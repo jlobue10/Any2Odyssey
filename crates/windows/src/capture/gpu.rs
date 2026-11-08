@@ -287,7 +287,6 @@ impl GpuDesktopCapture {
                 dst
             }
         } else {
-            let _ = frame.Close();
             return Err(format!(
                 "Unsupported desktop pixel format: {:?}",
                 desc.Format
@@ -315,7 +314,6 @@ impl GpuDesktopCapture {
         } else {
             Ok(())
         };
-        let _ = frame.Close();
         result?;
         self.frames += 1;
         Ok(true)
