@@ -17,6 +17,8 @@ function Remove-Any2OdysseyInstalledWorker {
  if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray before removing the conversion worker.'}
  if(Test-Path -LiteralPath $worker){Remove-Item -LiteralPath $worker}
  Remove-Item -LiteralPath $HelperPath
+ $folder=Split-Path -Parent $HelperPath
+ if((Split-Path -Leaf $folder) -eq 'Any2Odyssey' -and -not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)){Remove-Item -LiteralPath $folder}
 }
 
 # Dot sourcing is used only by isolated tests to load the pure checks.

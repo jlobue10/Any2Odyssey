@@ -352,8 +352,8 @@ impl App {
         if !exiting && to_tray {
             self.hide_to_tray(ctx);
         } else {
+            // Deferred quit: the window closes once the worker shutdown has finished.
             self.core.lock().expect("core").quit();
-            ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
 

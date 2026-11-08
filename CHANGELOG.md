@@ -2,7 +2,20 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## 0.8.0 (unreleased)
+## 0.8.0 (2026-11-08, pre-release)
+
+First Any2Odyssey release, published as a pre-release: everything below has been built and tested in CI and reviewed, but not yet run on a G90XF. Hardware results will be recorded here and the pre-release flag removed when they are in.
+
+### Audit fixes before release (PRs #1–#6)
+
+- Uninstall no longer elevates a script from user-writable `%LOCALAPPDATA%`. The only elevated step is `UninstallWorker.ps1`, installed under `%ProgramFiles%\Any2Odyssey`, which checks the approving account and its own path and removes only the fixed worker path and itself. The per-user uninstaller signals the quit event directly instead of launching the installed executable. (#6)
+- Worker start and the seven-second shutdown wait run off the GUI's shared-state lock, so Stop, Apply and Restart no longer freeze rendering; stale start results are discarded by generation, and Quit waits for cleanup while the window stays responsive. (#5)
+- Engine readiness is detected only from `Conversion.log` data written after `Start`, so a marker left by an earlier Samsung session cannot mark a failed new start as ready. (#2)
+- Capture frame notifications are coalesced and control checks (stop, parent liveness, readiness, overlay) run between dispatched messages, so sustained capture cannot starve them. (#3)
+- `ID3D11Multithread` protection is enabled on the immediate context, where it belongs, and verified. (#1)
+- SDR displays are captured as BGRA8 directly; the FP16 path with the SDR-white-level shader is kept for HDR or unknown colour state, a colour-mode change restarts conversion, and the CPU readback texture is allocated only by diagnostics. (#4)
+
+### Added
 
 - `--screenshot FILE [--dark] [--help-page]` renders the controls in an isolated preview for documentation and UI checks.
 
@@ -31,4 +44,4 @@ First Any2Odyssey release: a complete rewrite of Any2Odd 0.7.3 (Zhandragon, GPL-
 
 ### Not yet verified
 
-Nothing in this release has been run on the target hardware yet. Hardware results will be recorded here before 0.8.0 is tagged.
+Nothing in this release has been run on the target hardware yet; that is why 0.8.0 is a pre-release. Hardware results will be recorded here.
