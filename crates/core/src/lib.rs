@@ -4,6 +4,7 @@
 //! capture, the Samsung engine binding and Win32 window management live in the
 //! `any2odyssey-windows` crate; the desktop GUI lives in `any2odyssey`.
 
+pub mod about;
 pub mod capture_color;
 pub mod engine;
 pub mod frame_wake;

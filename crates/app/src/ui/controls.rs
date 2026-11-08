@@ -217,6 +217,15 @@ impl ControlsState {
                 .color(color(p.muted))
                 .size(12.0),
         );
+        ui.label(
+            RichText::new(format!(
+                "{} {}",
+                any2odyssey_core::APP_NAME,
+                any2odyssey_core::VERSION
+            ))
+            .color(color(p.muted))
+            .size(12.0),
+        );
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             if gold_button(ui, "View logs", false, p).clicked() {
