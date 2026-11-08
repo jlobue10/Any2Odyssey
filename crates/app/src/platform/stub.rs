@@ -2,6 +2,7 @@
 //! Windows engine. Linux portable features arrive with the Linux milestone.
 
 use any2odyssey_core::prefs::Preferences;
+use any2odyssey_core::update::Comparison;
 use std::path::Path;
 
 pub struct ControlEvents {
@@ -76,3 +77,6 @@ pub fn open_path(path: &Path) {
     let _ = open::that_detached(path);
 }
 pub fn install_jump_list() {}
+pub fn check_updates() -> Result<Comparison, String> {
+    Err("Checking for updates is available on Windows only.".into())
+}
