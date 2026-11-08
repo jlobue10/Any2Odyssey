@@ -32,6 +32,32 @@ pub struct WgcFrameSource {
     token: Option<i64>,
 }
 
+/// A checked-out pool frame. Return its buffer on every path, including errors.
+pub struct CapturedFrame(Direct3D11CaptureFrame);
+
+impl std::ops::Deref for CapturedFrame {
+    type Target = Direct3D11CaptureFrame;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for CapturedFrame {
+    fn drop(&mut self) {
+        let _ = self.0.Close();
+    }
+}
+
+// windows 0.62 represents a successful null interface as Error::empty(),
+// whose code is S_OK. Failed HRESULTs must reach the worker's recovery path.
+fn optional_frame<T>(result: windows::core::Result<T>) -> Result<Option<T>, String> {
+    match result {
+        Ok(frame) => Ok(Some(frame)),
+        Err(e) if e.code().is_ok() => Ok(None),
+        Err(e) => Err(format!("Capture frame acquisition: {e}")),
+    }
+}
+
 /// Information about the border-permission request, for the status file.
 pub struct BorderOutcome {
     pub access: String,
@@ -94,22 +120,19 @@ impl WgcFrameSource {
 
     /// Drain the pool and return the newest frame, or `None` when nothing new
     /// arrived. Errors if the monitor size changed (caller restarts).
-    pub fn take_latest(&self) -> Result<Option<Direct3D11CaptureFrame>, String> {
-        let Ok(mut latest) = self.pool.TryGetNextFrame() else {
+    pub fn take_latest(&self) -> Result<Option<CapturedFrame>, String> {
+        let Some(frame) = optional_frame(self.pool.TryGetNextFrame())? else {
             return Ok(None);
         };
+        let mut latest = CapturedFrame(frame);
         for _ in 0..2 {
-            match self.pool.TryGetNextFrame() {
-                Ok(next) => {
-                    let _ = latest.Close();
-                    latest = next;
-                }
-                Err(_) => break,
+            match optional_frame(self.pool.TryGetNextFrame())? {
+                Some(next) => latest = CapturedFrame(next),
+                None => break,
             }
         }
         let size = latest.ContentSize().map_err(|e| e.to_string())?;
         if size.Width != self.item_size.Width || size.Height != self.item_size.Height {
-            let _ = latest.Close();
             return Err("Monitor size changed. Restart conversion.".into());
         }
         Ok(Some(latest))
@@ -180,6 +203,26 @@ impl BorderOutcome {
             access: self.access.clone(),
             border_required: self.border_required,
             error: self.error.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{E_FAIL, RO_E_CLOSED};
+
+    #[test]
+    fn successful_null_frame_is_idle_but_failed_hresult_is_not() {
+        assert_eq!(
+            optional_frame::<u8>(Err(windows::core::Error::empty())),
+            Ok(None)
+        );
+        assert_eq!(optional_frame(Ok(42)), Ok(Some(42)));
+        for code in [E_FAIL, RO_E_CLOSED] {
+            let error =
+                optional_frame::<u8>(Err(windows::core::Error::from_hresult(code))).unwrap_err();
+            assert!(error.contains("Capture frame acquisition"));
         }
     }
 }
