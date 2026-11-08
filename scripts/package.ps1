@@ -7,8 +7,12 @@ $repo=Split-Path -Parent $PSScriptRoot
 $version=(Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()
 if($version -notmatch '^\d+\.\d+\.\d+$'){throw 'VERSION must contain major.minor.patch.'}
 if(-not (Test-Path -LiteralPath $Binary -PathType Leaf)){throw "Build first: $Binary is missing."}
-$fileVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($Binary).FileVersion
-if($fileVersion -ne ($version+'.0')){throw "Executable version '$fileVersion' does not match VERSION '$version'. Rebuild before packaging."}
+$info=[Diagnostics.FileVersionInfo]::GetVersionInfo($Binary)
+$fileVersion=if($info.FileVersion){$info.FileVersion}else{$info.ProductVersion}
+if(-not ($fileVersion -match '^\d+(\.\d+){1,3}')){throw "Executable has no readable version resource ('$fileVersion'). Rebuild before packaging."}
+$exeVersion=[version]$Matches[0];$wantVersion=[version]$version
+$normalize={param($v)[version]::new($v.Major,$v.Minor,[Math]::Max(0,$v.Build),[Math]::Max(0,$v.Revision))}
+if((& $normalize $exeVersion) -ne (& $normalize $wantVersion)){throw "Executable version '$fileVersion' does not match VERSION '$version'. Rebuild before packaging."}
 $dist=Join-Path $repo 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 # Fresh staging directory: never pick up logs, diagnostics or Samsung assets.

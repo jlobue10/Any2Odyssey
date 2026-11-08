@@ -6,6 +6,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") && cfg!(windows) {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("../../assets/Any2Odyssey.ico");
+        let four_part = format!("{}.0", env!("CARGO_PKG_VERSION"));
+        res.set("FileVersion", &four_part);
+        res.set("ProductVersion", &four_part);
         res.set("ProductName", "Any2Odyssey");
         res.set(
             "FileDescription",
