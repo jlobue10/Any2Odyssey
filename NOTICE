@@ -2,7 +2,7 @@ Any2Odyssey
 Copyright (C) 2026 Jonathan LoBue
 
 Any2Odyssey is a Rust reimplementation of Any2Odd 0.7.3 by Zhandragon
-(https://github.com/Zhandragon/Any2Odd), the continuous desktop 3D
+(distributed with its source at https://zhandragon.itch.io/any2odd), the continuous desktop 3D
 companion for the Samsung Odyssey 3D G90XF. Any2Odd is licensed under the
 GNU General Public License version 3 (GPL-3.0-only); Any2Odyssey keeps that
 license. The architecture, the Samsung engine integration, the capture and

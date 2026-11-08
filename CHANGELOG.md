@@ -1,6 +1,6 @@
 # Changelog
 
-Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose history is in the [upstream changelog](https://github.com/Zhandragon/Any2Odd/blob/main/CHANGELOG.md).
+Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
 ## 0.8.0 (unreleased)
 
