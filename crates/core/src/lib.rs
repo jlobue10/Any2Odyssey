@@ -10,6 +10,7 @@ pub mod geometry;
 pub mod help;
 pub mod ipc;
 pub mod log;
+pub mod log_readiness;
 pub mod overlay_settings;
 pub mod paths;
 pub mod prefs;

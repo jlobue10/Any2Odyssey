@@ -2,7 +2,6 @@
 //! run before conversion is started.
 
 use std::ffi::c_void;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use any2odyssey_core::engine::{check_resolution, verify_engine_file, EngineError};
@@ -97,11 +96,4 @@ impl EngineLibrary {
     pub fn stop(&self) {
         unsafe { (self.stop)() };
     }
-}
-
-/// True when Samsung's conversion log reports the renderer UI minimized,
-/// which is the only observable "running" signal the engine gives.
-pub fn conversion_log_reports_ready(log_path: &Path) -> bool {
-    any2odyssey_core::fsutil::tail(log_path, 9000)
-        .contains(any2odyssey_core::engine::ENGINE_READY_MARKER)
 }
