@@ -20,8 +20,30 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .prefix(".any2odyssey-")
         .tempfile_in(parent)?;
     tmp.write_all(bytes)?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    // Replacing a file that another process or thread has open can fail
+    // transiently on Windows (sharing violation / access denied) even though
+    // the opener used FILE_SHARE_DELETE. Status files are read while they are
+    // rewritten, so retry briefly before giving up.
+    let mut tmp = tmp;
+    let mut attempt = 0;
+    loop {
+        match tmp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(e) if attempt < 25 && is_transient_replace_error(&e.error) => {
+                attempt += 1;
+                tmp = e.file;
+                std::thread::sleep(std::time::Duration::from_millis(4));
+            }
+            Err(e) => return Err(e.error),
+        }
+    }
+}
+
+fn is_transient_replace_error(e: &io::Error) -> bool {
+    // ERROR_ACCESS_DENIED (5) and ERROR_SHARING_VIOLATION (32) on Windows.
+    cfg!(windows)
+        && (e.kind() == io::ErrorKind::PermissionDenied
+            || matches!(e.raw_os_error(), Some(5) | Some(32)))
 }
 
 /// Serialize `value` as pretty JSON and write it atomically.
@@ -108,7 +130,18 @@ mod tests {
                     barrier.wait();
                     for _ in 0..20 {
                         write_atomic(path, &payload).unwrap();
-                        let observed = fs::read(path).unwrap();
+                        // A reader may race another writer's replace; on Windows that
+                        // can surface as a transient open error. Retry the read, but
+                        // whatever is read must always be one complete payload.
+                        let observed = loop {
+                            match fs::read(path) {
+                                Ok(bytes) => break bytes,
+                                Err(e) if is_transient_replace_error(&e) => {
+                                    std::thread::yield_now()
+                                }
+                                Err(e) => panic!("read failed: {e}"),
+                            }
+                        };
                         assert_eq!(observed.len(), payload.len());
                         assert!(observed.iter().all(|&b| b == observed[0]));
                     }
