@@ -158,8 +158,16 @@ impl GpuDesktopCapture {
         .map_err(|e| format!("Direct3D 11 device: {e}"))?;
         let device: ID3D11Device = device.ok_or("Direct3D 11 device was not created.")?;
         let context: ID3D11DeviceContext = context.ok_or("Direct3D 11 context was not created.")?;
-        if let Ok(mt) = device.cast::<ID3D11Multithread>() {
-            let _ = unsafe { mt.SetMultithreadProtected(true) };
+        // ID3D11Multithread belongs to the immediate context, not the device.
+        // WGC shares this device with our rendering path; do not silently run
+        // without the protection we requested.
+        let mt: ID3D11Multithread = context
+            .cast()
+            .map_err(|e| format!("Direct3D 11 multithread interface: {e}"))?;
+        // The return value is the previous state, not a success indication.
+        let _ = unsafe { mt.SetMultithreadProtected(true) };
+        if !unsafe { mt.GetMultithreadProtected() }.as_bool() {
+            return Err("Direct3D 11 multithread protection was not enabled.".into());
         }
         if let Ok(dxgi) = device.cast::<IDXGIDevice1>() {
             let _ = unsafe { dxgi.SetMaximumFrameLatency(1) };
