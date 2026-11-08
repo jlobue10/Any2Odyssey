@@ -1,6 +1,7 @@
 //! Non-Windows build: the controls run, but 3D conversion needs Samsung's
 //! Windows engine. Linux portable features arrive with the Linux milestone.
 
+use any2odyssey_core::prefs::Preferences;
 use std::path::Path;
 
 pub struct ControlEvents {
@@ -24,7 +25,7 @@ impl ControlEvents {
     }
 }
 
-pub fn run_worker(_: &str, _: u32, _: isize) -> i32 {
+pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
     eprintln!("The conversion worker runs only on Windows.");
     1
 }
@@ -55,7 +56,7 @@ pub fn list_windows(_: Option<u32>) -> Vec<(isize, String)> {
 }
 pub struct Worker;
 impl Worker {
-    pub fn spawn(_: isize) -> Result<Worker, String> {
+    pub fn spawn(_: isize, _: Preferences) -> Result<Worker, String> {
         Err("3D conversion is only available on Windows.".into())
     }
     pub fn pid(&self) -> u32 {

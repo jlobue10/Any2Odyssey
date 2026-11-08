@@ -1,4 +1,4 @@
-//! The renderer worker process: `Any2OdysseyWorker.exe --worker <event> <parentPid> <sourceHwnd>`.
+//! The renderer worker process: `Any2OdysseyWorker.exe --worker <event> <parentPid> <sourceHwnd> <preferencesJson>`.
 //! It validates prerequisites, loads Samsung's engine, owns the capture
 //! surface and the overlay controller, and reports status through
 //! `worker-status.json` until the parent signals its stop event, exits, or
@@ -35,14 +35,14 @@ fn report(state: &str) {
     );
 }
 
-pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize) -> i32 {
+pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Preferences) -> i32 {
     let logger = Arc::new(Logger::default_location());
     let log: Arc<dyn Fn(&str) + Send + Sync> = {
         let l = logger.clone();
         Arc::new(move |m: &str| l.log(m))
     };
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    match run_inner(event_name, parent_pid, source_hwnd, log.clone()) {
+    match run_inner(event_name, parent_pid, source_hwnd, &prefs, log.clone()) {
         Ok(ready) => {
             log("Renderer stopped cleanly.");
             if ready {
@@ -77,9 +77,9 @@ fn run_inner(
     event_name: &str,
     parent_pid: u32,
     source_hwnd: isize,
+    prefs: &Preferences,
     log: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<bool, Exit> {
-    let prefs = Preferences::load();
     let Some(_guard) = InstanceGuard::acquire(ipc::RENDERER_MUTEX)
         .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?
     else {
@@ -118,7 +118,7 @@ fn run_inner(
         )
     })?;
     let mut surface = Mirror::new(
-        &prefs,
+        prefs,
         parent_pid,
         HWND(source_hwnd as *mut _),
         screen,
