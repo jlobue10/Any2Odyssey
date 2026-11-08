@@ -4,7 +4,8 @@
 
 use crate::fsutil::write_json_atomic;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
 /// What is captured and fed to the converter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -79,18 +80,21 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    /// Load from `path`; any problem (missing file, bad JSON, unknown mode)
-    /// yields defaults, exactly like the original. Values are clamped.
-    pub fn load_from(path: &Path) -> Preferences {
-        let mut prefs = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Preferences>(&text).ok())
-            .unwrap_or_default();
+    /// Only a missing file uses first-run defaults. Existing settings that
+    /// cannot be read or parsed must not silently enable desktop capture.
+    pub fn load_from(path: &Path) -> io::Result<Preferences> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e),
+        };
+        let mut prefs: Self = serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         prefs.sanitize();
-        prefs
+        Ok(prefs)
     }
 
-    pub fn load() -> Preferences {
+    pub fn load() -> io::Result<Preferences> {
         Self::load_from(&crate::paths::settings_file())
     }
 
@@ -113,6 +117,29 @@ impl Preferences {
 
     pub fn save(&mut self) -> std::io::Result<()> {
         self.save_to(&crate::paths::settings_file())
+    }
+
+    /// Explicit recovery after a load error: preserve the existing bytes in a
+    /// unique backup before replacing the file with settings chosen in the UI.
+    pub fn save_recovering_to(&mut self, path: &Path) -> io::Result<Option<PathBuf>> {
+        let backup = match std::fs::File::open(path) {
+            Ok(mut original) => {
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                let mut backup = tempfile::Builder::new()
+                    .prefix("settings-recovery-")
+                    .suffix(".json")
+                    .tempfile_in(parent)?;
+                std::io::copy(&mut original, &mut backup)?;
+                Some(backup.keep().map_err(|e| e.error)?.1)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        self.save_to(path)?;
+        Ok(backup)
     }
 }
 
@@ -176,21 +203,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_mode_or_json_falls_back_to_defaults_and_values_are_clamped() {
+    fn invalid_settings_are_errors_and_valid_values_are_clamped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, r#"{"Mode":"Sideways","Depth":9,"Popout":-7}"#).unwrap();
-        // Unknown enum variant makes the whole document invalid -> defaults.
-        assert_eq!(Preferences::load_from(&path), Preferences::default());
+        assert!(Preferences::load_from(&path).is_err());
         std::fs::write(&path, r#"{"Depth":9,"Popout":-7}"#).unwrap();
-        let p = Preferences::load_from(&path);
+        let p = Preferences::load_from(&path).unwrap();
         assert_eq!((p.depth, p.popout), (2.0, -1.0));
         std::fs::write(&path, "not json").unwrap();
-        assert_eq!(Preferences::load_from(&path), Preferences::default());
+        assert!(Preferences::load_from(&path).is_err());
         assert_eq!(
-            Preferences::load_from(&dir.path().join("missing.json")),
+            Preferences::load_from(&dir.path().join("missing.json")).unwrap(),
             Preferences::default()
         );
+        assert!(Preferences::load_from(dir.path()).is_err());
     }
 
     #[test]
@@ -203,11 +230,35 @@ mod tests {
             ..Default::default()
         };
         p.save_to(&path).unwrap();
-        let back = Preferences::load_from(&path);
+        let back = Preferences::load_from(&path).unwrap();
         assert_eq!(back.depth, 2.0);
         assert_eq!(back.popout, 0.0);
         let json = std::fs::read_to_string(&path).unwrap();
         assert!(json.contains("\"Mode\": \"Desktop\""));
+    }
+
+    #[test]
+    fn explicit_recovery_preserves_the_original_and_uses_unique_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut prefs = Preferences {
+            auto_convert: false,
+            ..Default::default()
+        };
+        std::fs::write(&path, b"broken settings\xff").unwrap();
+        let first = prefs.save_recovering_to(&path).unwrap().unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"broken settings\xff");
+        assert!(!Preferences::load_from(&path).unwrap().auto_convert);
+        std::fs::write(&path, "another damaged file").unwrap();
+        let second = prefs.save_recovering_to(&path).unwrap().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"broken settings\xff");
+        assert_eq!(
+            std::fs::read_to_string(second).unwrap(),
+            "another damaged file"
+        );
+        assert!(prefs.save_recovering_to(dir.path()).is_err());
+        assert!(dir.path().is_dir());
     }
 
     #[test]

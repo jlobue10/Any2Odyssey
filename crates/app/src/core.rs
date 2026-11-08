@@ -97,6 +97,7 @@ pub struct Core {
     pub prefs: Preferences,
     pub ui: UiSettings,
     pub status: String,
+    settings_load_error: Option<String>,
     pub supervisor: Supervisor,
     pub worker: Option<Worker>,
     operation: Option<mpsc::Receiver<WorkerResult>>,
@@ -118,13 +119,29 @@ pub struct Core {
 
 impl Core {
     pub fn new(logger: Logger, events: Option<ControlEvents>, start_requested: bool) -> Core {
-        let prefs = load_preferences(&logger);
+        let (prefs, settings_load_error) = match load_preferences(&logger) {
+            Ok(prefs) => (prefs, None),
+            Err(error) => {
+                logger.log(&error);
+                (
+                    Preferences {
+                        auto_convert: false,
+                        ..Default::default()
+                    },
+                    Some(error),
+                )
+            }
+        };
         let ui = UiSettings::load();
         let mut core = Core {
             supervisor: Supervisor::new(prefs.recover),
             prefs,
             ui,
-            status: "Ready".into(),
+            status: settings_load_error
+                .as_deref()
+                .map(settings_recovery_message)
+                .unwrap_or_else(|| "Ready".into()),
+            settings_load_error,
             worker: None,
             operation: None,
             generation: 0,
@@ -152,6 +169,10 @@ impl Core {
         self.prefs.recover = self.supervisor.recover;
         if self.preview {
             return true;
+        }
+        if let Some(error) = &self.settings_load_error {
+            self.status = settings_recovery_message(error);
+            return false;
         }
         if let Err(e) = self.prefs.save() {
             self.status = format!("Could not save preferences: {e}");
@@ -225,7 +246,28 @@ impl Core {
 
     /// Apply settings / restart conversion.
     pub fn apply(&mut self) {
-        if !self.save_preferences() {
+        if self.settings_load_error.is_some() && !self.preview {
+            // Apply is the explicit choice to replace unreadable settings.
+            // Startup, hide, quit and ordinary saves leave the original alone.
+            self.prefs.recover = self.supervisor.recover;
+            match self.prefs.save_recovering_to(&paths::settings_file()) {
+                Ok(backup) => {
+                    if let Some(backup) = backup {
+                        self.log(&format!(
+                            "Previous settings preserved at {}",
+                            backup.display()
+                        ));
+                    }
+                    self.settings_load_error = None;
+                }
+                Err(error) => {
+                    self.status =
+                        format!("Could not recover preferences; original left unchanged: {error}");
+                    self.log(&self.status);
+                    return;
+                }
+            }
+        } else if !self.save_preferences() {
             return;
         }
         if self.wanted() {
@@ -484,19 +526,33 @@ fn read_status(worker_pid: u32) -> Option<String> {
     (status.pid == worker_pid).then_some(status.state)
 }
 
+fn settings_recovery_message(error: &str) -> String {
+    format!("{error}. Automatic conversion is disabled. Fix the settings file and reopen, or choose settings and click Apply to save them with a backup of the original.")
+}
+
 /// Load preferences, importing Any2Odd's file once when ours does not exist.
-fn load_preferences(logger: &Logger) -> Preferences {
+fn load_preferences(logger: &Logger) -> Result<Preferences, String> {
     let own = paths::settings_file();
-    if !own.exists() {
-        if let Some(legacy) = paths::legacy_any2odd_settings_file().filter(|p| p.is_file()) {
-            let mut imported = Preferences::load_from(&legacy);
-            if imported.save_to(&own).is_ok() {
+    if !own
+        .try_exists()
+        .map_err(|e| format!("Could not inspect saved settings: {e}"))?
+    {
+        if let Some(legacy) = paths::legacy_any2odd_settings_file() {
+            if legacy
+                .try_exists()
+                .map_err(|e| format!("Could not inspect legacy settings: {e}"))?
+            {
+                let mut imported = Preferences::load_from(&legacy)
+                    .map_err(|e| format!("Could not load legacy settings: {e}"))?;
+                imported
+                    .save_to(&own)
+                    .map_err(|e| format!("Could not import legacy settings: {e}"))?;
                 logger.log(&format!("Imported preferences from {}", legacy.display()));
+                return Ok(imported);
             }
-            return imported;
         }
     }
-    Preferences::load()
+    Preferences::load().map_err(|e| format!("Could not load saved settings: {e}"))
 }
 
 /// Start the poller thread. It wakes the GUI (and un-hides the window when
@@ -559,8 +615,85 @@ pub fn shortcuts_line() -> &'static str {
 mod tests {
     use super::*;
 
+    static SETTINGS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RestoreDataDir(Option<std::ffi::OsString>);
+
+    impl Drop for RestoreDataDir {
+        fn drop(&mut self) {
+            if let Some(old) = self.0.take() {
+                std::env::set_var(paths::DATA_DIR_ENV, old);
+            } else {
+                std::env::remove_var(paths::DATA_DIR_ENV);
+            }
+        }
+    }
+
+    #[test]
+    fn damaged_settings_block_launch_and_autosave_until_explicit_apply() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let path = dir.path().join("settings.json");
+        let original = br#"{"Mode":"Window","AutoConvert":false,"Depth":"#;
+        std::fs::write(&path, original).unwrap();
+        let make_core = || Core::new(Logger::new(dir.path().join("test.log")), None, true);
+        let mut core = make_core();
+        assert!(!core.prefs.auto_convert);
+        assert!(core.settings_load_error.is_some());
+        assert!(core.status.contains("Automatic conversion is disabled"));
+        core.start_conversion();
+        assert!(!core.wanted());
+        assert!(core.operation.is_none());
+        assert!(!core.save_preferences());
+        core.quit();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let mut core = make_core();
+        core.prefs.mode = CaptureMode::Window;
+        core.prefs.depth = 1.25;
+        core.apply();
+        assert!(core.settings_load_error.is_none());
+        assert!(!core.wanted());
+        let saved = Preferences::load_from(&path).unwrap();
+        assert_eq!(saved.mode, CaptureMode::Window);
+        assert_eq!(saved.depth, 1.25);
+        assert!(!saved.auto_convert);
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("settings-recovery-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+        assert!(make_core().settings_load_error.is_none());
+    }
+
+    #[test]
+    fn unreadable_settings_cannot_be_replaced_without_a_backup() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let path = dir.path().join("settings.json");
+        std::fs::create_dir(&path).unwrap();
+        let mut core = Core::new(Logger::new(dir.path().join("test.log")), None, false);
+        core.apply();
+        assert!(core.settings_load_error.is_some());
+        assert!(!core.prefs.auto_convert);
+        assert!(!core.wanted());
+        assert!(path.is_dir());
+    }
+
     #[test]
     fn failed_save_blocks_start_apply_and_restart() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         // A directory at settings.json reliably refuses replacement on both OSes.
         let settings = dir.path().join("settings.json");
@@ -590,6 +723,7 @@ mod tests {
             prefs: Preferences::default(),
             ui: UiSettings::default(),
             status: "Ready".into(),
+            settings_load_error: None,
             supervisor: Supervisor::new(true),
             worker: None,
             operation: None,
