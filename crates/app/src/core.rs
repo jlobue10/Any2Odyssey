@@ -204,16 +204,22 @@ impl Core {
 
     pub fn refresh_windows(&mut self) {
         let worker_pid = self.worker.as_ref().map(Worker::pid);
-        self.windows = platform::list_windows(worker_pid)
+        let windows = platform::list_windows(worker_pid)
             .into_iter()
             .map(|(handle, title)| WindowChoice { handle, title })
             .collect();
-        if let Some(selected) = self.selected_window {
-            if !self.windows.iter().any(|w| w.handle == selected) {
-                self.selected_window = self.windows.first().map(|w| w.handle);
-            }
-        } else {
-            self.selected_window = self.windows.first().map(|w| w.handle);
+        self.set_windows(windows);
+    }
+
+    fn set_windows(&mut self, windows: Vec<WindowChoice>) {
+        self.windows = windows;
+        // A refreshed list is not consent to capture its first entry. Require
+        // a choice at launch, and clear a choice whose window has disappeared.
+        if self
+            .selected_window
+            .is_some_and(|selected| !self.windows.iter().any(|w| w.handle == selected))
+        {
+            self.selected_window = None;
         }
     }
 
@@ -817,5 +823,29 @@ mod tests {
         core.requests.clear();
         core.quit();
         assert!(previous.needs_repaint(&core));
+    }
+
+    #[test]
+    fn refreshing_sources_never_selects_an_unrequested_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        let choices = |handles: &[isize]| {
+            handles
+                .iter()
+                .map(|&handle| WindowChoice {
+                    handle,
+                    title: format!("Window {handle}"),
+                })
+                .collect()
+        };
+        core.set_windows(choices(&[10, 20]));
+        assert_eq!(core.selected_window, None, "startup requires a choice");
+        core.selected_window = Some(20);
+        core.set_windows(choices(&[30, 20, 10]));
+        assert_eq!(core.selected_window, Some(20), "retain a valid choice");
+        core.set_windows(choices(&[30, 10]));
+        assert_eq!(core.selected_window, None, "do not substitute another app");
+        core.set_windows(choices(&[20, 30, 10]));
+        assert_eq!(core.selected_window, None, "do not revive a cleared choice");
     }
 }

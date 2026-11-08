@@ -101,7 +101,7 @@ impl ControlsState {
                 row(ui, "Source window", |ui| {
                     let enabled = core.prefs.mode != CaptureMode::Desktop;
                     ui.add_enabled_ui(enabled, |ui| {
-                        let selected_title = core.selected_window.and_then(|h| core.windows.iter().find(|w| w.handle == h)).map(|w| w.title.clone()).unwrap_or_default();
+                        let selected_title = core.selected_window.and_then(|h| core.windows.iter().find(|w| w.handle == h)).map(|w| w.title.clone()).unwrap_or_else(|| "Choose a window".into());
                         let refresh_width = 90.0;
                         egui::ComboBox::from_id_salt("source-window").width((ui.available_width() - refresh_width).max(80.0)).selected_text(selected_title).show_ui(ui, |ui| {
                             let windows = core.windows.clone();
@@ -114,7 +114,7 @@ impl ControlsState {
                         }
                     });
                 })
-                .on_hover_text("Used by Selected window; also seeds Follow active window. Refresh updates the list.");
+                .on_hover_text("Selected window requires a choice each time this app opens; also seeds Follow active window. Refresh updates the list without choosing a replacement.");
             });
         };
         let tuning_panel = |ui: &mut Ui, core: &mut Core, state: &mut ControlsState| {
