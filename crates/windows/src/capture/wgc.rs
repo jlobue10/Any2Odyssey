@@ -49,6 +49,7 @@ impl WgcFrameSource {
     pub fn new(
         device: &ID3D11Device,
         monitor: HMONITOR,
+        pixel_format: DirectXPixelFormat,
         on_frame: impl Fn() + Send + Sync + 'static,
         log: &dyn Fn(&str),
     ) -> windows::core::Result<(WgcFrameSource, BorderOutcome)> {
@@ -59,12 +60,8 @@ impl WgcFrameSource {
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor)? };
         let item_size = item.Size()?;
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &wrapped,
-            DirectXPixelFormat::R16G16B16A16Float,
-            2,
-            item_size,
-        )?;
+        let pool =
+            Direct3D11CaptureFramePool::CreateFreeThreaded(&wrapped, pixel_format, 2, item_size)?;
         let session = pool.CreateCaptureSession(&item)?;
         session.SetIsCursorCaptureEnabled(false)?;
         if session.IsCursorCaptureEnabled()? {

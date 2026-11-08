@@ -10,13 +10,22 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
 
-/// Scale applied to HDR capture; 1.0 when the display is not in advanced color.
-/// Clamped to 1..=12.5 like the original.
-pub fn sdr_white_scale(monitor_device_name: &str) -> f32 {
-    sdr_white_scale_impl(monitor_device_name).unwrap_or(1.0)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptureColor {
+    pub advanced_color: bool,
+    pub white_scale: f32,
 }
 
-fn sdr_white_scale_impl(monitor: &str) -> Option<f32> {
+/// Unknown color state keeps the conservative FP16 capture path. A white
+/// scale of 1.0 alone cannot distinguish HDR from SDR.
+pub fn capture_color(monitor_device_name: &str) -> CaptureColor {
+    capture_color_impl(monitor_device_name).unwrap_or(CaptureColor {
+        advanced_color: true,
+        white_scale: 1.0,
+    })
+}
+
+fn capture_color_impl(monitor: &str) -> Option<CaptureColor> {
     let mut paths = 0u32;
     let mut modes = 0u32;
     unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }
@@ -67,12 +76,15 @@ fn sdr_white_scale_impl(monitor: &str) -> Option<f32> {
             ..Default::default()
         };
         if unsafe { DisplayConfigGetDeviceInfo(&mut color.header) } != 0 {
-            return Some(1.0);
+            return None;
         }
         // Bit 1 of the flags word: advancedColorEnabled.
         let flags = unsafe { color.Anonymous.value };
         if flags & 2 == 0 {
-            return Some(1.0);
+            return Some(CaptureColor {
+                advanced_color: false,
+                white_scale: 1.0,
+            });
         }
         let mut white = DISPLAYCONFIG_SDR_WHITE_LEVEL {
             header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
@@ -85,9 +97,12 @@ fn sdr_white_scale_impl(monitor: &str) -> Option<f32> {
         };
         if unsafe { DisplayConfigGetDeviceInfo(&mut white.header) } == 0 {
             let value = white.SDRWhiteLevel as f32 / 1000.0;
-            return Some(value.clamp(1.0, 12.5));
+            return Some(CaptureColor {
+                advanced_color: true,
+                white_scale: value.clamp(1.0, 12.5),
+            });
         }
-        return Some(1.0);
+        return None;
     }
-    Some(1.0)
+    None
 }
