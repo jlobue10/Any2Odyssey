@@ -24,6 +24,9 @@ jobs:
         run: cargo fmt --all --check
       - name: Build (release)
         run: cargo build --release --workspace
+      - name: Verify worker DPI manifest
+        shell: pwsh
+        run: ./installer/tests/test-dpi-manifest.ps1
       - name: Test
         run: cargo test --workspace
       - name: Clippy
