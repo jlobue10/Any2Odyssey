@@ -10,42 +10,14 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CaptureColor {
-    pub advanced_color: bool,
-    pub white_scale: f32,
-}
+use any2odyssey_core::capture_color::CaptureColor;
+use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 
-/// Unknown color state keeps the conservative FP16 capture path. A white
-/// scale of 1.0 alone cannot distinguish HDR from SDR.
-pub fn capture_color(monitor_device_name: &str) -> CaptureColor {
-    capture_color_impl(monitor_device_name).unwrap_or(CaptureColor {
-        advanced_color: true,
-        white_scale: 1.0,
-    })
-}
-
-fn capture_color_impl(monitor: &str) -> Option<CaptureColor> {
-    let mut paths = 0u32;
-    let mut modes = 0u32;
-    unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }
-        .ok()
-        .ok()?;
-    let mut path_data = vec![DISPLAYCONFIG_PATH_INFO::default(); paths as usize];
-    let mut mode_data = vec![DISPLAYCONFIG_MODE_INFO::default(); modes as usize];
-    unsafe {
-        QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut paths,
-            path_data.as_mut_ptr(),
-            &mut modes,
-            mode_data.as_mut_ptr(),
-            None,
-        )
-    }
-    .ok()
-    .ok()?;
-    for path in path_data.iter().take(paths as usize) {
+/// Query failure is distinct from an HDR result. The caller decides how long
+/// an already running pipeline may retain its last confirmed color state.
+pub fn capture_color(monitor: &str) -> Option<CaptureColor> {
+    let path_data = active_paths()?;
+    for path in &path_data {
         let mut name = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
             header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                 r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
@@ -103,6 +75,37 @@ fn capture_color_impl(monitor: &str) -> Option<CaptureColor> {
             });
         }
         return None;
+    }
+    None
+}
+
+/// Display topology can grow between the sizing and query calls. Retry that
+/// documented race with fresh buffers, but bound work on the capture thread.
+fn active_paths() -> Option<Vec<DISPLAYCONFIG_PATH_INFO>> {
+    for _ in 0..3 {
+        let mut paths = 0;
+        let mut modes = 0;
+        unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }
+            .ok()
+            .ok()?;
+        let mut path_data = vec![DISPLAYCONFIG_PATH_INFO::default(); paths as usize];
+        let mut mode_data = vec![DISPLAYCONFIG_MODE_INFO::default(); modes as usize];
+        let result = unsafe {
+            QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut paths,
+                path_data.as_mut_ptr(),
+                &mut modes,
+                mode_data.as_mut_ptr(),
+                None,
+            )
+        };
+        if result == ERROR_INSUFFICIENT_BUFFER {
+            continue;
+        }
+        result.ok().ok()?;
+        path_data.truncate(paths as usize);
+        return Some(path_data);
     }
     None
 }

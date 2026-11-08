@@ -5,6 +5,7 @@
 //! Each acquired frame is a complete current desktop image. It is never
 //! blended with the previous frame, so vanished menus disappear immediately.
 
+use any2odyssey_core::capture_color::ColorMonitor;
 use any2odyssey_core::geometry::Rect;
 use std::time::{Duration, Instant};
 use windows::core::{s, Interface, PCSTR};
@@ -44,7 +45,7 @@ pub struct GpuDesktopCapture {
     hdr: Option<HdrConverter>,
     sdr_input: Option<ID3D11Texture2D>,
     surface: Option<GpuSurface>,
-    color: display_color::CaptureColor,
+    color: ColorMonitor,
     color_checked: Instant,
     device_name: String,
     capture: Rect,
@@ -139,7 +140,7 @@ impl GpuDesktopCapture {
         on_frame: impl Fn() + Send + Sync + 'static,
         log: &dyn Fn(&str),
     ) -> Result<GpuDesktopCapture, String> {
-        let color = display_color::capture_color(device_name);
+        let color = ColorMonitor::new(display_color::capture_color(device_name));
         let found = find_output(device_name)?;
         if !found.bounds.contains_rect(&bounds) {
             return Err("Capture rectangle crosses a monitor boundary.".into());
@@ -176,7 +177,7 @@ impl GpuDesktopCapture {
         if let Ok(dxgi) = device.cast::<IDXGIDevice1>() {
             let _ = unsafe { dxgi.SetMaximumFrameLatency(1) };
         }
-        let format = if color.advanced_color {
+        let format = if color.color().advanced_color {
             DirectXPixelFormat::R16G16B16A16Float
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
@@ -185,7 +186,7 @@ impl GpuDesktopCapture {
             .map_err(|e| format!("Windows Graphics Capture: {e}"))?;
         log(&format!(
             "GPU desktop capture format: {format:?}; SDR white scale {}",
-            color.white_scale
+            color.color().white_scale
         ));
         Ok(GpuDesktopCapture {
             device,
@@ -229,11 +230,9 @@ impl GpuDesktopCapture {
         // normal recovery path recreates it with the new display settings.
         if self.color_checked.elapsed() >= Duration::from_secs(1) {
             self.color_checked = Instant::now();
-            if display_color::capture_color(&self.device_name) != self.color {
-                return Err(
-                    "Display color mode or SDR white level changed. Restart conversion.".into(),
-                );
-            }
+            self.color
+                .observe(display_color::capture_color(&self.device_name))
+                .map_err(str::to_owned)?;
         }
         let Some(source) = self.source.as_ref() else {
             return Err("Capture source closed.".into());
@@ -397,7 +396,7 @@ impl GpuDesktopCapture {
             self.device
                 .CreateRenderTargetView(&output, None, Some(&mut target))?
         };
-        let shader = hdr_to_sdr_shader(self.color.white_scale);
+        let shader = hdr_to_sdr_shader(self.color.color().white_scale);
         let vs_code = compile(&shader, s!("VS"), s!("vs_5_0"))?;
         let ps_code = compile(&shader, s!("PS"), s!("ps_5_0"))?;
         let mut vs = None;
