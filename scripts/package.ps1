@@ -23,7 +23,7 @@ foreach($name in @('Any2Odyssey.ico','Any2Odyssey.png','Any2Odyssey-wordmark.png
 foreach($name in @('README.md','CHANGELOG.md','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','VERSION')){Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $stage}
 $guide=Join-Path $repo 'USER-GUIDE.html'
 if(Test-Path -LiteralPath $guide){Copy-Item -LiteralPath $guide -Destination $stage}else{throw 'USER-GUIDE.html is missing; export the offline guide before packaging.'}
-Copy-Item -LiteralPath (Join-Path $repo 'docs\*.md') -Destination (Join-Path $stage 'docs')
+Get-ChildItem -LiteralPath (Join-Path $repo 'docs') -Filter '*.md' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage 'docs') }
 foreach($name in @('install.ps1','InstallSupport.ps1','Install-Launcher.ps1','Uninstall.ps1','Install.cmd','Install-GUI.cmd')){Copy-Item -LiteralPath (Join-Path $repo ('installer\'+$name)) -Destination $stage}
 $zip=Join-Path $dist ('Any2Odyssey-'+$version+'-windows-x64.zip')
 if(Test-Path -LiteralPath $zip){Remove-Item -LiteralPath $zip}
