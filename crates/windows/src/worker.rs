@@ -156,6 +156,16 @@ fn run_inner(
         )
     })?;
     let begun = Instant::now();
+    let mut readiness = any2odyssey_core::log_readiness::LogReadiness::snapshot(
+        &paths::samsung_conversion_log_file(),
+        any2odyssey_core::engine::ENGINE_READY_MARKER,
+    )
+    .map_err(|e| {
+        fail(
+            exit_code::RENDERER_ERROR,
+            format!("Cannot snapshot conversion log: {e}"),
+        )
+    })?;
     library.start(surface.hwnd(), prefs.side_by_side, ENGINE_CORE_HINT);
     let mut started = true;
     let hwnd = surface.hwnd();
@@ -206,12 +216,7 @@ fn run_inner(
                         shutdown(&mut surface, &mut started);
                         continue;
                     }
-                    if !ready
-                        && overlay.attached()
-                        && engine::conversion_log_reports_ready(
-                            &paths::samsung_conversion_log_file(),
-                        )
-                    {
+                    if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
                         ready = true;
                         report(&format!(
                             "3D active — click-through overlay; {}",

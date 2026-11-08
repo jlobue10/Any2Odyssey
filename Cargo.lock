@@ -90,6 +90,7 @@ version = "0.8.0"
 dependencies = [
  "dirs",
  "image",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",
