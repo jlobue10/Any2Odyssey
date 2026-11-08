@@ -3,7 +3,7 @@
 //! menu and hotkey events every 250 ms, so everything keeps working while the
 //! controls window is hidden in the tray.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use any2odyssey_core::log::Logger;
@@ -57,12 +57,22 @@ pub enum MenuCommand {
     Quit,
 }
 
+enum WorkerResult {
+    Started {
+        generation: u64,
+        result: Result<Worker, String>,
+    },
+    Stopped(Option<String>),
+}
+
 pub struct Core {
     pub prefs: Preferences,
     pub ui: UiSettings,
     pub status: String,
     pub supervisor: Supervisor,
     pub worker: Option<Worker>,
+    operation: Option<mpsc::Receiver<WorkerResult>>,
+    generation: u64,
     pub windows: Vec<WindowChoice>,
     pub selected_window: Option<isize>,
     pub hotkeys_ok: bool,
@@ -88,6 +98,8 @@ impl Core {
             ui,
             status: "Ready".into(),
             worker: None,
+            operation: None,
+            generation: 0,
             windows: Vec::new(),
             selected_window: None,
             hotkeys_ok: false,
@@ -162,7 +174,12 @@ impl Core {
     pub fn stop_conversion(&mut self) {
         self.supervisor.stop_requested();
         self.stop_worker();
-        self.status = "3D is off. Your normal desktop is restored.".into();
+        self.status = if self.operation.is_some() {
+            "Stopping 3D…"
+        } else {
+            "3D is off. Your normal desktop is restored."
+        }
+        .into();
     }
 
     pub fn toggle(&mut self) {
@@ -196,12 +213,7 @@ impl Core {
             self.status = "Preview mode: conversion is not started.".into();
             return;
         }
-        if self.worker_running() {
-            return;
-        }
-        if let Err(e) = platform::validate() {
-            self.status = e;
-            self.supervisor.start_failed();
+        if self.exiting || !self.wanted() || self.operation.is_some() || self.worker_running() {
             return;
         }
         self.save_preferences();
@@ -211,28 +223,100 @@ impl Core {
             self.supervisor.start_failed();
             return;
         }
-        match Worker::spawn(source) {
-            Ok(worker) => {
-                self.log(&format!(
-                    "Started renderer PID {} mode {:?}",
-                    worker.pid(),
-                    self.prefs.mode
-                ));
-                self.status = "Starting 3D — allow a few seconds for the AI model.".into();
-                self.worker = Some(worker);
+        let generation = self.generation;
+        let (tx, rx) = mpsc::channel();
+        self.operation = Some(rx);
+        self.status = "Starting 3D — checking prerequisites and loading the AI model.".into();
+        std::thread::spawn(move || {
+            // Hashing, hardware discovery and process launch must not hold the
+            // GUI's shared state lock. Cancellation is checked on completion.
+            let result = platform::validate().and_then(|()| Worker::spawn(source));
+            if let Err(mpsc::SendError(WorkerResult::Started {
+                result: Ok(worker), ..
+            })) = tx.send(WorkerResult::Started { generation, result })
+            {
+                // A closed receiver must never leave a newly spawned worker orphaned.
+                worker.stop();
             }
-            Err(e) => {
+        });
+    }
+
+    fn stop_worker(&mut self) {
+        // Invalidate a start already in flight, including an Apply that changes
+        // settings while prerequisite checks are still running.
+        self.generation = self.generation.wrapping_add(1);
+        if let Some(worker) = self.worker.take() {
+            let (tx, rx) = mpsc::channel();
+            self.operation = Some(rx);
+            self.status = "Stopping 3D…".into();
+            std::thread::spawn(move || {
+                let _ = tx.send(WorkerResult::Stopped(worker.stop()));
+            });
+        }
+    }
+
+    fn poll_operation(&mut self) {
+        let result = match self.operation.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(result)) => result,
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.operation = None;
                 self.supervisor.start_failed();
-                self.status = format!("Could not start conversion: {e}");
-                self.log(&format!("Could not start conversion: {e}"));
+                self.status = "Worker control task stopped unexpectedly. See logs.".into();
+                self.log(&self.status);
+                return;
+            }
+            _ => return,
+        };
+        self.operation = None;
+        match result {
+            WorkerResult::Started { generation, result } => match result {
+                Ok(worker) => {
+                    self.log(&format!("Started renderer PID {}", worker.pid()));
+                    self.worker = Some(worker);
+                    if generation != self.generation || !self.wanted() || self.exiting {
+                        self.stop_worker();
+                    }
+                }
+                Err(e) if generation == self.generation && self.wanted() && !self.exiting => {
+                    self.supervisor.start_failed();
+                    self.status = format!("Could not start conversion: {e}");
+                    self.log(&self.status);
+                }
+                Err(_) => {} // A cancelled attempt must not override newer intent.
+            },
+            WorkerResult::Stopped(message) => {
+                if let Some(message) = message {
+                    self.log(&message);
+                }
+                if !self.wanted() {
+                    self.status = "3D is off. Your normal desktop is restored.".into();
+                }
             }
         }
     }
 
-    fn stop_worker(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            if let Some(message) = worker.stop() {
-                self.log(&message);
+    pub fn ready_to_exit(&self) -> bool {
+        self.exiting && self.operation.is_none() && self.worker.is_none()
+    }
+
+    /// Emergency cleanup when the native window closes without the normal
+    /// deferred Quit flow. The caller performs these waits outside Core's lock.
+    pub fn take_shutdown(&mut self) -> impl FnOnce() {
+        self.exiting = true;
+        self.supervisor.stop_requested();
+        let worker = self.worker.take();
+        let operation = self.operation.take();
+        move || {
+            if let Some(worker) = worker {
+                worker.stop();
+            }
+            if let Some(rx) = operation {
+                if let Ok(WorkerResult::Started {
+                    result: Ok(worker), ..
+                }) = rx.recv()
+                {
+                    worker.stop();
+                }
             }
         }
     }
@@ -300,7 +384,7 @@ impl Core {
         self.exiting = true;
         self.save_preferences();
         self.stop_conversion();
-        self.requests.push(UiRequest::Quit);
+        // Keep the window and poller responsive until background cleanup finishes.
     }
 
     /// One supervision tick: external requests, worker state, recovery.
@@ -316,6 +400,16 @@ impl Core {
             if events.toggle.is_signaled() {
                 self.toggle();
             }
+        }
+        self.poll_operation();
+        if self.operation.is_some() {
+            return;
+        }
+        if self.exiting {
+            if self.ready_to_exit() && !self.requests.contains(&UiRequest::Quit) {
+                self.requests.push(UiRequest::Quit);
+            }
+            return;
         }
         let exited = self.worker.as_mut().and_then(|w| w.has_exited());
         match (self.worker.is_some(), exited) {
@@ -369,6 +463,7 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
             std::thread::sleep(POLL_INTERVAL);
             let mut show = false;
             let mut quit = false;
+            let hwnd;
             {
                 let Ok(mut core) = core.lock() else { break };
                 crate::hotkeys::drain(&mut core);
@@ -383,12 +478,12 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
                 if core.requests.contains(&UiRequest::Quit) {
                     quit = true;
                 }
-                if core.exiting && core.requests.is_empty() && core.worker.is_none() {
-                    // Quit handled by the GUI; stop polling once it is gone.
-                }
-                if show || quit {
-                    platform::show_window(core.controls_hwnd);
-                }
+                hwnd = core.controls_hwnd;
+            }
+            // Cross-thread Win32 window calls can synchronously dispatch on
+            // the GUI thread. Never hold Core while making them.
+            if show || quit {
+                platform::show_window(hwnd);
             }
             ctx.request_repaint();
             if quit {
@@ -408,4 +503,88 @@ pub fn version_line() -> String {
 
 pub fn shortcuts_line() -> &'static str {
     "Ctrl+Alt+F10  On / off    ·    Ctrl+Alt+F9  Controls    ·    Ctrl+Alt+F8  Restore overlay    ·    F1  Help"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn isolated(dir: &std::path::Path) -> Core {
+        Core {
+            prefs: Preferences::default(),
+            ui: UiSettings::default(),
+            status: "Ready".into(),
+            supervisor: Supervisor::new(true),
+            worker: None,
+            operation: None,
+            generation: 0,
+            windows: Vec::new(),
+            selected_window: None,
+            hotkeys_ok: false,
+            start_requested: false,
+            preview: true,
+            screenshot: None,
+            exiting: false,
+            requests: Vec::new(),
+            logger: Logger::new(dir.join("test.log")),
+            events: None,
+            controls_hwnd: 0,
+        }
+    }
+
+    #[test]
+    fn pending_operation_does_not_block_poll_and_quit_waits_for_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        let (tx, rx) = mpsc::channel();
+        core.operation = Some(rx);
+        core.poll(Instant::now());
+        assert!(core.operation.is_some());
+        core.quit();
+        core.poll(Instant::now());
+        assert!(!core.ready_to_exit());
+        assert!(!core.requests.contains(&UiRequest::Quit));
+        tx.send(WorkerResult::Stopped(None))
+            .unwrap_or_else(|_| panic!("receiver closed"));
+        core.poll(Instant::now());
+        assert!(core.ready_to_exit());
+        assert!(core.requests.contains(&UiRequest::Quit));
+    }
+
+    #[test]
+    fn cancelled_start_failure_does_not_erase_newer_start_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.supervisor.start_requested();
+        let generation = core.generation;
+        let (tx, rx) = mpsc::channel();
+        core.operation = Some(rx);
+        core.stop_worker(); // Invalidate the old launch, as Apply does.
+        tx.send(WorkerResult::Started {
+            generation,
+            result: Err("cancelled attempt".into()),
+        })
+        .unwrap_or_else(|_| panic!("receiver closed"));
+        core.poll_operation();
+        assert!(core.wanted());
+        assert_eq!(core.status, "Ready");
+        assert!(core.operation.is_none());
+    }
+
+    #[test]
+    fn current_start_failure_clears_intent_and_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.supervisor.start_requested();
+        let (tx, rx) = mpsc::channel();
+        core.operation = Some(rx);
+        tx.send(WorkerResult::Started {
+            generation: core.generation,
+            result: Err("missing engine".into()),
+        })
+        .unwrap_or_else(|_| panic!("receiver closed"));
+        core.poll_operation();
+        assert!(!core.wanted());
+        assert!(core.status.contains("missing engine"));
+    }
 }

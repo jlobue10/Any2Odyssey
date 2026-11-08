@@ -79,6 +79,7 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
+ "tempfile",
  "tray-icon",
  "windows",
  "winresource",
