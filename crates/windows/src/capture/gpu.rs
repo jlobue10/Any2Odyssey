@@ -6,7 +6,9 @@
 //! blended with the previous frame, so vanished menus disappear immediately.
 
 use any2odyssey_core::geometry::Rect;
+use std::time::{Duration, Instant};
 use windows::core::{s, Interface, PCSTR};
+use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
@@ -38,11 +40,13 @@ pub struct GpuDesktopCapture {
     context: ID3D11DeviceContext,
     source: Option<WgcFrameSource>,
     pub border: Option<BorderOutcome>,
-    staging: ID3D11Texture2D,
+    staging: Option<ID3D11Texture2D>,
     hdr: Option<HdrConverter>,
     sdr_input: Option<ID3D11Texture2D>,
     surface: Option<GpuSurface>,
-    white_scale: f32,
+    color: display_color::CaptureColor,
+    color_checked: Instant,
+    device_name: String,
     capture: Rect,
     output_bounds: Rect,
     pub frames: u64,
@@ -135,7 +139,7 @@ impl GpuDesktopCapture {
         on_frame: impl Fn() + Send + Sync + 'static,
         log: &dyn Fn(&str),
     ) -> Result<GpuDesktopCapture, String> {
-        let white_scale = display_color::sdr_white_scale(device_name);
+        let color = display_color::capture_color(device_name);
         let found = find_output(device_name)?;
         if !found.bounds.contains_rect(&bounds) {
             return Err("Capture rectangle crosses a monitor boundary.".into());
@@ -172,25 +176,29 @@ impl GpuDesktopCapture {
         if let Ok(dxgi) = device.cast::<IDXGIDevice1>() {
             let _ = unsafe { dxgi.SetMaximumFrameLatency(1) };
         }
-        let (source, border) = WgcFrameSource::new(&device, found.monitor, on_frame, log)
+        let format = if color.advanced_color {
+            DirectXPixelFormat::R16G16B16A16Float
+        } else {
+            DirectXPixelFormat::B8G8R8A8UIntNormalized
+        };
+        let (source, border) = WgcFrameSource::new(&device, found.monitor, format, on_frame, log)
             .map_err(|e| format!("Windows Graphics Capture: {e}"))?;
         log(&format!(
-            "GPU desktop capture format: R16G16B16A16_Float; SDR white scale {white_scale}"
+            "GPU desktop capture format: {format:?}; SDR white scale {}",
+            color.white_scale
         ));
-        let mut staging_desc = texture_desc(bounds.width as u32, bounds.height as u32);
-        staging_desc.Usage = D3D11_USAGE_STAGING;
-        staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-        let staging = create_texture(&device, &staging_desc).map_err(|e| e.to_string())?;
         Ok(GpuDesktopCapture {
             device,
             context,
             source: Some(source),
             border: Some(border),
-            staging,
+            staging: None,
             hdr: None,
             sdr_input: None,
             surface: None,
-            white_scale,
+            color,
+            color_checked: Instant::now(),
+            device_name: device_name.to_owned(),
             capture: bounds,
             output_bounds: found.bounds,
             frames: 0,
@@ -217,6 +225,16 @@ impl GpuDesktopCapture {
         window: Option<HWND>,
         pixels: Option<&mut Vec<u8>>,
     ) -> Result<bool, String> {
+        // A format/white-level change invalidates this pipeline. The worker's
+        // normal recovery path recreates it with the new display settings.
+        if self.color_checked.elapsed() >= Duration::from_secs(1) {
+            self.color_checked = Instant::now();
+            if display_color::capture_color(&self.device_name) != self.color {
+                return Err(
+                    "Display color mode or SDR white level changed. Restart conversion.".into(),
+                );
+            }
+        }
         let Some(source) = self.source.as_ref() else {
             return Err("Capture source closed.".into());
         };
@@ -303,12 +321,25 @@ impl GpuDesktopCapture {
         Ok(true)
     }
 
-    fn read_pixels(&self, current: &ID3D11Texture2D, pixels: &mut Vec<u8>) -> Result<(), String> {
-        unsafe { self.context.CopyResource(&self.staging, current) };
+    fn read_pixels(
+        &mut self,
+        current: &ID3D11Texture2D,
+        pixels: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        // Only diagnostics read pixels back to the CPU. Production capture
+        // should not reserve a 4K CPU-readable texture it never uses.
+        if self.staging.is_none() {
+            let mut desc = texture_desc(self.capture.width as u32, self.capture.height as u32);
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            self.staging = Some(create_texture(&self.device, &desc).map_err(|e| e.to_string())?);
+        }
+        let staging = self.staging.as_ref().expect("created");
+        unsafe { self.context.CopyResource(staging, current) };
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             self.context
-                .Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
         .map_err(|e| e.to_string())?;
         let w = self.capture.width as usize;
@@ -324,7 +355,7 @@ impl GpuDesktopCapture {
             };
             pixels.extend_from_slice(row);
         }
-        unsafe { self.context.Unmap(&self.staging, 0) };
+        unsafe { self.context.Unmap(staging, 0) };
         Ok(())
     }
 
@@ -368,7 +399,7 @@ impl GpuDesktopCapture {
             self.device
                 .CreateRenderTargetView(&output, None, Some(&mut target))?
         };
-        let shader = hdr_to_sdr_shader(self.white_scale);
+        let shader = hdr_to_sdr_shader(self.color.white_scale);
         let vs_code = compile(&shader, s!("VS"), s!("vs_5_0"))?;
         let ps_code = compile(&shader, s!("PS"), s!("ps_5_0"))?;
         let mut vs = None;
