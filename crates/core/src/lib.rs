@@ -5,6 +5,7 @@
 //! `any2odyssey-windows` crate; the desktop GUI lives in `any2odyssey`.
 
 pub mod engine;
+pub mod frame_wake;
 pub mod fsutil;
 pub mod geometry;
 pub mod help;

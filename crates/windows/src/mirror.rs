@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use any2odyssey_core::frame_wake::FrameWake;
 use any2odyssey_core::geometry::{fit, offscreen_bounds, Rect};
 use any2odyssey_core::prefs::{CaptureMode, Preferences};
 use any2odyssey_core::status::DesktopCaptureStatus;
@@ -148,6 +149,7 @@ pub struct Mirror {
     thumbs: Vec<win::Thumbnail>,
     signature: String,
     desktop: Option<GpuDesktopCapture>,
+    frame_wake: Arc<FrameWake>,
     sampled: Instant,
     sample_frames: u64,
     capture_millis: f64,
@@ -194,6 +196,7 @@ impl Mirror {
             thumbs: Vec::new(),
             signature: String::new(),
             desktop: None,
+            frame_wake: Arc::new(FrameWake::default()),
             sampled: Instant::now(),
             sample_frames: 0,
             capture_millis: 0.0,
@@ -203,15 +206,17 @@ impl Mirror {
         };
         if desktop_mode {
             let target = hwnd.0 as isize;
+            let wake = mirror.frame_wake.clone();
             let on_frame = move || {
-                let _ = unsafe {
+                wake.notify(|| unsafe {
                     PostMessageW(
                         Some(HWND(target as *mut _)),
                         WM_FRAME_ARRIVED,
                         WPARAM(0),
                         LPARAM(0),
                     )
-                };
+                    .is_ok()
+                });
             };
             let log = mirror.log.clone();
             let capture = GpuDesktopCapture::new(screen, device_name, on_frame, &|m| log(m))
@@ -282,6 +287,7 @@ impl Mirror {
 
     /// A frame-arrived message: present it (desktop mode only).
     pub fn frame_arrived(&mut self, can_capture: bool) -> Result<(), String> {
+        self.frame_wake.acknowledge();
         if self.desktop.is_some() && can_capture {
             self.capture_desktop()?;
         }
