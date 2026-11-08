@@ -3,8 +3,6 @@
 //! through the delayed AI pipeline), and the yellow capture border is removed
 //! when Windows grants the per-app Borderless permission.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use any2odyssey_core::status::CaptureBorderStatus;
@@ -32,7 +30,6 @@ pub struct WgcFrameSource {
     session: GraphicsCaptureSession,
     item_size: SizeInt32,
     token: Option<i64>,
-    pub frame_flag: Arc<AtomicBool>,
 }
 
 /// Information about the border-permission request, for the status file.
@@ -73,13 +70,10 @@ impl WgcFrameSource {
         let border = configure_border(&session, log);
         // 16 ms minimum interval; TimeSpan is in 100 ns units.
         session.SetMinUpdateInterval(TimeSpan { Duration: 160_000 })?;
-        let frame_flag = Arc::new(AtomicBool::new(false));
-        let flag = frame_flag.clone();
         let handler = windows::Foundation::TypedEventHandler::<
             Direct3D11CaptureFramePool,
             windows::core::IInspectable,
         >::new(move |_, _| {
-            flag.store(true, Ordering::Release);
             on_frame();
             Ok(())
         });
@@ -93,7 +87,6 @@ impl WgcFrameSource {
                 session,
                 item_size,
                 token: Some(token),
-                frame_flag,
             },
             border,
         ))

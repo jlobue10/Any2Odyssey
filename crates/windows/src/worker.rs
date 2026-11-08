@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use any2odyssey_core::engine::{ENGINE_CORE_HINT, ENGINE_READY_TIMEOUT_SECS};
+use any2odyssey_core::frame_wake::DispatchDeadline;
 use any2odyssey_core::ipc;
 use any2odyssey_core::log::Logger;
 use any2odyssey_core::paths;
@@ -189,50 +190,52 @@ fn run_inner(
         surface.close();
     };
 
+    let mut overlay_deadline = DispatchDeadline::new(Instant::now(), Duration::from_millis(100));
+    let mut poll_deadline = DispatchDeadline::new(Instant::now(), Mirror::poll_interval());
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        // Timers wake an idle loop; deadlines also run between posted frames
+        // so sustained capture cannot starve stop, liveness or overlay checks.
+        let now = Instant::now();
+        if poll_deadline.due(now) {
+            let alive = is_pid_alive(parent_pid);
+            if stop_event.is_signaled() || !alive || engine::ENGINE_CLOSED.load(Ordering::Acquire) {
+                shutdown(&mut surface, &mut started);
+                continue;
+            }
+            if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
+                ready = true;
+                report(&format!(
+                    "3D active — click-through overlay; {}",
+                    if prefs.keep_overlay_on_top {
+                        "stays above apps"
+                    } else {
+                        "Ctrl+Alt+F8 restores it"
+                    }
+                ));
+            }
+            if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
+                report("Conversion did not initialize. See conversion log.");
+                shutdown(&mut surface, &mut started);
+                continue;
+            }
+        }
+        if overlay_deadline.due(now) {
+            if let Err(e) = overlay.tick(restore_event.is_signaled()) {
+                log(&format!("Overlay error: {e}"));
+                report(&e);
+                shutdown(&mut surface, &mut started);
+                continue;
+            }
+        }
         if msg.hwnd == hwnd && msg.message == WM_TIMER {
-            match msg.wParam.0 {
-                TIMER_UPDATE => {
-                    if let Err(e) = surface.tick(overlay.capture_safe()) {
-                        log(&format!("Desktop capture failed: {e}"));
-                        report(&format!("Desktop capture error: {e}"));
-                        shutdown(&mut surface, &mut started);
-                    }
+            if msg.wParam.0 == TIMER_UPDATE {
+                let result = surface.tick(overlay.capture_safe());
+                if let Err(e) = result {
+                    log(&format!("Desktop capture failed: {e}"));
+                    report(&format!("Desktop capture error: {e}"));
+                    shutdown(&mut surface, &mut started);
                 }
-                TIMER_OVERLAY => {
-                    if let Err(e) = overlay.tick(restore_event.is_signaled()) {
-                        log(&format!("Overlay error: {e}"));
-                        report(&e);
-                        shutdown(&mut surface, &mut started);
-                    }
-                }
-                TIMER_POLL => {
-                    let alive = is_pid_alive(parent_pid);
-                    if stop_event.is_signaled()
-                        || !alive
-                        || engine::ENGINE_CLOSED.load(Ordering::Acquire)
-                    {
-                        shutdown(&mut surface, &mut started);
-                        continue;
-                    }
-                    if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
-                        ready = true;
-                        report(&format!(
-                            "3D active — click-through overlay; {}",
-                            if prefs.keep_overlay_on_top {
-                                "stays above apps"
-                            } else {
-                                "Ctrl+Alt+F8 restores it"
-                            }
-                        ));
-                    }
-                    if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
-                        report("Conversion did not initialize. See conversion log.");
-                        shutdown(&mut surface, &mut started);
-                    }
-                }
-                _ => {}
             }
             continue;
         }
