@@ -21,6 +21,7 @@ pub mod status;
 pub mod stereo;
 pub mod supervisor;
 pub mod theme;
+pub mod update;
 
 /// Product name used in window titles, tray tooltips and the data directory.
 pub const APP_NAME: &str = "Any2Odyssey";
