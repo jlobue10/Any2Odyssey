@@ -1,0 +1,26 @@
+Any2Odyssey
+Copyright (C) 2026 Jonathan LoBue
+
+Any2Odyssey is a Rust reimplementation of Any2Odd 0.7.3 by Zhandragon
+(https://github.com/Zhandragon/Any2Odd), the continuous desktop 3D
+companion for the Samsung Odyssey 3D G90XF. Any2Odd is licensed under the
+GNU General Public License version 3 (GPL-3.0-only); Any2Odyssey keeps that
+license. The architecture, the Samsung engine integration, the capture and
+overlay design, the user-facing behaviour and the written Help are derived
+from Any2Odd. All code in this repository was rewritten in Rust; no code from
+Any2Odd is included verbatim.
+
+Any2Odd in turn credits Any2C1 (CubeVi) as the inspiration for its
+continuous-conversion workflow and PortalAI (Zhandragon) for its visual
+presentation. Any2Odyssey ships none of their code or assets, and the
+donation material that Any2Odd carried for its maintainer has been removed;
+support the upstream author at https://github.com/sponsors/Zhandragon.
+
+Samsung, Odyssey, Odyssey 3D Hub, LeiaSR and Leia are trademarks of their
+respective owners. Any2Odyssey does not include Samsung or Leia binaries, AI
+models or calibration data.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3. This program is distributed WITHOUT ANY WARRANTY; see
+LICENSE for details.

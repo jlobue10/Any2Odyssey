@@ -1,0 +1,10 @@
+/target/
+/build/
+/dist/
+*.log
+*.pdb
+.venv/
+__pycache__/
+.vs/
+*.user
+*.suo
