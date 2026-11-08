@@ -191,12 +191,10 @@ pub fn test_capture_exclusion() -> i32 {
                 pump(100);
                 if capture.read_back(pixels)?
                     && pixels.len() >= (bounds.width * bounds.height * 4) as usize
+                    && pixel(pixels, bounds.width, 20, 40) == left
+                    && pixel(pixels, bounds.width, 120, 40) == right
                 {
-                    if pixel(pixels, bounds.width, 20, 40) == left
-                        && pixel(pixels, bounds.width, 120, 40) == right
-                    {
-                        return Ok(());
-                    }
+                    return Ok(());
                 }
             }
             Err(format!(
