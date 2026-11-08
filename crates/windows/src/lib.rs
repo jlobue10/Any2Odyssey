@@ -19,6 +19,7 @@ pub mod mirror;
 pub mod overlay;
 pub mod processes;
 pub mod taskbar;
+pub mod update;
 pub mod win;
 pub mod worker;
 

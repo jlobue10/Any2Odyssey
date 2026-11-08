@@ -313,6 +313,18 @@ impl Request {
     }
 }
 
+/// Parse a latest-release document and relate it to the running version.
+pub fn evaluate_latest_release(body: &str) -> Result<Comparison, ParseError> {
+    parse_latest_release(body).map(|release| compare(Version::current(), release))
+}
+
+/// Exit codes of `Any2Odyssey --check-updates`, for scripts and tests.
+pub mod exit_code {
+    pub const UP_TO_DATE: i32 = 0;
+    pub const CHECK_FAILED: i32 = 1;
+    pub const UPDATE_AVAILABLE: i32 = 10;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +565,34 @@ mod tests {
         );
         assert_eq!(request.accept, "application/vnd.github+json");
         assert!(request.user_agent.bytes().all(|b| b.is_ascii_graphic()));
+    }
+}
+
+#[cfg(test)]
+mod evaluate_tests {
+    use super::*;
+
+    #[test]
+    fn evaluation_relates_the_document_to_the_running_version() {
+        let current = Version::current();
+        let future = Version::new(current.major + 1, 0, 0);
+        let body = format!(r#"{{"tag_name":"{}"}}"#, future.tag());
+        match evaluate_latest_release(&body) {
+            Ok(Comparison::Available(release)) => assert_eq!(release.version, future),
+            other => panic!("{other:?}"),
+        }
+        let body = format!(r#"{{"tag_name":"{}"}}"#, current.tag());
+        assert_eq!(evaluate_latest_release(&body), Ok(Comparison::UpToDate));
+        let body = r#"{"tag_name":"v0.0.1"}"#;
+        assert_eq!(
+            evaluate_latest_release(body),
+            Ok(Comparison::AheadOfRelease)
+        );
+        assert_eq!(
+            evaluate_latest_release(r#"{"tag_name":"v1.0.0","draft":true}"#),
+            Err(ParseError::Draft)
+        );
+        assert_ne!(exit_code::UPDATE_AVAILABLE, exit_code::UP_TO_DATE);
+        assert_ne!(exit_code::UPDATE_AVAILABLE, exit_code::CHECK_FAILED);
     }
 }

@@ -19,7 +19,7 @@ use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
     format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
         any2odyssey_core::VERSION
     )
 }
@@ -65,6 +65,41 @@ fn self_test(logger: &Logger) -> i32 {
     0
 }
 
+/// `--check-updates`: one blocking query, a line of output and an exit code
+/// scripts can act on. The GUI performs the same check on its own thread.
+fn check_updates_cli(logger: &Logger) -> i32 {
+    use any2odyssey_core::update::{exit_code, Comparison};
+    let running = any2odyssey_core::VERSION;
+    let (message, code) = match platform::check_updates() {
+        Ok(Comparison::UpToDate) => (
+            format!("{APP_NAME} {running} is up to date."),
+            exit_code::UP_TO_DATE,
+        ),
+        Ok(Comparison::AheadOfRelease) => (
+            format!("{APP_NAME} {running} is newer than the latest published release."),
+            exit_code::UP_TO_DATE,
+        ),
+        Ok(Comparison::Available(release)) => (
+            format!(
+                "Update available: {APP_NAME} {} (running {running}). {}",
+                release.version, release.page_url
+            ),
+            exit_code::UPDATE_AVAILABLE,
+        ),
+        Err(error) => (
+            format!("Could not check for updates: {error}"),
+            exit_code::CHECK_FAILED,
+        ),
+    };
+    logger.log(&message);
+    if code == exit_code::CHECK_FAILED {
+        eprintln!("{message}");
+    } else {
+        println!("{message}");
+    }
+    code
+}
+
 fn worker_preferences(snapshot: &str) -> serde_json::Result<any2odyssey_core::prefs::Preferences> {
     let mut preferences: any2odyssey_core::prefs::Preferences = serde_json::from_str(snapshot)?;
     preferences.sanitize();
@@ -94,6 +129,7 @@ fn main() {
         [flag] if flag == "--test-capture-exclusion" => platform::test_capture_exclusion(),
         [flag] if flag == "--test-offscreen" => platform::test_offscreen(),
         [flag] if flag == "--self-test" => self_test(&logger),
+        [flag] if flag == "--check-updates" => check_updates_cli(&logger),
         [flag, path] if flag == "--export-guide" => match guide::export(std::path::Path::new(path))
         {
             Ok(()) => 0,
