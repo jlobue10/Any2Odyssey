@@ -96,8 +96,6 @@ fn run_inner(
             message: None,
         });
     }
-    let library = EngineLibrary::load()
-        .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?;
     let stop_event = Event::open(event_name).map_err(|e| {
         fail(
             exit_code::RENDERER_ERROR,
@@ -111,6 +109,23 @@ fn run_inner(
                 format!("Renderer error: restore event: {e}"),
             )
         })?;
+    // The engine reads depth/pop-out and output flags from Samsung's file.
+    // Do not load or start it with stale values after a failed Apply.
+    any2odyssey_core::overlay_settings::update_file(
+        &paths::samsung_overlay_settings_file(),
+        &paths::overlay_backup_file(),
+        prefs.side_by_side,
+        prefs.depth,
+        prefs.popout,
+    )
+    .map_err(|e| {
+        fail(
+            exit_code::RENDERER_ERROR,
+            format!("Could not update Samsung overlay settings; conversion was not started: {e}"),
+        )
+    })?;
+    let library = EngineLibrary::load()
+        .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?;
     let (screen, device_name, _) = win::primary_monitor().ok_or_else(|| {
         fail(
             exit_code::RENDERER_ERROR,
@@ -141,15 +156,6 @@ fn run_inner(
     );
 
     report("Starting conversion");
-    if let Err(e) = any2odyssey_core::overlay_settings::update_file(
-        &paths::samsung_overlay_settings_file(),
-        &paths::overlay_backup_file(),
-        prefs.side_by_side,
-        prefs.depth,
-        prefs.popout,
-    ) {
-        log(&format!("Could not update Samsung overlay settings: {e}"));
-    }
     surface.show(overlay.capture_safe()).map_err(|e| {
         fail(
             exit_code::RENDERER_ERROR,
