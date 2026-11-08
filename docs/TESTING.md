@@ -38,7 +38,7 @@ They use temporary folders and an isolated `HKCU:\Software\Any2OdysseyInstallerT
 
 ## Hardware acceptance (target machine)
 
-Not automated. On the Windows PC with the G90XF, Odyssey 3D Hub 1.5.1 and the RTX GPU: full install, automatic start, each capture mode, SBS mode, depth/pop-out apply, Ctrl+Alt+F8/F9/F10, overlay behind a borderless game, recovery after killing the worker, uninstall. Record the results in `CHANGELOG.md` before tagging a release. Optical depth must be judged by a person at the monitor; screenshots cannot show it.
+Not automated. On the Windows PC with the G90XF, Odyssey 3D Hub 1.5.1 and the RTX GPU: full install, automatic start, each capture mode, SBS mode, depth/pop-out apply, Ctrl+Alt+F8/F9/F10, overlay behind a borderless game, recovery after killing the worker, uninstall. Record the results in `CHANGELOG.md` before tagging a release. Each release entry's "Hardware verification" section lists the checks that version's changes added (for 0.8.1: rapid Apply/Restart, 125–200 % and mixed-DPI scaling, HDR/SDR-white-level toggles, monitor rearrangement, tray restore and quit while hidden). Optical depth must be judged by a person at the monitor; screenshots cannot show it.
 
 Results so far: 0.8.0 passed full install, preference import, automatic start, whole-desktop AI conversion, click-through overlay and Keep 3D above apps on a G90XF with an RTX 5090 (2026-11-08; details in the CHANGELOG). The remaining items in the list above are still to be recorded.
 
