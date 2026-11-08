@@ -1,0 +1,557 @@
+//! Release discovery behind "Check for updates".
+//!
+//! This module parses GitHub's latest-release document, compares it with the
+//! running version, decides when a startup check is due and keeps everything
+//! the server sent at arm's length: release notes are reduced to plain text,
+//! and only URLs on GitHub's own hosts are ever handed to a browser. It does no
+//! I/O. The HTTPS transport lives in the platform crates, and nothing here is
+//! used by the worker process.
+
+use serde::Deserialize;
+use std::fmt;
+
+/// Repository whose releases are checked.
+pub const REPOSITORY: &str = "jlobue10/Any2Odyssey";
+/// GitHub REST endpoint for the newest published, non-prerelease release.
+pub const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/jlobue10/Any2Odyssey/releases/latest";
+/// Releases index, shown when a release has no usable page of its own.
+pub const RELEASES_PAGE: &str = "https://github.com/jlobue10/Any2Odyssey/releases";
+/// Largest response a transport may hand to [`parse_latest_release`].
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Release notes kept for display, in characters.
+pub const MAX_NOTES_CHARS: usize = 4000;
+/// Automatic checks run at most this often.
+pub const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
+/// Hosts whose HTTPS URLs may be opened from an update result.
+pub const ALLOWED_HOSTS: [&str; 3] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+];
+
+/// A release version. Only plain `major.minor.patch` is recognized; pre-release
+/// suffixes are rejected because the release workflow never publishes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Version {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+impl Version {
+    pub const fn new(major: u32, minor: u32, patch: u32) -> Version {
+        Version {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    /// Accepts `0.8.2`, `v0.8.2` and surrounding whitespace, nothing else.
+    pub fn parse(text: &str) -> Option<Version> {
+        let text = text.trim();
+        let text = text
+            .strip_prefix('v')
+            .or_else(|| text.strip_prefix('V'))
+            .unwrap_or(text);
+        let mut parts = text.split('.');
+        let mut next = || {
+            let part = parts.next()?;
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u32>().ok()
+        };
+        let version = Version::new(next()?, next()?, next()?);
+        parts.next().is_none().then_some(version)
+    }
+
+    /// The version this executable was built as.
+    pub fn current() -> Version {
+        Version::parse(crate::VERSION).expect("CARGO_PKG_VERSION is major.minor.patch")
+    }
+
+    /// The tag the release workflow creates for this version.
+    pub fn tag(&self) -> String {
+        format!("v{self}")
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// A published release, with every URL already checked by [`allowed_url`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Release {
+    pub version: Version,
+    /// Release page, built from the parsed version rather than copied from the
+    /// document so a surprising `html_url` can never reach the browser.
+    pub page_url: String,
+    /// The Windows x64 package, when the release carries one under the
+    /// expected name on an allowed host.
+    pub zip_url: Option<String>,
+    /// The package's `.sha256` companion, under the same conditions.
+    pub checksum_url: Option<String>,
+    /// Release notes as plain text, see [`sanitize_notes`].
+    pub notes: String,
+    /// Publication time as the API reported it, kept only if it looks like a
+    /// timestamp.
+    pub published_at: Option<String>,
+}
+
+impl Release {
+    pub fn package_name(version: Version) -> String {
+        format!("Any2Odyssey-{version}-windows-x64.zip")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParseError {
+    TooLarge(usize),
+    Json(String),
+    Draft,
+    Prerelease,
+    MissingTag,
+    UnrecognizedTag(String),
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::TooLarge(bytes) => write!(
+                f,
+                "release information is too large ({bytes} bytes, limit {MAX_RESPONSE_BYTES})"
+            ),
+            ParseError::Json(message) => write!(f, "release information is not valid: {message}"),
+            ParseError::Draft => write!(f, "the latest release is a draft"),
+            ParseError::Prerelease => write!(f, "the latest release is a pre-release"),
+            ParseError::MissingTag => write!(f, "the latest release has no tag"),
+            ParseError::UnrecognizedTag(tag) => {
+                write!(f, "the release tag {tag:?} is not a version number")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+#[derive(Deserialize)]
+struct Document {
+    tag_name: Option<String>,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    body: Option<String>,
+    published_at: Option<String>,
+    #[serde(default)]
+    assets: Vec<Asset>,
+}
+
+#[derive(Deserialize)]
+struct Asset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// Parse the JSON body of [`LATEST_RELEASE_API`]. Unknown fields are ignored so
+/// GitHub can extend the document; missing ones degrade to `None`.
+pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(ParseError::TooLarge(body.len()));
+    }
+    let document: Document =
+        serde_json::from_str(body).map_err(|e| ParseError::Json(e.to_string()))?;
+    if document.draft {
+        return Err(ParseError::Draft);
+    }
+    if document.prerelease {
+        return Err(ParseError::Prerelease);
+    }
+    let tag = document.tag_name.ok_or(ParseError::MissingTag)?;
+    let version = Version::parse(&tag).ok_or_else(|| ParseError::UnrecognizedTag(tag.clone()))?;
+    let asset_url = |name: &str| {
+        document
+            .assets
+            .iter()
+            .find(|asset| asset.name == name && allowed_url(&asset.browser_download_url))
+            .map(|asset| asset.browser_download_url.clone())
+    };
+    let package = Release::package_name(version);
+    Ok(Release {
+        version,
+        page_url: format!("{RELEASES_PAGE}/tag/{}", version.tag()),
+        zip_url: asset_url(&package),
+        checksum_url: asset_url(&format!("{package}.sha256")),
+        notes: sanitize_notes(document.body.as_deref().unwrap_or_default()),
+        published_at: document
+            .published_at
+            .filter(|text| looks_like_timestamp(text)),
+    })
+}
+
+fn looks_like_timestamp(text: &str) -> bool {
+    text.len() <= 40
+        && text.len() >= 10
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b':' | b'T' | b'Z' | b'+' | b'.'))
+}
+
+/// True for an `https://` URL whose authority is exactly one of
+/// [`ALLOWED_HOSTS`]: no user information, no port, no other scheme.
+pub fn allowed_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains(['@', ':', '\\']) {
+        return false;
+    }
+    let host = authority.to_ascii_lowercase();
+    ALLOWED_HOSTS.contains(&host.as_str())
+}
+
+/// Reduce release notes to plain text: drop control and bidirectional
+/// formatting characters, normalize line endings, collapse blank runs and cap
+/// the length. Markdown is left as-is; it is displayed, not rendered.
+pub fn sanitize_notes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len().min(MAX_NOTES_CHARS + 1));
+    let mut newlines = 0usize;
+    let mut chars = 0usize;
+    let mut truncated = false;
+    for c in text.chars() {
+        let c = match c {
+            '\r' => continue,
+            '\t' => ' ',
+            '\n' => '\n',
+            c if c.is_control() || is_bidi_or_zero_width(c) => continue,
+            c => c,
+        };
+        if c == '\n' {
+            newlines += 1;
+            if newlines > 2 {
+                continue;
+            }
+        } else {
+            newlines = 0;
+        }
+        if chars == MAX_NOTES_CHARS {
+            truncated = true;
+            break;
+        }
+        out.push(c);
+        chars += 1;
+    }
+    let mut out = out.trim().to_owned();
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
+fn is_bidi_or_zero_width(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
+/// How a published release relates to the running version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Comparison {
+    /// The running version is the published one.
+    UpToDate,
+    /// A newer release exists.
+    Available(Release),
+    /// The running version is newer than anything published: a development
+    /// or pre-release build. Not an update.
+    AheadOfRelease,
+}
+
+pub fn compare(current: Version, release: Release) -> Comparison {
+    match release.version.cmp(&current) {
+        std::cmp::Ordering::Greater => Comparison::Available(release),
+        std::cmp::Ordering::Equal => Comparison::UpToDate,
+        std::cmp::Ordering::Less => Comparison::AheadOfRelease,
+    }
+}
+
+/// Whether an automatic check should run now. `last_check` and `now` are Unix
+/// seconds. A missing record or a clock that moved backwards both mean "check".
+pub fn check_due(last_check: Option<i64>, now: i64) -> bool {
+    match last_check {
+        None => true,
+        Some(last) if last > now => true,
+        Some(last) => now - last >= CHECK_INTERVAL_SECONDS,
+    }
+}
+
+/// What a transport sends. Kept here so the headers are visible and tested;
+/// nothing identifies the machine beyond the standard client name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub url: &'static str,
+    pub user_agent: String,
+    pub accept: &'static str,
+    pub api_version: &'static str,
+}
+
+impl Request {
+    pub fn latest_release() -> Request {
+        Request {
+            url: LATEST_RELEASE_API,
+            user_agent: format!("{}/{}", crate::APP_NAME, crate::VERSION),
+            accept: "application/vnd.github+json",
+            api_version: "2022-11-28",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"{
+      "url": "https://api.github.com/repos/jlobue10/Any2Odyssey/releases/1",
+      "html_url": "https://github.com/jlobue10/Any2Odyssey/releases/tag/v0.9.0",
+      "tag_name": "v0.9.0",
+      "name": "0.9.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-12-01T18:04:31Z",
+      "author": { "login": "jlobue10", "id": 1 },
+      "assets": [
+        { "name": "Any2Odyssey-0.9.0-windows-x64.zip",
+          "browser_download_url": "https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.0/Any2Odyssey-0.9.0-windows-x64.zip",
+          "size": 3909802 },
+        { "name": "Any2Odyssey-0.9.0-windows-x64.zip.sha256",
+          "browser_download_url": "https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.0/Any2Odyssey-0.9.0-windows-x64.zip.sha256" }
+      ],
+      "body": "Windows x64 package.\r\n\r\n\r\n\r\n## What's Changed\r\n* Fix\u0007 thing\u202E by @jlobue10"
+    }"#;
+
+    #[test]
+    fn versions_parse_and_order() {
+        assert_eq!(Version::parse("0.8.2"), Some(Version::new(0, 8, 2)));
+        assert_eq!(Version::parse(" v1.10.0\n"), Some(Version::new(1, 10, 0)));
+        assert_eq!(Version::parse("V0.8.2"), Some(Version::new(0, 8, 2)));
+        for invalid in [
+            "",
+            "v",
+            "0.8",
+            "0.8.2.1",
+            "0.8.2-rc1",
+            "0.8.2 beta",
+            "0.-8.2",
+            "a.b.c",
+            "0..2",
+            "v 0.8.2",
+            "99999999999.0.0",
+            "0.8.2\0",
+        ] {
+            assert_eq!(Version::parse(invalid), None, "{invalid:?}");
+        }
+        assert!(Version::new(0, 9, 0) > Version::new(0, 8, 12));
+        assert!(Version::new(1, 0, 0) > Version::new(0, 99, 99));
+        assert!(Version::new(0, 8, 2) > Version::new(0, 8, 1));
+        assert_eq!(Version::new(0, 8, 2).to_string(), "0.8.2");
+        assert_eq!(Version::new(0, 8, 2).tag(), "v0.8.2");
+    }
+
+    #[test]
+    fn current_version_is_the_package_version() {
+        assert_eq!(Version::current().to_string(), crate::VERSION);
+    }
+
+    #[test]
+    fn sample_document_yields_a_release() {
+        let release = parse_latest_release(SAMPLE).unwrap();
+        assert_eq!(release.version, Version::new(0, 9, 0));
+        assert_eq!(
+            release.page_url,
+            "https://github.com/jlobue10/Any2Odyssey/releases/tag/v0.9.0"
+        );
+        assert_eq!(
+            release.zip_url.as_deref(),
+            Some("https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.0/Any2Odyssey-0.9.0-windows-x64.zip")
+        );
+        assert!(release
+            .checksum_url
+            .as_deref()
+            .unwrap()
+            .ends_with(".zip.sha256"));
+        assert_eq!(
+            release.published_at.as_deref(),
+            Some("2026-12-01T18:04:31Z")
+        );
+        assert_eq!(
+            release.notes,
+            "Windows x64 package.\n\n## What's Changed\n* Fix thing by @jlobue10"
+        );
+    }
+
+    #[test]
+    fn page_url_comes_from_the_tag_not_the_document() {
+        let body = r#"{"tag_name":"v0.9.1","html_url":"https://evil.example/x"}"#;
+        let release = parse_latest_release(body).unwrap();
+        assert_eq!(
+            release.page_url,
+            "https://github.com/jlobue10/Any2Odyssey/releases/tag/v0.9.1"
+        );
+        assert_eq!(release.zip_url, None);
+        assert_eq!(release.checksum_url, None);
+        assert_eq!(release.notes, "");
+        assert_eq!(release.published_at, None);
+    }
+
+    #[test]
+    fn assets_on_other_hosts_or_with_other_names_are_ignored() {
+        let body = r#"{"tag_name":"v0.9.0","assets":[
+            {"name":"Any2Odyssey-0.9.0-windows-x64.zip","browser_download_url":"https://github.com.evil.example/a.zip"},
+            {"name":"Any2Odyssey-0.9.0-windows-x64.zip","browser_download_url":"http://github.com/a.zip"},
+            {"name":"Any2Odyssey-0.8.0-windows-x64.zip","browser_download_url":"https://github.com/old.zip"},
+            {"name":"any2odyssey-0.9.0-windows-x64.zip","browser_download_url":"https://github.com/case.zip"}
+        ]}"#;
+        let release = parse_latest_release(body).unwrap();
+        assert_eq!(release.zip_url, None);
+        assert_eq!(release.checksum_url, None);
+    }
+
+    #[test]
+    fn documents_that_are_not_a_release_are_rejected() {
+        assert_eq!(
+            parse_latest_release(r#"{"tag_name":"v0.9.0","draft":true}"#),
+            Err(ParseError::Draft)
+        );
+        assert_eq!(
+            parse_latest_release(r#"{"tag_name":"v0.9.0","prerelease":true}"#),
+            Err(ParseError::Prerelease)
+        );
+        assert_eq!(
+            parse_latest_release(r#"{"name":"0.9.0"}"#),
+            Err(ParseError::MissingTag)
+        );
+        assert_eq!(
+            parse_latest_release(r#"{"tag_name":"nightly"}"#),
+            Err(ParseError::UnrecognizedTag("nightly".into()))
+        );
+        assert!(matches!(
+            parse_latest_release("[]"),
+            Err(ParseError::Json(_))
+        ));
+        assert!(matches!(
+            parse_latest_release("not json"),
+            Err(ParseError::Json(_))
+        ));
+        assert!(matches!(
+            parse_latest_release(r#"{"tag_name":"v0.9.0","assets":[{"name":"x"}]}"#),
+            Err(ParseError::Json(_))
+        ));
+        let huge = format!(
+            r#"{{"tag_name":"v0.9.0","body":"{}"}}"#,
+            "x".repeat(MAX_RESPONSE_BYTES)
+        );
+        assert_eq!(
+            parse_latest_release(&huge),
+            Err(ParseError::TooLarge(huge.len()))
+        );
+        // An odd publication time is dropped, not trusted.
+        let release =
+            parse_latest_release(r#"{"tag_name":"v0.9.0","published_at":"<b>soon</b>"}"#).unwrap();
+        assert_eq!(release.published_at, None);
+    }
+
+    #[test]
+    fn only_https_urls_on_github_hosts_are_allowed() {
+        for ok in [
+            "https://github.com/jlobue10/Any2Odyssey/releases",
+            "https://GitHub.com/x",
+            "https://github.com",
+            "https://github.com?x=1",
+            "https://objects.githubusercontent.com/github-production-release-asset/1",
+            "https://release-assets.githubusercontent.com/x",
+        ] {
+            assert!(allowed_url(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "github.com",
+            "http://github.com/x",
+            "https://github.com.evil.example/x",
+            "https://evil.example/github.com/x",
+            "https://user@github.com/x",
+            "https://github.com:443/x",
+            "https://github.com\\evil.example/x",
+            "javascript:alert(1)",
+            "file:///C:/Windows",
+            "https://api.github.com/repos",
+            "https://githubusercontent.com/x",
+            "https:///x",
+        ] {
+            assert!(!allowed_url(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn notes_become_bounded_plain_text() {
+        assert_eq!(
+            sanitize_notes("  a\r\n\r\n\r\n\r\nb\t\tc \u{1b}[31m  "),
+            "a\n\nb  c [31m"
+        );
+        assert_eq!(sanitize_notes("\u{202E}x\u{200B}y\u{FEFF}z\u{2066}"), "xyz");
+        assert_eq!(sanitize_notes("\u{7f}\u{0}\u{1}"), "");
+        let long = "é".repeat(MAX_NOTES_CHARS + 10);
+        let notes = sanitize_notes(&long);
+        assert_eq!(notes.chars().count(), MAX_NOTES_CHARS + 1);
+        assert!(notes.ends_with('…'));
+        let exact = "x".repeat(MAX_NOTES_CHARS);
+        assert_eq!(sanitize_notes(&exact), exact);
+    }
+
+    #[test]
+    fn comparison_distinguishes_update_current_and_development_builds() {
+        let release = parse_latest_release(SAMPLE).unwrap();
+        assert_eq!(
+            compare(Version::new(0, 8, 1), release.clone()),
+            Comparison::Available(release.clone())
+        );
+        assert_eq!(
+            compare(Version::new(0, 9, 0), release.clone()),
+            Comparison::UpToDate
+        );
+        assert_eq!(
+            compare(Version::new(0, 9, 1), release),
+            Comparison::AheadOfRelease
+        );
+    }
+
+    #[test]
+    fn automatic_checks_are_daily_and_tolerate_clock_changes() {
+        let now = 1_800_000_000;
+        assert!(check_due(None, now));
+        assert!(!check_due(Some(now), now));
+        assert!(!check_due(Some(now - CHECK_INTERVAL_SECONDS + 1), now));
+        assert!(check_due(Some(now - CHECK_INTERVAL_SECONDS), now));
+        assert!(check_due(Some(now + 60), now));
+    }
+
+    #[test]
+    fn request_targets_the_api_with_a_plain_client_name() {
+        let request = Request::latest_release();
+        assert_eq!(request.url, LATEST_RELEASE_API);
+        assert!(request.url.starts_with("https://api.github.com/repos/"));
+        assert!(request.url.contains(REPOSITORY));
+        assert_eq!(
+            request.user_agent,
+            format!("Any2Odyssey/{}", crate::VERSION)
+        );
+        assert_eq!(request.accept, "application/vnd.github+json");
+        assert!(request.user_agent.bytes().all(|b| b.is_ascii_graphic()));
+    }
+}
