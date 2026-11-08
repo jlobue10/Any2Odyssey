@@ -1,5 +1,6 @@
 //! The eframe application: custom chrome, pages, tray/hotkey wiring.
 
+mod about;
 mod controls;
 mod help;
 mod theme;
@@ -17,6 +18,7 @@ use egui::{
 
 use crate::core::{self, Core, MenuCommand, UiRequest};
 use crate::platform;
+use about::AboutState;
 use controls::ControlsState;
 use help::HelpState;
 use theme::color;
@@ -28,6 +30,7 @@ const EDGE: f32 = 9.0;
 enum Page {
     Controls,
     Help,
+    About,
 }
 
 pub struct App {
@@ -35,6 +38,7 @@ pub struct App {
     page: Page,
     controls: ControlsState,
     help: HelpState,
+    about: AboutState,
     palette: Palette,
     wordmark: Option<egui::TextureHandle>,
     #[cfg(windows)]
@@ -162,6 +166,7 @@ impl App {
             page,
             controls,
             help: HelpState::default(),
+            about: AboutState::new(),
             palette,
             wordmark,
             #[cfg(windows)]
@@ -213,6 +218,10 @@ impl App {
                     self.show_controls(ctx);
                     self.help.select("start");
                     self.page = Page::Help;
+                }
+                UiRequest::ShowAbout => {
+                    self.show_controls(ctx);
+                    self.page = Page::About;
                 }
                 UiRequest::ToggleTheme => self.set_dark(ctx, !self.palette.dark),
                 UiRequest::MinimizeToTray => self.hide_to_tray(ctx),
@@ -343,6 +352,12 @@ impl App {
             self.help.select("start");
             self.page = Page::Help;
         }
+        if widgets::gold_button(&mut actions, "About", false, &p)
+            .on_hover_text("Version, installation and credits")
+            .clicked()
+        {
+            self.page = Page::About;
+        }
         ui.add_space(TITLEBAR_HEIGHT);
     }
 
@@ -401,6 +416,7 @@ impl App {
         item(ui, "Restart conversion", MenuCommand::Restart);
         ui.separator();
         item(ui, "Help", MenuCommand::Help);
+        item(ui, "About", MenuCommand::About);
         item(ui, "Toggle light / dark mode", MenuCommand::ToggleTheme);
         item(ui, "View logs", MenuCommand::ViewLogs);
         item(ui, "Minimize to tray", MenuCommand::MinimizeToTray);
@@ -563,6 +579,11 @@ impl eframe::App for App {
                     }
                     Page::Help => {
                         if self.help.show(&mut body, &p) {
+                            self.page = Page::Controls;
+                        }
+                    }
+                    Page::About => {
+                        if self.about.show(&mut body, &p) {
                             self.page = Page::Controls;
                         }
                     }

@@ -34,6 +34,7 @@ pub struct WindowChoice {
 pub enum UiRequest {
     ShowControls,
     ShowHelp,
+    ShowAbout,
     ToggleTheme,
     MinimizeToTray,
     Quit,
@@ -51,6 +52,7 @@ pub enum MenuCommand {
     AiMode,
     Restart,
     Help,
+    About,
     ToggleTheme,
     ViewLogs,
     MinimizeToTray,
@@ -463,6 +465,7 @@ impl Core {
             }
             MenuCommand::Restart => self.restart(),
             MenuCommand::Help => self.requests.push(UiRequest::ShowHelp),
+            MenuCommand::About => self.requests.push(UiRequest::ShowAbout),
             MenuCommand::ToggleTheme => self.requests.push(UiRequest::ToggleTheme),
             MenuCommand::ViewLogs => platform::open_path(&paths::data_dir()),
             MenuCommand::MinimizeToTray => self.requests.push(UiRequest::MinimizeToTray),
@@ -581,6 +584,7 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
                 core.poll(Instant::now());
                 if core.requests.contains(&UiRequest::ShowControls)
                     || core.requests.contains(&UiRequest::ShowHelp)
+                    || core.requests.contains(&UiRequest::ShowAbout)
                 {
                     show = true;
                 }

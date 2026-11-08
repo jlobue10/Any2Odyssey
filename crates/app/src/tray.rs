@@ -48,6 +48,7 @@ pub fn build_menu() -> (Menu, MenuItem, CheckMenuItem) {
     add("Restart conversion", MenuCommand::Restart);
     let _ = menu.append(&PredefinedMenuItem::separator());
     add("Help", MenuCommand::Help);
+    add("About Any2Odyssey", MenuCommand::About);
     add("Toggle light / dark mode", MenuCommand::ToggleTheme);
     add("View logs", MenuCommand::ViewLogs);
     add("Minimize to tray", MenuCommand::MinimizeToTray);
