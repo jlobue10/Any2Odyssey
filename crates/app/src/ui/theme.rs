@@ -4,6 +4,7 @@ use any2odyssey_core::theme::{Palette, Rgb};
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Stroke, Visuals};
 
 pub const DISPLAY_FONT: &str = "display";
+pub const UI_FONT: &str = "ui";
 
 pub fn color(c: Rgb) -> Color32 {
     Color32::from_rgb(c.0, c.1, c.2)
@@ -25,6 +26,20 @@ pub fn install_fonts(ctx: &egui::Context) {
         display_family(),
         vec![DISPLAY_FONT.to_owned(), "Ubuntu-Light".to_owned()],
     );
+    // Fira Sans (OFL) is the UI text face; it also supplies the arrows and
+    // triangles that egui's default font lacks.
+    fonts.font_data.insert(
+        UI_FONT.to_owned(),
+        std::sync::Arc::new(FontData::from_static(include_bytes!(
+            "../../../../assets/fonts/FiraSans-Regular.ttf"
+        ))),
+    );
+    if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+        list.insert(0, UI_FONT.to_owned());
+    }
+    if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
+        list.push(UI_FONT.to_owned());
+    }
     ctx.set_fonts(fonts);
 }
 

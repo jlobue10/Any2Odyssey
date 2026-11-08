@@ -17,6 +17,13 @@ use crate::platform::{self, ControlEvents, Worker};
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenshotRequest {
+    pub path: std::path::PathBuf,
+    pub dark: bool,
+    pub help_page: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowChoice {
     pub handle: isize,
     pub title: String,
@@ -60,6 +67,10 @@ pub struct Core {
     pub selected_window: Option<isize>,
     pub hotkeys_ok: bool,
     pub start_requested: bool,
+    /// Isolated preview (screenshots, UI checks): never starts a worker or writes preferences.
+    pub preview: bool,
+    /// `--screenshot FILE [--dark] [--help-page]`: render, save, exit.
+    pub screenshot: Option<ScreenshotRequest>,
     pub exiting: bool,
     pub requests: Vec<UiRequest>,
     pub logger: Logger,
@@ -81,6 +92,8 @@ impl Core {
             selected_window: None,
             hotkeys_ok: false,
             start_requested,
+            preview: false,
+            screenshot: None,
             exiting: false,
             requests: Vec::new(),
             logger,
@@ -97,12 +110,18 @@ impl Core {
 
     pub fn save_preferences(&mut self) {
         self.prefs.recover = self.supervisor.recover;
+        if self.preview {
+            return;
+        }
         if let Err(e) = self.prefs.save() {
             self.log(&format!("Could not save preferences: {e}"));
         }
     }
 
     pub fn save_ui(&self) {
+        if self.preview {
+            return;
+        }
         if let Err(e) = self.ui.save() {
             self.log(&format!("Could not save desktop theme: {e}"));
         }
@@ -173,6 +192,10 @@ impl Core {
     }
 
     fn start_worker(&mut self) {
+        if self.preview {
+            self.status = "Preview mode: conversion is not started.".into();
+            return;
+        }
         if self.worker_running() {
             return;
         }

@@ -19,27 +19,27 @@ scripts/         packaging
 | --- | --- | --- |
 | `Companion.cs` — `Files` (paths, JSON save/log/tail) | `core::paths`, `core::fsutil`, `core::log` | done |
 | `Companion.cs` — `Preferences` | `core::prefs` (same JSON keys; one-time Any2Odd import) | done |
-| `Companion.cs` — `Win` P/Invoke | `windows::win` | in progress |
-| `Companion.cs` — `Mirror` (offscreen capture surface, DWM thumbnails) | `windows::mirror` | in progress |
-| `Companion.cs` — `Engine` (validate, SaveOverlay, worker `Run`) | `core::engine` (hash pin, messages), `core::overlay_settings`, `windows::engine` (LoadLibrary/Start/Stop, worker loop) | core done, Windows in progress |
-| `Companion.cs` — `MainForm` logic (worker start/stop, poll, recovery) | `core::supervisor` (decisions), `app` (process ownership) | core done, app in progress |
-| `Companion.cs` — `Program` (args, single instance, named events) | `app::main`, `core::ipc`, `windows::ipc` | in progress |
-| `MainWindow.cs` | `app::ui::controls` | in progress |
-| `DesktopTheme.cs` | `core::theme` (palette), `app::ui::theme` (egui style, ornaments) | palette done, drawing in progress |
-| `DesktopControls.cs` (ResponsiveGrid, ScrollSurface, Gold* widgets) | `app::ui::widgets` | in progress |
+| `Companion.cs` — `Win` P/Invoke | `windows::win` | done (awaiting G90XF hardware test) |
+| `Companion.cs` — `Mirror` (offscreen capture surface, DWM thumbnails) | `windows::mirror` | done (awaiting G90XF hardware test) |
+| `Companion.cs` — `Engine` (validate, SaveOverlay, worker `Run`) | `core::engine` (hash pin, messages), `core::overlay_settings`, `windows::engine` (LoadLibrary/Start/Stop, worker loop) | done |
+| `Companion.cs` — `MainForm` logic (worker start/stop, poll, recovery) | `core::supervisor` (decisions), `app` (process ownership) | done |
+| `Companion.cs` — `Program` (args, single instance, named events) | `app::main`, `core::ipc`, `windows::ipc` | done (awaiting G90XF hardware test) |
+| `MainWindow.cs` | `app::ui::controls` | done (awaiting G90XF hardware test) |
+| `DesktopTheme.cs` | `core::theme` (palette), `app::ui::theme` (egui style, ornaments) | done |
+| `DesktopControls.cs` (ResponsiveGrid, ScrollSurface, Gold* widgets) | `app::ui::widgets` | done (awaiting G90XF hardware test) |
 | `HelpContent.cs` + `Documentation/help.json` | `core::help` + `crates/core/src/help.json` (rebranded) | done |
 | `DonationWindow.cs` | — | dropped (donation content removed) |
-| `OverlayController.cs` | `windows::overlay` | in progress |
-| `RendererTaskbar.cs` | `windows::taskbar` | in progress |
-| `TaskbarMenu.cs` (WPF JumpList) | `windows::jumplist` (ICustomDestinationList) | in progress |
-| `Projection.cs` (layout probe) | `windows::diagnostics` | in progress |
-| `DesktopCapture.cs` (+ exclusion/offscreen tests) | `windows::capture`, `windows::diagnostics` | in progress |
-| `GpuDesktopCapture.cs` (D3D11, HDR→SDR shader) | `windows::capture::gpu` | in progress |
-| `GpuSurface.cs` (swap chain) | `windows::capture::surface` | in progress |
-| `DisplayColor.cs` (SDR white level) | `windows::display_color` | in progress |
-| `WgcFrameSource.cs` | `windows::capture::wgc` | in progress |
+| `OverlayController.cs` | `windows::overlay` | done (awaiting G90XF hardware test) |
+| `RendererTaskbar.cs` | `windows::taskbar` | done (awaiting G90XF hardware test) |
+| `TaskbarMenu.cs` (WPF JumpList) | `windows::jumplist` (ICustomDestinationList) | done (awaiting G90XF hardware test) |
+| `Projection.cs` (layout probe) | `windows::diagnostics` | done (awaiting G90XF hardware test) |
+| `DesktopCapture.cs` (+ exclusion/offscreen tests) | `windows::capture`, `windows::diagnostics` | done (awaiting G90XF hardware test) |
+| `GpuDesktopCapture.cs` (D3D11, HDR→SDR shader) | `windows::capture::gpu` | done (awaiting G90XF hardware test) |
+| `GpuSurface.cs` (swap chain) | `windows::capture::surface` | done (awaiting G90XF hardware test) |
+| `DisplayColor.cs` (SDR white level) | `windows::display_color` | done (awaiting G90XF hardware test) |
+| `WgcFrameSource.cs` | `windows::capture::wgc` | done (awaiting G90XF hardware test) |
 | `IconMaker.cs` | `tools/iconmaker` | done |
-| `tools/DocumentationScreenshots.cs` | — | dropped (screenshots are produced manually) |
+| `tools/DocumentationScreenshots.cs` | `Any2Odyssey --screenshot FILE [--dark] [--help-page]` (isolated preview, no worker, no saved preferences) | replaced |
 
 ## C# tests
 
@@ -48,8 +48,8 @@ scripts/         packaging
 | `--self-test` geometry | `core::geometry` tests | done |
 | `tests/SliderValidation.cs` | `core::slider` tests | done |
 | `tests/RecoveryValidation.cs` | `core::supervisor` tests | done |
-| `tests/UiValidation.cs` (layout at 980×780, stacking, scrolling) | `app` layout tests | in progress |
-| `--test-capture-exclusion`, `--test-offscreen` | `windows::diagnostics` (same flags) | in progress |
+| `tests/UiValidation.cs` (layout at 980×780, stacking, scrolling) | `app` layout tests | done (awaiting G90XF hardware test) |
+| `--test-capture-exclusion`, `--test-offscreen` | `windows::diagnostics` (same flags) | done (awaiting G90XF hardware test) |
 
 ## Python (portable edition)
 
@@ -76,7 +76,7 @@ scripts/         packaging
 | Upstream | Any2Odyssey | Status |
 | --- | --- | --- |
 | `README.md`, `Documentation/README.md`, `PLATFORMS.md`, `TESTING.md`, `CHANGELOG.md`, `RELEASE-NOTES.md` | `README.md`, `docs/` | rewritten |
-| `USER-GUIDE.html`, `tools/export-guide.py`, `tests/check-documentation.py` | offline guide exported from `help.json` | in progress |
+| `USER-GUIDE.html`, `tools/export-guide.py`, `tests/check-documentation.py` | offline guide exported from `help.json` | done (awaiting G90XF hardware test) |
 | `Documentation/DONATIONS.md`, `assets/donations/*`, `sponsor-button.svg`, `.github/FUNDING.yml` | — | dropped |
 | `assets/Any2Odd.ico/.png/-wordmark.png` | `assets/Any2Odyssey.*` (regenerated) | done |
 | `THIRD-PARTY-LICENSES.txt` | `THIRD-PARTY-LICENSES.md` | rewritten |

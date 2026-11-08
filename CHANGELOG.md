@@ -4,6 +4,8 @@ Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continu
 
 ## 0.8.0 (unreleased)
 
+- `--screenshot FILE [--dark] [--help-page]` renders the controls in an isolated preview for documentation and UI checks.
+
 First Any2Odyssey release: a complete rewrite of Any2Odd 0.7.3 (Zhandragon, GPL-3.0-only) in Rust, under a new name and identity.
 
 ### Changed

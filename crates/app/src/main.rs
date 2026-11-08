@@ -19,7 +19,7 @@ use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
     format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
         any2odyssey_core::VERSION
     )
 }
@@ -96,8 +96,19 @@ fn main() {
         }
         [flag] if flag == "--show" && platform::signal(ipc::SHOW_EVENT) => 0,
         [flag] if flag == "--toggle" && platform::signal(ipc::TOGGLE_EVENT) => 0,
-        [flag] if flag == "--toggle" || flag == "--show" => run_gui(flag == "--toggle", logger),
-        [] => run_gui(false, logger),
+        [flag] if flag == "--toggle" || flag == "--show" => {
+            run_gui(flag == "--toggle", logger, None)
+        }
+        [flag, path, rest @ ..] if flag == "--screenshot" => run_gui(
+            false,
+            logger,
+            Some(core::ScreenshotRequest {
+                path: path.into(),
+                dark: rest.iter().any(|a| a == "--dark"),
+                help_page: rest.iter().any(|a| a == "--help-page"),
+            }),
+        ),
+        [] => run_gui(false, logger, None),
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{}", usage());
             0
@@ -110,7 +121,25 @@ fn main() {
     std::process::exit(code);
 }
 
-fn run_gui(start_requested: bool, logger: Logger) -> i32 {
+fn run_gui(
+    start_requested: bool,
+    logger: Logger,
+    screenshot: Option<core::ScreenshotRequest>,
+) -> i32 {
+    if let Some(request) = screenshot {
+        // Isolated preview: no single-instance guard, no events, no worker, no saved preferences.
+        let mut core = core::Core::new(logger, None, false);
+        core.preview = true;
+        core.ui.dark_mode = request.dark;
+        core.screenshot = Some(request);
+        return match ui::run(Arc::new(Mutex::new(core))) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
     let Some(_guard) = platform::single_instance() else {
         // Another instance owns the controls: bring it forward instead.
         platform::signal(ipc::SHOW_EVENT);

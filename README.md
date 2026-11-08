@@ -12,6 +12,15 @@ Any2Odyssey is a tray application that turns capturable on-screen content (wallp
 
 [Documentation](docs/) · [Platform support](docs/PLATFORMS.md) · [Porting map](docs/PORTING.md) · [Testing](docs/TESTING.md) · [Report an issue](https://github.com/jlobue10/Any2Odyssey/issues)
 
+## A look inside
+
+Rendered with `Any2Odyssey --screenshot` in an isolated preview (no conversion running). The default 980 × 780 window, light and dark.
+
+| Light | Dark |
+| --- | --- |
+| [![Controls, light](docs/assets/controls-light.png)](docs/assets/controls-light.png) | [![Controls, dark](docs/assets/controls-dark.png)](docs/assets/controls-dark.png) |
+| [![Help, light](docs/assets/help-light.png)](docs/assets/help-light.png) | [![Help, dark](docs/assets/help-dark.png)](docs/assets/help-dark.png) |
+
 ## What it does
 
 - Whole-desktop AI conversion, enabled by default when the app opens; selected-window and follow-active-window capture as experimental alternatives; manual side-by-side input for sources that already contain a stereo pair.

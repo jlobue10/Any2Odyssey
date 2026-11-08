@@ -176,7 +176,7 @@ pub fn gold_button_sized(
 ) -> Response {
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), font, Color32::WHITE);
+        .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER);
     let padding = vec2(13.0, 7.0);
     let size = fixed.unwrap_or(galley.size() + padding * 2.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());

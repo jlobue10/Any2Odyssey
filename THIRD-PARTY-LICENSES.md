@@ -17,7 +17,7 @@ Until the first release the authoritative list is `Cargo.lock`; all direct depen
 
 Samsung's Odyssey 3D Hub, its `ConversionWrapper.dll`, the LeiaSR runtime, AI models and calibration data are **not** included. They are obtained and licensed separately from Samsung and are loaded from their own installation folders at run time.
 
-## Bundled font: Libre Baskerville
+## Bundled font: Libre Baskerville (tools/iconmaker/fonts) and Fira Sans (assets/fonts, UI text in the controls; copyright 2012-2015 The Mozilla Foundation and Telefonica S.A.)
 
 `tools/iconmaker/fonts/LibreBaskerville-Variable.ttf` is used only by the icon generator to draw the emblem and wordmark lettering; it is not shipped in the application package. Copyright 2012 The Libre Baskerville Project Authors (https://github.com/impallari/Libre-Baskerville), with Reserved Font Name Libre Baskerville. Licensed under the SIL Open Font License 1.1; the full text is in `tools/iconmaker/fonts/OFL.txt` and reproduced here:
 

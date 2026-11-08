@@ -41,6 +41,8 @@ pub struct App {
     tray: Option<crate::tray::Tray>,
     _hotkeys: Option<global_hotkey::GlobalHotKeyManager>,
     hidden: bool,
+    frames: u32,
+    screenshot_taken: bool,
 }
 
 fn load_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
@@ -117,12 +119,21 @@ impl App {
                 None
             }
         };
-        platform::install_jump_list();
-        let hotkeys = crate::hotkeys::register();
+        let preview = core.lock().expect("core").preview;
+        if !preview {
+            platform::install_jump_list();
+        }
+        let hotkeys = if preview {
+            None
+        } else {
+            crate::hotkeys::register()
+        };
         {
             let mut c = core.lock().expect("core");
-            c.hotkeys_ok = hotkeys.is_some();
-            if !c.hotkeys_ok {
+            c.hotkeys_ok = hotkeys.is_some() || preview;
+            if preview {
+                c.status = "Ready".into();
+            } else if !c.hotkeys_ok {
                 c.status =
                     "One of Ctrl+Alt+F8/F9/F10 is in use. Free the shortcuts before starting 3D."
                         .into();
@@ -131,10 +142,23 @@ impl App {
                 c.start_conversion();
             }
         }
-        core::spawn_poller(core.clone(), cc.egui_ctx.clone());
+        if !preview {
+            core::spawn_poller(core.clone(), cc.egui_ctx.clone());
+        }
+        let page = if core
+            .lock()
+            .expect("core")
+            .screenshot
+            .as_ref()
+            .is_some_and(|s| s.help_page)
+        {
+            Page::Help
+        } else {
+            Page::Controls
+        };
         App {
             core,
-            page: Page::Controls,
+            page,
             controls,
             help: HelpState::default(),
             palette,
@@ -143,6 +167,8 @@ impl App {
             tray,
             _hotkeys: hotkeys,
             hidden: false,
+            frames: 0,
+            screenshot_taken: false,
         }
     }
 
@@ -384,6 +410,52 @@ impl App {
     }
 }
 
+impl App {
+    /// `--screenshot`: after a few settled frames request a capture, save it
+    /// on arrival and close. Returns true once the window is closing.
+    fn screenshot_step(&mut self, ctx: &egui::Context) -> bool {
+        let request = self.core.lock().expect("core").screenshot.clone();
+        let Some(request) = request else { return false };
+        if self.frames == 4 {
+            ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        if self.screenshot_taken {
+            return true;
+        }
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| {
+                if let egui::Event::Screenshot { image, .. } = e {
+                    Some(image.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(image) = image {
+            let [w, h] = image.size;
+            let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+            match image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+                .ok_or("bad image".to_owned())
+                .and_then(|img| img.save(&request.path).map_err(|e| e.to_string()))
+            {
+                Ok(()) => println!("{}", request.path.display()),
+                Err(e) => eprintln!("Could not save screenshot: {e}"),
+            }
+            self.screenshot_taken = true;
+            self.core.lock().expect("core").exiting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return true;
+        }
+        if self.frames > 120 {
+            eprintln!("Screenshot was not delivered.");
+            self.core.lock().expect("core").exiting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(windows)]
 fn window_handle(cc: &eframe::CreationContext<'_>) -> isize {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -404,6 +476,10 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint_after(Duration::from_millis(250));
+        self.frames += 1;
+        if self.screenshot_step(ctx) {
+            return;
+        }
         self.handle_requests(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             let (exiting, to_tray) = {
