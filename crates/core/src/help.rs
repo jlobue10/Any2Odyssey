@@ -66,7 +66,15 @@ mod tests {
         for t in topics() {
             let text = format!("{} {}", t.title, t.body).to_lowercase();
             // Upstream may be named only where migration or credit is explained.
-            if !["origins", "automation", "updates", "dependencies", "platforms"].contains(&t.id.as_str()) {
+            if ![
+                "origins",
+                "automation",
+                "updates",
+                "dependencies",
+                "platforms",
+            ]
+            .contains(&t.id.as_str())
+            {
                 assert!(
                     !text.contains("any2odd"),
                     "topic {} still mentions Any2Odd",

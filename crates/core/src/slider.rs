@@ -3,8 +3,6 @@
 //! two-decimal readout. Port of the invariants checked by Any2Odd's
 //! `SliderValidation`.
 
-use crate::prefs::{DEPTH_MAX, DEPTH_MIN, POPOUT_MAX, POPOUT_MIN};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SliderSpec {
     pub min: i32,
@@ -42,6 +40,7 @@ impl SliderSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prefs::{DEPTH_MAX, DEPTH_MIN, POPOUT_MAX, POPOUT_MIN};
 
     #[test]
     fn ranges_match_preferences() {
