@@ -9,7 +9,8 @@ use any2odyssey_core::paths;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::System::LibraryLoader::{
-    GetProcAddress, LoadLibraryExW, SetDllDirectoryW, LOAD_WITH_ALTERED_SEARCH_PATH,
+    AddDllDirectory, GetProcAddress, LoadLibraryExW, SetDefaultDllDirectories,
+    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, LOAD_LIBRARY_SEARCH_USER_DIRS,
 };
 
 use crate::{devices, processes, win};
@@ -45,6 +46,40 @@ pub fn validate() -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Limit implicit engine dependencies and later bare-name loads to Windows
+/// and the explicitly configured Samsung/Leia folders. The caller's PATH and
+/// current directory must not supply executable code to the worker.
+fn configure_dll_search() -> Result<(), String> {
+    static CONFIGURED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    CONFIGURED
+        .get_or_init(|| {
+            unsafe {
+                SetDefaultDllDirectories(
+                    LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS,
+                )
+            }
+            .map_err(|e| format!("DLL search policy: {e}"))?;
+            for directory in paths::ENGINE_DLL_DIRS {
+                // Optional CUDA/ONNX/Leia components can be absent. A required
+                // missing dependency will produce a load error, never a PATH fallback.
+                if !std::path::Path::new(directory).is_dir() {
+                    continue;
+                }
+                let cookie = unsafe { AddDllDirectory(PCWSTR(win::wide(directory).as_ptr())) };
+                if cookie.is_null() {
+                    return Err(format!(
+                        "DLL search folder {directory}: {}",
+                        windows::core::Error::from_thread()
+                    ));
+                }
+                // Keep these fixed directories registered for the worker lifetime:
+                // the engine may load more dependencies after Start or during Stop.
+            }
+            Ok(())
+        })
+        .clone()
+}
+
 pub struct EngineLibrary {
     _module: HMODULE,
     start: StartFn,
@@ -52,25 +87,20 @@ pub struct EngineLibrary {
 }
 
 impl EngineLibrary {
-    /// Make the engine folder the current directory, prepend Samsung's
-    /// folders to PATH, then load the library and resolve `Start`/`Stop`.
+    /// Use the engine working folder for its data and a restricted DLL search
+    /// policy for its executable dependencies, then resolve Start/Stop.
     pub fn load() -> Result<EngineLibrary, String> {
+        configure_dll_search()?;
         let engine = paths::engine_dir();
         std::env::set_current_dir(&engine).map_err(|e| format!("Engine folder: {e}"))?;
-        let mut path = paths::ENGINE_PATH_EXTRA.join(";");
-        if let Some(existing) = std::env::var_os("PATH") {
-            path.push(';');
-            path.push_str(&existing.to_string_lossy());
-        }
-        std::env::set_var("PATH", path);
-        unsafe { SetDllDirectoryW(PCWSTR(win::wide(&engine.to_string_lossy()).as_ptr())) }
-            .map_err(|e| format!("SetDllDirectory: {e}"))?;
         let dll = paths::engine_dll();
         let module = unsafe {
             LoadLibraryExW(
                 PCWSTR(win::wide(&dll.to_string_lossy()).as_ptr()),
                 None,
-                LOAD_WITH_ALTERED_SEARCH_PATH,
+                LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+                    | LOAD_LIBRARY_SEARCH_SYSTEM32
+                    | LOAD_LIBRARY_SEARCH_USER_DIRS,
             )
         }
         .map_err(|e| format!("Engine load error {}", e.code().0 as u32 & 0xffff))?;
@@ -95,5 +125,90 @@ impl EngineLibrary {
 
     pub fn stop(&self) {
         unsafe { (self.stop)() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::FreeLibrary;
+    use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, LOAD_LIBRARY_FLAGS};
+
+    const CHILD_ENV: &str = "ANY2ODYSSEY_DLL_SEARCH_TEST";
+
+    #[test]
+    fn dll_search_rejects_path_and_cwd_but_allows_explicit_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let system = unsafe {
+            LoadLibraryExW(
+                windows::core::w!("version.dll"),
+                None,
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        }
+        .unwrap();
+        let mut buffer = vec![0u16; 32768];
+        let length = unsafe { GetModuleFileNameW(Some(system), &mut buffer) } as usize;
+        assert!(length > 0 && length < buffer.len());
+        let source = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]));
+        unsafe { FreeLibrary(system) }.unwrap();
+        for folder in ["cwd", "path", "allowed"] {
+            let dir = root.path().join(folder);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::copy(&source, dir.join(format!("any2odyssey-{folder}-probe.dll"))).unwrap();
+        }
+        let mut path = vec![root.path().join("path")];
+        path.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        // DLL search policy is process-wide and cannot be reset to the standard
+        // policy. Run the real loader assertions in a disposable test process.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "engine::tests::dll_search_child", "--nocapture"])
+            .env(CHILD_ENV, root.path())
+            .env("PATH", std::env::join_paths(path).unwrap())
+            .current_dir(root.path().join("cwd"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn dll_search_child() {
+        let Some(root) = std::env::var_os(CHILD_ENV) else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let load = |name: &str| unsafe {
+            LoadLibraryExW(
+                PCWSTR(win::wide(name).as_ptr()),
+                None,
+                LOAD_LIBRARY_FLAGS(0),
+            )
+        };
+        // Prove the fixtures are loadable with the original search order.
+        for name in ["any2odyssey-cwd-probe.dll", "any2odyssey-path-probe.dll"] {
+            let module = load(name).unwrap();
+            unsafe { FreeLibrary(module) }.unwrap();
+        }
+        configure_dll_search().unwrap();
+        for name in ["any2odyssey-cwd-probe.dll", "any2odyssey-path-probe.dll"] {
+            assert!(load(name).is_err(), "loaded untrusted fixture {name}");
+        }
+        let allowed = root.join("allowed");
+        let cookie =
+            unsafe { AddDllDirectory(PCWSTR(win::wide(&allowed.to_string_lossy()).as_ptr())) };
+        assert!(!cookie.is_null());
+        let module = load("any2odyssey-allowed-probe.dll").unwrap();
+        unsafe { FreeLibrary(module) }.unwrap();
+        unsafe { windows::Win32::System::LibraryLoader::RemoveDllDirectory(cookie) }.unwrap();
+        let system = load("version.dll").unwrap();
+        unsafe { FreeLibrary(system) }.unwrap();
     }
 }

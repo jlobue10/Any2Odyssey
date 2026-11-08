@@ -58,8 +58,8 @@ pub const ENGINE_DIR: &str = r"C:\Program Files\Odyssey 3D Hub\Conversion";
 pub const WORKER_EXE: &str = "Any2OdysseyWorker.exe";
 /// Samsung's engine library that is loaded by the worker.
 pub const ENGINE_DLL: &str = "ConversionWrapper.dll";
-/// Extra DLL search folders the worker prepends to PATH, relative to or beside the engine.
-pub const ENGINE_PATH_EXTRA: &[&str] = &[
+/// Fixed DLL search folders explicitly registered by the worker.
+pub const ENGINE_DLL_DIRS: &[&str] = &[
     r"C:\Program Files\Odyssey 3D Hub\Conversion",
     r"C:\Program Files\Odyssey 3D Hub\Conversion\CUDA",
     r"C:\Program Files\Odyssey 3D Hub\Conversion\ONNX",
