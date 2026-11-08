@@ -8,12 +8,14 @@ $registration='HKCU:\Software\Any2OdysseyInstallerTests\'+[Guid]::NewGuid().ToSt
 New-Item -ItemType Directory -Path $package,$desktop,$programs,(Join-Path $package 'build'),(Join-Path $package 'assets') | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'build\Any2Odyssey.exe') -Destination (Join-Path $package 'build')
 foreach($file in @('VERSION','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','USER-GUIDE.html')){Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $package}
-Copy-Item -LiteralPath (Join-Path $installerDir 'InstallSupport.ps1') -Destination $package
+foreach($support in @('InstallSupport.ps1','UninstallWorker.ps1')){Copy-Item -LiteralPath (Join-Path $installerDir $support) -Destination $package}
 Copy-Item -LiteralPath (Join-Path $repo 'assets\Any2Odyssey.ico') -Destination (Join-Path $package 'assets')
 foreach($file in @('install.ps1','Uninstall.ps1')){
  $script=Get-Content -LiteralPath (Join-Path $installerDir $file) -Raw
  $script=$script.Replace('$env:LOCALAPPDATA',("'"+$local+"'")).Replace('C:\Program Files\Odyssey 3D Hub\Conversion',$engine).Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey',$registration)
  $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktop+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
+ $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+(Join-Path $root 'programfiles')+"'"))
+ $script=$script.Replace('if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')
  if($file -eq 'install.ps1'){$script=$script.Replace('if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')}
  if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath')){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath (Join-Path $package $file) -Value $script -Encoding UTF8

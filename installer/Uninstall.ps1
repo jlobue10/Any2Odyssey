@@ -5,17 +5,28 @@ $versionFile=Join-Path $app 'version.json'
 if(Test-Path -LiteralPath $versionFile){$record=Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json;$controlsOnly=$record.ControlsOnly -eq $true}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 $principal=New-Object Security.Principal.WindowsPrincipal($identity)
-if(-not $controlsOnly -and -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
- $arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'"'
- $elevated=Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
- exit $elevated.ExitCode
+if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+ throw 'Run Uninstall.ps1 as your normal user. Only the protected worker-removal helper requests elevation.'
 }
+if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to uninstall Any2Odyssey.'}
 $exe=Join-Path $app 'Any2Odyssey.exe'
 $worker='C:\Program Files\Odyssey 3D Hub\Conversion\Any2OdysseyWorker.exe'
-if(Test-Path -LiteralPath $exe){Start-Process -FilePath $exe -ArgumentList '--quit' -WindowStyle Hidden -Wait}
+$helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
+# Signal the existing process directly; never execute a writable installed EXE.
+try{
+ $quit=[Threading.EventWaitHandle]::OpenExisting('Local\Any2OdysseyQuit')
+ try{$null=$quit.Set()}finally{$quit.Dispose()}
+}catch [Threading.WaitHandleCannotBeOpenedException]{}
 $deadline=(Get-Date).AddSeconds(12)
 while((Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
 if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
+if(-not $controlsOnly -and ((Test-Path -LiteralPath $worker) -or (Test-Path -LiteralPath $helper))){
+ if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
+ $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+ $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'" -ExpectedUserSid "'+$identity.User.Value+'"'
+ $elevated=Start-Process -FilePath $powershell -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+ if($elevated.ExitCode -ne 0){throw 'Worker removal did not complete. No per-user installation files were removed. Retry using the same Windows account.'}
+}
 $shell=New-Object -ComObject WScript.Shell
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){
  $link=Join-Path $folder 'Any2Odyssey.lnk'
@@ -23,7 +34,6 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
 }
 # Exact file list only: leave Samsung files, personal settings and logs intact.
 $ownedFiles=@($exe,(Join-Path $app 'Any2Odyssey.ico'),(Join-Path $app 'LICENSE'),(Join-Path $app 'NOTICE'),(Join-Path $app 'THIRD-PARTY-LICENSES.md'),(Join-Path $app 'USER-GUIDE.html'),(Join-Path $app 'Uninstall.ps1'))
-if(-not $controlsOnly){$ownedFiles+=$worker}
 foreach($file in $ownedFiles){
  if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}
 }

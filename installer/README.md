@@ -16,7 +16,8 @@ PowerShell installer family, ported from Any2Odd 0.7.3's installer (GPL-3.0-only
 - `Install-Launcher.ps1`: preflight before UAC, same-account check, relays the elevated result to the original console.
 - `install.ps1`: the installer. `-CheckOnly` (read-only), `-ControlsOnly`, `-AllowDowngrade`.
 - `InstallSupport.ps1`: version detection (`FileVersionInfo` of the native executable, then `version.json`/registry), install action (Install/Upgrade/Repair/Downgrade) and the file transaction with rollback.
-- `Uninstall.ps1`: removes exactly the files the installer placed; Samsung files, settings and logs stay.
+- `UninstallWorker.ps1`: installed under `%ProgramFiles%\Any2Odyssey`; the only elevated uninstall step, removes the fixed worker path and itself, and checks the approving account.
+- `Uninstall.ps1`: runs as the normal user, signals the quit event without launching the installed EXE, and removes exactly the files the installer placed; Samsung files, settings and logs stay.
 - `tests/`: isolated tests that run on Windows only (temporary folders, isolated registry key, simulated engine hash and elevation). They need `build\Any2Odyssey.exe` in the repository root; see `docs/TESTING.md`.
 
 ## Package layout expected
@@ -29,7 +30,7 @@ USER-GUIDE.html
 LICENSE
 NOTICE
 THIRD-PARTY-LICENSES.md
-Install.cmd  Install-GUI.cmd  Install-Launcher.ps1  install.ps1  InstallSupport.ps1  Uninstall.ps1
+Install.cmd  Install-GUI.cmd  Install-Launcher.ps1  install.ps1  InstallSupport.ps1  Uninstall.ps1  UninstallWorker.ps1
 ```
 
 `scripts/package.ps1` builds this layout into `dist/Any2Odyssey-<version>-windows-x64.zip`.
