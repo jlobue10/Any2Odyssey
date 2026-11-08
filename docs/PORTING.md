@@ -1,0 +1,82 @@
+# Porting map: Any2Odd 0.7.3 → Any2Odyssey
+
+Every upstream source file and where its behaviour lives now. Status: **done**, **in progress**, **dropped** (with reason), **replaced**.
+
+## Workspace layout
+
+```
+crates/core      any2odyssey-core      platform-neutral logic (all OSes)
+crates/windows   any2odyssey-windows   Win32/DWM/WGC/D3D11, Samsung engine worker (Windows only)
+crates/app       any2odyssey           the GUI executable (controls, tray, worker supervision; Linux portable features)
+tools/iconmaker  any2odyssey-iconmaker brand asset generator
+installer/       PowerShell installer family
+scripts/         packaging
+```
+
+## C# (Windows application)
+
+| Upstream file | Any2Odyssey | Status |
+| --- | --- | --- |
+| `Companion.cs` — `Files` (paths, JSON save/log/tail) | `core::paths`, `core::fsutil`, `core::log` | done |
+| `Companion.cs` — `Preferences` | `core::prefs` (same JSON keys; one-time Any2Odd import) | done |
+| `Companion.cs` — `Win` P/Invoke | `windows::win` | in progress |
+| `Companion.cs` — `Mirror` (offscreen capture surface, DWM thumbnails) | `windows::mirror` | in progress |
+| `Companion.cs` — `Engine` (validate, SaveOverlay, worker `Run`) | `core::engine` (hash pin, messages), `core::overlay_settings`, `windows::engine` (LoadLibrary/Start/Stop, worker loop) | core done, Windows in progress |
+| `Companion.cs` — `MainForm` logic (worker start/stop, poll, recovery) | `core::supervisor` (decisions), `app` (process ownership) | core done, app in progress |
+| `Companion.cs` — `Program` (args, single instance, named events) | `app::main`, `core::ipc`, `windows::ipc` | in progress |
+| `MainWindow.cs` | `app::ui::controls` | in progress |
+| `DesktopTheme.cs` | `core::theme` (palette), `app::ui::theme` (egui style, ornaments) | palette done, drawing in progress |
+| `DesktopControls.cs` (ResponsiveGrid, ScrollSurface, Gold* widgets) | `app::ui::widgets` | in progress |
+| `HelpContent.cs` + `Documentation/help.json` | `core::help` + `crates/core/src/help.json` (rebranded) | done |
+| `DonationWindow.cs` | — | dropped (donation content removed) |
+| `OverlayController.cs` | `windows::overlay` | in progress |
+| `RendererTaskbar.cs` | `windows::taskbar` | in progress |
+| `TaskbarMenu.cs` (WPF JumpList) | `windows::jumplist` (ICustomDestinationList) | in progress |
+| `Projection.cs` (layout probe) | `windows::diagnostics` | in progress |
+| `DesktopCapture.cs` (+ exclusion/offscreen tests) | `windows::capture`, `windows::diagnostics` | in progress |
+| `GpuDesktopCapture.cs` (D3D11, HDR→SDR shader) | `windows::capture::gpu` | in progress |
+| `GpuSurface.cs` (swap chain) | `windows::capture::surface` | in progress |
+| `DisplayColor.cs` (SDR white level) | `windows::display_color` | in progress |
+| `WgcFrameSource.cs` | `windows::capture::wgc` | in progress |
+| `IconMaker.cs` | `tools/iconmaker` | done |
+| `tools/DocumentationScreenshots.cs` | — | dropped (screenshots are produced manually) |
+
+## C# tests
+
+| Upstream | Any2Odyssey | Status |
+| --- | --- | --- |
+| `--self-test` geometry | `core::geometry` tests | done |
+| `tests/SliderValidation.cs` | `core::slider` tests | done |
+| `tests/RecoveryValidation.cs` | `core::supervisor` tests | done |
+| `tests/UiValidation.cs` (layout at 980×780, stacking, scrolling) | `app` layout tests | in progress |
+| `--test-capture-exclusion`, `--test-offscreen` | `windows::diagnostics` (same flags) | in progress |
+
+## Python (portable edition)
+
+| Upstream | Any2Odyssey | Status |
+| --- | --- | --- |
+| `portable/stereo.py` | `core::stereo` | done |
+| `portable/app.py` | Linux feature set of `app` | planned (phase 3) |
+| `tests/test_portable.py` (stereo assertions) | `core::stereo` tests | done |
+| `portable/run.sh`, `launch-linux.sh`, `Launch-macOS.command`, `requirements.txt`, `START-HERE.md` | — | dropped (native build replaces the Python bundles) |
+| `tools/package-portable.py` | — | dropped |
+
+## PowerShell / CMD
+
+| Upstream | Any2Odyssey | Status |
+| --- | --- | --- |
+| `install.ps1`, `InstallSupport.ps1`, `Install-Launcher.ps1`, `Uninstall.ps1`, `Install.cmd`, `Install-GUI.cmd` | `installer/` (new identity, no dependency manifest) | done, untested on Windows |
+| `restore.ps1` (SharpDX NuGet) | — | dropped (no bundled DLLs) |
+| `build.ps1` | `cargo build --release` | replaced |
+| `package.ps1` | `scripts/package.ps1` | done, untested on Windows |
+| `tests/test-installer.ps1`, `test-install-flow.ps1`, `test-controls-install.ps1`, `test-install-launcher.ps1` | `installer/tests/` | ported, untested on Windows |
+
+## Documentation and assets
+
+| Upstream | Any2Odyssey | Status |
+| --- | --- | --- |
+| `README.md`, `Documentation/README.md`, `PLATFORMS.md`, `TESTING.md`, `CHANGELOG.md`, `RELEASE-NOTES.md` | `README.md`, `docs/` | rewritten |
+| `USER-GUIDE.html`, `tools/export-guide.py`, `tests/check-documentation.py` | offline guide exported from `help.json` | in progress |
+| `Documentation/DONATIONS.md`, `assets/donations/*`, `sponsor-button.svg`, `.github/FUNDING.yml` | — | dropped |
+| `assets/Any2Odd.ico/.png/-wordmark.png` | `assets/Any2Odyssey.*` (regenerated) | done |
+| `THIRD-PARTY-LICENSES.txt` | `THIRD-PARTY-LICENSES.md` | rewritten |

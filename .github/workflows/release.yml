@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    name: Build and attach Windows x64 package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches VERSION
+        shell: pwsh
+        run: |
+          $version=(Get-Content VERSION -Raw).Trim()
+          if ("${{ github.ref_name }}" -ne "v$version") { throw "Tag ${{ github.ref_name }} does not match VERSION $version" }
+      - name: Build (release)
+        run: cargo build --release --workspace
+      - name: Test
+        run: cargo test --workspace
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Create GitHub release with the ZIP and its SHA-256
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
+          body: |
+            Windows x64 package for Any2Odyssey ${{ github.ref_name }}. Extract the ZIP and run `Install.cmd` (full converter, needs Odyssey 3D Hub 1.5.1) or `Install-GUI.cmd` (controls only). Verify the download against the attached `.sha256`.

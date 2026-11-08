@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  windows:
+    name: Windows x64 (build, test, lint, package)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all --check
+      - name: Build (release)
+        run: cargo build --release --workspace
+      - name: Test
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Regenerate brand assets and check they are committed
+        shell: pwsh
+        run: |
+          cargo run --release -p any2odyssey-iconmaker -- assets
+          git diff --exit-code -- assets
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package.ps1
+      - name: Installer unit test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          Copy-Item target/release/Any2Odyssey.exe build/
+          ./installer/tests/test-installer.ps1
+          ./installer/tests/test-install-launcher.ps1
+          ./installer/tests/test-controls-install.ps1
+          ./installer/tests/test-install-flow.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Any2Odyssey-windows-x64-exe
+          path: target/release/Any2Odyssey.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Any2Odyssey-windows-x64-zip
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  linux:
+    name: Linux ${{ matrix.arch }} (core, iconmaker, app)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Desktop build dependencies (eframe, tray-icon, global-hotkey)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxrandr-dev \
+            libxi-dev libgl1-mesa-dev libssl-dev pkg-config
+      - name: Format check
+        run: cargo fmt --all --check
+      - name: Build
+        run: cargo build -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+      - name: Test
+        run: cargo test -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+      - name: Clippy
+        run: cargo clippy -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
+      - name: Windows cross-check (no linking)
+        if: matrix.arch == 'x86_64'
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo check --workspace --target x86_64-pc-windows-msvc

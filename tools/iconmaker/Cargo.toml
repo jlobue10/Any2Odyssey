@@ -1,5 +1,6 @@
 [package]
 name = "any2odyssey-iconmaker"
+description = "Generates the Any2Odyssey emblem icon, 256 px PNG and wordmark (vector engraving, no external assets)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,3 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+tiny-skia = "0.12"
+ab_glyph = "0.2"
+png = "0.18"
+
+[dev-dependencies]
+tempfile = "3"
