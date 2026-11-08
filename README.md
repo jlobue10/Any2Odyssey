@@ -27,6 +27,7 @@ Rendered with `Any2Odyssey --screenshot` in an isolated preview (no conversion r
 - Click-through 3D output that can stay above apps without taking keyboard focus; Ctrl+Alt+F8 restores it.
 - GPU capture with a bounded frame queue, exclusion of the output from capture (no feedback trails) and exclusion of the hardware cursor (no delayed duplicate pointer). HDR desktops are normalized to SDR.
 - Depth strength and pop-out controls, automatic start, automatic worker recovery, minimize/close to tray, a themed light/dark controls window with built-in Help (F1), tray and jump-list commands.
+- An About page with the version, build and installation record, and a check of GitHub Releases for a newer version: on request, or once a day when the controls open (switchable). Nothing is downloaded or installed automatically.
 - A single native executable. No .NET runtime, no bundled DLLs.
 
 Automatic side-by-side detection is not implemented. Select side-by-side manually when the source already contains a stereo pair.
@@ -110,9 +111,10 @@ An installed Any2Odd is separate and keeps its own entry in Installed apps; unin
 | Show controls | Tray double-click, desktop shortcut, or **Ctrl+Alt+F9** |
 | Restore overlay without taking game focus | **Ctrl+Alt+F8** or the tray menu |
 | Help | **F1** or the Help button |
+| About, version and update check | **About** button, right-click or tray menu; `Any2Odyssey --check-updates` from a terminal |
 | Apply capture / input / depth / overlay changes | **Apply settings / restart conversion** |
 
-Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice in `ui-settings.json`; `companion.log` and the JSON status files in the same folder. Review and redact window titles, user names and paths before sharing logs.
+Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice and the time of the last update check in `ui-settings.json`; `companion.log` and the JSON status files in the same folder. Review and redact window titles, user names and paths before sharing logs.
 
 ## Linux
 
