@@ -181,16 +181,21 @@ pub fn enum_windows(mut f: impl FnMut(HWND)) {
     let _ = unsafe { EnumWindows(Some(thunk), LPARAM(&mut dynf as *mut _ as isize)) };
 }
 
+/// Check a known source directly; capture refresh does not need a desktop scan.
+pub fn is_capture_candidate(h: HWND, exclude_pids: &[u32]) -> bool {
+    is_window(h)
+        && is_visible(h)
+        && !is_iconic(h)
+        && !is_cloaked(h)
+        && !exclude_pids.contains(&process_id(h))
+}
+
 /// Windows eligible as capture sources: visible, not minimized, not cloaked,
 /// and not owned by the controls or worker processes.
 pub fn candidate_windows(exclude_pids: &[u32]) -> Vec<HWND> {
     let mut out = Vec::new();
     enum_windows(|h| {
-        if is_visible(h)
-            && !is_iconic(h)
-            && !is_cloaked(h)
-            && !exclude_pids.contains(&process_id(h))
-        {
+        if is_capture_candidate(h, exclude_pids) {
             out.push(h);
         }
     });
