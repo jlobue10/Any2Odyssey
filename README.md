@@ -8,7 +8,7 @@ Any2Odyssey is a tray application that turns capturable on-screen content (wallp
 
 **Credit.** Any2Odyssey is a Rust reimplementation of [Any2Odd](https://zhandragon.itch.io/any2odd) 0.7.3 by **Zhandragon**, released under the GNU GPL-3.0. The architecture, the Samsung engine integration, the capture and overlay design, the behaviour of every control and the written Help all derive from Any2Odd; Any2Odyssey keeps the same license (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). Any2Odd in turn credits Any2C1 (CubeVi) for the continuous-conversion workflow and PortalAI (Zhandragon) for its visual style. Any2Odd's source accompanies its itch.io release; the GitHub repository it names is not public. If this program is useful to you, consider supporting the upstream author through that page.
 
-**Status: 0.8.0 is in development.** The Rust port is being built and has not yet been released. Nothing on this page has been verified on hardware until the [CHANGELOG](CHANGELOG.md) says so.
+**Status: 0.8.0 is released and confirmed working on hardware.** The Rust port runs on a Samsung Odyssey 3D G90XF with an NVIDIA RTX 5090, Odyssey 3D Hub 1.5.1 and Windows 11 (build 26300): install, automatic start, whole-desktop AI conversion and the click-through overlay all behave as described. The hardware record is in the [CHANGELOG](CHANGELOG.md).
 
 [Documentation](docs/) · [Platform support](docs/PLATFORMS.md) · [Porting map](docs/PORTING.md) · [Testing](docs/TESTING.md) · [Report an issue](https://github.com/jlobue10/Any2Odyssey/issues)
 
@@ -45,7 +45,7 @@ These apply to the full Windows converter. A controls-only installation needs on
 | OS | Windows 11 x64, 24H2 (build 26100) or newer |
 | Display | Samsung Odyssey 3D G90XF, primary monitor, landscape 3840 × 2160 |
 | Connection | DisplayPort and the monitor's USB upstream connection; working `3D Stereo WebCam` |
-| GPU | Upstream tested an RTX 4090 and passes a fixed 16,384-core hint to the engine. Other GPUs are unvalidated |
+| GPU | NVIDIA RTX 5090 (Any2Odyssey 0.8.0, driver 621.14) and RTX 4090 (upstream Any2Odd) confirmed; the engine receives a fixed 16,384-core hint. Other GPUs are unvalidated |
 | Samsung software | Odyssey 3D Hub 1.5.1 and its installed LeiaSR dependencies, in their default `C:\Program Files` locations |
 | Install | 64-bit Windows PowerShell 5.1 for the installer scripts; administrator access only to place the worker beside Samsung's engine |
 

@@ -11,7 +11,7 @@ cargo install cargo-about
 cargo about generate about.hbs > THIRD-PARTY-LICENSES.md
 ```
 
-Until the first release the authoritative list is `Cargo.lock`; all direct dependencies are MIT, Apache-2.0 and/or zlib licensed. The Microsoft `windows` crate (MIT OR Apache-2.0) provides the Win32/WinRT bindings; the Windows Graphics Capture interop follows Microsoft's Windows.UI.Composition-Win32-Samples (MIT).
+The authoritative list is `Cargo.lock`; all direct dependencies are MIT, Apache-2.0 and/or zlib licensed. The Microsoft `windows` crate (MIT OR Apache-2.0) provides the Win32/WinRT bindings; the Windows Graphics Capture interop follows Microsoft's Windows.UI.Composition-Win32-Samples (MIT).
 
 ## Samsung / Leia
 

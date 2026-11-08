@@ -2,9 +2,9 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## 0.8.0 (2026-11-08, pre-release)
+## 0.8.0 (2026-11-08)
 
-First Any2Odyssey release, published as a pre-release: everything below has been built and tested in CI and reviewed, but not yet run on a G90XF. Hardware results will be recorded here and the pre-release flag removed when they are in.
+First Any2Odyssey release. Everything below was built and tested in CI, reviewed, and then confirmed working on the target hardware the same day (see [Hardware verification](#hardware-verification) at the end of this entry).
 
 ### Audit fixes before release, second round (PRs #7–#11)
 
@@ -50,6 +50,24 @@ First Any2Odyssey release: a complete rewrite of Any2Odd 0.7.3 (Zhandragon, GPL-
 - Capture output excluded from capture, hardware cursor excluded, offscreen capture surface placed outside all monitors, HDR to SDR normalization using the display's SDR white level, 16 ms minimum capture interval, borderless capture when Windows grants permission.
 - Themed light/dark controls, responsive layout (980 × 780 default), written Help topics.
 
-### Not yet verified
+### Hardware verification
 
-Nothing in this release has been run on the target hardware yet; that is why 0.8.0 is a pre-release. Hardware results will be recorded here.
+Confirmed working on 2026-11-08 with the released `Any2Odyssey-0.8.0-windows-x64.zip`.
+
+| Component | Tested |
+| --- | --- |
+| Display | Samsung Odyssey 3D G90XF, primary, 3840 × 2160, DisplayPort + USB upstream, in a four-monitor arrangement |
+| GPU | NVIDIA GeForce RTX 5090, driver 621.14 |
+| OS | Windows 11 Pro x64, build 26300 |
+| Samsung software | Odyssey 3D Hub 1.5.1 with the pinned `ConversionWrapper.dll` |
+
+Results:
+
+- `Install.cmd` performed a clean full installation (worker placed beside Samsung's engine, engine hash check passed, Installed-apps entry registered); the installer's `install-result.json` and the app's `version.json` were written as designed.
+- First launch imported the existing Any2Odd preferences once, as documented.
+- Automatic start on launch worked: whole-desktop WGC GPU capture started (cursor excluded, 16 ms minimum interval), the renderer came up as a click-through, no-activation overlay hidden from Alt+Tab, the output was excluded from capture (no feedback trails) and the status read `3D active — click-through overlay; stays above apps`.
+- Glasses-free 3D output on the G90XF was judged good at the monitor with depth 0.9 and pop-out 0.
+- Keep 3D above apps restored the overlay without stealing focus across dozens of foreground-window changes; no worker failure, recovery attempt or capture error was logged.
+- Capture statistics over a nine-minute session: 31,400 frames, about 57 fps, 0.38 ms average capture time.
+
+Not covered by this pass and still open for a later entry: selected-window and follow-active-window capture, manual side-by-side input, a borderless game behind the overlay, killing the worker to exercise recovery, and uninstall.
