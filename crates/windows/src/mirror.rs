@@ -263,7 +263,7 @@ impl Mirror {
         let Some(actual) = win::window_rect(self.hwnd) else {
             return Err("Capture surface has no bounds.".into());
         };
-        if win::monitor_rects().iter().any(|m| m.intersects(&actual)) {
+        if win::intersects_any_monitor(actual)? {
             return Err(
                 "Capture surface overlaps a monitor. Conversion stopped to prevent feedback."
                     .into(),

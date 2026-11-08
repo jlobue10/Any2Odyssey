@@ -242,6 +242,59 @@ pub fn monitor_rects() -> Vec<Rect> {
     monitors().into_iter().map(|m| m.0).collect()
 }
 
+#[derive(Default)]
+struct MonitorOverlap {
+    seen: bool,
+    overlaps: bool,
+    invalid: bool,
+}
+
+impl MonitorOverlap {
+    fn observe(&mut self, bounds: Rect, monitor: Option<Rect>) -> BOOL {
+        let Some(monitor) = monitor.filter(|r| !r.is_empty()) else {
+            self.invalid = true;
+            return BOOL(0);
+        };
+        self.seen = true;
+        self.overlaps = monitor.intersects(&bounds);
+        BOOL((!self.overlaps) as i32)
+    }
+
+    fn finish(self, enumeration_succeeded: bool) -> Result<bool, String> {
+        // EnumDisplayMonitors returns false when our callback stops early.
+        if self.overlaps {
+            return Ok(true);
+        }
+        if self.invalid || !self.seen || !enumeration_succeeded {
+            return Err(
+                "Could not verify monitor bounds. Conversion stopped to prevent feedback.".into(),
+            );
+        }
+        Ok(false)
+    }
+}
+
+/// Check current monitor rectangles without building a list, looking up names,
+/// sorting, or allocating. With a null HDC, the callback supplies each monitor's
+/// rectangle in virtual-screen coordinates. Stop at the first overlap.
+pub fn intersects_any_monitor(bounds: Rect) -> Result<bool, String> {
+    unsafe extern "system" fn check(_: HMONITOR, _: HDC, rect: *mut RECT, data: LPARAM) -> BOOL {
+        let (bounds, state) = unsafe { &mut *(data.0 as *mut (Rect, MonitorOverlap)) };
+        state.observe(*bounds, unsafe { rect.as_ref() }.map(|r| rect_from(*r)))
+    }
+    let mut query = (bounds, MonitorOverlap::default());
+    let succeeded = unsafe {
+        EnumDisplayMonitors(
+            None,
+            None,
+            Some(check),
+            LPARAM(&mut query as *mut _ as isize),
+        )
+    }
+    .as_bool();
+    query.1.finish(succeeded)
+}
+
 /// A DWM thumbnail of `source` painted into `destination`.
 pub struct Thumbnail(pub isize);
 
@@ -287,4 +340,48 @@ pub fn pwstr(buf: &mut [u16]) -> PWSTR {
 fn _assert_ex_style_bits() {
     const _: () = assert!(WINDOW_EX_STYLE(0x0800_0000).0 == 0x0800_0000);
     const _: () = assert!(desired_overlay_ex_style(WS_EX_APPWINDOW_BIT) & WS_EX_APPWINDOW_BIT == 0);
+}
+
+#[cfg(test)]
+mod monitor_overlap_tests {
+    use super::*;
+
+    #[test]
+    fn overlapping_monitor_stops_enumeration_without_hiding_the_overlap() {
+        let bounds = Rect::new(100, 100, 100, 100);
+        let mut state = MonitorOverlap::default();
+        assert!(!state
+            .observe(bounds, Some(Rect::new(0, 0, 3840, 2160)))
+            .as_bool());
+        assert_eq!(state.finish(false), Ok(true));
+    }
+
+    #[test]
+    fn every_monitor_must_be_checked_before_declaring_no_overlap() {
+        let bounds = Rect::new(5000, 0, 100, 100);
+        let mut state = MonitorOverlap::default();
+        assert!(state
+            .observe(bounds, Some(Rect::new(0, 0, 3840, 2160)))
+            .as_bool());
+        assert!(state
+            .observe(bounds, Some(Rect::new(-1920, 0, 1920, 1080)))
+            .as_bool());
+        assert_eq!(state.finish(true), Ok(false));
+    }
+
+    #[test]
+    fn missing_or_failed_topology_is_not_treated_as_safe() {
+        assert!(MonitorOverlap::default().finish(true).is_err());
+        let bounds = Rect::new(5000, 0, 100, 100);
+        for invalid in [None, Some(Rect::EMPTY)] {
+            let mut state = MonitorOverlap::default();
+            assert!(!state.observe(bounds, invalid).as_bool());
+            assert!(state.finish(false).is_err());
+        }
+        let mut state = MonitorOverlap::default();
+        assert!(state
+            .observe(bounds, Some(Rect::new(0, 0, 3840, 2160)))
+            .as_bool());
+        assert!(state.finish(false).is_err());
+    }
 }
