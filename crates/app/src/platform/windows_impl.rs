@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use any2odyssey_core::ipc;
 use any2odyssey_core::paths;
 use any2odyssey_core::prefs::Preferences;
+use any2odyssey_core::update::{self, Comparison};
 use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
 use windows::Win32::Foundation::HWND;
@@ -185,4 +186,11 @@ pub fn install_jump_list() {
             &any2odyssey_windows::taskbar::default_tasks(),
         );
     }
+}
+
+/// Ask GitHub for the newest published release and relate it to this build.
+/// Blocking: callers run it off the GUI thread.
+pub fn check_updates() -> Result<Comparison, String> {
+    let body = any2odyssey_windows::update::fetch(&update::Request::latest_release())?;
+    update::evaluate_latest_release(&body).map_err(|e| e.to_string())
 }
