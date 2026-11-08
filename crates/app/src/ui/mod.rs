@@ -490,7 +490,11 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.hide_to_tray(ctx);
             } else {
-                self.core.lock().expect("core").quit();
+                let mut core = self.core.lock().expect("core");
+                core.quit();
+                if !core.ready_to_exit() {
+                    ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                }
             }
         }
         if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) && !self.hidden {
@@ -551,16 +555,18 @@ impl eframe::App for App {
                 }
                 widgets::window_frame(ui.painter(), screen, &p, radius);
             });
-        if self.core.lock().expect("core").exiting {
+        if self.core.lock().expect("core").ready_to_exit() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let mut c = self.core.lock().expect("core");
-        c.exiting = true;
-        c.save_preferences();
-        c.stop_conversion();
+        let cleanup = {
+            let mut c = self.core.lock().expect("core");
+            c.save_preferences();
+            c.take_shutdown()
+        };
+        cleanup();
     }
 }
 
