@@ -33,8 +33,9 @@ pub fn apply(doc: &mut Value, side_by_side: bool, depth: f64, popout: f64) {
     values.insert("Overlay Off".into(), Value::Bool(true));
 }
 
-/// Read Samsung's file (tolerating absence or corruption), back it up to
-/// `backup` if no backup exists yet, apply the values and write it back.
+/// Read Samsung's file, back up a valid original once, and update our section.
+/// Only a missing file is initialized. Unreadable, malformed, or unexpected
+/// data is left intact so a transient Samsung write cannot erase its settings.
 pub fn update_file(
     path: &Path,
     backup: &Path,
@@ -42,16 +43,43 @@ pub fn update_file(
     depth: f64,
     popout: f64,
 ) -> std::io::Result<()> {
-    if path.is_file() && !backup.exists() {
-        if let Some(parent) = backup.parent() {
+    use std::io::{self, Write};
+    let original = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let mut doc = match original.as_deref() {
+        Some(bytes) => serde_json::from_slice::<Value>(bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        None => Value::Object(Map::new()),
+    };
+    let section = if side_by_side {
+        SECTION_SBS
+    } else {
+        SECTION_STANDARD
+    };
+    if !doc.is_object() || doc.get(section).is_some_and(|value| !value.is_object()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Samsung overlay settings must contain JSON objects; original left unchanged",
+        ));
+    }
+    if let Some(bytes) = original {
+        if let Some(parent) = backup.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(path, backup)?;
+        // Back up exactly the snapshot we parsed, without replacing a prior backup.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(backup)
+        {
+            Ok(mut file) => file.write_all(&bytes)?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
     }
-    let mut doc = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .unwrap_or_else(|| Value::Object(Map::new()));
     apply(&mut doc, side_by_side, depth, popout);
     crate::fsutil::write_json_atomic(path, &doc)
 }
@@ -83,6 +111,38 @@ mod tests {
         let mut doc = json!([1, 2, 3]);
         apply(&mut doc, false, 0.9, 0.0);
         assert!(doc["StandardVideo"].is_object());
+    }
+
+    #[test]
+    fn malformed_settings_are_preserved_instead_of_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        for original in [
+            r#"{"Other": "incomplete""#,
+            "[]",
+            "null",
+            r#"{"StandardVideo":42}"#,
+        ] {
+            std::fs::write(&path, original).unwrap();
+            assert!(update_file(&path, &backup, false, 0.9, 0.0).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+            assert!(
+                !backup.exists(),
+                "invalid input must not occupy the one-time backup"
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_input_does_not_create_a_backup_or_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        std::fs::create_dir(&path).unwrap();
+        assert!(update_file(&path, &backup, false, 0.9, 0.0).is_err());
+        assert!(path.is_dir());
+        assert!(!backup.exists());
     }
 
     #[test]
