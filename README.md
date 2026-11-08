@@ -88,13 +88,15 @@ Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LO
 ### Uninstall
 
 1. Quit Any2Odyssey from its tray menu (**Quit completely**). The uninstaller asks a running instance to quit and waits up to 12 seconds, but a clean exit first is simplest.
-2. Open Windows **Settings → Apps → Installed apps**, find **Any2Odyssey** (or **Any2Odyssey (controls only)**) and choose **Uninstall**. This runs the `Uninstall.ps1` that the installer placed in `%LOCALAPPDATA%\Programs\Any2Odyssey`. A full installation requests elevation once to remove the worker from Samsung's folder; a controls-only installation needs no elevation. Equivalent command from PowerShell:
+2. Open Windows **Settings → Apps → Installed apps**, find **Any2Odyssey** (or **Any2Odyssey (controls only)**) and choose **Uninstall**. This runs the `Uninstall.ps1` that the installer placed in `%LOCALAPPDATA%\Programs\Any2Odyssey`. A full installation requests elevation once for a protected worker-removal helper in Program Files; a controls-only installation needs no elevation. Equivalent command from PowerShell:
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Any2Odyssey\Uninstall.ps1"
    ```
 
-What is removed: `Any2Odyssey.exe`, the icon, LICENSE/NOTICE/third-party notices, `USER-GUIDE.html`, `Uninstall.ps1` and `version.json` from `%LOCALAPPDATA%\Programs\Any2Odyssey`; `Any2OdysseyWorker.exe` from `C:\Program Files\Odyssey 3D Hub\Conversion` (full installs only); the desktop and Start menu shortcuts that point at this installation; and the `HKCU\...\Uninstall\Any2Odyssey` registration. Nothing else in Samsung's folders is touched, and no reboot is needed.
+Run the uninstaller as your normal user and approve the helper using the same account. Older installations must be repaired with this release before using the protected helper.
+
+What is removed: `Any2Odyssey.exe`, the icon, LICENSE/NOTICE/third-party notices, `USER-GUIDE.html`, `Uninstall.ps1` and `version.json` from `%LOCALAPPDATA%\Programs\Any2Odyssey`; `Any2OdysseyWorker.exe` from `C:\Program Files\Odyssey 3D Hub\Conversion` and `C:\Program Files\Any2Odyssey\UninstallWorker.ps1` (full installs only); the desktop and Start menu shortcuts that point at this installation; and the `HKCU\...\Uninstall\Any2Odyssey` registration. Nothing else in Samsung's folders is touched, and no reboot is needed.
 
 What is kept, on purpose: Samsung's Odyssey 3D Hub and LeiaSR software; your preferences, theme and logs in `%LOCALAPPDATA%\Any2Odyssey`; and `Samsung-OverlaySettings-before.json` in that folder, the untouched copy of Samsung's overlay settings taken before the first conversion. Delete `%LOCALAPPDATA%\Any2Odyssey` yourself if you want a complete reset. To put Samsung's original depth/pop-out values back, close Odyssey 3D Hub and copy that backup over `%USERPROFILE%\AppData\LocalLow\Samsung\Odyssey3DHubUI\SettingsData\OverlaySettings.json`; the uninstaller does not do this automatically because the file may hold newer Samsung settings of your own.
 

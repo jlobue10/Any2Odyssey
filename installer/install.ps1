@@ -9,9 +9,10 @@ $engine='C:\Program Files\Odyssey 3D Hub\Conversion'
 $registration='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey'
 $binary=Join-Path $PSScriptRoot 'build\Any2Odyssey.exe'
 $workerName='Any2OdysseyWorker.exe'
+$helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
 $documents=@('USER-GUIDE.html','Uninstall.ps1','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md')
 if(-not [Environment]::Is64BitProcess -or [Environment]::OSVersion.Version.Build -lt 26100){throw 'Use 64-bit PowerShell on Windows 11 24H2 or newer.'}
-foreach($relative in @('VERSION','build\Any2Odyssey.exe','assets\Any2Odyssey.ico')+$documents){
+foreach($relative in @('VERSION','build\Any2Odyssey.exe','assets\Any2Odyssey.ico','UninstallWorker.ps1')+$documents){
  if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $relative) -PathType Leaf)){throw "Missing package file: $relative. Build or extract the complete release first."}
 }
 $versionText=(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw).Trim()
@@ -51,7 +52,10 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 $operations=@()
 foreach($name in $documents){$operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot $name;Destination=Join-Path $app $name}}
 $operations+=[pscustomobject]@{Source=$binary;Destination=Join-Path $app 'Any2Odyssey.exe'}
-if(-not $ControlsOnly){$operations+=[pscustomobject]@{Source=$binary;Destination=Join-Path $engine $workerName}}
+if(-not $ControlsOnly){
+ $operations+=[pscustomobject]@{Source=$binary;Destination=Join-Path $engine $workerName}
+ $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'UninstallWorker.ps1';Destination=$helper}
+}
 $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'assets\Any2Odyssey.ico';Destination=Join-Path $app 'Any2Odyssey.ico'}
 $record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionText;PreviousVersion=$(if($installed){$installed.Version.ToString()}else{$null});Action=$action;App=$app;ControlsOnly=[bool]$ControlsOnly;Worker=$(if(-not $ControlsOnly){Join-Path $engine $workerName}else{$null});Hash=(Get-FileHash -LiteralPath $binary).Hash}
 $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8

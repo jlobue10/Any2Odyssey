@@ -41,6 +41,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path build -Force | Out-Null
           Copy-Item target/release/Any2Odyssey.exe build/
+          ./installer/tests/test-uninstall-helper.ps1
           ./installer/tests/test-installer.ps1
           ./installer/tests/test-install-launcher.ps1
           ./installer/tests/test-controls-install.ps1
