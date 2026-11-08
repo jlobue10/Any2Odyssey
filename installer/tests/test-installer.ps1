@@ -39,3 +39,6 @@ Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $
 Assert ((Get-FileHash -LiteralPath (Join-Path $data 'Samsung-OverlaySettings-before.json')).Hash -eq $backupHash) 'Samsung settings backup preserved'
 Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $samsungHash) 'Samsung engine untouched'
 Write-Host "Isolated test files: $root"
+
+# Assertion failures throw above; a clean run must not inherit a native command's exit code.
+exit 0

@@ -39,3 +39,6 @@ $wrapper=Join-Path $root 'simulate-elevation.ps1';Set-Content -LiteralPath $wrap
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated elevated file-copy failure')) 'Elevated installation error is relayed to the original console'
 Write-Host "Isolated launcher fixtures: $root"
+
+# Assertion failures throw above; a clean run must not inherit a native command's exit code.
+exit 0

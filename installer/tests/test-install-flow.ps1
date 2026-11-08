@@ -57,3 +57,6 @@ try{
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Repeated installer repairs the same release'
  Write-Host "Isolated integration files: $root"
 }finally{if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}}
+
+# Assertion failures throw above; a clean run must not inherit a native command's exit code.
+exit 0

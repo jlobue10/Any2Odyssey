@@ -56,3 +56,6 @@ try{
  $failed=$false;try{& $installer -ControlsOnly}catch{$failed=$_.Exception.Message.Contains('full installation')};Assert $failed 'Controls-only setup refuses to split an existing full installation'
  Write-Host "Isolated test files: $root"
 }finally{if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}}
+
+# Assertion failures throw above; a clean run must not inherit a native command's exit code.
+exit 0
