@@ -18,5 +18,4 @@ dirs.workspace = true
 time.workspace = true
 same-file = "1"
 
-[dev-dependencies]
 tempfile = "3"
