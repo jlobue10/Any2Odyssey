@@ -1,6 +1,7 @@
 //! Notification-area icon and its menu (Windows). The same command set is
 //! used by the controls window's right-click menu.
 
+use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
@@ -12,6 +13,8 @@ pub struct Tray {
     icon: TrayIcon,
     toggle_item: MenuItem,
     keep_item: CheckMenuItem,
+    last_wanted: Cell<Option<bool>>,
+    last_keep: Cell<Option<bool>>,
 }
 
 struct Ids {
@@ -73,20 +76,32 @@ impl Tray {
             icon,
             toggle_item,
             keep_item,
+            last_wanted: Cell::new(None),
+            last_keep: Cell::new(None),
         })
     }
 
     /// Keep dynamic items in sync with state (called from the GUI thread).
     pub fn sync(&self, wanted: bool, keep_on_top: bool) {
-        self.toggle_item
-            .set_text(if wanted { "Turn 3D off" } else { "Turn 3D on" });
-        if self.keep_item.is_checked() != keep_on_top {
-            self.keep_item.set_checked(keep_on_top);
+        if self.last_wanted.get() != Some(wanted) {
+            self.toggle_item
+                .set_text(if wanted { "Turn 3D off" } else { "Turn 3D on" });
+            if self
+                .icon
+                .set_tooltip(Some(if wanted {
+                    "Any2Odyssey — on"
+                } else {
+                    "Any2Odyssey — off"
+                }))
+                .is_ok()
+            {
+                self.last_wanted.set(Some(wanted));
+            }
         }
-        let _ = self.icon.set_tooltip(Some(format!(
-            "Any2Odyssey — {}",
-            if wanted { "on" } else { "off" }
-        )));
+        if self.last_keep.get() != Some(keep_on_top) {
+            self.keep_item.set_checked(keep_on_top);
+            self.last_keep.set(Some(keep_on_top));
+        }
     }
 }
 

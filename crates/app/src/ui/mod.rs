@@ -41,6 +41,7 @@ pub struct App {
     tray: Option<crate::tray::Tray>,
     _hotkeys: Option<global_hotkey::GlobalHotKeyManager>,
     hidden: bool,
+    preview: bool,
     frames: u32,
     screenshot_taken: bool,
 }
@@ -167,6 +168,7 @@ impl App {
             tray,
             _hotkeys: hotkeys,
             hidden: false,
+            preview,
             frames: 0,
             screenshot_taken: false,
         }
@@ -475,7 +477,11 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.request_repaint_after(Duration::from_millis(250));
+        // Preview capture needs several settled frames and a bounded timeout.
+        // Normal controls repaint for input or a change reported by the poller.
+        if self.preview {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         self.frames += 1;
         if self.screenshot_step(ctx) {
             return;
@@ -511,6 +517,14 @@ impl eframe::App for App {
         if let Some(tray) = &self.tray {
             let c = self.core.lock().expect("core");
             tray.sync(c.wanted(), c.prefs.keep_overlay_on_top);
+        }
+        // Process show/quit requests and synchronize the tray before skipping
+        // hidden content. Supervision continues on its independent poller.
+        if self.hidden || ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+            if self.core.lock().expect("core").ready_to_exit() {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            return;
         }
         let p = self.palette;
         let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));

@@ -65,6 +65,34 @@ enum WorkerResult {
     Stopped(Option<String>),
 }
 
+/// State changed by the poller that the GUI actually displays. Keeping one
+/// small snapshot avoids scheduling a full redraw for an unchanged poll.
+struct UiState {
+    status: String,
+    prefs: Preferences,
+    wanted: bool,
+    exiting: bool,
+}
+
+impl UiState {
+    fn capture(core: &Core) -> Self {
+        Self {
+            status: core.status.clone(),
+            prefs: core.prefs.clone(),
+            wanted: core.wanted(),
+            exiting: core.exiting,
+        }
+    }
+
+    fn needs_repaint(&self, core: &Core) -> bool {
+        !core.requests.is_empty()
+            || self.status != core.status
+            || self.prefs != core.prefs
+            || self.wanted != core.wanted()
+            || self.exiting != core.exiting
+    }
+}
+
 pub struct Core {
     pub prefs: Preferences,
     pub ui: UiSettings,
@@ -480,9 +508,11 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
             std::thread::sleep(POLL_INTERVAL);
             let mut show = false;
             let mut quit = false;
+            let repaint;
             let hwnd;
             {
                 let Ok(mut core) = core.lock() else { break };
+                let previous = UiState::capture(&core);
                 crate::hotkeys::drain(&mut core);
                 #[cfg(windows)]
                 crate::tray::drain(&mut core);
@@ -496,13 +526,16 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
                     quit = true;
                 }
                 hwnd = core.controls_hwnd;
+                repaint = previous.needs_repaint(&core);
             }
             // Cross-thread Win32 window calls can synchronously dispatch on
             // the GUI thread. Never hold Core while making them.
             if show || quit {
                 platform::show_window(hwnd);
             }
-            ctx.request_repaint();
+            if repaint {
+                ctx.request_repaint();
+            }
             if quit {
                 break;
             }
@@ -629,5 +662,26 @@ mod tests {
         core.poll_operation();
         assert!(!core.wanted());
         assert!(core.status.contains("missing engine"));
+    }
+    #[test]
+    fn unchanged_polls_do_not_redraw_but_status_commands_and_quit_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        let previous = UiState::capture(&core);
+        for _ in 0..10 {
+            core.poll(Instant::now());
+            assert!(!previous.needs_repaint(&core));
+        }
+        core.status = "3D active".into();
+        assert!(previous.needs_repaint(&core));
+        let previous = UiState::capture(&core);
+        core.prefs.side_by_side = true;
+        assert!(previous.needs_repaint(&core));
+        let previous = UiState::capture(&core);
+        core.requests.push(UiRequest::ShowControls);
+        assert!(previous.needs_repaint(&core));
+        core.requests.clear();
+        core.quit();
+        assert!(previous.needs_repaint(&core));
     }
 }
