@@ -11,6 +11,7 @@ use any2odyssey_core::paths;
 use any2odyssey_core::prefs::{CaptureMode, Preferences, UiSettings};
 use any2odyssey_core::status::WorkerStatus;
 use any2odyssey_core::supervisor::{Action, Supervisor};
+use any2odyssey_core::update::{self, Comparison, UpdateState};
 
 use crate::platform::{self, ControlEvents, Worker};
 
@@ -53,6 +54,7 @@ pub enum MenuCommand {
     Restart,
     Help,
     About,
+    CheckUpdates,
     ToggleTheme,
     ViewLogs,
     MinimizeToTray,
@@ -74,6 +76,7 @@ struct UiState {
     prefs: Preferences,
     wanted: bool,
     exiting: bool,
+    update: UpdateState,
 }
 
 impl UiState {
@@ -83,6 +86,7 @@ impl UiState {
             prefs: core.prefs.clone(),
             wanted: core.wanted(),
             exiting: core.exiting,
+            update: core.update.clone(),
         }
     }
 
@@ -92,6 +96,7 @@ impl UiState {
             || self.prefs != core.prefs
             || self.wanted != core.wanted()
             || self.exiting != core.exiting
+            || self.update != core.update
     }
 }
 
@@ -104,6 +109,9 @@ pub struct Core {
     pub worker: Option<Worker>,
     operation: Option<mpsc::Receiver<WorkerResult>>,
     generation: u64,
+    /// Result of the background update check, see `check_updates`.
+    pub update: UpdateState,
+    update_task: Option<mpsc::Receiver<Result<Comparison, String>>>,
     pub windows: Vec<WindowChoice>,
     pub selected_window: Option<isize>,
     pub hotkeys_ok: bool,
@@ -147,6 +155,8 @@ impl Core {
             worker: None,
             operation: None,
             generation: 0,
+            update: UpdateState::Unchecked,
+            update_task: None,
             windows: Vec::new(),
             selected_window: None,
             hotkeys_ok: false,
@@ -386,6 +396,37 @@ impl Core {
         }
     }
 
+    /// Start one background check; the answer arrives through `poll`. The
+    /// network call never runs under the shared-state lock or in a preview.
+    pub fn check_updates(&mut self) {
+        if self.preview || self.update_task.is_some() {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        let (tx, rx) = mpsc::channel();
+        self.update_task = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(platform::check_updates());
+        });
+    }
+
+    fn poll_update(&mut self) {
+        let result = match self.update_task.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(result)) => result,
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                Err("the update check stopped unexpectedly".to_owned())
+            }
+            _ => return,
+        };
+        self.update_task = None;
+        self.update = UpdateState::from_result(result);
+        self.log(&format!("Update check: {}", self.update.summary()));
+        if !matches!(self.update, UpdateState::Failed(_)) {
+            self.ui.last_update_check = Some(update::now_unix());
+            self.save_ui();
+        }
+    }
+
     pub fn ready_to_exit(&self) -> bool {
         self.exiting && self.operation.is_none() && self.worker.is_none()
     }
@@ -466,6 +507,10 @@ impl Core {
             MenuCommand::Restart => self.restart(),
             MenuCommand::Help => self.requests.push(UiRequest::ShowHelp),
             MenuCommand::About => self.requests.push(UiRequest::ShowAbout),
+            MenuCommand::CheckUpdates => {
+                self.check_updates();
+                self.requests.push(UiRequest::ShowAbout);
+            }
             MenuCommand::ToggleTheme => self.requests.push(UiRequest::ToggleTheme),
             MenuCommand::ViewLogs => platform::open_path(&paths::data_dir()),
             MenuCommand::MinimizeToTray => self.requests.push(UiRequest::MinimizeToTray),
@@ -497,6 +542,7 @@ impl Core {
                 self.toggle();
             }
         }
+        self.poll_update();
         self.poll_operation();
         if self.operation.is_some() {
             return;
@@ -533,6 +579,14 @@ fn read_status(worker_pid: u32) -> Option<String> {
     let text = std::fs::read_to_string(paths::worker_status_file()).ok()?;
     let status: WorkerStatus = serde_json::from_str(&text).ok()?;
     (status.pid == worker_pid).then_some(status.state)
+}
+
+/// Open a page from an update result in the browser. Only GitHub's own hosts
+/// pass; anything else is ignored.
+pub fn open_release_url(url: &str) {
+    if update::allowed_url(url) {
+        let _ = open::that_detached(url);
+    }
 }
 
 fn settings_recovery_message(error: &str) -> String {
@@ -738,6 +792,8 @@ mod tests {
             worker: None,
             operation: None,
             generation: 0,
+            update: UpdateState::Unchecked,
+            update_task: None,
             windows: Vec::new(),
             selected_window: None,
             hotkeys_ok: false,
@@ -851,5 +907,32 @@ mod tests {
         assert_eq!(core.selected_window, None, "do not substitute another app");
         core.set_windows(choices(&[20, 30, 10]));
         assert_eq!(core.selected_window, None, "do not revive a cleared choice");
+    }
+
+    #[test]
+    fn update_results_arrive_through_poll_and_record_the_check_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.check_updates();
+        assert_eq!(core.update, UpdateState::Unchecked, "previews never check");
+        let release = update::parse_latest_release(r#"{"tag_name":"v99.0.0"}"#).unwrap();
+        let (tx, rx) = mpsc::channel();
+        core.update_task = Some(rx);
+        core.update = UpdateState::Checking;
+        tx.send(Ok(Comparison::Available(release.clone()))).unwrap();
+        let previous = UiState::capture(&core);
+        core.poll(Instant::now());
+        assert_eq!(core.update, UpdateState::Available(release));
+        assert!(core.ui.last_update_check.is_some());
+        assert!(core.update_task.is_none());
+        assert!(previous.needs_repaint(&core), "a new result wakes the UI");
+
+        let (tx, rx) = mpsc::channel::<Result<Comparison, String>>();
+        core.update_task = Some(rx);
+        core.ui.last_update_check = None;
+        drop(tx);
+        core.poll(Instant::now());
+        assert!(matches!(core.update, UpdateState::Failed(_)));
+        assert_eq!(core.ui.last_update_check, None, "failures do not count");
     }
 }

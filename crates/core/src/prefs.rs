@@ -60,6 +60,8 @@ pub struct Preferences {
     pub minimize_to_tray: bool,
     pub recover: bool,
     pub keep_overlay_on_top: bool,
+    /// Ask GitHub for the newest release once a day when the controls open.
+    pub check_updates: bool,
     pub depth: f64,
     pub popout: f64,
 }
@@ -73,6 +75,7 @@ impl Default for Preferences {
             minimize_to_tray: true,
             recover: true,
             keep_overlay_on_top: true,
+            check_updates: true,
             depth: DEPTH_DEFAULT,
             popout: POPOUT_DEFAULT,
         }
@@ -148,6 +151,8 @@ impl Preferences {
 #[serde(rename_all = "PascalCase", default)]
 pub struct UiSettings {
     pub dark_mode: bool,
+    /// Unix seconds of the last completed update check.
+    pub last_update_check: Option<i64>,
 }
 
 impl UiSettings {
@@ -266,10 +271,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ui-settings.json");
         assert!(!UiSettings::load_from(&path).dark_mode);
-        UiSettings { dark_mode: true }.save_to(&path).unwrap();
-        assert!(UiSettings::load_from(&path).dark_mode);
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("\"DarkMode\": true"));
+        UiSettings {
+            dark_mode: true,
+            last_update_check: Some(1_800_000_000),
+        }
+        .save_to(&path)
+        .unwrap();
+        let back = UiSettings::load_from(&path);
+        assert!(back.dark_mode);
+        assert_eq!(back.last_update_check, Some(1_800_000_000));
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains("\"DarkMode\": true"));
+        assert!(json.contains("\"LastUpdateCheck\": 1800000000"));
+        // Files from earlier versions have no check time.
+        std::fs::write(&path, "{\"DarkMode\": false}").unwrap();
+        assert_eq!(UiSettings::load_from(&path).last_update_check, None);
     }
 }
