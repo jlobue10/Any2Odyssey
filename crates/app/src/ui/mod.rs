@@ -146,6 +146,15 @@ impl App {
             } else if c.prefs.auto_convert || c.start_requested {
                 c.start_conversion();
             }
+            if !preview
+                && c.prefs.check_updates
+                && any2odyssey_core::update::check_due(
+                    c.ui.last_update_check,
+                    any2odyssey_core::update::now_unix(),
+                )
+            {
+                c.check_updates();
+            }
         }
         if !preview {
             core::spawn_poller(core.clone(), cc.egui_ctx.clone());
@@ -417,6 +426,7 @@ impl App {
         ui.separator();
         item(ui, "Help", MenuCommand::Help);
         item(ui, "About", MenuCommand::About);
+        item(ui, "Check for updates", MenuCommand::CheckUpdates);
         item(ui, "Toggle light / dark mode", MenuCommand::ToggleTheme);
         item(ui, "View logs", MenuCommand::ViewLogs);
         item(ui, "Minimize to tray", MenuCommand::MinimizeToTray);
@@ -532,7 +542,8 @@ impl eframe::App for App {
         #[cfg(windows)]
         if let Some(tray) = &self.tray {
             let c = self.core.lock().expect("core");
-            tray.sync(c.wanted(), c.prefs.keep_overlay_on_top);
+            let update = c.update.available().map(|r| r.version.to_string());
+            tray.sync(c.wanted(), c.prefs.keep_overlay_on_top, update.as_deref());
         }
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
@@ -583,7 +594,8 @@ impl eframe::App for App {
                         }
                     }
                     Page::About => {
-                        if self.about.show(&mut body, &p) {
+                        let mut c = self.core.lock().expect("core");
+                        if self.about.show(&mut body, &p, &mut c) {
                             self.page = Page::Controls;
                         }
                     }

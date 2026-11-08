@@ -60,6 +60,8 @@ pub struct Preferences {
     pub minimize_to_tray: bool,
     pub recover: bool,
     pub keep_overlay_on_top: bool,
+    /// Ask GitHub for the newest release once a day when the controls open.
+    pub check_updates: bool,
     pub depth: f64,
     pub popout: f64,
 }
@@ -73,6 +75,7 @@ impl Default for Preferences {
             minimize_to_tray: true,
             recover: true,
             keep_overlay_on_top: true,
+            check_updates: true,
             depth: DEPTH_DEFAULT,
             popout: POPOUT_DEFAULT,
         }
@@ -148,6 +151,8 @@ impl Preferences {
 #[serde(rename_all = "PascalCase", default)]
 pub struct UiSettings {
     pub dark_mode: bool,
+    /// Unix seconds of the last completed update check.
+    pub last_update_check: Option<i64>,
 }
 
 impl UiSettings {

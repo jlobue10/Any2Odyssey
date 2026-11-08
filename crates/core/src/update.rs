@@ -313,6 +313,69 @@ impl Request {
     }
 }
 
+/// Seconds since the Unix epoch, for [`check_due`] and the saved last check.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// What the controls know about updates, shown on the About page and in the
+/// tray tooltip.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum UpdateState {
+    #[default]
+    Unchecked,
+    Checking,
+    UpToDate,
+    AheadOfRelease,
+    Available(Release),
+    Failed(String),
+}
+
+impl UpdateState {
+    pub fn from_result(result: Result<Comparison, String>) -> UpdateState {
+        match result {
+            Ok(Comparison::UpToDate) => UpdateState::UpToDate,
+            Ok(Comparison::AheadOfRelease) => UpdateState::AheadOfRelease,
+            Ok(Comparison::Available(release)) => UpdateState::Available(release),
+            Err(error) => UpdateState::Failed(error),
+        }
+    }
+
+    pub fn available(&self) -> Option<&Release> {
+        match self {
+            UpdateState::Available(release) => Some(release),
+            _ => None,
+        }
+    }
+
+    /// A check that produced an answer, successful or not.
+    pub fn is_settled(&self) -> bool {
+        !matches!(self, UpdateState::Unchecked | UpdateState::Checking)
+    }
+
+    pub fn summary(&self) -> String {
+        let running = crate::VERSION;
+        match self {
+            UpdateState::Unchecked => "Not checked yet.".to_owned(),
+            UpdateState::Checking => "Checking GitHub for the newest release…".to_owned(),
+            UpdateState::UpToDate => {
+                format!("{} {running} is the newest release.", crate::APP_NAME)
+            }
+            UpdateState::AheadOfRelease => {
+                format!("Version {running} is newer than the newest published release.")
+            }
+            UpdateState::Available(release) => format!(
+                "Version {} is available; this is {running}.",
+                release.version
+            ),
+            UpdateState::Failed(error) => format!("Could not check for updates: {error}"),
+        }
+    }
+}
+
 /// Parse a latest-release document and relate it to the running version.
 pub fn evaluate_latest_release(body: &str) -> Result<Comparison, ParseError> {
     parse_latest_release(body).map(|release| compare(Version::current(), release))
@@ -594,5 +657,34 @@ mod evaluate_tests {
         );
         assert_ne!(exit_code::UPDATE_AVAILABLE, exit_code::UP_TO_DATE);
         assert_ne!(exit_code::UPDATE_AVAILABLE, exit_code::CHECK_FAILED);
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn update_state_reflects_each_outcome() {
+        let release = parse_latest_release(r#"{"tag_name":"v99.0.0"}"#).unwrap();
+        let available = UpdateState::from_result(Ok(Comparison::Available(release.clone())));
+        assert_eq!(available.available(), Some(&release));
+        assert!(available.summary().contains("99.0.0"));
+        assert!(available.summary().contains(crate::VERSION));
+        assert!(available.is_settled());
+        let current = UpdateState::from_result(Ok(Comparison::UpToDate));
+        assert_eq!(current, UpdateState::UpToDate);
+        assert!(current.summary().contains(crate::VERSION));
+        assert_eq!(
+            UpdateState::from_result(Ok(Comparison::AheadOfRelease)),
+            UpdateState::AheadOfRelease
+        );
+        let failed = UpdateState::from_result(Err("offline".into()));
+        assert_eq!(failed, UpdateState::Failed("offline".into()));
+        assert!(failed.summary().contains("offline"));
+        assert!(failed.available().is_none());
+        assert!(!UpdateState::default().is_settled());
+        assert!(!UpdateState::Checking.is_settled());
+        assert!(now_unix() > 1_700_000_000);
     }
 }
