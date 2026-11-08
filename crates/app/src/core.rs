@@ -120,14 +120,17 @@ impl Core {
         self.logger.log(message);
     }
 
-    pub fn save_preferences(&mut self) {
+    pub fn save_preferences(&mut self) -> bool {
         self.prefs.recover = self.supervisor.recover;
         if self.preview {
-            return;
+            return true;
         }
         if let Err(e) = self.prefs.save() {
-            self.log(&format!("Could not save preferences: {e}"));
+            self.status = format!("Could not save preferences: {e}");
+            self.log(&self.status);
+            return false;
         }
+        true
     }
 
     pub fn save_ui(&self) {
@@ -166,7 +169,9 @@ impl Core {
     }
 
     pub fn start_conversion(&mut self) {
-        self.save_preferences();
+        if !self.save_preferences() {
+            return;
+        }
         self.supervisor.start_requested();
         self.start_worker();
     }
@@ -192,7 +197,9 @@ impl Core {
 
     /// Apply settings / restart conversion.
     pub fn apply(&mut self) {
-        self.save_preferences();
+        if !self.save_preferences() {
+            return;
+        }
         if self.wanted() {
             self.stop_worker();
             self.start_worker();
@@ -202,7 +209,9 @@ impl Core {
     }
 
     pub fn restart(&mut self) {
-        self.save_preferences();
+        if !self.save_preferences() {
+            return;
+        }
         self.stop_worker();
         self.supervisor.start_requested();
         self.start_worker();
@@ -216,7 +225,11 @@ impl Core {
         if self.exiting || !self.wanted() || self.operation.is_some() || self.worker_running() {
             return;
         }
-        self.save_preferences();
+        if !self.save_preferences() {
+            self.supervisor.start_failed();
+            return;
+        }
+        let preferences = self.prefs.clone();
         let source = self.selected_window.unwrap_or(0);
         if self.prefs.mode == CaptureMode::Window && source == 0 {
             self.status = "Choose a source window first.".into();
@@ -230,7 +243,7 @@ impl Core {
         std::thread::spawn(move || {
             // Hashing, hardware discovery and process launch must not hold the
             // GUI's shared state lock. Cancellation is checked on completion.
-            let result = platform::validate().and_then(|()| Worker::spawn(source));
+            let result = platform::validate().and_then(|()| Worker::spawn(source, preferences));
             if let Err(mpsc::SendError(WorkerResult::Started {
                 result: Ok(worker), ..
             })) = tx.send(WorkerResult::Started { generation, result })
@@ -347,7 +360,9 @@ impl Core {
             MenuCommand::RestoreOverlay => self.restore_overlay(),
             MenuCommand::KeepOverlayOnTop(value) => {
                 self.prefs.keep_overlay_on_top = value;
-                self.save_preferences();
+                if !self.save_preferences() {
+                    return;
+                }
                 if self.wanted() {
                     self.stop_worker();
                     self.start_worker();
@@ -362,7 +377,9 @@ impl Core {
             }
             MenuCommand::SideBySide | MenuCommand::AiMode => {
                 self.prefs.side_by_side = command == MenuCommand::SideBySide;
-                self.save_preferences();
+                if !self.save_preferences() {
+                    return;
+                }
                 if self.wanted() {
                     self.stop_worker();
                     self.start_worker();
@@ -508,6 +525,32 @@ pub fn shortcuts_line() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_save_blocks_start_apply_and_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory at settings.json reliably refuses replacement on both OSes.
+        let settings = dir.path().join("settings.json");
+        std::fs::create_dir(&settings).unwrap();
+        let old = std::env::var_os(paths::DATA_DIR_ENV);
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let mut core = isolated(dir.path());
+        core.preview = false;
+        core.prefs.mode = CaptureMode::Window;
+        core.selected_window = Some(42);
+        for action in [Core::start_conversion, Core::apply, Core::restart] {
+            action(&mut core);
+            assert!(!core.wanted());
+            assert!(core.operation.is_none());
+            assert_eq!(core.generation, 0);
+            assert!(core.status.starts_with("Could not save preferences:"));
+        }
+        if let Some(old) = old {
+            std::env::set_var(paths::DATA_DIR_ENV, old);
+        } else {
+            std::env::remove_var(paths::DATA_DIR_ENV);
+        }
+    }
 
     fn isolated(dir: &std::path::Path) -> Core {
         Core {

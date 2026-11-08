@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use any2odyssey_core::ipc;
 use any2odyssey_core::paths;
+use any2odyssey_core::prefs::Preferences;
 use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
 use windows::Win32::Foundation::HWND;
@@ -16,8 +17,8 @@ pub use any2odyssey_windows::ipc::ControlEvents;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-pub fn run_worker(event: &str, parent: u32, source: isize) -> i32 {
-    worker::run(event, parent, source)
+pub fn run_worker(event: &str, parent: u32, source: isize, preferences: Preferences) -> i32 {
+    worker::run(event, parent, source, preferences)
 }
 pub fn inspect(pid: u32) -> i32 {
     match diagnostics::write_inspect(pid) {
@@ -78,7 +79,10 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn spawn(source_hwnd: isize) -> Result<Worker, String> {
+    pub fn spawn(source_hwnd: isize, preferences: Preferences) -> Result<Worker, String> {
+        // This immutable launch snapshot is independent of later file writes,
+        // read failures, or settings changed while validation is in flight.
+        let snapshot = serde_json::to_string(&preferences).map_err(|e| e.to_string())?;
         let session = any2odyssey_windows::ipc::new_session_id();
         let (stop_name, restore_name) = ipc::worker_event_names(&session);
         let stop = Event::create(&stop_name, true).map_err(|e| e.to_string())?;
@@ -89,6 +93,7 @@ impl Worker {
                 &stop_name,
                 &processes::current_pid().to_string(),
                 &source_hwnd.to_string(),
+                &snapshot,
             ])
             .current_dir(paths::engine_dir())
             .creation_flags(CREATE_NO_WINDOW)

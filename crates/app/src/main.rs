@@ -19,7 +19,7 @@ use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
     format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
         any2odyssey_core::VERSION
     )
 }
@@ -65,15 +65,27 @@ fn self_test(logger: &Logger) -> i32 {
     0
 }
 
+fn worker_preferences(snapshot: &str) -> serde_json::Result<any2odyssey_core::prefs::Preferences> {
+    let mut preferences: any2odyssey_core::prefs::Preferences = serde_json::from_str(snapshot)?;
+    preferences.sanitize();
+    Ok(preferences)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let _ = std::fs::create_dir_all(paths::data_dir());
     let logger = Logger::default_location();
     let code = match args.as_slice() {
-        [flag, event, parent, source] if flag == "--worker" => {
+        [flag, event, parent, source, snapshot] if flag == "--worker" => {
             let parent: u32 = parent.parse().unwrap_or(0);
             let source: isize = source.parse().unwrap_or(0);
-            platform::run_worker(event, parent, source)
+            match worker_preferences(snapshot) {
+                Ok(preferences) => platform::run_worker(event, parent, source, preferences),
+                Err(error) => {
+                    logger.log(&format!("Invalid worker preferences: {error}"));
+                    any2odyssey_core::status::exit_code::RENDERER_ERROR
+                }
+            }
         }
         [flag, pid] if flag == "--inspect" => platform::inspect(pid.parse().unwrap_or(0)),
         [flag, parent, worker] if flag == "--layout-probe" => {
@@ -158,6 +170,32 @@ fn run_gui(
         Err(e) => {
             eprintln!("{e}");
             1
+        }
+    }
+}
+
+#[cfg(test)]
+mod worker_snapshot_tests {
+    use super::*;
+    use any2odyssey_core::prefs::{CaptureMode, Preferences};
+
+    #[test]
+    fn launch_snapshot_preserves_scope_without_reading_settings() {
+        let mut prefs = Preferences {
+            mode: CaptureMode::Window,
+            side_by_side: true,
+            depth: 1.25,
+            ..Default::default()
+        };
+        let snapshot = serde_json::to_string(&prefs).unwrap();
+        prefs.mode = CaptureMode::Desktop;
+        assert_eq!(prefs.mode, CaptureMode::Desktop);
+        let launched = worker_preferences(&snapshot).unwrap();
+        assert_eq!(launched.mode, CaptureMode::Window);
+        assert!(launched.side_by_side);
+        assert_eq!(launched.depth, 1.25);
+        for invalid in ["not json", "null", r#"{"Mode":"Unknown"}"#] {
+            assert!(worker_preferences(invalid).is_err(), "{invalid}");
         }
     }
 }
