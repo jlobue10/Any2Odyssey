@@ -146,8 +146,8 @@ pub struct Mirror {
     parent_pid: u32,
     selected: HWND,
     last_active: HWND,
-    thumbs: Vec<win::Thumbnail>,
-    signature: String,
+    thumbnail: Option<(HWND, win::Thumbnail)>,
+    thumbnail_size: Option<(i32, i32)>,
     desktop: Option<GpuDesktopCapture>,
     frame_wake: Arc<FrameWake>,
     sampled: Instant,
@@ -193,8 +193,8 @@ impl Mirror {
             parent_pid,
             selected,
             last_active: HWND::default(),
-            thumbs: Vec::new(),
-            signature: String::new(),
+            thumbnail: None,
+            thumbnail_size: None,
             desktop: None,
             frame_wake: Arc::new(FrameWake::default()),
             sampled: Instant::now(),
@@ -331,11 +331,11 @@ impl Mirror {
     }
 
     fn refresh_sources(&mut self) {
-        let all = win::candidate_windows(&[self.parent_pid, current_pid()]);
+        let exclude = [self.parent_pid, current_pid()];
         let mut target = self.selected;
         if self.mode == CaptureMode::Active {
             let active = win::foreground();
-            if all.contains(&active) {
+            if win::is_capture_candidate(active, &exclude) {
                 if let Some(r) = win::visible_bounds(active) {
                     if r.intersects(&self.screen) {
                         self.last_active = active;
@@ -348,48 +348,60 @@ impl Mirror {
                 self.selected
             };
         }
-        let candidates: Vec<HWND> = if target != HWND::default() && all.contains(&target) {
-            vec![target]
-        } else {
-            Vec::new()
-        };
-        let signature = candidates
-            .iter()
-            .map(|h| format!("{:?}:{:?}", h.0, win::window_rect(*h).unwrap_or_default()))
-            .collect::<Vec<_>>()
-            .join(";");
-        if signature == self.signature {
+        if !win::is_capture_candidate(target, &exclude) {
+            self.thumbnail = None;
+            self.thumbnail_size = None;
+            self.sources = 0;
             return;
         }
-        self.signature = signature;
-        self.thumbs.clear();
-        self.sources = 0;
-        for h in candidates {
-            let Ok(thumb) = win::Thumbnail::register(self.hwnd, h) else {
-                continue;
+        if self
+            .thumbnail
+            .as_ref()
+            .is_none_or(|(source, _)| *source != target)
+        {
+            self.thumbnail = None;
+            self.thumbnail_size = None;
+            self.sources = 0;
+            let Ok(thumb) = win::Thumbnail::register(self.hwnd, target) else {
+                return; // Retry on the next tick, even when the window has not moved.
             };
-            let Ok((w, hgt)) = thumb.source_size() else {
-                continue;
-            };
-            if w < 2 || hgt < 2 {
-                continue;
-            }
-            let source = Rect::new(0, 0, w, hgt);
-            let dest = fit(
-                source,
-                Rect::new(0, 0, self.screen.width, self.screen.height),
-            );
-            if thumb.update(dest, source).is_ok() {
-                self.thumbs.push(thumb);
-                self.sources += 1;
-            }
+            self.thumbnail = Some((target, thumb));
+        }
+        let (_, thumb) = self.thumbnail.as_ref().expect("registered");
+        let Ok((w, h)) = thumb.source_size() else {
+            self.thumbnail = None;
+            self.thumbnail_size = None;
+            self.sources = 0;
+            return;
+        };
+        if w < 2 || h < 2 {
+            self.thumbnail = None;
+            self.thumbnail_size = None;
+            self.sources = 0;
+            return;
+        }
+        if self.thumbnail_size == Some((w, h)) {
+            return;
+        }
+        let source = Rect::new(0, 0, w, h);
+        let dest = fit(
+            source,
+            Rect::new(0, 0, self.screen.width, self.screen.height),
+        );
+        // Moving a source needs no DWM update. Resizing updates the existing
+        // thumbnail; only switching sources replaces the registration.
+        if thumb.update(dest, source).is_ok() {
+            self.thumbnail_size = Some((w, h));
+            self.sources = 1;
         }
     }
 
     /// Stop timers, drop capture and destroy the window (posts WM_QUIT).
     pub fn close(&mut self) {
         kill_timer(self.hwnd, TIMER_UPDATE);
-        self.thumbs.clear();
+        self.thumbnail = None;
+        self.thumbnail_size = None;
+        self.sources = 0;
         self.desktop = None;
         if win::is_window(self.hwnd) {
             let _ = unsafe { DestroyWindow(self.hwnd) };
