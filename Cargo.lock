@@ -64,7 +64,7 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "any2odyssey"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "any2odyssey-core",
  "any2odyssey-windows",
@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "any2odyssey-core"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "dirs",
  "image",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "any2odyssey-iconmaker"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "ab_glyph",
  "png 0.18.1",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "any2odyssey-windows"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "any2odyssey-core",
  "serde",
