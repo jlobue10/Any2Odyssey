@@ -65,8 +65,16 @@ impl InstanceGuard {
     /// `Ok(Some(guard))` when this process is the first owner, `Ok(None)` when
     /// another instance already holds the name.
     pub fn acquire(name: &str) -> windows::core::Result<Option<InstanceGuard>> {
-        let h = unsafe { CreateMutexW(None, true, PCWSTR(wide(name).as_ptr()))? };
-        if unsafe { windows::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS {
+        // Keep the name buffer alive past the call and read the thread's last
+        // error immediately: dropping the buffer in between would run the
+        // allocator before GetLastError, which must see CreateMutexW's value.
+        let name = wide(name);
+        let (h, last_error) = unsafe {
+            let h = CreateMutexW(None, true, PCWSTR(name.as_ptr()));
+            (h, windows::Win32::Foundation::GetLastError())
+        };
+        let h = h?;
+        if last_error == ERROR_ALREADY_EXISTS {
             let _ = unsafe { CloseHandle(h) };
             return Ok(None);
         }
@@ -97,7 +105,10 @@ impl ControlEvents {
     }
 }
 
-/// Random 32-hex-digit session id for per-worker event names.
+/// 32-hex-digit session id for per-worker event names. Not random: it mixes
+/// the clock, the PID and a stack address only so that successive workers
+/// of one controls process get distinct `Local\` names. Nothing relies on
+/// it being unguessable; the namespace is already per session.
 pub fn new_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

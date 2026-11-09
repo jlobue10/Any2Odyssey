@@ -25,7 +25,7 @@ use crate::engine::{self, EngineLibrary};
 use crate::ipc::{Event, InstanceGuard};
 use crate::mirror::{self, Mirror, TIMER_OVERLAY, TIMER_POLL, TIMER_UPDATE, WM_FRAME_ARRIVED};
 use crate::overlay::OverlayController;
-use crate::processes::{current_pid, is_pid_alive};
+use crate::processes::{current_pid, ParentWatch};
 use crate::win;
 
 fn report(state: &str) {
@@ -124,6 +124,14 @@ fn run_inner(
             format!("Could not update Samsung overlay settings; conversion was not started: {e}"),
         )
     })?;
+    // Hold the parent open for the whole run: a held handle pins the process
+    // object, so a recycled PID can never be mistaken for a living parent.
+    let parent = ParentWatch::open(parent_pid).ok_or_else(|| {
+        fail(
+            exit_code::RENDERER_ERROR,
+            "Renderer error: the controls process is not running.",
+        )
+    })?;
     let library = EngineLibrary::load()
         .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?;
     let (screen, device_name, _) = win::primary_monitor().ok_or_else(|| {
@@ -180,12 +188,13 @@ fn run_inner(
     mirror::set_timer(hwnd, TIMER_OVERLAY, 100);
 
     let mut ready = false;
-    let mut closing = false;
-    let mut shutdown = |surface: &mut Mirror, started: &mut bool| {
-        if closing {
+    // Shared, not captured by unique borrow, so the loop can read it while
+    // the shutdown closure is alive.
+    let closing = std::cell::Cell::new(false);
+    let shutdown = |surface: &mut Mirror, started: &mut bool| {
+        if closing.replace(true) {
             return;
         }
-        closing = true;
         mirror::kill_timer(hwnd, TIMER_POLL);
         mirror::kill_timer(hwnd, TIMER_OVERLAY);
         mirror::kill_timer(hwnd, TIMER_UPDATE);
@@ -200,11 +209,21 @@ fn run_inner(
     let mut poll_deadline = DispatchDeadline::new(Instant::now(), Mirror::poll_interval());
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        if closing.get() {
+            // The stop reason is already in worker-status.json and the
+            // surface is destroyed. Only pump the engine's own windows until
+            // WM_QUIT; a late overlay or capture error must not overwrite it.
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            continue;
+        }
         // Timers wake an idle loop; deadlines also run between posted frames
         // so sustained capture cannot starve stop, liveness or overlay checks.
         let now = Instant::now();
         if poll_deadline.due(now) {
-            let alive = is_pid_alive(parent_pid);
+            let alive = parent.is_alive();
             if stop_event.is_signaled() || !alive || engine::ENGINE_CLOSED.load(Ordering::Acquire) {
                 shutdown(&mut surface, &mut started);
                 continue;

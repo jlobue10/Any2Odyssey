@@ -99,8 +99,16 @@ impl OverlayController {
                 return Err("The 3D output did not accept its input-safe styles.".into());
             }
             (self.log)(&format!("Renderer overlay configured: click-through, no activation, hidden from Alt+Tab; HWND {:?}", output.0));
-            taskbar::remove_renderer_tab(output)?;
-            (self.log)("Removed native renderer taskbar entry so Windows auto-hide can resume.");
+            // Cosmetic: a missing or restarting shell must not stop conversion.
+            // The input-safety checks above remain fatal.
+            match taskbar::remove_renderer_tab(output) {
+                Ok(()) => (self.log)(
+                    "Removed native renderer taskbar entry so Windows auto-hide can resume.",
+                ),
+                Err(e) => (self.log)(&format!(
+                    "Could not remove the renderer taskbar entry (retrying once): {e}"
+                )),
+            }
             // Shell registration is asynchronous; verify once more shortly.
             self.verify_taskbar_at = Some(Instant::now() + Duration::from_secs(2));
             self.configured = true;
