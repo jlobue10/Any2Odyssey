@@ -230,18 +230,18 @@ impl App {
     }
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        if !self.tray_available() {
+        // Without a native handle the only hide available is winit's, which
+        // is SW_HIDE: a window that gets no paint message and therefore no
+        // frame, the state 0.8.5 removed, and one show_window(0) cannot undo.
+        // Treat it like a missing tray and minimize instead.
+        let hwnd = self.core.lock().expect("core").controls_hwnd;
+        if !self.tray_available() || hwnd == 0 {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             return;
         }
         self.core.lock().expect("core").save_preferences();
         self.hidden = true;
-        let hwnd = self.core.lock().expect("core").controls_hwnd;
-        if hwnd != 0 {
-            platform::hide_window(hwnd);
-        } else {
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-        }
+        platform::hide_window(hwnd);
     }
 
     fn show_controls(&mut self, ctx: &egui::Context) {
