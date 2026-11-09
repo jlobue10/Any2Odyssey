@@ -27,11 +27,16 @@ function Get-Any2OdysseyPackageVersion {
  if(-not $text -or $text -notmatch '^\d+(\.\d+){1,3}'){throw "The packaged executable has no readable version resource: $Binary"}
  return [version]$Matches[0]
 }
+function ConvertTo-Any2OdysseyFourPartVersion {
+ param([version]$Version)
+ # A version resource may omit build or revision ([version] reports -1); compare on four parts.
+ return [version]::new($Version.Major,$Version.Minor,[Math]::Max(0,$Version.Build),[Math]::Max(0,$Version.Revision))
+}
 function Get-Any2OdysseyInstallAction {
  param([version]$PackageVersion,$InstalledVersion,[switch]$AllowDowngrade)
  if($null -eq $InstalledVersion){return 'Install'}
- $package=[version]::new($PackageVersion.Major,$PackageVersion.Minor,[Math]::Max(0,$PackageVersion.Build),[Math]::Max(0,$PackageVersion.Revision))
- $installed=[version]::new($InstalledVersion.Major,$InstalledVersion.Minor,[Math]::Max(0,$InstalledVersion.Build),[Math]::Max(0,$InstalledVersion.Revision))
+ $package=ConvertTo-Any2OdysseyFourPartVersion $PackageVersion
+ $installed=ConvertTo-Any2OdysseyFourPartVersion $InstalledVersion
  if($package -gt $installed){return 'Upgrade'}
  if($package -eq $installed){return 'Repair'}
  if(-not $AllowDowngrade){throw "Installed version $installed is newer than package $package. Downgrade blocked. Use -AllowDowngrade only if you intend to install this older version."}

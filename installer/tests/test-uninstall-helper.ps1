@@ -32,12 +32,23 @@ try{
  Remove-Any2OdysseyInstalledWorker -HelperPath $helper
  Assert (-not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper)) 'Helper removes only the owned worker and itself'
  Assert ((Test-Path -LiteralPath $sentinel) -and (Test-Path -LiteralPath $userExe)) 'Samsung and per-user files remain untouched'
- $uninstall=Get-Content -LiteralPath (Join-Path $installer 'Uninstall.ps1') -Raw
- Assert (-not $uninstall.Contains('Start-Process -FilePath $exe') -and -not $uninstall.Contains('$PSCommandPath')) 'Uninstaller never launches the per-user EXE or re-elevates itself'
- $errors=$null;$tokens=$null
- foreach($file in @('Uninstall.ps1','UninstallWorker.ps1','install.ps1')){
-  $null=[Management.Automation.Language.Parser]::ParseFile((Join-Path $installer $file),[ref]$tokens,[ref]$errors)
+ $errors=$null;$tokens=$null;$uninstallAst=$null
+ foreach($file in @('Uninstall.ps1','UninstallWorker.ps1','install.ps1','InstallSupport.ps1','Install-Launcher.ps1')){
+  $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $installer $file),[ref]$tokens,[ref]$errors)
   Assert ($errors.Count -eq 0) "PowerShell syntax: $file"
+  if($file -eq 'Uninstall.ps1'){$uninstallAst=$ast}
  }
+ # Only path tests and deletions may name the per-user executable. Any other command, or an
+ # & / . invocation, that references it would run user-writable code from the uninstaller.
+ $allowedCommands=@('Test-Path','Remove-Item','Join-Path')
+ $exeCommands=@($uninstallAst.FindAll({param($node)$node -is [Management.Automation.Language.CommandAst]},$true) | Where-Object {
+  $command=$_
+  $references=@($command.CommandElements | Where-Object {$_.Extent.Text -match '\$exe\b|Any2Odyssey\.exe'})
+  $name=$command.GetCommandName()
+  $references.Count -gt 0 -and (-not $name -or $allowedCommands -notcontains $name)
+ })
+ Assert ($exeCommands.Count -eq 0) "Uninstaller never launches the per-user EXE (found: $(($exeCommands | ForEach-Object {$_.Extent.Text}) -join '; '))"
+ $selfReferences=@($uninstallAst.FindAll({param($node)$node -is [Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -eq 'PSCommandPath'},$true))
+ Assert ($selfReferences.Count -eq 0) 'Uninstaller never re-elevates itself'
 }finally{Remove-Item -LiteralPath $root -Recurse -Force}
 exit 0
