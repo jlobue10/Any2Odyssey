@@ -33,6 +33,7 @@ Build the release, copy `target\release\Any2Odyssey.exe` to `build\`, then run f
 .\installer\tests\test-install-launcher.ps1
 .\installer\tests\test-controls-install.ps1
 .\installer\tests\test-install-flow.ps1 [-PreviousPackage <extracted older release>]
+.\installer\tests\test-uninstall-flow.ps1
 ```
 
 They use temporary folders and an isolated `HKCU:\Software\Any2OdysseyInstallerTests` key; the Samsung engine hash and elevation are simulated. No real installation is performed and no Samsung file is read or written. CI runs the same scripts on `windows-latest`.
