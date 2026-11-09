@@ -203,6 +203,23 @@ fn run_inner(
                 format!("Renderer error: restore event: {e}"),
             )
         })?;
+    // Hold the parent open for the whole run: a held handle pins the process
+    // object, so a recycled PID can never be mistaken for a living parent.
+    let parent = ParentWatch::open(parent_pid).ok_or_else(|| {
+        fail(
+            exit_code::RENDERER_ERROR,
+            "Renderer error: the controls process is not running.",
+        )
+    })?;
+    // A toggle that was undone, or a parent that quit, while prerequisites
+    // ran: nothing is on screen yet, so leave without touching Samsung's
+    // settings file or loading the engine and its dependency tree, which
+    // takes seconds the controls' 7-second stop clock is already counting.
+    let stopped_early = || stop_event.is_signaled() || !parent.is_alive();
+    if stopped_early() {
+        log("Stop requested during the prerequisite checks; the engine was not loaded.");
+        return Ok(false);
+    }
     // The engine reads depth/pop-out and output flags from Samsung's file.
     // Do not load or start it with stale values after a failed Apply.
     any2odyssey_core::overlay_settings::update_file(
@@ -216,14 +233,6 @@ fn run_inner(
         fail(
             exit_code::RENDERER_ERROR,
             format!("Could not update Samsung overlay settings; conversion was not started: {e}"),
-        )
-    })?;
-    // Hold the parent open for the whole run: a held handle pins the process
-    // object, so a recycled PID can never be mistaken for a living parent.
-    let parent = ParentWatch::open(parent_pid).ok_or_else(|| {
-        fail(
-            exit_code::RENDERER_ERROR,
-            "Renderer error: the controls process is not running.",
         )
     })?;
     // Duplicates, so the watchdog's wait never touches a handle this function
@@ -241,9 +250,8 @@ fn run_inner(
             "Renderer error: no primary monitor",
         )
     })?;
-    // A toggle that was undone, or a parent that quit, while prerequisites
-    // ran: nothing is on screen yet, so leave without touching the engine.
-    let stopped_early = || stop_event.is_signaled() || !parent.is_alive();
+    // Loading the engine can take seconds; a stop that arrived meanwhile must
+    // not create the capture.
     if stopped_early() {
         log("Stop requested before the capture was created; the engine was not started.");
         return Ok(false);
