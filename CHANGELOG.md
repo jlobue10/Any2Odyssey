@@ -2,6 +2,42 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.8.5 (2026-11-09)
+
+Seventh audit round: a fresh read of 0.8.4 found two regressions introduced by the sixth round and a gap in its watchdog. Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.4 ones below.
+
+### Fixed
+
+Controls:
+
+- **Quit from the tray completes again.** The controls hid into the tray with a plain hide, and a hidden window receives no paint message, which is the only thing that runs the application frame. Everything the frame does for a hidden window waited for a paint that never came: the tray tooltip and menu went stale, and the deferred Quit (tray *Quit completely*, `--quit`, the installer's shutdown request before an upgrade) never turned into a window close. 0.8.4 removed the accidental un-hide on Quit that had supplied that one frame, so quitting from the tray left a process only Task Manager could end and an upgrade attempted with the controls in the tray failed with "Quit it from its tray". The controls now minimize without activation as a tool window (no taskbar button, no Alt+Tab entry) instead of hiding, so frames keep flowing; the poller also ends the process itself 3 seconds after a quit request if the window still has not closed. (#45)
+- A `--show` that arrives during a deferred quit no longer un-hides the window for a frame; the shortcut-conflict status no longer replaces the settings-recovery message; `--inspect` and `--layout-probe` reject a non-numeric process id instead of probing PID 0 and reporting success; opening a folder or URL runs off the GUI and poller threads; the launch sweep also removes stale `.overlay-backup-*` temporaries; the legacy-import error names Any2Odd's settings file. (#45)
+
+Worker (Windows):
+
+- The 0.8.4 watchdog waited only on the controls process and the stop event, so a stop the worker decided on itself (ready timeout, overlay or capture error, engine closed) called the engine's `Stop` with no backstop; if that call never returned, the worker never exited and recovery never ran until *Turn off* was pressed. The worker now signals the stop event itself before every call into the engine's `Stop`, so the same 7-second grace applies to every stop, including the two paths outside the normal shutdown that the first fix missed. (#43, #48)
+- A stop that arrives while prerequisites run, while the capture is being built (up to 10 seconds) or just before `Start` is honoured without starting the model. The watchdog log line names which handle fired and a failed wait is logged; the ready timeout, a failed prerequisite check and a second renderer instance leave a line in `companion.log`. The controls pass their resolved data folder to the worker, which completes the 0.8.4 `ANY2ODYSSEY_DATA_DIR` change. (#43)
+
+Installer:
+
+- **A controls-only uninstall no longer removes another account's full installation.** Since 0.8.4 a controls-only record ran the Program Files helper whenever it existed, so on a shared PC user B's uninstall prompted for elevation and, if approved, deleted user A's worker and helper. A full install now writes an owner marker (the installing account) beside the helper; a controls-only uninstall runs the helper only when the marker names the current account and otherwise says what it left alone. Helpers placed by 0.8.4 or earlier carry no marker, so a controls-only record no longer removes them; `Install-GUI.cmd`'s refusal explains how to clear one (run `Install.cmd`, or remove `C:\Program Files\Any2Odyssey` as an administrator). (#46)
+- A truncated `version.json` no longer blocks uninstall or the installer's version lookup; the registered uninstall command names the system `powershell.exe` by full path; the staging folder is cleaned up on every failure path; a declined elevation prompt during install prints a plain message and the "no result" message mentions mapped drives; the `.cmd` launchers use `Sysnative` from a 32-bit host; the `.sha256` file ends with LF so `sha256sum -c` works on Linux and macOS (the 0.8.4 file ends with CRLF). (#46)
+
+Documentation, notices and CI:
+
+- A folder named `--list` with three duplicate images was tracked by the 0.8.4 release commit and is removed; the icon maker refuses option-shaped folder names. README said 0.8.3 was current. NOTICE pointed at a sponsors page that Help and README deliberately do not; the About credits name both embedded typefaces; the tray Help topic no longer says explicit Minimize to tray is always available; `docs/PORTING.md` no longer claims an automated layout test. (#44)
+- The toolchain is pinned to 1.99.1 (clippy runs with warnings denied, so a new stable could turn an unrelated PR or a tag push red); `.html`, `.txt` and `.manifest` files check out with LF so a Windows checkout matches the Linux job's byte comparison; CI cancels superseded runs and keeps artifacts 14 days; the release workflow refuses a version without a changelog entry; every crate is marked `publish = false`. (#44)
+
+### Notes on earlier entries
+
+- 0.8.4 (#40), controls: the "no flash on quit" change is what exposed the hidden-window frame problem above; with 0.8.5 both hold (no flash, and Quit completes).
+- 0.8.4 (#38), installer: "the helper now runs whenever it exists" is narrowed to helpers this account installed; see the installer entry above.
+- 0.8.4, hardware list: "confirm the status line reports the missing notification icon" holds only until the automatic start reports its own status; the log line is the reliable trace.
+
+### Hardware verification
+
+Pending. To check on the G90XF with the 0.8.5 package: hide to the tray and confirm no taskbar button and no Alt+Tab entry; restore via tray double-click, Ctrl+Alt+F9 and `--show`; quit from the tray while hidden with a game in the foreground (no flash, process gone within a second) (#45); run `Install.cmd` over 0.8.5 with the controls in the tray (the installer's quit request must succeed) (#45); force a ready timeout (start with Samsung's player holding the engine, or disconnect the camera) and confirm the worker exits and recovery runs (#43); toggle 3D on and off within a second during model load (no 7-second kill in the log) (#43); after a full install, confirm `C:\Program Files\Any2Odyssey\UninstallWorker.owner` holds your SID and that uninstall removes it (#46); verify the published `.sha256` with `sha256sum -c` on a Linux machine (#46).
+
 ## 0.8.4 (2026-11-09)
 
 Sixth audit round: a fresh read of the code, installer, workflows and documentation after 0.8.3, with one Codex follow-up (#37). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.3 ones below.
