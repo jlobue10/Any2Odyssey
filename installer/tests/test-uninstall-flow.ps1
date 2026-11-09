@@ -46,7 +46,7 @@ $declineElevation=$false
 # Notes the uninstaller prints are recorded here: capturing the information stream with 6>&1
 # behaves differently under Windows PowerShell 5.1, a function shadowing the cmdlet does not.
 $notes=New-Object 'System.Collections.Generic.List[string]'
-function Write-Host {param([Parameter(ValueFromRemainingArguments=$true)]$Object,$ForegroundColor,$BackgroundColor,[switch]$NoNewline)$text=($Object -join ' ');$notes.Add($text);Microsoft.PowerShell.Utility\Write-Host $text}
+function Write-Host {param($Object,$ForegroundColor,$BackgroundColor,[switch]$NoNewline)$text=[string]::Join(' ',@($Object));$notes.Add($text);$Host.UI.WriteLine($text)}
 function Get-Process {param($Name,$ErrorAction)return @()}
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
