@@ -124,9 +124,7 @@ impl App {
             {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    core.lock()
-                        .expect("core")
-                        .log(&format!("Tray icon unavailable: {e}"));
+                    report_missing_tray(&mut core.lock().expect("core"), &e);
                     None
                 }
             }
@@ -244,6 +242,14 @@ impl App {
     fn show_controls(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         self.page = Page::Controls;
+        // `hide_to_tray` hides with a raw ShowWindow(SW_HIDE) that winit does
+        // not observe, so its own visibility flag still says "visible" and
+        // the Visible(true) command below is a no-op on that path. Un-hide at
+        // the same level; the commands stay for a viewport without a handle.
+        let hwnd = self.core.lock().expect("core").controls_hwnd;
+        if hwnd != 0 {
+            platform::show_window(hwnd);
+        }
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -369,7 +375,7 @@ impl App {
         if chrome(&mut actions, "×", "Close").clicked() {
             self.close_requested(ctx);
         }
-        if chrome(&mut actions, "▾", "Minimize to tray").clicked() {
+        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
             self.hide_to_tray(ctx);
         }
         if chrome(&mut actions, "□", "Maximize / restore").clicked() {
@@ -459,7 +465,11 @@ impl App {
         item(ui, "Check for updates", MenuCommand::CheckUpdates);
         item(ui, "Toggle light / dark mode", MenuCommand::ToggleTheme);
         item(ui, "View logs", MenuCommand::ViewLogs);
-        item(ui, "Minimize to tray", MenuCommand::MinimizeToTray);
+        item(
+            ui,
+            minimize_label(self.tray_available()),
+            MenuCommand::MinimizeToTray,
+        );
         ui.separator();
         item(ui, "Quit completely", MenuCommand::Quit);
         if let Some(cmd) = command.get() {
@@ -518,6 +528,27 @@ impl App {
             return true;
         }
         false
+    }
+}
+
+/// What the explicit minimize button and menu item do on this desktop: hide
+/// into the tray when there is one, otherwise an ordinary minimize.
+fn minimize_label(tray_available: bool) -> &'static str {
+    if tray_available {
+        "Minimize to tray"
+    } else {
+        "Minimize"
+    }
+}
+
+/// Without a notification icon the tray preference cannot act. Say so on the
+/// status line unless it already reports something the user must fix first
+/// (unreadable settings); the log keeps the reason either way.
+#[cfg(any(windows, test))]
+fn report_missing_tray(c: &mut Core, error: &str) {
+    c.log(&format!("Tray icon unavailable: {error}"));
+    if c.status == "Ready" {
+        c.status = "The notification icon could not be created; Minimize and Close act normally. See companion.log.".into();
     }
 }
 
@@ -690,6 +721,8 @@ mod tests {
         };
         assert!(core.lock().unwrap().prefs.minimize_to_tray);
         assert!(!app.hides_to_tray());
+        assert_eq!(minimize_label(app.tray_available()), "Minimize");
+        assert_eq!(minimize_label(true), "Minimize to tray");
         let ctx = egui::Context::default();
         let output = ctx.run(Default::default(), |ctx| app.hide_to_tray(ctx));
         assert!(!app.hidden, "a missing icon must never hide the controls");
@@ -701,6 +734,24 @@ mod tests {
         assert!(
             core.lock().unwrap().exiting,
             "Close must quit without a tray"
+        );
+    }
+
+    #[test]
+    fn missing_tray_is_reported_unless_a_prerequisite_error_is_showing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = Core::new_preview(Logger::new(dir.path().join("test.log")));
+        assert_eq!(core.status, "Ready");
+        report_missing_tray(&mut core, "shell not running");
+        assert!(core
+            .status
+            .starts_with("The notification icon could not be created"));
+        let settings_error = "Could not load saved settings: damaged".to_owned();
+        core.status = settings_error.clone();
+        report_missing_tray(&mut core, "shell not running");
+        assert_eq!(
+            core.status, settings_error,
+            "keep the error the user must fix"
         );
     }
 }

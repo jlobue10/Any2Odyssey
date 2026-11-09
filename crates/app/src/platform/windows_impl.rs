@@ -138,6 +138,27 @@ impl Worker {
         let _ = self.restore.set();
     }
 
+    /// A short-lived system process standing in for the renderer, so unit
+    /// tests can drive the result handling without Samsung's engine.
+    #[cfg(test)]
+    pub fn fake() -> Worker {
+        let session = any2odyssey_windows::ipc::new_session_id();
+        let (stop_name, restore_name) = ipc::worker_event_names(&session);
+        Worker {
+            child: Command::new("cmd.exe")
+                .args(["/C", "exit 0"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("cmd.exe"),
+            stop: Event::create(&stop_name, true).expect("stop event"),
+            restore: Event::create(&restore_name, false).expect("restore event"),
+            exit_code: None,
+        }
+    }
+
     /// Signal the stop event and wait up to 7 s; kill only our own worker.
     /// Returns a log line when the worker had to be killed.
     pub fn stop(mut self) -> Option<String> {
