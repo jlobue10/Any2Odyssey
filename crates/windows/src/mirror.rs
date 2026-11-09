@@ -14,7 +14,9 @@ use any2odyssey_core::geometry::{fit, offscreen_bounds, Rect};
 use any2odyssey_core::prefs::{CaptureMode, Preferences};
 use any2odyssey_core::status::DesktopCaptureStatus;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DeleteObject, FillRect, ValidateRect, HBRUSH, HDC,
 };
@@ -77,7 +79,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
 
 fn register_class() -> windows::core::Result<()> {
     static DONE: AtomicBool = AtomicBool::new(false);
-    if DONE.swap(true, Ordering::AcqRel) {
+    if DONE.load(Ordering::Acquire) {
         return Ok(());
     }
     let class = wide(CLASS_NAME);
@@ -89,8 +91,15 @@ fn register_class() -> windows::core::Result<()> {
         ..Default::default()
     };
     if unsafe { RegisterClassExW(&wc) } == 0 {
-        return Err(windows::core::Error::from_thread());
+        let error = windows::core::Error::from_thread();
+        // Another caller registered it first; the class exists either way.
+        if error.code() != ERROR_CLASS_ALREADY_EXISTS.to_hresult() {
+            // Leave DONE clear so the next window creation retries instead of
+            // failing later with a confusing "class not found".
+            return Err(error);
+        }
     }
+    DONE.store(true, Ordering::Release);
     Ok(())
 }
 
