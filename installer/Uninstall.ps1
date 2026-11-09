@@ -7,7 +7,14 @@ try{
 $app=Join-Path $env:LOCALAPPDATA 'Programs\Any2Odyssey'
 $controlsOnly=$false
 $versionFile=Join-Path $app 'version.json'
-if(Test-Path -LiteralPath $versionFile){$record=Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json;$controlsOnly=$record.ControlsOnly -eq $true}
+if(Test-Path -LiteralPath $versionFile){
+ try{$record=Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json;$controlsOnly=$record.ControlsOnly -eq $true}
+ catch{
+  # A truncated or damaged record must not block the uninstall; the files decide instead.
+  $controlsOnly=$false
+  Write-Host 'The installation record (version.json) is unreadable; whether the conversion worker or its helper exists decides what is removed.'
+ }
+}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 $principal=New-Object Security.Principal.WindowsPrincipal($identity)
 # True when this process already holds an administrator token (UAC disabled, the
@@ -32,8 +39,15 @@ while((Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue) 
 if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
 # A full installation removes its worker through the helper. A controls-only record never
 # elevates for a worker it did not install, but a helper left behind by a pre-0.8.3 reinstall
-# over a full installation is still ours to remove, or Install-GUI.cmd stays blocked by it.
-$needsHelper=if($controlsOnly){Test-Path -LiteralPath $helper -PathType Leaf}else{(Test-Path -LiteralPath $worker) -or (Test-Path -LiteralPath $helper)}
+# over this account's full installation is still ours to remove, or Install-GUI.cmd stays
+# blocked by it. The installer writes the installing account's SID beside the helper; without
+# that marker, or with another account's SID in it (a shared PC), the helper belongs to someone
+# else's full installation and a controls-only uninstall must not prompt for it or remove it.
+$ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
+$helperPresent=Test-Path -LiteralPath $helper -PathType Leaf
+$helperIsOurs=$helperPresent -and (Test-Path -LiteralPath $ownerFile -PathType Leaf) -and (([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim() -eq $identity.User.Value)
+$needsHelper=if($controlsOnly){$helperIsOurs}else{(Test-Path -LiteralPath $worker) -or $helperPresent}
+if($controlsOnly -and $helperPresent -and -not $helperIsOurs){Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
 if($needsHelper){
  if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'

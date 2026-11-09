@@ -9,11 +9,13 @@ $local=Join-Path $root 'local';$engine=Join-Path $root 'engine';$desktop=Join-Pa
 $registration='HKCU:\Software\Any2OdysseyInstallerTests\'+[Guid]::NewGuid().ToString('N')
 $app=Join-Path $local 'Programs\Any2Odyssey';$data=Join-Path $local 'Any2Odyssey'
 $exe=Join-Path $app 'Any2Odyssey.exe';$worker=Join-Path $engine 'Any2OdysseyWorker.exe';$helper=Join-Path $programFiles 'Any2Odyssey\UninstallWorker.ps1'
+$ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $ownedNames=@('Any2Odyssey.exe','Any2Odyssey.ico','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','USER-GUIDE.html')
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
 function New-Fixture {
- param([bool]$Elevated,[string]$Record='{"Version":"0.8.2","ControlsOnly":false}')
+ # $HelperOwner is the SID written beside the helper by the installer; '' leaves no marker (pre-0.8.5 helper).
+ param([bool]$Elevated,[string]$Record='{"Version":"0.8.2","ControlsOnly":false}',[string]$HelperOwner=$sid)
  foreach($folder in @($app,$data,$engine,$desktop,$programs,(Split-Path -Parent $helper))){New-Item -ItemType Directory -Path $folder -Force | Out-Null}
  foreach($name in $ownedNames){Set-Content -LiteralPath (Join-Path $app $name) -Value "installed $name"}
  Set-Content -LiteralPath (Join-Path $app 'version.json') -Value $Record
@@ -21,6 +23,8 @@ function New-Fixture {
  Set-Content -LiteralPath $worker -Value 'installed worker'
  Set-Content -LiteralPath (Join-Path $engine 'ConversionWrapper.dll') -Value 'Samsung file; never loaded'
  Copy-Item -LiteralPath (Join-Path $installerDir 'UninstallWorker.ps1') -Destination $helper
+ if(Test-Path -LiteralPath $ownerFile){Remove-Item -LiteralPath $ownerFile}
+ if($HelperOwner){[IO.File]::WriteAllText($ownerFile,$HelperOwner,[Text.UTF8Encoding]::new($false))}
  $shell=New-Object -ComObject WScript.Shell
  foreach($folder in @($desktop,$programs)){$link=$shell.CreateShortcut((Join-Path $folder 'Any2Odyssey.lnk'));$link.TargetPath=$exe;$link.Save()}
  New-Item -Path $registration -Force | Out-Null
@@ -46,8 +50,9 @@ function Start-Process {
  # A declined UAC prompt surfaces from Start-Process -Verb RunAs as this exception type.
  if($declineElevation){throw (New-Object InvalidOperationException 'This command cannot be run due to the error: The operation was canceled by the user.')}
  if($helperExitCode -eq 0){
-  # Stand in for UninstallWorker.ps1: it removes the fixed worker path and itself.
+  # Stand in for UninstallWorker.ps1: it removes the fixed worker path, itself and its owner marker.
   Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
+  if(Test-Path -LiteralPath $ownerFile){Remove-Item -LiteralPath $ownerFile}
  }
  return [pscustomobject]@{ExitCode=$helperExitCode}
 }
@@ -88,12 +93,37 @@ try{
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'Declined elevation leaves everything in place'
  $declineElevation=$false
 
- # A pre-0.8.3 controls-only reinstall over a full install left this record with the helper still present.
+ # A pre-0.8.3 controls-only reinstall over a full install left this record with the helper still
+ # present; the owner marker names this account, so the helper is ours to run.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
  & (Join-Path $app 'Uninstall.ps1')
  Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Controls-only record with an orphaned helper still runs the helper'
- Assert (-not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe)) 'Orphaned helper and worker are removed along with the controls'
+ Assert (-not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $ownerFile)) 'Orphaned helper, worker and owner marker are removed along with the controls'
+
+ # Shared PC: another account's full installation owns the helper; a controls-only uninstall leaves it.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner 'S-1-5-21-1-2-3-1001'
+ $output=& (Join-Path $app 'Uninstall.ps1') 6>&1 | Out-String
+ Assert ($launches.Count -eq 0) 'Controls-only uninstall never elevates for a helper owned by another account'
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'Controls removed while another account owns the helper'
+ Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $ownerFile)) 'Another account''s helper, worker and owner marker are left alone'
+ Assert ($output.Contains('belong to another account or an older release')) 'The left-alone helper is explained to the user'
+
+ # A helper without an owner marker (installed before the marker existed) is not assumed to be ours.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner ''
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 0) 'Controls-only uninstall never elevates for a helper without an owner marker'
+ Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe)) 'Unmarked helper and worker are left; the controls are removed'
+
+ # A truncated version.json must not block the uninstall; the worker and helper decide.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2",'
+ $output=& (Join-Path $app 'Uninstall.ps1') 6>&1 | Out-String
+ Assert ($output.Contains('version.json) is unreadable')) 'Damaged installation record is reported'
+ Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Damaged record falls back to the files present and runs the helper'
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $registration)) 'Uninstall completes despite the damaged record'
 
  # A genuine controls-only installation has neither worker nor helper and needs no elevation.
  $launches.Clear()

@@ -16,7 +16,7 @@ PowerShell installer family, ported from Any2Odd 0.7.3's installer (GPL-3.0-only
 - `Install-Launcher.ps1`: preflight before UAC, same-account check, relays the elevated result to the original console.
 - `install.ps1`: the installer. `-CheckOnly` (read-only), `-ControlsOnly`, `-AllowDowngrade`.
 - `InstallSupport.ps1`: version detection (`FileVersionInfo` of the native executable, then `version.json`/registry), install action (Install/Upgrade/Repair/Downgrade) and the file transaction with rollback.
-- `UninstallWorker.ps1`: installed under `%ProgramFiles%\Any2Odyssey`; the only elevated uninstall step, removes the fixed worker path and itself, and checks the approving account.
+- `UninstallWorker.ps1`: installed under `%ProgramFiles%\Any2Odyssey`; the only elevated uninstall step, removes the fixed worker path, itself and its owner marker, and checks the approving account. The installer writes `UninstallWorker.owner` (the installing account's SID) beside it; on a shared PC a controls-only uninstall by another account leaves a helper it does not own.
 - `Uninstall.ps1`: runs as the normal user, signals the quit event without launching the installed EXE, and removes exactly the files the installer placed; Samsung files, settings and logs stay.
 - `tests/`: isolated tests that run on Windows only (temporary folders, isolated registry key, simulated engine hash and elevation). They need `build\Any2Odyssey.exe` in the repository root; see `docs/TESTING.md`.
 
