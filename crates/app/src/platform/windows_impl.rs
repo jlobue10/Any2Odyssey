@@ -173,12 +173,6 @@ pub fn hide_window(hwnd: isize) {
     }
 }
 
-/// The notification area is always present on Windows; a hidden controls
-/// window comes back through the tray icon, its menu or the shortcuts.
-pub fn tray_available() -> bool {
-    true
-}
-
 pub fn open_path(path: &Path) {
     let _ = open::that_detached(path);
 }

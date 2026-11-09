@@ -34,6 +34,7 @@ impl ControlsState {
         core: &mut Core,
         p: &Palette,
         wordmark: Option<&egui::TextureHandle>,
+        tray_available: bool,
     ) {
         banner(ui, wordmark, p);
         ui.add_space(4.0);
@@ -166,7 +167,7 @@ impl ControlsState {
                     // Without a notification area the setting cannot act: a
                     // hidden window would have nothing to bring it back.
                     ui.add_enabled(
-                        crate::platform::tray_available(),
+                        tray_available,
                         egui::Checkbox::new(minimize, "Minimize and close to the tray"),
                     )
                     .on_disabled_hover_text(
@@ -239,7 +240,7 @@ impl ControlsState {
             if gold_button(ui, "View logs", false, p).clicked() {
                 core.menu(MenuCommand::ViewLogs);
             }
-            let minimize_label = if crate::platform::tray_available() {
+            let minimize_label = if tray_available {
                 "Minimize to tray"
             } else {
                 "Minimize"
