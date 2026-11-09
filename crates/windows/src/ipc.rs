@@ -105,7 +105,10 @@ impl ControlEvents {
     }
 }
 
-/// Random 32-hex-digit session id for per-worker event names.
+/// 32-hex-digit session id for per-worker event names. Not random: it mixes
+/// the clock, the PID and a stack address only so that successive workers
+/// of one controls process get distinct `Local\` names. Nothing relies on
+/// it being unguessable; the namespace is already per session.
 pub fn new_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
