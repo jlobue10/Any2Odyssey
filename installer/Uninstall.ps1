@@ -38,16 +38,12 @@ $deadline=(Get-Date).AddSeconds(12)
 while((Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
 if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
 # A full installation removes its worker through the helper. A controls-only record never
-# elevates for a worker it did not install, but a helper left behind by a pre-0.8.3 reinstall
-# over this account's full installation is still ours to remove, or Install-GUI.cmd stays
-# blocked by it. The installer writes the installing account's SID beside the helper; without
-# that marker, or with another account's SID in it (a shared PC), the helper belongs to someone
-# else's full installation and a controls-only uninstall must not prompt for it or remove it.
-$ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
+# elevates for a worker it did not install: a helper that is still present then belongs to
+# another account's full installation or to an older release, and is removed by running
+# Install.cmd and uninstalling again from that account (or by an administrator by hand).
 $helperPresent=Test-Path -LiteralPath $helper -PathType Leaf
-$helperIsOurs=$helperPresent -and (Test-Path -LiteralPath $ownerFile -PathType Leaf) -and (([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim() -eq $identity.User.Value)
-$needsHelper=if($controlsOnly){$helperIsOurs}else{(Test-Path -LiteralPath $worker) -or $helperPresent}
-if($controlsOnly -and $helperPresent -and -not $helperIsOurs){Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
+$needsHelper=(-not $controlsOnly) -and ((Test-Path -LiteralPath $worker) -or $helperPresent)
+if($controlsOnly -and $helperPresent){Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
 if($needsHelper){
  if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'

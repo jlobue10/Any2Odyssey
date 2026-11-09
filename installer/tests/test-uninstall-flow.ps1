@@ -97,14 +97,6 @@ try{
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'Declined elevation leaves everything in place'
  $declineElevation=$false
 
- # A pre-0.8.3 controls-only reinstall over a full install left this record with the helper still
- # present; the owner marker names this account, so the helper is ours to run.
- $launches.Clear()
- New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
- & (Join-Path $app 'Uninstall.ps1')
- Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Controls-only record with an orphaned helper still runs the helper'
- Assert (-not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $ownerFile)) 'Orphaned helper, worker and owner marker are removed along with the controls'
-
  # Shared PC: another account's full installation owns the helper; a controls-only uninstall leaves it.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner 'S-1-5-21-1-2-3-1001'
@@ -114,12 +106,20 @@ try{
  Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $ownerFile)) 'Another account''s helper, worker and owner marker are left alone'
  Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The left-alone helper is explained to the user'
 
- # A helper without an owner marker (installed before the marker existed) is not assumed to be ours.
+ # A helper without an owner marker (installed before the marker existed) is left like any other.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner ''
  & (Join-Path $app 'Uninstall.ps1')
  Assert ($launches.Count -eq 0) 'Controls-only uninstall never elevates for a helper without an owner marker'
  Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe)) 'Unmarked helper and worker are left; the controls are removed'
+
+ # A controls-only record never runs the helper, whatever the marker says: the installer refuses a
+ # controls-only install while a helper exists, so this account's marker beside one cannot arise.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+ $notes.Clear();& (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 0 -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker)) 'Controls-only uninstall leaves a helper even when the marker names this account'
+ Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The left-alone helper is explained for a controls-only record'
 
  # A truncated version.json must not block the uninstall; the worker and helper decide.
  $launches.Clear()
