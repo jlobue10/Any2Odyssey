@@ -19,6 +19,8 @@ impl CaptureColor {
 pub struct ColorMonitor {
     color: CaptureColor,
     failures: u8,
+    /// False while `color` is the startup fallback rather than a query result.
+    confirmed: bool,
 }
 
 impl ColorMonitor {
@@ -28,6 +30,7 @@ impl ColorMonitor {
         Self {
             color: initial.unwrap_or(CaptureColor::CONSERVATIVE),
             failures: 0,
+            confirmed: initial.is_some(),
         }
     }
 
@@ -38,8 +41,16 @@ impl ColorMonitor {
     pub fn observe(&mut self, result: Option<CaptureColor>) -> Result<(), &'static str> {
         if let Some(color) = result {
             self.failures = 0;
+            let confirmed = std::mem::replace(&mut self.confirmed, true);
             if color != self.color {
-                return Err("Display color mode or SDR white level changed. Restart conversion.");
+                // The pipeline compiles the white level into its shader, so a
+                // first real answer that differs from the startup fallback
+                // still needs a rebuild; it is not a change the user made.
+                return Err(if confirmed {
+                    "Display color mode or SDR white level changed. Restart conversion."
+                } else {
+                    "Display color information became available after startup; restarting conversion to use it."
+                });
             }
         } else {
             self.failures = self.failures.saturating_add(1);
@@ -101,6 +112,19 @@ mod tests {
         let mut monitor = ColorMonitor::new(None);
         assert_eq!(monitor.color(), CaptureColor::CONSERVATIVE);
         assert!(monitor.observe(None).is_ok());
-        assert!(monitor.observe(Some(SDR)).is_err());
+        let message = monitor.observe(Some(SDR)).unwrap_err();
+        assert!(message.contains("became available"), "{message}");
+        assert!(!message.contains("changed"), "{message}");
+    }
+
+    #[test]
+    fn unknown_startup_confirmed_by_the_fallback_itself_is_quiet() {
+        let mut monitor = ColorMonitor::new(None);
+        assert_eq!(monitor.observe(Some(CaptureColor::CONSERVATIVE)), Ok(()));
+        let hdr = CaptureColor {
+            advanced_color: true,
+            white_scale: 2.0,
+        };
+        assert!(monitor.observe(Some(hdr)).unwrap_err().contains("changed"));
     }
 }

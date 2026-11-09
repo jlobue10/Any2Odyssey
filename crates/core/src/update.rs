@@ -69,15 +69,62 @@ impl Version {
         parts.next().is_none().then_some(version)
     }
 
-    /// The version this executable was built as.
-    pub fn current() -> Version {
-        Version::parse(crate::VERSION).expect("CARGO_PKG_VERSION is major.minor.patch")
+    /// The version this executable was built as. Checked at compile time, so
+    /// a `0.9.0-rc1` in `Cargo.toml` fails the build instead of panicking in
+    /// `--check-updates` and on the About page.
+    pub const fn current() -> Version {
+        CURRENT
     }
 
     /// The tag the release workflow creates for this version.
     pub fn tag(&self) -> String {
         format!("v{self}")
     }
+}
+
+/// `CARGO_PKG_VERSION` parsed at compile time; see [`Version::current`].
+const CURRENT: Version = parse_release_version(crate::VERSION);
+
+/// `const` parser for the package version: exactly `major.minor.patch` with
+/// decimal digits. Any other shape is a compile error through the panics.
+const fn parse_release_version(text: &str) -> Version {
+    let bytes = text.as_bytes();
+    let mut parts = [0u32; 3];
+    let mut part = 0;
+    let mut digits = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'.' {
+            assert!(
+                digits > 0 && part < 2,
+                "CARGO_PKG_VERSION must be major.minor.patch"
+            );
+            part += 1;
+            digits = 0;
+        } else {
+            assert!(
+                b.is_ascii_digit(),
+                "CARGO_PKG_VERSION must be a plain release version"
+            );
+            // `Option::and_then` takes a closure and is not `const`; spell it out.
+            let scaled = match parts[part].checked_mul(10) {
+                Some(n) => n,
+                None => panic!("CARGO_PKG_VERSION component overflows u32"),
+            };
+            parts[part] = match scaled.checked_add((b - b'0') as u32) {
+                Some(n) => n,
+                None => panic!("CARGO_PKG_VERSION component overflows u32"),
+            };
+            digits += 1;
+        }
+        i += 1;
+    }
+    assert!(
+        part == 2 && digits > 0,
+        "CARGO_PKG_VERSION must be major.minor.patch"
+    );
+    Version::new(parts[0], parts[1], parts[2])
 }
 
 impl fmt::Display for Version {
@@ -184,7 +231,11 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
         return Err(ParseError::Prerelease);
     }
     let tag = document.tag_name.ok_or(ParseError::MissingTag)?;
+    // Every URL below is rebuilt from the version as `v<major>.<minor>.<patch>`,
+    // and GitHub's tag paths are literal, so a tag spelled any other way
+    // (`V0.9.0`, `v0.09.0`) would 404 even though the version parses.
     let version = Version::parse(&tag)
+        .filter(|version| version.tag() == tag.trim())
         .ok_or_else(|| ParseError::UnrecognizedTag(bounded(&tag, MAX_TAG_CHARS)))?;
     // The document only confirms that the asset exists under its expected
     // name on an allowed host; the URL handed to the browser is synthesized.
@@ -585,6 +636,14 @@ mod tests {
             parse_latest_release(r#"{"tag_name":"nightly"}"#),
             Err(ParseError::UnrecognizedTag("nightly".into()))
         );
+        // Parses as a version, but the synthesized download URLs would not match it.
+        for tag in ["V0.9.0", "v0.09.0", "0.9.0"] {
+            assert_eq!(
+                parse_latest_release(&format!(r#"{{"tag_name":"{tag}"}}"#)),
+                Err(ParseError::UnrecognizedTag(tag.into())),
+                "{tag}"
+            );
+        }
         assert!(matches!(
             parse_latest_release("[]"),
             Err(ParseError::Json(_))

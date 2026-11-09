@@ -19,8 +19,13 @@ pub fn data_dir() -> PathBuf {
 /// [`data_dir`] for an explicit override value, so the rule is testable
 /// without mutating the process environment under parallel tests.
 fn data_dir_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
-    if let Some(dir) = override_dir {
-        return PathBuf::from(dir);
+    // The worker runs with the engine folder as its working directory, so a
+    // relative override would split the controls' and the worker's files;
+    // resolve it here, once, against this process's directory. An empty
+    // value means unset rather than "the current directory".
+    if let Some(dir) = override_dir.filter(|dir| !dir.is_empty()) {
+        let dir = PathBuf::from(dir);
+        return std::path::absolute(&dir).unwrap_or(dir);
     }
     let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
     if cfg!(windows) {
@@ -130,5 +135,13 @@ mod tests {
         } else {
             "any2odyssey"
         }));
+    }
+
+    #[test]
+    fn relative_and_empty_overrides_do_not_depend_on_the_working_directory() {
+        let relative = data_dir_from(Some("data".into()));
+        assert!(relative.is_absolute(), "{relative:?}");
+        assert!(relative.ends_with("data"));
+        assert_eq!(data_dir_from(Some("".into())), data_dir_from(None));
     }
 }

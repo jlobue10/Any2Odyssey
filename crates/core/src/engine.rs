@@ -20,6 +20,8 @@ pub const ENGINE_READY_MARKER: &str = "First time MinimizeUI";
 pub enum EngineError {
     #[error("Samsung's conversion engine is missing.")]
     Missing,
+    #[error("Samsung's conversion engine could not be read: {0}")]
+    Unreadable(String),
     #[error("Samsung's engine changed. This build needs a compatibility update.")]
     HashMismatch { actual: String },
     #[error("The companion worker is not installed.")]
@@ -50,7 +52,7 @@ pub fn verify_engine_file(dll: &Path) -> Result<(), EngineError> {
     if !dll.is_file() {
         return Err(EngineError::Missing);
     }
-    let actual = sha256_hex(dll).map_err(|_| EngineError::Missing)?;
+    let actual = sha256_hex(dll).map_err(|e| EngineError::Unreadable(e.to_string()))?;
     if actual != EXPECTED_ENGINE_SHA256 {
         return Err(EngineError::HashMismatch { actual });
     }
