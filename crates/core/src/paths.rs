@@ -13,7 +13,13 @@ pub const DATA_DIR_ENV: &str = "ANY2ODYSSEY_DATA_DIR";
 /// Per-user data directory: `%LOCALAPPDATA%\Any2Odyssey` on Windows,
 /// `$XDG_DATA_HOME/any2odyssey` (or the platform equivalent) elsewhere.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
+    data_dir_from(std::env::var_os(DATA_DIR_ENV))
+}
+
+/// [`data_dir`] for an explicit override value, so the rule is testable
+/// without mutating the process environment under parallel tests.
+fn data_dir_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = override_dir {
         return PathBuf::from(dir);
     }
     let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
@@ -112,13 +118,14 @@ mod tests {
 
     #[test]
     fn data_dir_honours_override() {
-        // Serialize env mutation inside this test only.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var(DATA_DIR_ENV, dir.path());
-        assert_eq!(data_dir(), dir.path());
-        assert_eq!(settings_file(), dir.path().join("settings.json"));
-        std::env::remove_var(DATA_DIR_ENV);
-        assert!(data_dir().ends_with(if cfg!(windows) {
+        let chosen = data_dir_from(Some(dir.path().as_os_str().to_owned()));
+        assert_eq!(chosen, dir.path());
+        assert_eq!(
+            chosen.join("settings.json"),
+            dir.path().join("settings.json")
+        );
+        assert!(data_dir_from(None).ends_with(if cfg!(windows) {
             "Any2Odyssey"
         } else {
             "any2odyssey"
