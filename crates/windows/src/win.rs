@@ -154,9 +154,10 @@ pub fn set_window_pos(
 pub fn hwnd_topmost() -> HWND {
     HWND_TOPMOST
 }
-/// `SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE` and the extra `SWP_SHOWWINDOW`
-/// / `SWP_FRAMECHANGED` bits the overlay controller uses.
+/// `SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE` and the extra `SWP_NOZORDER` /
+/// `SWP_SHOWWINDOW` / `SWP_FRAMECHANGED` bits the overlay controller uses.
 pub const SWP_NOSIZE_NOMOVE_NOACTIVATE: u32 = 0x0001 | 0x0002 | 0x0010;
+pub const SWP_NOZORDER: u32 = 0x0004;
 pub const SWP_SHOWWINDOW: u32 = 0x0040;
 pub const SWP_FRAMECHANGED: u32 = 0x0020;
 pub const SW_SHOWNOACTIVATE: i32 = 4;

@@ -34,6 +34,7 @@ impl ControlsState {
         core: &mut Core,
         p: &Palette,
         wordmark: Option<&egui::TextureHandle>,
+        tray_available: bool,
     ) {
         banner(ui, wordmark, p);
         ui.add_space(4.0);
@@ -166,11 +167,11 @@ impl ControlsState {
                     // Without a notification area the setting cannot act: a
                     // hidden window would have nothing to bring it back.
                     ui.add_enabled(
-                        crate::platform::tray_available(),
+                        tray_available,
                         egui::Checkbox::new(minimize, "Minimize and close to the tray"),
                     )
                     .on_disabled_hover_text(
-                        "This desktop has no tray; Minimize and Close act normally.",
+                        "No notification icon is available (see companion.log on Windows); Minimize and Close act normally.",
                     );
                     ui.checkbox(
                         keep,
@@ -201,18 +202,18 @@ impl ControlsState {
                 draw(ui, &mut auto, &mut recover, &mut minimize, &mut keep, 0);
                 draw(ui, &mut auto, &mut recover, &mut minimize, &mut keep, 1);
             }
+            // Only Apply commits the sliders: a depth or pop-out dragged but
+            // not applied is not saved by a checkbox change, exactly as the
+            // tray hide and Quit do not save it either.
             if auto != core.prefs.auto_convert {
                 core.prefs.auto_convert = auto;
-                self.push_sliders(core);
                 core.save_preferences();
             }
             if recover != core.supervisor.recover {
-                self.push_sliders(core);
                 core.recover_changed(recover);
             }
             if minimize != core.prefs.minimize_to_tray {
                 core.prefs.minimize_to_tray = minimize;
-                self.push_sliders(core);
                 core.save_preferences();
             }
             if keep != core.prefs.keep_overlay_on_top {
@@ -239,12 +240,7 @@ impl ControlsState {
             if gold_button(ui, "View logs", false, p).clicked() {
                 core.menu(MenuCommand::ViewLogs);
             }
-            let minimize_label = if crate::platform::tray_available() {
-                "Minimize to tray"
-            } else {
-                "Minimize"
-            };
-            if gold_button(ui, minimize_label, false, p).clicked() {
+            if gold_button(ui, super::minimize_label(tray_available), false, p).clicked() {
                 core.requests.push(UiRequest::MinimizeToTray);
             }
             if gold_button(ui, "Quit completely", false, p).clicked() {

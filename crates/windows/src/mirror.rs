@@ -140,8 +140,9 @@ pub fn create_plain_window(
     Ok(hwnd)
 }
 
-pub fn set_timer(hwnd: HWND, id: usize, millis: u32) {
-    unsafe { SetTimer(Some(hwnd), id, millis, None) };
+/// Start (or re-arm) a window timer; false when Windows refused it.
+pub fn set_timer(hwnd: HWND, id: usize, millis: u32) -> bool {
+    unsafe { SetTimer(Some(hwnd), id, millis, None) != 0 }
 }
 pub fn kill_timer(hwnd: HWND, id: usize) {
     let _ = unsafe { KillTimer(Some(hwnd), id) };
@@ -264,7 +265,9 @@ impl Mirror {
         } else {
             self.refresh_sources();
         }
-        set_timer(self.hwnd, TIMER_UPDATE, self.update_interval_ms);
+        if !set_timer(self.hwnd, TIMER_UPDATE, self.update_interval_ms) {
+            return Err("Could not start the capture update timer.".into());
+        }
         Ok(())
     }
 

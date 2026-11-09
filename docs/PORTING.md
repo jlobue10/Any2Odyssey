@@ -31,7 +31,7 @@ scripts/         packaging
 | `DonationWindow.cs` | — | dropped (donation content removed) |
 | `OverlayController.cs` | `windows::overlay` | done (verified on the G90XF, 0.8.0) |
 | `RendererTaskbar.cs` | `windows::taskbar` | done (verified on the G90XF, 0.8.0) |
-| `TaskbarMenu.cs` (WPF JumpList) | `windows::jumplist` (ICustomDestinationList) | done (verified on the G90XF, 0.8.0) |
+| `TaskbarMenu.cs` (WPF JumpList) | `windows::taskbar` (ICustomDestinationList) | done (verified on the G90XF, 0.8.0) |
 | `Projection.cs` (layout probe) | `windows::diagnostics` | done (verified on the G90XF, 0.8.0) |
 | `DesktopCapture.cs` (+ exclusion/offscreen tests) | `windows::capture`, `windows::diagnostics` | done (verified on the G90XF, 0.8.0) |
 | `GpuDesktopCapture.cs` (D3D11, HDR→SDR shader) | `windows::capture::gpu` | done (verified on the G90XF, 0.8.0) |
@@ -65,11 +65,11 @@ scripts/         packaging
 
 | Upstream | Any2Odyssey | Status |
 | --- | --- | --- |
-| `install.ps1`, `InstallSupport.ps1`, `Install-Launcher.ps1`, `Uninstall.ps1`, `Install.cmd`, `Install-GUI.cmd` | `installer/` (new identity, no dependency manifest) | done, untested on Windows |
+| `install.ps1`, `InstallSupport.ps1`, `Install-Launcher.ps1`, `Uninstall.ps1`, `Install.cmd`, `Install-GUI.cmd` | `installer/` (new identity, no dependency manifest) | done (installed on the G90XF PC, 0.8.0; tests run in CI under PowerShell 7 and 5.1) |
 | `restore.ps1` (SharpDX NuGet) | — | dropped (no bundled DLLs) |
 | `build.ps1` | `cargo build --release` | replaced |
-| `package.ps1` | `scripts/package.ps1` | done, untested on Windows |
-| `tests/test-installer.ps1`, `test-install-flow.ps1`, `test-controls-install.ps1`, `test-install-launcher.ps1` | `installer/tests/` | ported, untested on Windows |
+| `package.ps1` | `scripts/package.ps1` | done (runs in CI and the release workflow) |
+| `tests/test-installer.ps1`, `test-install-flow.ps1`, `test-controls-install.ps1`, `test-install-launcher.ps1` | `installer/tests/` (plus `test-uninstall-flow.ps1`, `test-uninstall-helper.ps1`, `test-dpi-manifest.ps1`) | done (CI runs them on `windows-latest` under PowerShell 7 and 5.1) |
 
 ## Documentation and assets
 

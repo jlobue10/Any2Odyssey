@@ -13,7 +13,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, commit of 2026-10-16
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
@@ -58,6 +58,15 @@ jobs:
           ANY2ODYSSEY_SKIP_OS_CHECK: '1'
         run: |
           foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      # Same check as the Linux CI job: USER-GUIDE.html is the exported Help and 0.8.1 shipped a stale copy.
+      - name: Offline guide matches the embedded Help topics
+        shell: pwsh
+        run: |
+          $exported=Join-Path $env:RUNNER_TEMP 'guide.html'
+          cargo run --locked --release -p any2odyssey -- --export-guide $exported
+          if ($LASTEXITCODE -ne 0) { throw "--export-guide exited $LASTEXITCODE" }
+          $normalize={param($path)([IO.File]::ReadAllText($path)).Replace("`r`n","`n")}
+          if ((& $normalize $exported) -ne (& $normalize 'USER-GUIDE.html')) { throw 'USER-GUIDE.html differs from the embedded Help; regenerate it with --export-guide' }
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
@@ -68,5 +77,6 @@ jobs:
             dist/*.zip
             dist/*.sha256
           generate_release_notes: true
+          fail_on_unmatched_files: true
           body: |
             Windows x64 package for Any2Odyssey ${{ github.ref_name }}. Extract the ZIP and run `Install.cmd` (full converter, needs Odyssey 3D Hub 1.5.1) or `Install-GUI.cmd` (controls only). Verify the download against the attached `.sha256`.

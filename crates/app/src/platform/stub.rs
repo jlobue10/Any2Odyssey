@@ -60,6 +60,10 @@ impl Worker {
     pub fn spawn(_: isize, _: Preferences) -> Result<Worker, String> {
         Err("3D conversion is only available on Windows.".into())
     }
+    #[cfg(test)]
+    pub fn fake() -> Worker {
+        Worker
+    }
     pub fn pid(&self) -> u32 {
         0
     }
@@ -73,11 +77,6 @@ impl Worker {
 }
 pub fn show_window(_: isize) {}
 pub fn hide_window(_: isize) {}
-/// No notification icon on this build yet, so the controls never hide into a
-/// tray they could not come back from.
-pub fn tray_available() -> bool {
-    false
-}
 pub fn open_path(path: &Path) {
     let _ = open::that_detached(path);
 }

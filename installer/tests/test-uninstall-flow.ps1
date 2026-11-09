@@ -13,10 +13,10 @@ $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $ownedNames=@('Any2Odyssey.exe','Any2Odyssey.ico','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','USER-GUIDE.html')
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
 function New-Fixture {
- param([bool]$Elevated)
+ param([bool]$Elevated,[string]$Record='{"Version":"0.8.2","ControlsOnly":false}')
  foreach($folder in @($app,$data,$engine,$desktop,$programs,(Split-Path -Parent $helper))){New-Item -ItemType Directory -Path $folder -Force | Out-Null}
  foreach($name in $ownedNames){Set-Content -LiteralPath (Join-Path $app $name) -Value "installed $name"}
- Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.2","ControlsOnly":false}'
+ Set-Content -LiteralPath (Join-Path $app 'version.json') -Value $Record
  Set-Content -LiteralPath (Join-Path $data 'settings.json') -Value '{"Depth":1.1,"Popout":0}'
  Set-Content -LiteralPath $worker -Value 'installed worker'
  Set-Content -LiteralPath (Join-Path $engine 'ConversionWrapper.dll') -Value 'Samsung file; never loaded'
@@ -38,10 +38,13 @@ function New-Fixture {
 # (the uninstaller is invoked from this script), so no $script: or $global: state is needed.
 $launches=New-Object 'System.Collections.Generic.List[object]'
 $helperExitCode=0
+$declineElevation=$false
 function Get-Process {param($Name,$ErrorAction)return @()}
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
  $launches.Add([pscustomobject]@{FilePath=$FilePath;ArgumentList=$ArgumentList;Verb=$Verb;Wait=[bool]$Wait})
+ # A declined UAC prompt surfaces from Start-Process -Verb RunAs as this exception type.
+ if($declineElevation){throw (New-Object InvalidOperationException 'This command cannot be run due to the error: The operation was canceled by the user.')}
  if($helperExitCode -eq 0){
   # Stand in for UninstallWorker.ps1: it removes the fixed worker path and itself.
   Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
@@ -76,6 +79,29 @@ try{
  $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('Worker removal did not complete')}
  Assert $failed 'Helper failure stops the uninstall with its own message'
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and (Test-Path -LiteralPath $worker)) 'Helper failure leaves per-user files, shortcuts, registration and worker in place'
+
+ $launches.Clear()
+ $helperExitCode=0;$declineElevation=$true
+ New-Fixture -Elevated $false
+ $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('Elevation was declined')}
+ Assert $failed 'Declined UAC prompt stops the uninstall with a plain message'
+ Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'Declined elevation leaves everything in place'
+ $declineElevation=$false
+
+ # A pre-0.8.3 controls-only reinstall over a full install left this record with the helper still present.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Controls-only record with an orphaned helper still runs the helper'
+ Assert (-not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe)) 'Orphaned helper and worker are removed along with the controls'
+
+ # A genuine controls-only installation has neither worker nor helper and needs no elevation.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+ Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 0) 'Controls-only uninstall never asks for elevation'
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'Controls-only uninstall removes the controls and registration'
  $passed=$true
 }finally{
  if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}

@@ -8,6 +8,18 @@ use std::path::Path;
 /// file first and is renamed into place, so readers never observe a partial
 /// file. Parent directories are created as needed.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_inner(path, bytes, false)
+}
+
+/// [`write_atomic`] that also flushes the content to disk before the rename,
+/// for the preference files: a power loss right after Apply must not leave
+/// an empty `settings.json` that the next launch treats as damaged. Status
+/// files are rewritten every second and stay unsynced.
+pub fn write_atomic_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_inner(path, bytes, true)
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     use std::io::Write;
     let parent = path
         .parent()
@@ -20,6 +32,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .prefix(".any2odyssey-")
         .tempfile_in(parent)?;
     tmp.write_all(bytes)?;
+    if sync {
+        tmp.as_file().sync_all()?;
+    }
     // Replacing a file that another process or thread has open can fail
     // transiently on Windows (sharing violation / access denied) even though
     // the opener used FILE_SHARE_DELETE. Status files are read while they are
@@ -64,26 +79,37 @@ pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Res
     write_atomic(path, text.as_bytes())
 }
 
-/// Read at most the last `chars` bytes of a (possibly growing) text file, as
-/// lossy UTF-8. Missing or unreadable files yield an empty string, matching the
-/// tolerant behaviour needed when tailing Samsung's conversion log.
-pub fn tail(path: &Path, chars: u64) -> String {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = fs::File::open(path) else {
-        return String::new();
+/// [`write_json_atomic`] through [`write_atomic_durable`].
+pub fn write_json_atomic_durable<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
+    write_atomic_durable(path, text.as_bytes())
+}
+
+/// Remove `.any2odyssey-*` temporaries in `dir` that a writer killed between
+/// creating and publishing left behind. Only files older than an hour go, so
+/// a worker that is mid-write right now is never touched; errors are ignored
+/// because the sweep is housekeeping. Returns how many were removed.
+pub fn remove_stale_temporaries(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
     };
-    let Ok(len) = file.metadata().map(|m| m.len()) else {
-        return String::new();
-    };
-    let start = len.saturating_sub(chars);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return String::new();
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    String::from_utf8_lossy(&buf).into_owned()
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60);
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".any2odyssey-"))
+        })
+        .filter(|entry| {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified < cutoff)
+        })
+        .filter(|entry| fs::remove_file(entry.path()).is_ok())
+        .count()
 }
 
 #[cfg(test)]
@@ -199,12 +225,34 @@ mod tests {
     }
 
     #[test]
-    fn tail_returns_suffix_and_tolerates_missing_files() {
+    fn durable_write_publishes_like_the_plain_one() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("log.txt");
-        fs::write(&path, "0123456789").unwrap();
-        assert_eq!(tail(&path, 4), "6789");
-        assert_eq!(tail(&path, 100), "0123456789");
-        assert_eq!(tail(&dir.path().join("missing"), 10), "");
+        let path = dir.path().join("settings.json");
+        write_atomic_durable(&path, b"one").unwrap();
+        write_atomic_durable(&path, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+    }
+
+    #[test]
+    fn stale_temporaries_are_swept_but_fresh_and_foreign_files_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(".any2odyssey-stale");
+        let fresh = dir.path().join(".any2odyssey-fresh");
+        let foreign = dir.path().join("settings.json");
+        for p in [&stale, &fresh, &foreign] {
+            fs::write(p, b"x").unwrap();
+        }
+        let two_hours_ago =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(two_hours_ago)
+            .unwrap();
+        assert_eq!(remove_stale_temporaries(dir.path()), 1);
+        assert_eq!(entries(dir.path()), [".any2odyssey-fresh", "settings.json"]);
+        assert_eq!(remove_stale_temporaries(&dir.path().join("missing")), 0);
     }
 }

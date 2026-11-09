@@ -140,7 +140,21 @@ impl GpuDesktopCapture {
         on_frame: impl Fn() + Send + Sync + 'static,
         log: &dyn Fn(&str),
     ) -> Result<GpuDesktopCapture, String> {
-        let color = ColorMonitor::new(display_color::capture_color(device_name));
+        // A failed first query seeds the conservative fallback, and the first
+        // real answer then costs a pipeline rebuild through recovery. The
+        // query races display-topology changes, so give it a few tries first.
+        let mut initial = display_color::capture_color(device_name);
+        for _ in 0..4 {
+            if initial.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            initial = display_color::capture_color(device_name);
+        }
+        if initial.is_none() {
+            log("Display color query failed at startup; using FP16 until it answers.");
+        }
+        let color = ColorMonitor::new(initial);
         let found = find_output(device_name)?;
         if !found.bounds.contains_rect(&bounds) {
             return Err("Capture rectangle crosses a monitor boundary.".into());

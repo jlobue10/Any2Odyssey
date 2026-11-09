@@ -124,9 +124,7 @@ impl App {
             {
                 Ok(t) => Some(t),
                 Err(e) => {
-                    core.lock()
-                        .expect("core")
-                        .log(&format!("Tray icon unavailable: {e}"));
+                    report_missing_tray(&mut core.lock().expect("core"), &e);
                     None
                 }
             }
@@ -207,16 +205,27 @@ impl App {
         c.save_ui();
     }
 
+    fn tray_available(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.tray.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     /// Whether closing or minimizing may hide the window into the tray: the
     /// preference must be on and this desktop must have a notification area
     /// to bring the window back from. Without one, a hidden window could only
     /// be recovered by a global shortcut, which not every desktop offers.
     fn hides_to_tray(&self) -> bool {
-        platform::tray_available() && self.core.lock().expect("core").prefs.minimize_to_tray
+        self.tray_available() && self.core.lock().expect("core").prefs.minimize_to_tray
     }
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
-        if !platform::tray_available() {
+        if !self.tray_available() {
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             return;
         }
@@ -233,6 +242,14 @@ impl App {
     fn show_controls(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         self.page = Page::Controls;
+        // `hide_to_tray` hides with a raw ShowWindow(SW_HIDE) that winit does
+        // not observe, so its own visibility flag still says "visible" and
+        // the Visible(true) command below is a no-op on that path. Un-hide at
+        // the same level; the commands stay for a viewport without a handle.
+        let hwnd = self.core.lock().expect("core").controls_hwnd;
+        if hwnd != 0 {
+            platform::show_window(hwnd);
+        }
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -358,7 +375,7 @@ impl App {
         if chrome(&mut actions, "×", "Close").clicked() {
             self.close_requested(ctx);
         }
-        if chrome(&mut actions, "▾", "Minimize to tray").clicked() {
+        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
             self.hide_to_tray(ctx);
         }
         if chrome(&mut actions, "□", "Maximize / restore").clicked() {
@@ -448,7 +465,11 @@ impl App {
         item(ui, "Check for updates", MenuCommand::CheckUpdates);
         item(ui, "Toggle light / dark mode", MenuCommand::ToggleTheme);
         item(ui, "View logs", MenuCommand::ViewLogs);
-        item(ui, "Minimize to tray", MenuCommand::MinimizeToTray);
+        item(
+            ui,
+            minimize_label(self.tray_available()),
+            MenuCommand::MinimizeToTray,
+        );
         ui.separator();
         item(ui, "Quit completely", MenuCommand::Quit);
         if let Some(cmd) = command.get() {
@@ -507,6 +528,27 @@ impl App {
             return true;
         }
         false
+    }
+}
+
+/// What the explicit minimize button and menu item do on this desktop: hide
+/// into the tray when there is one, otherwise an ordinary minimize.
+fn minimize_label(tray_available: bool) -> &'static str {
+    if tray_available {
+        "Minimize to tray"
+    } else {
+        "Minimize"
+    }
+}
+
+/// Without a notification icon the tray preference cannot act. Say so on the
+/// status line unless it already reports something the user must fix first
+/// (unreadable settings); the log keeps the reason either way.
+#[cfg(any(windows, test))]
+fn report_missing_tray(c: &mut Core, error: &str) {
+    c.log(&format!("Tray icon unavailable: {error}"));
+    if c.status == "Ready" {
+        c.status = "The notification icon could not be created; Minimize and Close act normally. See companion.log.".into();
     }
 }
 
@@ -608,7 +650,14 @@ impl eframe::App for App {
                             .show(&mut body, |ui| {
                                 ui.set_width(ui.available_width() - 4.0);
                                 let mut c = self.core.lock().expect("core");
-                                self.controls.show(ui, &mut c, &p, self.wordmark.as_ref());
+                                let tray_available = self.tray_available();
+                                self.controls.show(
+                                    ui,
+                                    &mut c,
+                                    &p,
+                                    self.wordmark.as_ref(),
+                                    tray_available,
+                                );
                             });
                     }
                     Page::Help => {
@@ -642,3 +691,67 @@ impl eframe::App for App {
 
 #[allow(dead_code)]
 fn _unused(_: Color32) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use any2odyssey_core::log::Logger;
+
+    #[test]
+    fn missing_tray_minimizes_normally_and_close_quits() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Arc::new(Mutex::new(Core::new_preview(Logger::new(
+            dir.path().join("test.log"),
+        ))));
+        let mut app = App {
+            controls: ControlsState::from_core(&core.lock().unwrap()),
+            core: core.clone(),
+            page: Page::Controls,
+            help: HelpState::default(),
+            about: AboutState::new(),
+            palette: Palette::for_dark(false),
+            wordmark: None,
+            #[cfg(windows)]
+            tray: None, // Tray creation failed, regardless of platform support.
+            _hotkeys: None, // Global shortcuts may also be unavailable.
+            hidden: false,
+            preview: false,
+            frames: 0,
+            screenshot_taken: false,
+        };
+        assert!(core.lock().unwrap().prefs.minimize_to_tray);
+        assert!(!app.hides_to_tray());
+        assert_eq!(minimize_label(app.tray_available()), "Minimize");
+        assert_eq!(minimize_label(true), "Minimize to tray");
+        let ctx = egui::Context::default();
+        let output = ctx.run(Default::default(), |ctx| app.hide_to_tray(ctx));
+        assert!(!app.hidden, "a missing icon must never hide the controls");
+        assert!(output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .iter()
+            .any(|command| matches!(command, ViewportCommand::Minimized(true))));
+        app.close_requested(&ctx);
+        assert!(
+            core.lock().unwrap().exiting,
+            "Close must quit without a tray"
+        );
+    }
+
+    #[test]
+    fn missing_tray_is_reported_unless_a_prerequisite_error_is_showing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = Core::new_preview(Logger::new(dir.path().join("test.log")));
+        assert_eq!(core.status, "Ready");
+        report_missing_tray(&mut core, "shell not running");
+        assert!(core
+            .status
+            .starts_with("The notification icon could not be created"));
+        let settings_error = "Could not load saved settings: damaged".to_owned();
+        core.status = settings_error.clone();
+        report_missing_tray(&mut core, "shell not running");
+        assert_eq!(
+            core.status, settings_error,
+            "keep the error the user must fix"
+        );
+    }
+}

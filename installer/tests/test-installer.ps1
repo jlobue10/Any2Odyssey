@@ -30,9 +30,14 @@ $samsungHash=(Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dl
 [IO.File]::WriteAllBytes((Join-Path $app 'Any2Odyssey.exe'),([IO.File]::ReadAllBytes($current)+[byte[]](0)))
 $oldHash=(Get-FileHash -LiteralPath (Join-Path $app 'Any2Odyssey.exe')).Hash
 $operations=@([pscustomobject]@{Source=$current;Destination=Join-Path $app 'Any2Odyssey.exe'},[pscustomobject]@{Source=$current;Destination=Join-Path $engine 'Any2OdysseyWorker.exe'})
+# A destination two folders deep that does not exist yet: a failed transaction must remove what it created.
+$newFolder=Join-Path $root 'programfiles\Any2Odyssey'
+$failingOperations=$operations+@([pscustomobject]@{Source=$current;Destination=Join-Path $newFolder 'UninstallWorker.ps1'})
 $rollback=[pscustomobject]@{Called=$false};$failed=$false
-try{Invoke-Any2OdysseyFileTransaction $operations -AfterCopy {throw 'Simulated registration failure'} -RollbackState {$rollback.Called=$true}}catch{$failed=$true}
+try{Invoke-Any2OdysseyFileTransaction $failingOperations -AfterCopy {throw 'Simulated registration failure'} -RollbackState {$rollback.Called=$true}}catch{$failed=$true}
 Assert ($failed -and $rollback.Called) 'Failure invokes registration rollback'
+Assert (-not (Test-Path -LiteralPath $newFolder) -and -not (Test-Path -LiteralPath (Split-Path -Parent $newFolder))) 'Failed install removes the folders it created'
+Assert ((Test-Path -LiteralPath $app) -and (Test-Path -LiteralPath $engine)) 'Failed install keeps the folders that already existed'
 Assert ((Get-FileHash -LiteralPath (Join-Path $app 'Any2Odyssey.exe')).Hash -eq $oldHash) 'Failed upgrade restores old executable byte-for-byte'
 Assert (-not (Test-Path -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe'))) 'Failed upgrade removes newly introduced worker'
 Invoke-Any2OdysseyFileTransaction $operations
