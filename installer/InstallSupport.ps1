@@ -21,8 +21,11 @@ function Get-Any2OdysseyInstalledVersion {
   throw "Cannot read the installed executable version at $path. Repair or inspect that installation before continuing."
  }
  if($Registration -and (Test-Path -LiteralPath $Registration)){
+  # A DisplayVersion edited by hand or by a registry cleaner counts as absent, like a damaged record.
   $value=(Get-ItemProperty -LiteralPath $Registration -Name DisplayVersion -ErrorAction SilentlyContinue).DisplayVersion
-  if($value){return [pscustomobject]@{Version=[version]$value;Source=$Registration}}
+  $registered=$null
+  if($value){try{$registered=[version]$value}catch{}}
+  if($registered){return [pscustomobject]@{Version=$registered;Source=$Registration}}
  }
  foreach($path in @((Join-Path $AppPath 'version.json'),(Join-Path $DataPath 'install-result.json'))){
   $recorded=Get-Any2OdysseyRecordedVersion -Path $path
