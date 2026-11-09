@@ -21,12 +21,12 @@ jobs:
           $version=(Get-Content VERSION -Raw).Trim()
           if ("${{ github.ref_name }}" -ne "v$version") { throw "Tag ${{ github.ref_name }} does not match VERSION $version" }
       - name: Build (release)
-        run: cargo build --release --workspace
+        run: cargo build --locked --release --workspace
       - name: Verify worker DPI manifest
         shell: pwsh
         run: ./installer/tests/test-dpi-manifest.ps1
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1

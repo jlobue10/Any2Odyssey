@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -23,18 +26,18 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Build (release)
-        run: cargo build --release --workspace
+        run: cargo build --locked --release --workspace
       - name: Verify worker DPI manifest
         shell: pwsh
         run: ./installer/tests/test-dpi-manifest.ps1
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Regenerate brand assets and check they are committed
         shell: pwsh
         run: |
-          cargo run --release -p any2odyssey-iconmaker -- assets
+          cargo run --locked --release -p any2odyssey-iconmaker -- assets
           git diff --exit-code -- assets
       - name: Package
         shell: pwsh
@@ -87,13 +90,13 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Build
-        run: cargo build -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+        run: cargo build --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
       - name: Test
-        run: cargo test -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+        run: cargo test --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
       - name: Clippy
-        run: cargo clippy -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
+        run: cargo clippy --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo check --workspace --target x86_64-pc-windows-msvc
+          cargo check --locked --workspace --target x86_64-pc-windows-msvc
