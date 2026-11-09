@@ -172,7 +172,15 @@ pub enum ParseError {
     Draft,
     Prerelease,
     MissingTag,
+    /// The tag is not a version number at all.
     UnrecognizedTag(String),
+    /// The tag parses as a version but is not spelled the way the release
+    /// workflow tags and the download links are built (`v<major>.<minor>.<patch>`,
+    /// no capital `V`, no leading zeros), so every synthesized link would 404.
+    TagMismatch {
+        tag: String,
+        expected: String,
+    },
 }
 
 impl fmt::Display for ParseError {
@@ -189,6 +197,10 @@ impl fmt::Display for ParseError {
             ParseError::UnrecognizedTag(tag) => {
                 write!(f, "the release tag {tag:?} is not a version number")
             }
+            ParseError::TagMismatch { tag, expected } => write!(
+                f,
+                "the release tag {tag:?} is not spelled {expected:?}, so its download links would not resolve"
+            ),
         }
     }
 }
@@ -235,8 +247,13 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
     // and GitHub's tag paths are literal, so a tag spelled any other way
     // (`V0.9.0`, `v0.09.0`) would 404 even though the version parses.
     let version = Version::parse(&tag)
-        .filter(|version| version.tag() == tag.trim())
         .ok_or_else(|| ParseError::UnrecognizedTag(bounded(&tag, MAX_TAG_CHARS)))?;
+    if version.tag() != tag.trim() {
+        return Err(ParseError::TagMismatch {
+            tag: bounded(&tag, MAX_TAG_CHARS),
+            expected: version.tag(),
+        });
+    }
     // The document only confirms that the asset exists under its expected
     // name on an allowed host; the URL handed to the browser is synthesized.
     let asset_url = |name: &str| {
@@ -636,12 +653,22 @@ mod tests {
             parse_latest_release(r#"{"tag_name":"nightly"}"#),
             Err(ParseError::UnrecognizedTag("nightly".into()))
         );
-        // Parses as a version, but the synthesized download URLs would not match it.
+        // Parses as a version, but the synthesized download URLs would not
+        // match it; the error names the spelling they are built from.
         for tag in ["V0.9.0", "v0.09.0", "0.9.0"] {
+            let error = parse_latest_release(&format!(r#"{{"tag_name":"{tag}"}}"#)).unwrap_err();
             assert_eq!(
-                parse_latest_release(&format!(r#"{{"tag_name":"{tag}"}}"#)),
-                Err(ParseError::UnrecognizedTag(tag.into())),
+                error,
+                ParseError::TagMismatch {
+                    tag: tag.into(),
+                    expected: "v0.9.0".into(),
+                },
                 "{tag}"
+            );
+            let shown = error.to_string();
+            assert!(
+                shown.contains("\"v0.9.0\"") && !shown.contains("not a version number"),
+                "{shown}"
             );
         }
         assert!(matches!(
