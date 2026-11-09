@@ -5,6 +5,8 @@ function Assert($condition,[string]$message){if(-not $condition){throw $message}
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-installer-test-'+[Guid]::NewGuid().ToString('N'))
 $app=Join-Path $root 'app';$data=Join-Path $root 'data';$engine=Join-Path $root 'engine'
 New-Item -ItemType Directory -Path $app,$data,$engine | Out-Null
+$passed=$false
+try{
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $current=Join-Path $repo 'build\Any2Odyssey.exe'
 if(-not (Test-Path -LiteralPath $current)){throw "Build the release first: $current is missing (copy target\release\Any2Odyssey.exe to build\)."}
@@ -39,7 +41,8 @@ Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')).
 Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Preferences preserved byte-for-byte'
 Assert ((Get-FileHash -LiteralPath (Join-Path $data 'Samsung-OverlaySettings-before.json')).Hash -eq $backupHash) 'Samsung settings backup preserved'
 Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $samsungHash) 'Samsung engine untouched'
-Write-Host "Isolated test files: $root"
+$passed=$true
+}finally{if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}}
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
 exit 0

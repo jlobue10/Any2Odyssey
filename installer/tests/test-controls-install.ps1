@@ -27,6 +27,7 @@ $installer=Join-Path $package 'install.ps1';$app=Join-Path $local 'Programs\Any2
 New-Item -ItemType Directory -Path $data -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $data 'settings.json') -Value '{"AutoConvert":false,"Depth":1.2}'
 $settingsHash=(Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash
+$passed=$false
 try{
  & $installer -CheckOnly -ControlsOnly
  Assert (-not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $engine)) 'Controls-only preflight makes no installation changes'
@@ -57,8 +58,13 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayName -eq 'Any2Odyssey') 'Full setup clears the controls-only registration label'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Promotion preserves user preferences'
  $failed=$false;try{& $installer -ControlsOnly}catch{$failed=$_.Exception.Message.Contains('full installation')};Assert $failed 'Controls-only setup refuses to split an existing full installation'
- Write-Host "Isolated test files: $root"
-}finally{if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}}
+ $passed=$true
+}finally{
+ if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
+ $testKeys=Split-Path -Parent $registration
+ if((Test-Path -LiteralPath $testKeys) -and -not (Get-ChildItem -LiteralPath $testKeys | Select-Object -First 1) -and -not (Get-Item -LiteralPath $testKeys).GetValueNames().Count){Remove-Item -LiteralPath $testKeys}
+ if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}
+}
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
 exit 0

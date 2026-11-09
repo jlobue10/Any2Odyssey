@@ -41,6 +41,7 @@ if($PreviousPackage){
  Copy-Item -LiteralPath (Join-Path $PreviousPackage 'build\Any2Odyssey.exe') -Destination (Join-Path $engine 'Any2OdysseyWorker.exe')
  $expectedAction='Upgrade'
 }
+$passed=$false
 try{
  & $testInstall -CheckOnly
  Assert (-not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath (Join-Path $app 'version.json'))) 'CheckOnly leaves installation and registration untouched'
@@ -57,8 +58,13 @@ try{
  Assert ($shell.CreateShortcut((Join-Path $programs 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
  & $testInstall
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Repeated installer repairs the same release'
- Write-Host "Isolated integration files: $root"
-}finally{if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}}
+ $passed=$true
+}finally{
+ if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
+ $testKeys=Split-Path -Parent $registration
+ if((Test-Path -LiteralPath $testKeys) -and -not (Get-ChildItem -LiteralPath $testKeys | Select-Object -First 1) -and -not (Get-Item -LiteralPath $testKeys).GetValueNames().Count){Remove-Item -LiteralPath $testKeys}
+ if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}
+}
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
 exit 0

@@ -7,6 +7,8 @@ Copy-Item -LiteralPath (Join-Path $installerDir 'Install-Launcher.ps1') -Destina
 $launcher=Join-Path $root 'Install-Launcher.ps1';$installer=Join-Path $root 'install.ps1';$report=Join-Path $root 'result.json'
 $powershell=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
+$passed=$false
+try{
 Set-Content -LiteralPath $installer -Encoding UTF8 -Value "param([switch]`$ControlsOnly,[switch]`$CheckOnly);throw 'Simulated missing engine; run Install-GUI.cmd.'"
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated missing engine; run Install-GUI.cmd.')) 'Preflight failure remains visible in the original launcher console'
@@ -38,7 +40,8 @@ exit $LASTEXITCODE
 $wrapper=Join-Path $root 'simulate-elevation.ps1';Set-Content -LiteralPath $wrapper -Value $stub -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated elevated file-copy failure')) 'Elevated installation error is relayed to the original console'
-Write-Host "Isolated launcher fixtures: $root"
+$passed=$true
+}finally{if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}}
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
 exit 0
