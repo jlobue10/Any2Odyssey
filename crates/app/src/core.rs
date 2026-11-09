@@ -713,33 +713,45 @@ fn settings_recovery_message(error: &str) -> String {
     format!("{error}. Automatic conversion is disabled, and so is the daily update check until you turn it back on from the About page. Fix the settings file and reopen, or choose settings and click Apply to save them with a backup of the original.")
 }
 
-/// Load preferences, importing Any2Odd's file once when ours does not exist.
+/// Load preferences, importing Any2Odd's file when ours does not exist.
 fn load_preferences(logger: &Logger) -> Result<Preferences, String> {
-    let own = paths::settings_file();
+    load_preferences_from(
+        logger,
+        &paths::settings_file(),
+        paths::legacy_any2odd_settings_file().as_deref(),
+    )
+}
+
+/// Only damage to our own file is an error (and gates automatic start and
+/// the saves until Apply, see `Core::initialize`). Any2Odd's file is a
+/// courtesy import: when it exists but cannot be read, that is logged and
+/// the controls start with defaults, as they would without it.
+fn load_preferences_from(
+    logger: &Logger,
+    own: &std::path::Path,
+    legacy: Option<&std::path::Path>,
+) -> Result<Preferences, String> {
     if !own
         .try_exists()
         .map_err(|e| format!("Could not inspect saved settings: {e}"))?
     {
-        if let Some(legacy) = paths::legacy_any2odd_settings_file() {
-            if legacy
-                .try_exists()
-                .map_err(|e| format!("Could not inspect legacy settings: {e}"))?
-            {
-                let mut imported = Preferences::load_from(&legacy).map_err(|e| {
-                    format!(
-                        "Could not import Any2Odd's settings from {}: {e}",
-                        legacy.display()
-                    )
-                })?;
-                imported
-                    .save_to(&own)
-                    .map_err(|e| format!("Could not import legacy settings: {e}"))?;
-                logger.log(&format!("Imported preferences from {}", legacy.display()));
-                return Ok(imported);
+        if let Some(legacy) = legacy.filter(|legacy| legacy.try_exists().unwrap_or(false)) {
+            match Preferences::load_from(legacy) {
+                Ok(mut imported) => {
+                    imported
+                        .save_to(own)
+                        .map_err(|e| format!("Could not import legacy settings: {e}"))?;
+                    logger.log(&format!("Imported preferences from {}", legacy.display()));
+                    return Ok(imported);
+                }
+                Err(e) => logger.log(&format!(
+                    "Could not import Any2Odd's settings from {}: {e}. Starting with defaults; Any2Odd's file is left as it is.",
+                    legacy.display()
+                )),
             }
         }
     }
-    Preferences::load().map_err(|e| format!("Could not load saved settings: {e}"))
+    Preferences::load_from(own).map_err(|e| format!("Could not load saved settings: {e}"))
 }
 
 /// Start the poller thread. It wakes the GUI (and un-hides the window when
@@ -926,6 +938,40 @@ mod tests {
         assert_eq!(backups.len(), 1);
         assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
         assert!(make_core().settings_load_error.is_none());
+    }
+
+    #[test]
+    fn a_damaged_any2odd_file_is_logged_and_skipped_not_treated_as_our_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("settings.json");
+        let legacy = dir.path().join("Odyssey3DCompanion").join("settings.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let log = dir.path().join("test.log");
+        let logger = Logger::new(log.clone());
+        // Readable legacy file: imported and written as our own.
+        std::fs::write(&legacy, br#"{"Mode":"Active","AutoConvert":false}"#).unwrap();
+        let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
+        assert_eq!(prefs.mode, CaptureMode::Active);
+        assert!(!prefs.auto_convert);
+        assert!(own.exists());
+        // Damaged legacy file: no error, defaults, nothing written, a log line.
+        std::fs::remove_file(&own).unwrap();
+        std::fs::write(&legacy, b"not json").unwrap();
+        let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
+        assert_eq!(prefs, Preferences::default());
+        assert!(!own.exists(), "nothing is imported from a damaged file");
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"not json");
+        assert!(std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("Could not import Any2Odd's settings"));
+        // A legacy path that does not exist imports nothing and writes nothing.
+        std::fs::remove_file(&legacy).unwrap();
+        let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
+        assert_eq!(prefs, Preferences::default());
+        assert!(!own.exists());
+        // Our own file still gates: a damaged one is the error it always was.
+        std::fs::write(&own, b"damaged").unwrap();
+        assert!(load_preferences_from(&logger, &own, Some(&legacy)).is_err());
     }
 
     #[test]
