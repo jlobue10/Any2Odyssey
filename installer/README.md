@@ -12,12 +12,12 @@ PowerShell installer family, ported from Any2Odd 0.7.3's installer (GPL-3.0-only
 
 ## Files
 
-- `Install.cmd` / `Install-GUI.cmd`: double-click launchers (full install with elevation, or controls only without elevation).
+- `Install.cmd` / `Install-GUI.cmd`: double-click launchers (full install with elevation, or controls only without elevation). From a 32-bit host (a 32-bit file manager or console) they start the 64-bit PowerShell through `Sysnative`, since `install.ps1` refuses a 32-bit process.
 - `Install-Launcher.ps1`: preflight before UAC, same-account check, relays the elevated result to the original console.
 - `install.ps1`: the installer. `-CheckOnly` (read-only), `-ControlsOnly`, `-AllowDowngrade`.
 - `InstallSupport.ps1`: version detection (`FileVersionInfo` of the native executable, then `version.json`/registry), install action (Install/Upgrade/Repair/Downgrade) and the file transaction with rollback.
 - `UninstallWorker.ps1`: installed under `%ProgramFiles%\Any2Odyssey`; the only elevated uninstall step, removes the fixed worker path, itself and its owner marker, and checks the approving account. The installer writes `UninstallWorker.owner` (the installing account's SID) beside it. A controls-only uninstall never runs the helper: a helper present beside a controls-only record belongs to another account's full installation or to an older release, and `Install.cmd` followed by a full uninstall from that account (or an administrator by hand) removes it. A full uninstall whose marker names another account (someone else ran `Install.cmd` later on a shared PC) also leaves worker and helper alone and says so; that later install prints a notice that it is replacing them.
-- `Uninstall.ps1`: runs as the normal user, signals the quit event without launching the installed EXE, and removes exactly the files the installer placed; Samsung files, settings and logs stay.
+- `Uninstall.ps1`: runs as the normal user, signals the quit event without launching the installed EXE, and removes exactly the files the installer placed; Samsung files, settings and logs stay. The registered uninstall command adds `-Pause`, which keeps the console open with the reason when something fails; without the switch (the README command, the tests) errors propagate as before.
 - `tests/`: isolated tests that run on Windows only (temporary folders, isolated registry key, simulated engine hash and elevation). They need `build\Any2Odyssey.exe` in the repository root; see `docs/TESTING.md`.
 
 ## Trust model
