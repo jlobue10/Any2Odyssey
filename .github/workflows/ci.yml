@@ -102,6 +102,12 @@ jobs:
         run: cargo fmt --all --check
       - name: Build
         run: cargo build --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+      # USER-GUIDE.html is the exported Help; 0.8.1 shipped a stale copy.
+      - name: Offline guide matches the embedded Help topics
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo run --locked -p any2odyssey -- --export-guide /tmp/guide.html
+          cmp /tmp/guide.html USER-GUIDE.html
       - name: Test
         run: cargo test --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
       - name: Clippy
