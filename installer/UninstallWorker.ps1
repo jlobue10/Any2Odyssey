@@ -18,6 +18,9 @@ function Remove-Any2OdysseyInstalledWorker {
  if(Test-Path -LiteralPath $worker){Remove-Item -LiteralPath $worker}
  Remove-Item -LiteralPath $HelperPath
  $folder=Split-Path -Parent $HelperPath
+ # The installer's ownership marker (installing account SID) lives beside the helper.
+ $owner=Join-Path $folder 'UninstallWorker.owner'
+ if(Test-Path -LiteralPath $owner -PathType Leaf){Remove-Item -LiteralPath $owner}
  if((Split-Path -Leaf $folder) -eq 'Any2Odyssey' -and -not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)){Remove-Item -LiteralPath $folder}
 }
 

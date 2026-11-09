@@ -616,7 +616,10 @@ impl Core {
                 self.quit();
                 return;
             }
-            if events.show.is_signaled() {
+            // A deferred quit is under way: the window must not come back
+            // for one frame, and the launch that asked is told nothing was
+            // shown through its exit code.
+            if events.show.is_signaled() && !self.exiting {
                 self.requests.push(UiRequest::ShowControls);
             }
             if events.toggle.is_signaled() {
@@ -686,8 +689,12 @@ fn load_preferences(logger: &Logger) -> Result<Preferences, String> {
                 .try_exists()
                 .map_err(|e| format!("Could not inspect legacy settings: {e}"))?
             {
-                let mut imported = Preferences::load_from(&legacy)
-                    .map_err(|e| format!("Could not load legacy settings: {e}"))?;
+                let mut imported = Preferences::load_from(&legacy).map_err(|e| {
+                    format!(
+                        "Could not import Any2Odd's settings from {}: {e}",
+                        legacy.display()
+                    )
+                })?;
                 imported
                     .save_to(&own)
                     .map_err(|e| format!("Could not import legacy settings: {e}"))?;
@@ -733,8 +740,10 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
             // the GUI thread. Never hold Core while making them. Only a show
             // request un-hides the window: a quit from the tray or `--quit`
             // while hidden must not flash the controls and steal the focus
-            // from a game for one frame; the repaint below is enough to wake
-            // eframe's loop so the deferred Quit is processed.
+            // from a game for one frame. The repaint wakes eframe's loop so
+            // the frame turns the Quit request into a window close; a hidden
+            // window still gets that frame because `hide_window` minimizes
+            // instead of hiding (see platform).
             if show {
                 platform::show_window(hwnd);
             }
@@ -742,11 +751,25 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
                 ctx.request_repaint();
             }
             if quit {
-                break;
+                // The frame normally closes the window within milliseconds.
+                // Should it never come (no paint message reaches the window),
+                // the worker is already stopped and the preferences saved, so
+                // ending the process is the right outcome, not a zombie that
+                // only Task Manager can remove.
+                ctx.request_repaint();
+                std::thread::sleep(QUIT_GRACE);
+                if let Ok(core) = core.lock() {
+                    core.log("The window did not close after the quit request; exiting directly.");
+                }
+                std::process::exit(0);
             }
         })
         .expect("poller thread");
 }
+
+/// How long the poller gives the GUI to close the window after a quit
+/// request before it ends the process itself.
+const QUIT_GRACE: Duration = Duration::from_secs(3);
 
 pub fn version_line() -> String {
     format!(
@@ -892,7 +915,9 @@ mod tests {
         // A directory at settings.json reliably refuses replacement on both OSes.
         let settings = dir.path().join("settings.json");
         std::fs::create_dir(&settings).unwrap();
-        let old = std::env::var_os(paths::DATA_DIR_ENV);
+        // Restored by the guard even when an assertion below fails, so a
+        // failure cannot point later tests at a deleted directory.
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
         std::env::set_var(paths::DATA_DIR_ENV, dir.path());
         let mut core = isolated(dir.path());
         core.preview = false;
@@ -904,11 +929,6 @@ mod tests {
             assert!(core.operation.is_none());
             assert_eq!(core.generation, 0);
             assert!(core.status.starts_with("Could not save preferences:"));
-        }
-        if let Some(old) = old {
-            std::env::set_var(paths::DATA_DIR_ENV, old);
-        } else {
-            std::env::remove_var(paths::DATA_DIR_ENV);
         }
     }
 

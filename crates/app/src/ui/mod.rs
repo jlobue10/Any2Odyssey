@@ -148,8 +148,13 @@ impl App {
                 // conflict (or a desktop without global shortcuts) is reported
                 // but does not block the automatic start.
                 if !c.hotkeys_ok {
-                    c.status = "Global shortcuts Ctrl+Alt+F8/F9/F10 are unavailable; another app may hold them. The buttons, menus and tray still work.".into();
                     c.log("Global shortcuts unavailable: not all of Ctrl+Alt+F8/F9/F10 could be registered.");
+                    // An unreadable settings.json (or a missing tray icon)
+                    // already owns the status line; that message tells the
+                    // user what to do and must not be replaced.
+                    if c.status == "Ready" {
+                        c.status = "Global shortcuts Ctrl+Alt+F8/F9/F10 are unavailable; another app may hold them. The buttons, menus and tray still work.".into();
+                    }
                 }
                 if c.prefs.auto_convert || c.start_requested {
                     c.start_conversion();

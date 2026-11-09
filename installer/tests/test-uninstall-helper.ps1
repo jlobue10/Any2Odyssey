@@ -4,6 +4,7 @@ $installer=Split-Path -Parent $PSScriptRoot
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-helper-test-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $helper=Join-Path $root 'UninstallWorker.ps1'
+$owner=Join-Path $root 'UninstallWorker.owner'
 $worker=Join-Path $root 'Any2OdysseyWorker.exe'
 $sentinel=Join-Path $root 'ConversionWrapper.dll'
 $userExe=Join-Path $root 'UserWritable.exe'
@@ -22,15 +23,16 @@ try{
   Assert $failed "Reject unsafe helper context: $field"
  }
  Set-Content -LiteralPath $worker -Value 'owned worker'
+ Set-Content -LiteralPath $owner -Value 'S-1-5-21-1'
  Set-Content -LiteralPath $sentinel -Value 'Samsung file'
  Set-Content -LiteralPath $userExe -Value 'must not run or be deleted by elevated helper'
  $script:running=$true
  function Get-Process {param($Name,$ErrorAction)if($script:running){return [pscustomobject]@{Id=1}}}
  $failed=$false;try{Remove-Any2OdysseyInstalledWorker -HelperPath $helper}catch{$failed=$true}
- Assert ($failed -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'Running app blocks deletion without killing processes'
+ Assert ($failed -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $owner)) 'Running app blocks deletion without killing processes'
  $script:running=$false
  Remove-Any2OdysseyInstalledWorker -HelperPath $helper
- Assert (-not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper)) 'Helper removes only the owned worker and itself'
+ Assert (-not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $owner)) 'Helper removes only the owned worker, itself and its owner marker'
  Assert ((Test-Path -LiteralPath $sentinel) -and (Test-Path -LiteralPath $userExe)) 'Samsung and per-user files remain untouched'
  $errors=$null;$tokens=$null;$uninstallAst=$null
  foreach($file in @('Uninstall.ps1','UninstallWorker.ps1','install.ps1','InstallSupport.ps1','Install-Launcher.ps1')){

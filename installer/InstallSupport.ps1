@@ -1,4 +1,12 @@
 # Shared, independently testable installer operations. No work is done when dot-sourced.
+function Get-Any2OdysseyRecordedVersion {
+ param([string]$Path)
+ # version.json / install-result.json: a damaged record (truncated JSON, empty file) counts as
+ # absent so the next source decides, instead of blocking every install and uninstall.
+ if(-not (Test-Path -LiteralPath $Path -PathType Leaf)){return $null}
+ try{$record=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json;if($record.Version){return [version]$record.Version}}catch{}
+ return $null
+}
 function Get-Any2OdysseyInstalledVersion {
  param([string]$AppPath,[string]$Registration,[string]$DataPath)
  $path=Join-Path $AppPath 'Any2Odyssey.exe'
@@ -8,7 +16,8 @@ function Get-Any2OdysseyInstalledVersion {
   $text=if($info.FileVersion){$info.FileVersion}elseif($info.ProductVersion){$info.ProductVersion}else{$null}
   if($text -and $text -match '^\d+(\.\d+){1,3}'){return [pscustomobject]@{Version=[version]$Matches[0];Source=$path}}
   $record=Join-Path $AppPath 'version.json'
-  if(Test-Path -LiteralPath $record){$json=Get-Content -LiteralPath $record -Raw | ConvertFrom-Json;if($json.Version){return [pscustomobject]@{Version=[version]$json.Version;Source=$record}}}
+  $recorded=Get-Any2OdysseyRecordedVersion -Path $record
+  if($recorded){return [pscustomobject]@{Version=$recorded;Source=$record}}
   throw "Cannot read the installed executable version at $path. Repair or inspect that installation before continuing."
  }
  if($Registration -and (Test-Path -LiteralPath $Registration)){
@@ -16,7 +25,8 @@ function Get-Any2OdysseyInstalledVersion {
   if($value){return [pscustomobject]@{Version=[version]$value;Source=$Registration}}
  }
  foreach($path in @((Join-Path $AppPath 'version.json'),(Join-Path $DataPath 'install-result.json'))){
-  if(Test-Path -LiteralPath $path){$record=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json;if($record.Version){return [pscustomobject]@{Version=[version]$record.Version;Source=$path}}}
+  $recorded=Get-Any2OdysseyRecordedVersion -Path $path
+  if($recorded){return [pscustomobject]@{Version=$recorded;Source=$path}}
  }
  return $null
 }

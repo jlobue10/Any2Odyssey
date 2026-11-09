@@ -48,7 +48,7 @@ scripts/         packaging
 | `--self-test` geometry | `core::geometry` tests | done |
 | `tests/SliderValidation.cs` | `core::slider` tests | done |
 | `tests/RecoveryValidation.cs` | `core::supervisor` tests | done |
-| `tests/UiValidation.cs` (layout at 980×780, stacking, scrolling) | `app` layout tests | done (verified on the G90XF, 0.8.0) |
+| `tests/UiValidation.cs` (layout at 980×780, stacking, scrolling) | `--screenshot` previews (no automated layout test) | replaced (layout verified by eye on the G90XF, 0.8.0) |
 | `--test-capture-exclusion`, `--test-offscreen` | `windows::diagnostics` (same flags) | done (verified on the G90XF, 0.8.0) |
 
 ## Python (portable edition)

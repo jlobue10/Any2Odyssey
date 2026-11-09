@@ -36,7 +36,8 @@ $archive=[IO.Compression.ZipFile]::OpenRead($zip)
 try{$bad=@($archive.Entries | Where-Object { $_.FullName -like '*\*' })}finally{$archive.Dispose()}
 if($bad.Count -gt 0){Remove-Item -LiteralPath $zip;throw "The archive has backslash entry names ($($bad[0].FullName)); package with PowerShell 7 (pwsh)."}
 $hash=(Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText(($zip+'.sha256'),$hash+'  '+[IO.Path]::GetFileName($zip)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
+# LF, not [Environment]::NewLine: a CRLF line makes `sha256sum -c` on Linux/macOS report an improperly formatted line.
+[IO.File]::WriteAllText(($zip+'.sha256'),$hash+'  '+[IO.Path]::GetFileName($zip)+"`n",[Text.UTF8Encoding]::new($false))
 Remove-Item -LiteralPath $stage -Recurse
 Write-Host $zip
 Write-Host ('SHA256 '+$hash)

@@ -4,6 +4,7 @@ description = "Platform-neutral core of Any2Odyssey: preferences, geometry, ster
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

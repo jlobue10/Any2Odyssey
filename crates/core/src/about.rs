@@ -16,7 +16,8 @@ pub const CREDITS: &str = "Any2Odyssey is a Rust reimplementation of Any2Odd 0.7
 released under the GNU General Public License version 3.0 only. \
 Copyright (C) 2026 Jonathan LoBue. \
 The 3D conversion itself is performed by Samsung's Odyssey 3D Hub engine, which is a separate product and not part of this program. \
-The icon and wordmark use the Libre Baskerville typeface (SIL Open Font License 1.1).";
+The interface uses Libre Baskerville (display face, icon and wordmark) and Fira Sans (text), both under the SIL Open Font License 1.1; \
+the fonts egui bundles are listed in THIRD-PARTY-LICENSES.md.";
 
 /// What the installer writes. Field names are the installer's PascalCase;
 /// fields it does not know are ignored and missing ones stay empty.
@@ -272,9 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn gather_uses_the_package_version() {
+    fn gather_reports_the_package_version_and_names_both_typefaces() {
         let info = AboutInfo::gather(None);
         assert_eq!(info.version, crate::VERSION);
         assert!(info.platform.contains(std::env::consts::OS));
+        assert!(CREDITS.contains("Libre Baskerville") && CREDITS.contains("Fira Sans"));
     }
 }

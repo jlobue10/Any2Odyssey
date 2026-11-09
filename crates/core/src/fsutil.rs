@@ -97,10 +97,9 @@ pub fn remove_stale_temporaries(dir: &Path) -> usize {
     entries
         .flatten()
         .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(".any2odyssey-"))
+            entry.file_name().to_str().is_some_and(|name| {
+                name.starts_with(".any2odyssey-") || name.starts_with(".overlay-backup-")
+            })
         })
         .filter(|entry| {
             entry

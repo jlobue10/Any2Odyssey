@@ -4,6 +4,7 @@ description = "Continuous desktop 3D for the Samsung Odyssey G90XF: controls, tr
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

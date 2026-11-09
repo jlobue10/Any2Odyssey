@@ -40,6 +40,18 @@ exit $LASTEXITCODE
 $wrapper=Join-Path $root 'simulate-elevation.ps1';Set-Content -LiteralPath $wrapper -Value $stub -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated elevated file-copy failure')) 'Elevated installation error is relayed to the original console'
+# A declined UAC prompt surfaces from Start-Process -Verb RunAs as InvalidOperationException.
+$declined=@'
+function Start-Process {
+ param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
+ throw (New-Object InvalidOperationException 'This command cannot be run due to the error: The operation was canceled by the user.')
+}
+& (Join-Path $PSScriptRoot 'Install-Launcher.ps1')
+exit $LASTEXITCODE
+'@
+$declinedWrapper=Join-Path $root 'simulate-declined.ps1';Set-Content -LiteralPath $declinedWrapper -Value $declined -Encoding UTF8
+$output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $declinedWrapper 2>&1 | Out-String
+Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Elevation was declined. Nothing was installed.') -and -not (Test-Path -LiteralPath (Join-Path $root 'marker.txt'))) 'Declined elevation stops setup with a plain message'
 $passed=$true
 }finally{if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}}
 
