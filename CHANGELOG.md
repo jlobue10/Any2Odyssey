@@ -2,7 +2,7 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## 0.8.5 (unreleased)
+## 0.8.5 (2026-11-09)
 
 Seventh audit round: a fresh read of 0.8.4 found two regressions introduced by the sixth round and a gap in its watchdog. Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.4 ones below.
 
@@ -15,7 +15,7 @@ Controls:
 
 Worker (Windows):
 
-- The 0.8.4 watchdog waited only on the controls process and the stop event, so a stop the worker decided on itself (ready timeout, overlay or capture error, engine closed) called the engine's `Stop` with no backstop; if that call never returned, the worker never exited and recovery never ran until *Turn off* was pressed. The worker now signals the stop event itself before stopping the engine, so the same 7-second grace applies to every stop. (#43)
+- The 0.8.4 watchdog waited only on the controls process and the stop event, so a stop the worker decided on itself (ready timeout, overlay or capture error, engine closed) called the engine's `Stop` with no backstop; if that call never returned, the worker never exited and recovery never ran until *Turn off* was pressed. The worker now signals the stop event itself before every call into the engine's `Stop`, so the same 7-second grace applies to every stop, including the two paths outside the normal shutdown that the first fix missed. (#43, #48)
 - A stop that arrives while prerequisites run, while the capture is being built (up to 10 seconds) or just before `Start` is honoured without starting the model. The watchdog log line names which handle fired and a failed wait is logged; the ready timeout, a failed prerequisite check and a second renderer instance leave a line in `companion.log`. The controls pass their resolved data folder to the worker, which completes the 0.8.4 `ANY2ODYSSEY_DATA_DIR` change. (#43)
 
 Installer:
