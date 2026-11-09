@@ -647,8 +647,17 @@ impl Core {
                 }
             }
             (true, Some(code)) => {
+                // The worker's error paths write their reason to
+                // worker-status.json before exiting. Read it while the pid
+                // still matches, so the status line carries it instead of
+                // only a number; the log keeps the line as well.
+                let reason = self.worker.as_ref().and_then(|w| read_status(w.pid()));
                 self.worker = None;
-                self.status = self.supervisor.worker_exited(code, now);
+                self.status = self.supervisor.worker_exited(code, reason.as_deref(), now);
+                self.log(&format!(
+                    "Renderer exited with code {code}: {}",
+                    self.status
+                ));
             }
             (true, None) => {
                 if let Some(worker) = &self.worker {
@@ -1073,7 +1082,7 @@ mod tests {
             let now = Instant::now();
             // The worker dies, recovery queues a retry, the retry fires and
             // its launch is validating when the user unchecks recovery.
-            core.status = core.supervisor.worker_exited(1, now);
+            core.status = core.supervisor.worker_exited(1, None, now);
             assert!(core.supervisor.retry_pending());
             assert_eq!(
                 core.supervisor.tick_without_worker(now + RECOVERY_DELAY),
