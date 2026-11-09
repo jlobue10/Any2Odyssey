@@ -69,15 +69,28 @@ pub fn update_file(
         if let Some(parent) = backup.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        // Back up exactly the snapshot we parsed, without replacing a prior backup.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(backup)
-        {
-            Ok(mut file) => file.write_all(&bytes)?,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
+        // Publish only a complete snapshot. A failed write must not occupy the
+        // one-time backup name and make the next launch discard the original.
+        if !backup.try_exists()? {
+            let parent = backup
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let mut pending = tempfile::Builder::new()
+                .prefix(".overlay-backup-")
+                .tempfile_in(parent)?;
+            pending.write_all(&bytes)?;
+            match pending.persist_noclobber(backup) {
+                Ok(_) => {}
+                Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.error),
+            }
+        }
+        if !backup.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Samsung overlay backup is not a regular file; original left unchanged",
+            ));
         }
     }
     apply(&mut doc, side_by_side, depth, popout);
@@ -143,6 +156,18 @@ mod tests {
         assert!(update_file(&path, &backup, false, 0.9, 0.0).is_err());
         assert!(path.is_dir());
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn backup_directory_does_not_count_as_a_preserved_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        let original = br#"{"Other":"preserve this"}"#;
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(&backup).unwrap();
+        assert!(update_file(&path, &backup, false, 0.9, 0.0).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[test]
