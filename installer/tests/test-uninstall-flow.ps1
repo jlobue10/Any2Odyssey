@@ -43,6 +43,10 @@ function New-Fixture {
 $launches=New-Object 'System.Collections.Generic.List[object]'
 $helperExitCode=0
 $declineElevation=$false
+# Notes the uninstaller prints are recorded here: capturing the information stream with 6>&1
+# behaves differently under Windows PowerShell 5.1, a function shadowing the cmdlet does not.
+$notes=New-Object 'System.Collections.Generic.List[string]'
+function Write-Host {param([Parameter(ValueFromRemainingArguments=$true)]$Object,$ForegroundColor,$BackgroundColor,[switch]$NoNewline)$text=($Object -join ' ');$notes.Add($text);Microsoft.PowerShell.Utility\Write-Host $text}
 function Get-Process {param($Name,$ErrorAction)return @()}
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
@@ -104,11 +108,11 @@ try{
  # Shared PC: another account's full installation owns the helper; a controls-only uninstall leaves it.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner 'S-1-5-21-1-2-3-1001'
- $output=& (Join-Path $app 'Uninstall.ps1') 6>&1 | Out-String
+ $notes.Clear();& (Join-Path $app 'Uninstall.ps1')
  Assert ($launches.Count -eq 0) 'Controls-only uninstall never elevates for a helper owned by another account'
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'Controls removed while another account owns the helper'
  Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $ownerFile)) 'Another account''s helper, worker and owner marker are left alone'
- Assert ($output.Contains('belong to another account or an older release')) 'The left-alone helper is explained to the user'
+ Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The left-alone helper is explained to the user'
 
  # A helper without an owner marker (installed before the marker existed) is not assumed to be ours.
  $launches.Clear()
@@ -120,8 +124,8 @@ try{
  # A truncated version.json must not block the uninstall; the worker and helper decide.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2",'
- $output=& (Join-Path $app 'Uninstall.ps1') 6>&1 | Out-String
- Assert ($output.Contains('version.json) is unreadable')) 'Damaged installation record is reported'
+ $notes.Clear();& (Join-Path $app 'Uninstall.ps1')
+ Assert (($notes -join [char]10).Contains('version.json) is unreadable')) 'Damaged installation record is reported'
  Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Damaged record falls back to the files present and runs the helper'
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $registration)) 'Uninstall completes despite the damaged record'
 
