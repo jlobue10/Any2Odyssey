@@ -91,7 +91,9 @@ impl Preferences {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e),
         };
-        let mut prefs: Self = serde_json::from_str(&text)
+        // A file hand-edited in Notepad ("UTF-8 with BOM") or written by
+        // Windows PowerShell must not count as damaged.
+        let mut prefs: Self = serde_json::from_str(crate::fsutil::strip_utf8_bom_str(&text))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         prefs.sanitize();
         Ok(prefs)
@@ -136,6 +138,7 @@ impl Preferences {
                     .suffix(".json")
                     .tempfile_in(parent)?;
                 std::io::copy(&mut original, &mut backup)?;
+                backup.as_file().sync_all()?;
                 Some(backup.keep().map_err(|e| e.error)?.1)
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
@@ -159,7 +162,7 @@ impl UiSettings {
     pub fn load_from(path: &Path) -> UiSettings {
         std::fs::read_to_string(path)
             .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+            .and_then(|t| serde_json::from_str(crate::fsutil::strip_utf8_bom_str(&t)).ok())
             .unwrap_or_default()
     }
     pub fn load() -> UiSettings {
@@ -218,6 +221,12 @@ mod tests {
         assert_eq!((p.depth, p.popout), (2.0, -1.0));
         std::fs::write(&path, "not json").unwrap();
         assert!(Preferences::load_from(&path).is_err());
+        std::fs::write(&path, "\u{FEFF}{\"Mode\":\"Window\"}").unwrap();
+        assert_eq!(
+            Preferences::load_from(&path).unwrap().mode,
+            CaptureMode::Window,
+            "a byte-order mark is not damage"
+        );
         assert_eq!(
             Preferences::load_from(&dir.path().join("missing.json")).unwrap(),
             Preferences::default()
@@ -286,5 +295,7 @@ mod tests {
         // Files from earlier versions have no check time.
         std::fs::write(&path, "{\"DarkMode\": false}").unwrap();
         assert_eq!(UiSettings::load_from(&path).last_update_check, None);
+        std::fs::write(&path, "\u{FEFF}{\"DarkMode\": true}").unwrap();
+        assert!(UiSettings::load_from(&path).dark_mode);
     }
 }

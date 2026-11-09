@@ -46,6 +46,18 @@ fn is_transient_replace_error(e: &io::Error) -> bool {
             || matches!(e.raw_os_error(), Some(5) | Some(32)))
 }
 
+/// `bytes` without a leading UTF-8 byte-order mark. Notepad's "UTF-8 with BOM"
+/// and Windows PowerShell 5.1's `-Encoding UTF8` both write one, and
+/// `serde_json` refuses to parse it.
+pub fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
+}
+
+/// [`strip_utf8_bom`] for text.
+pub fn strip_utf8_bom_str(text: &str) -> &str {
+    text.strip_prefix('\u{FEFF}').unwrap_or(text)
+}
+
 /// Serialize `value` as pretty JSON and write it atomically.
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
@@ -78,41 +90,76 @@ pub fn tail(path: &Path, chars: u64) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn atomic_write_replaces_existing_file_and_leaves_no_temp() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("file.json");
-        write_atomic(&path, b"one").unwrap();
-        write_atomic(&path, b"two").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
-        assert!(!dir.path().join("nested").join("file.json.tmp").exists());
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]
-    fn predictable_temp_file_is_not_touched() {
+    fn atomic_write_replaces_existing_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        let path = nested.join("file.json");
+        write_atomic(&path, b"one").unwrap();
+        write_atomic(&path, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+        // Whatever name the temporary had, nothing but the published file remains.
+        assert_eq!(entries(&nested), ["file.json"]);
+    }
+
+    #[test]
+    fn temporaries_are_unique_per_writer() {
+        // Two writers of the same path must never share a temporary name, so an
+        // interrupted writer cannot leave a file the next one appends to or
+        // publishes. The exclusive-create temp file is what provides that; a
+        // fixed `<name>.tmp` sibling would make this test fail.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        let old_temp = dir.path().join("settings.json.tmp");
-        fs::write(&old_temp, b"belongs to someone else").unwrap();
+        let parent = dir.path();
+        let first = tempfile::Builder::new()
+            .prefix(".any2odyssey-")
+            .tempfile_in(parent)
+            .unwrap();
         write_atomic(&path, b"new settings").unwrap();
-        assert_eq!(fs::read(&old_temp).unwrap(), b"belongs to someone else");
+        assert!(
+            first.path().exists(),
+            "another writer's temporary is untouched"
+        );
         assert_eq!(fs::read(&path).unwrap(), b"new settings");
+        assert_eq!(entries(parent).len(), 2);
     }
 
     #[cfg(unix)]
     #[test]
-    fn predictable_temp_symlink_cannot_clobber_another_file() {
+    fn a_symlink_at_the_destination_is_replaced_not_followed() {
+        // A planted link at the published path must not redirect the write into
+        // another file: the rename replaces the directory entry itself.
         let dir = tempfile::tempdir().unwrap();
         let victim = dir.path().join("unrelated");
         fs::write(&victim, b"preserve me").unwrap();
         let path = dir.path().join("settings.json");
-        std::os::unix::fs::symlink(&victim, dir.path().join("settings.json.tmp")).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
         write_atomic(&path, b"new settings").unwrap();
-        assert_eq!(fs::read(victim).unwrap(), b"preserve me");
+        assert_eq!(fs::read(&victim).unwrap(), b"preserve me");
+        assert_eq!(fs::read(&path).unwrap(), b"new settings");
         assert!(!fs::symlink_metadata(&path)
             .unwrap()
             .file_type()
             .is_symlink());
+        assert_eq!(entries(dir.path()), ["settings.json", "unrelated"]);
+    }
+
+    #[test]
+    fn byte_order_marks_are_stripped_once() {
+        assert_eq!(strip_utf8_bom(b"\xEF\xBB\xBF{}"), b"{}");
+        assert_eq!(strip_utf8_bom(b"{}"), b"{}");
+        assert_eq!(strip_utf8_bom(b"\xEF\xBB\xBF\xEF\xBB\xBF"), b"\xEF\xBB\xBF");
+        assert_eq!(strip_utf8_bom_str("\u{FEFF}{}"), "{}");
+        assert_eq!(strip_utf8_bom_str("{}"), "{}");
     }
 
     #[test]

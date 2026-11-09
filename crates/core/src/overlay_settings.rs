@@ -50,7 +50,9 @@ pub fn update_file(
         Err(e) => return Err(e),
     };
     let mut doc = match original.as_deref() {
-        Some(bytes) => serde_json::from_slice::<Value>(bytes)
+        // Windows tools often save JSON with a UTF-8 byte-order mark; serde_json
+        // rejects it, which would read as "Samsung's file is malformed".
+        Some(bytes) => serde_json::from_slice::<Value>(crate::fsutil::strip_utf8_bom(bytes))
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         None => Value::Object(Map::new()),
     };
@@ -80,6 +82,10 @@ pub fn update_file(
                 .prefix(".overlay-backup-")
                 .tempfile_in(parent)?;
             pending.write_all(&bytes)?;
+            // The name is claimed once and never repaired: make sure the bytes
+            // reach the disk before the rename does, or a power loss right after
+            // publishing could leave a truncated "original" behind forever.
+            pending.as_file().sync_all()?;
             match pending.persist_noclobber(backup) {
                 Ok(_) => {}
                 Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -168,6 +174,19 @@ mod tests {
         std::fs::create_dir(&backup).unwrap();
         assert!(update_file(&path, &backup, false, 0.9, 0.0).is_err());
         assert_eq!(std::fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn byte_order_mark_is_tolerated_and_the_backup_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        let original = b"\xEF\xBB\xBF{\"StandardVideo\":{\"3D Depth\":\"0.500000\"}}";
+        std::fs::write(&path, original).unwrap();
+        update_file(&path, &backup, false, 0.9, 0.1).unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), original);
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["StandardVideo"]["3D Depth"], "0.900000");
     }
 
     #[test]
