@@ -4,7 +4,8 @@
 //! `worker-status.json` until the parent signals its stop event, exits, or
 //! the engine closes.
 
-use std::sync::atomic::Ordering;
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,8 +16,9 @@ use any2odyssey_core::log::Logger;
 use any2odyssey_core::paths;
 use any2odyssey_core::prefs::{CaptureMode, Preferences};
 use any2odyssey_core::status::{exit_code, WorkerStatus};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, WAIT_EVENT, WAIT_OBJECT_0};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_TIMER,
 };
@@ -28,11 +30,60 @@ use crate::overlay::OverlayController;
 use crate::processes::{current_pid, ParentWatch};
 use crate::win;
 
+/// How long the controls wait for a signalled worker before killing it
+/// (`Worker::stop` in the app crate). The in-process watchdog uses the same
+/// grace: past it the controls would have killed us if they were still there,
+/// so a worker alive after it was either orphaned or is stuck.
+const WATCHDOG_GRACE: Duration = Duration::from_secs(7);
+
 fn report(state: &str) {
     let _ = any2odyssey_core::fsutil::write_json_atomic(
         &paths::worker_status_file(),
         &WorkerStatus::now(state, current_pid()),
     );
+}
+
+/// Backstop for a message loop that cannot reach its own stop checks: an
+/// engine `Stop` that never returns, a wndproc blocked inside the engine, or
+/// a loop starved in some way the deadlines do not cover. The loop normally
+/// notices the stop event or a dead parent within a poll interval and exits
+/// on its own; this thread only acts when `finished` is still clear a full
+/// grace period after either handle was signalled, so a slow but progressing
+/// shutdown under the grace is never cut short. Without it, a click-through
+/// topmost overlay would stay on screen with nothing left to remove it.
+fn spawn_watchdog(
+    parent: ParentWatch,
+    stop: Event,
+    finished: Arc<AtomicBool>,
+    log: Arc<dyn Fn(&str) + Send + Sync>,
+) {
+    let thread_log = log.clone();
+    let spawned = std::thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || {
+            let handles = [parent.handle(), stop.handle()];
+            // SAFETY: the handles are owned by this closure for its whole life
+            // and carry SYNCHRONIZE access. The stop event is manual-reset, so
+            // satisfying this wait does not consume the signal the message
+            // loop polls for.
+            let woken = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+            if woken != WAIT_OBJECT_0 && woken != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                // WAIT_FAILED: nothing to wait on; the loop's own polls stay in charge.
+                return;
+            }
+            std::thread::sleep(WATCHDOG_GRACE);
+            if finished.load(Ordering::Acquire) {
+                return;
+            }
+            thread_log(&format!(
+                "Watchdog: the message loop did not stop within {} s after the controls went away; exiting.",
+                WATCHDOG_GRACE.as_secs()
+            ));
+            std::process::exit(exit_code::RENDERER_ERROR);
+        });
+    if let Err(e) = spawned {
+        log(&format!("Watchdog thread not started: {e}"));
+    }
 }
 
 pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Preferences) -> i32 {
@@ -42,7 +93,20 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
         Arc::new(move |m: &str| l.log(m))
     };
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    match run_inner(event_name, parent_pid, source_hwnd, &prefs, log.clone()) {
+    // Set once `run_inner` has returned on any path: only then have the loop,
+    // the engine's Stop and the surface teardown all completed, which is what
+    // the watchdog must see before it stands down.
+    let finished = Arc::new(AtomicBool::new(false));
+    let result = run_inner(
+        event_name,
+        parent_pid,
+        source_hwnd,
+        &prefs,
+        log.clone(),
+        finished.clone(),
+    );
+    finished.store(true, Ordering::Release);
+    match result {
         Ok(ready) => {
             log("Renderer stopped cleanly.");
             if ready {
@@ -79,6 +143,7 @@ fn run_inner(
     source_hwnd: isize,
     prefs: &Preferences,
     log: Arc<dyn Fn(&str) + Send + Sync>,
+    finished: Arc<AtomicBool>,
 ) -> Result<bool, Exit> {
     let Some(_guard) = InstanceGuard::acquire(ipc::RENDERER_MUTEX)
         .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?
@@ -132,6 +197,13 @@ fn run_inner(
             "Renderer error: the controls process is not running.",
         )
     })?;
+    // Duplicates, so the watchdog's wait never touches a handle this function
+    // is about to close. A missing backstop is logged, not fatal: the loop's
+    // own checks still cover every ordinary stop.
+    match (parent.try_clone(), stop_event.try_clone()) {
+        (Ok(parent), Ok(stop)) => spawn_watchdog(parent, stop, finished, log.clone()),
+        (Err(e), _) | (_, Err(e)) => log(&format!("Watchdog not started: {e}")),
+    }
     let library = EngineLibrary::load()
         .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?;
     let (screen, device_name, _) = win::primary_monitor().ok_or_else(|| {
@@ -184,17 +256,29 @@ fn run_inner(
     library.start(surface.hwnd(), prefs.side_by_side, ENGINE_CORE_HINT);
     let mut started = true;
     let hwnd = surface.hwnd();
-    mirror::set_timer(hwnd, TIMER_POLL, Mirror::poll_interval().as_millis() as u32);
-    mirror::set_timer(hwnd, TIMER_OVERLAY, 100);
+    // An idle loop is woken only by these timers; without them the stop event
+    // and the parent's liveness would go unevaluated between frames.
+    if !mirror::set_timer(hwnd, TIMER_POLL, Mirror::poll_interval().as_millis() as u32)
+        || !mirror::set_timer(hwnd, TIMER_OVERLAY, 100)
+    {
+        library.stop();
+        return Err(fail(
+            exit_code::RENDERER_ERROR,
+            "Renderer error: could not start the poll timer",
+        ));
+    }
 
     let mut ready = false;
-    // Shared, not captured by unique borrow, so the loop can read it while
-    // the shutdown closure is alive.
-    let closing = std::cell::Cell::new(false);
-    let shutdown = |surface: &mut Mirror, started: &mut bool| {
+    // Shared, not captured by unique borrow, so the loop can read them while
+    // the shutdown closure is alive. `failure` holds the exit code of the
+    // first error that stopped the loop; later errors are already ignored.
+    let closing = Cell::new(false);
+    let failure: Cell<Option<i32>> = Cell::new(None);
+    let shutdown = |surface: &mut Mirror, started: &mut bool, code: Option<i32>| {
         if closing.replace(true) {
             return;
         }
+        failure.set(code);
         mirror::kill_timer(hwnd, TIMER_POLL);
         mirror::kill_timer(hwnd, TIMER_OVERLAY);
         mirror::kill_timer(hwnd, TIMER_UPDATE);
@@ -225,7 +309,7 @@ fn run_inner(
         if poll_deadline.due(now) {
             let alive = parent.is_alive();
             if stop_event.is_signaled() || !alive || engine::ENGINE_CLOSED.load(Ordering::Acquire) {
-                shutdown(&mut surface, &mut started);
+                shutdown(&mut surface, &mut started, None);
                 continue;
             }
             if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
@@ -241,15 +325,27 @@ fn run_inner(
             }
             if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
                 report("Conversion did not initialize. See conversion log.");
-                shutdown(&mut surface, &mut started);
+                // Same code a pre-ready stop produced before; the supervisor
+                // treats every exit alike, only the log line distinguishes it.
+                shutdown(
+                    &mut surface,
+                    &mut started,
+                    Some(exit_code::NEVER_BECAME_READY),
+                );
                 continue;
             }
         }
         if overlay_deadline.due(now) {
+            // The engine may close between two polls; re-showing its window
+            // now would race its own teardown.
+            if engine::ENGINE_CLOSED.load(Ordering::Acquire) {
+                shutdown(&mut surface, &mut started, None);
+                continue;
+            }
             if let Err(e) = overlay.tick(restore_event.is_signaled()) {
                 log(&format!("Overlay error: {e}"));
                 report(&e);
-                shutdown(&mut surface, &mut started);
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
         }
@@ -259,7 +355,7 @@ fn run_inner(
                 if let Err(e) = result {
                     log(&format!("Desktop capture failed: {e}"));
                     report(&format!("Desktop capture error: {e}"));
-                    shutdown(&mut surface, &mut started);
+                    shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 }
             }
             continue;
@@ -268,7 +364,7 @@ fn run_inner(
             if let Err(e) = surface.frame_arrived(overlay.capture_safe()) {
                 log(&format!("Desktop capture failed: {e}"));
                 report(&format!("Desktop capture error: {e}"));
-                shutdown(&mut surface, &mut started);
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
             }
             continue;
         }
@@ -279,6 +375,14 @@ fn run_inner(
     }
     if started {
         library.stop();
+    }
+    if let Some(code) = failure.get() {
+        // The reason is already in worker-status.json and the log; a message
+        // here would overwrite it with something less specific.
+        return Err(Exit {
+            code,
+            message: None,
+        });
     }
     Ok(ready)
 }

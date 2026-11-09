@@ -65,7 +65,10 @@ fn configure_dll_search() -> Result<(), String> {
                 if !std::path::Path::new(directory).is_dir() {
                     continue;
                 }
-                let cookie = unsafe { AddDllDirectory(PCWSTR(win::wide(directory).as_ptr())) };
+                // The buffer must outlive the call, and the thread's last error
+                // must be read before any deallocation can overwrite it.
+                let dir = win::wide(directory);
+                let cookie = unsafe { AddDllDirectory(PCWSTR(dir.as_ptr())) };
                 if cookie.is_null() {
                     return Err(format!(
                         "DLL search folder {directory}: {}",
