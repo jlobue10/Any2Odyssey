@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// What is captured and fed to the converter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Default)]
 pub enum CaptureMode {
     /// The whole primary desktop, including wallpaper, icons and menus.
     #[default]
@@ -41,6 +41,45 @@ impl CaptureMode {
     }
     pub fn from_index(i: usize) -> CaptureMode {
         Self::ALL.get(i).copied().unwrap_or_default()
+    }
+}
+
+/// Serialized as the variant name; read back from the name or from Any2Odd's
+/// integer form. Any2Odd is C#, and both Json.NET and System.Text.Json write
+/// enums as their integer value unless told otherwise (`"Mode": 2`); the 0.8.0
+/// hardware import succeeded with a file carrying `"Mode": "Active"`, so the
+/// name form exists in the wild too. Both must load; we always save the name.
+impl<'de> Deserialize<'de> for CaptureMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, Unexpected, Visitor};
+        struct ModeVisitor;
+        impl Visitor<'_> for ModeVisitor {
+            type Value = CaptureMode;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("\"Desktop\", \"Window\", \"Active\" or the index 0, 1 or 2")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<CaptureMode, E> {
+                match v {
+                    "Desktop" => Ok(CaptureMode::Desktop),
+                    "Window" => Ok(CaptureMode::Window),
+                    "Active" => Ok(CaptureMode::Active),
+                    other => Err(E::unknown_variant(other, &["Desktop", "Window", "Active"])),
+                }
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<CaptureMode, E> {
+                usize::try_from(v)
+                    .ok()
+                    .and_then(|i| CaptureMode::ALL.get(i).copied())
+                    .ok_or_else(|| E::invalid_value(Unexpected::Unsigned(v), &self))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<CaptureMode, E> {
+                match u64::try_from(v) {
+                    Ok(v) => self.visit_u64(v),
+                    Err(_) => Err(E::invalid_value(Unexpected::Signed(v), &self)),
+                }
+            }
+        }
+        deserializer.deserialize_any(ModeVisitor)
     }
 }
 
@@ -216,6 +255,45 @@ mod tests {
                 && !p.keep_overlay_on_top
         );
         assert_eq!((p.depth, p.popout), (1.5, -0.25));
+    }
+
+    #[test]
+    fn any2odd_integer_modes_are_accepted_and_saved_as_names() {
+        // Provenance: Any2Odd is C#, and Json.NET and System.Text.Json both
+        // serialize enums as integers by default, so an Any2Odd settings.json
+        // may carry "Mode": 2. The 0.8.0 hardware import succeeded with the
+        // string form ("Mode": "Active"), so both shapes must load.
+        for (json, mode) in [
+            (r#"{"Mode":0}"#, CaptureMode::Desktop),
+            (r#"{"Mode":1}"#, CaptureMode::Window),
+            (r#"{"Mode":2}"#, CaptureMode::Active),
+            (r#"{"Mode":"Window"}"#, CaptureMode::Window),
+        ] {
+            let p: Preferences = serde_json::from_str(json).unwrap();
+            assert_eq!(p.mode, mode, "{json}");
+        }
+        for json in [
+            r#"{"Mode":3}"#,
+            r#"{"Mode":-1}"#,
+            r#"{"Mode":1.5}"#,
+            r#"{"Mode":"2"}"#,
+            r#"{"Mode":null}"#,
+            r#"{"Mode":true}"#,
+            r#"{"Mode":18446744073709551615}"#,
+        ] {
+            assert!(serde_json::from_str::<Preferences>(json).is_err(), "{json}");
+        }
+        // Our own file always carries the name, whatever form was imported.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut imported: Preferences = serde_json::from_str(r#"{"Mode":2}"#).unwrap();
+        imported.save_to(&path).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(json.contains("\"Mode\": \"Active\""), "{json}");
+        assert_eq!(
+            Preferences::load_from(&path).unwrap().mode,
+            CaptureMode::Active
+        );
     }
 
     #[test]
