@@ -29,8 +29,11 @@ try{
   $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -RunInstall -ResultFile "'+$report+'" -ExpectedUserSid "'+$identity.User.Value+'"'
   try{$process=Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru}
   catch [InvalidOperationException]{
-   # Declining the UAC prompt surfaces as this exception; the elevated step never started.
-   throw 'Elevation was declined. Nothing was installed.'
+   # A declined UAC prompt surfaces as InvalidOperationException wrapping Win32Exception 1223
+   # (ERROR_CANCELLED); the elevated step never started. Any other launch failure keeps its own message.
+   $inner=$_.Exception.InnerException
+   if($inner -is [ComponentModel.Win32Exception] -and $inner.NativeErrorCode -eq 1223){throw 'Elevation was declined. Nothing was installed.'}
+   throw
   }
   if(-not (Test-Path -LiteralPath $report)){throw "Installer exited with code $($process.ExitCode) without a result. Retry setup and check whether security software interrupted PowerShell, or extract the package to a local folder: an elevated process cannot see mapped network drives."}
   $result=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json

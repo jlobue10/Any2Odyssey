@@ -40,11 +40,12 @@ exit $LASTEXITCODE
 $wrapper=Join-Path $root 'simulate-elevation.ps1';Set-Content -LiteralPath $wrapper -Value $stub -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated elevated file-copy failure')) 'Elevated installation error is relayed to the original console'
-# A declined UAC prompt surfaces from Start-Process -Verb RunAs as InvalidOperationException.
+# A declined UAC prompt surfaces from Start-Process -Verb RunAs as InvalidOperationException wrapping
+# Win32Exception 1223 (ERROR_CANCELLED); the stub throws that exact shape.
 $declined=@'
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
- throw (New-Object InvalidOperationException 'This command cannot be run due to the error: The operation was canceled by the user.')
+ throw (New-Object InvalidOperationException -ArgumentList 'This command cannot be run due to the error: The operation was canceled by the user.',(New-Object ComponentModel.Win32Exception 1223))
 }
 & (Join-Path $PSScriptRoot 'Install-Launcher.ps1')
 exit $LASTEXITCODE
@@ -52,6 +53,18 @@ exit $LASTEXITCODE
 $declinedWrapper=Join-Path $root 'simulate-declined.ps1';Set-Content -LiteralPath $declinedWrapper -Value $declined -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $declinedWrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Elevation was declined. Nothing was installed.') -and -not (Test-Path -LiteralPath (Join-Path $root 'marker.txt'))) 'Declined elevation stops setup with a plain message'
+# Any other launch failure (here Win32 error 2, file not found) must keep its own message.
+$otherFailure=@'
+function Start-Process {
+ param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
+ throw (New-Object InvalidOperationException -ArgumentList 'This command cannot be run due to the error: simulated launch failure.',(New-Object ComponentModel.Win32Exception 2))
+}
+& (Join-Path $PSScriptRoot 'Install-Launcher.ps1')
+exit $LASTEXITCODE
+'@
+$otherWrapper=Join-Path $root 'simulate-launch-failure.ps1';Set-Content -LiteralPath $otherWrapper -Value $otherFailure -Encoding UTF8
+$output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $otherWrapper 2>&1 | Out-String
+Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Installation did not complete: This command cannot be run due to the error: simulated launch failure.') -and -not $output.Contains('Elevation was declined')) 'A launch failure other than a declined prompt is not reported as declined'
 $passed=$true
 }finally{if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}}
 

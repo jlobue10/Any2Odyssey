@@ -42,7 +42,8 @@ function New-Fixture {
 # (the uninstaller is invoked from this script), so no $script: or $global: state is needed.
 $launches=New-Object 'System.Collections.Generic.List[object]'
 $helperExitCode=0
-$declineElevation=$false
+# '' (helper runs), 'declined' (UAC prompt cancelled: Win32 error 1223) or 'other' (any other launch failure).
+$launchFailure=''
 # Notes the uninstaller prints are recorded here: capturing the information stream with 6>&1
 # behaves differently under Windows PowerShell 5.1, a function shadowing the cmdlet does not.
 $notes=New-Object 'System.Collections.Generic.List[string]'
@@ -51,8 +52,9 @@ function Get-Process {param($Name,$ErrorAction)return @()}
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
  $launches.Add([pscustomobject]@{FilePath=$FilePath;ArgumentList=$ArgumentList;Verb=$Verb;Wait=[bool]$Wait})
- # A declined UAC prompt surfaces from Start-Process -Verb RunAs as this exception type.
- if($declineElevation){throw (New-Object InvalidOperationException 'This command cannot be run due to the error: The operation was canceled by the user.')}
+ # A declined UAC prompt surfaces from Start-Process -Verb RunAs as InvalidOperationException wrapping Win32Exception 1223.
+ if($launchFailure -eq 'declined'){throw (New-Object InvalidOperationException -ArgumentList 'This command cannot be run due to the error: The operation was canceled by the user.',(New-Object ComponentModel.Win32Exception 1223))}
+ if($launchFailure -eq 'other'){throw (New-Object InvalidOperationException -ArgumentList 'This command cannot be run due to the error: simulated launch failure.',(New-Object ComponentModel.Win32Exception 2))}
  if($helperExitCode -eq 0){
   # Stand in for UninstallWorker.ps1: it removes the fixed worker path, itself and its owner marker.
   Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
@@ -90,12 +92,19 @@ try{
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and (Test-Path -LiteralPath $worker)) 'Helper failure leaves per-user files, shortcuts, registration and worker in place'
 
  $launches.Clear()
- $helperExitCode=0;$declineElevation=$true
+ $helperExitCode=0;$launchFailure='declined'
  New-Fixture -Elevated $false
  $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('Elevation was declined')}
  Assert $failed 'Declined UAC prompt stops the uninstall with a plain message'
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'Declined elevation leaves everything in place'
- $declineElevation=$false
+
+ $launches.Clear()
+ $launchFailure='other'
+ New-Fixture -Elevated $false
+ $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('simulated launch failure') -and -not $_.Exception.Message.Contains('Elevation was declined')}
+ Assert $failed 'A launch failure other than a declined prompt keeps its own message'
+ Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'A failed helper launch leaves everything in place'
+ $launchFailure=''
 
  # Shared PC: another account's full installation owns the helper; a controls-only uninstall leaves it.
  $launches.Clear()

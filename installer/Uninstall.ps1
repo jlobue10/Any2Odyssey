@@ -60,8 +60,11 @@ if($needsHelper){
  if(-not $alreadyElevated){$launch.Verb='RunAs'}
  try{$removal=Start-Process @launch}
  catch [InvalidOperationException]{
-  # Declining the UAC prompt surfaces as this exception; nothing has been removed yet.
-  throw 'Elevation was declined. The conversion worker needs administrator approval to be removed; no files were changed.'
+  # A declined UAC prompt surfaces as InvalidOperationException wrapping Win32Exception 1223
+  # (ERROR_CANCELLED); nothing has been removed yet. Any other launch failure keeps its own message.
+  $inner=$_.Exception.InnerException
+  if($inner -is [ComponentModel.Win32Exception] -and $inner.NativeErrorCode -eq 1223){throw 'Elevation was declined. The conversion worker needs administrator approval to be removed; no files were changed.'}
+  throw
  }
  if($removal.ExitCode -ne 0){throw 'Worker removal did not complete. No per-user installation files were removed. Retry using the same Windows account.'}
 }
