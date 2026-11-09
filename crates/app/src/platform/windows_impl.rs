@@ -11,7 +11,7 @@ use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 pub use any2odyssey_windows::ipc::ControlEvents;
@@ -176,26 +176,53 @@ impl Worker {
     }
 }
 
+/// `WS_EX_TOOLWINDOW`: no taskbar button and no Alt+Tab entry.
+const WS_EX_TOOLWINDOW_BIT: isize = 0x0000_0080;
+
 pub fn show_window(hwnd: isize) {
     if hwnd == 0 {
         return;
     }
     let h = HWND(hwnd as *mut _);
     unsafe {
+        // The taskbar re-reads the extended style only across a hide/show,
+        // so a window hidden by `hide_window` gets its button back here.
+        let style = win::ex_style(h);
+        if style & WS_EX_TOOLWINDOW_BIT != 0 {
+            let _ = ShowWindow(h, SW_HIDE);
+            win::set_ex_style(h, style & !WS_EX_TOOLWINDOW_BIT);
+        }
         let _ = ShowWindow(h, SW_SHOW);
         let _ = ShowWindow(h, SW_RESTORE);
         let _ = SetForegroundWindow(h);
     }
 }
 
+/// Take the controls off the screen, the taskbar and Alt+Tab while keeping
+/// them a *visible* window for Win32: eframe runs a frame only from
+/// `WM_PAINT`, which a window hidden with `SW_HIDE` never receives, so with
+/// `SW_HIDE` the tray menu, a hotkey toggle and above all the deferred Quit
+/// would wait for a frame that never came (0.8.4 hung on Quit from the tray).
+/// A minimized tool window gets its paint messages and shows nothing.
 pub fn hide_window(hwnd: isize) {
-    if hwnd != 0 {
-        let _ = unsafe { ShowWindow(HWND(hwnd as *mut _), SW_HIDE) };
+    if hwnd == 0 {
+        return;
+    }
+    let h = HWND(hwnd as *mut _);
+    unsafe {
+        let _ = ShowWindow(h, SW_HIDE);
+        win::set_ex_style(h, win::ex_style(h) | WS_EX_TOOLWINDOW_BIT);
+        let _ = ShowWindow(h, SW_SHOWMINNOACTIVE);
     }
 }
 
 pub fn open_path(path: &Path) {
-    let _ = open::that_detached(path);
+    // `open` waits up to 250 ms for its launcher; callers hold the shared
+    // state or the GUI frame, so do that off their thread.
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = open::that_detached(path);
+    });
 }
 
 pub fn install_jump_list() {
