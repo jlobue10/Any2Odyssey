@@ -119,6 +119,19 @@ fn pixel(pixels: &[u8], width: i32, x: i32, y: i32) -> [u8; 3] {
     [pixels[i + 2], pixels[i + 1], pixels[i]] // BGRA -> RGB
 }
 
+/// `pixel` for error messages: a buffer that never received a frame (or a
+/// short one) reads as "no frame" instead of indexing out of bounds.
+fn describe_pixel(pixels: &[u8], width: i32, height: i32, x: i32, y: i32) -> String {
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return "no frame".to_owned();
+    }
+    let end = ((y * width + x) * 4) as usize + 4;
+    if pixels.len() < (width * height * 4) as usize || pixels.len() < end {
+        return "no frame".to_owned();
+    }
+    format!("{:?}", pixel(pixels, width, x, y))
+}
+
 /// Pump messages for roughly `millis`, then return.
 fn pump(millis: u64) {
     let until = Instant::now() + std::time::Duration::from_millis(millis);
@@ -198,9 +211,9 @@ pub fn test_capture_exclusion() -> i32 {
                 }
             }
             Err(format!(
-                "Stage {stage} failed: left={:?} right={:?} frames={}",
-                pixel(pixels, bounds.width, 20, 40),
-                pixel(pixels, bounds.width, 120, 40),
+                "Stage {stage} failed: left={} right={} frames={}",
+                describe_pixel(pixels, bounds.width, bounds.height, 20, 40),
+                describe_pixel(pixels, bounds.width, bounds.height, 120, 40),
                 capture.frames
             ))
         };
@@ -359,8 +372,8 @@ pub fn test_offscreen() -> i32 {
             }
             if !ok {
                 return Err(format!(
-                    "Offscreen surface did not deliver fresh pixels at stage {stage}; pixel {:?}",
-                    pixel(&pixels, 80, 40, 40)
+                    "Offscreen surface did not deliver fresh pixels at stage {stage}; pixel {}",
+                    describe_pixel(&pixels, 80, 80, 40, 40)
                 ));
             }
         }
@@ -384,4 +397,20 @@ pub fn test_offscreen() -> i32 {
 #[allow(dead_code)]
 fn _unused(_: HWND, _: &MSG) {
     let _ = (GetMessageW, WM_TIMER, set_timer, kill_timer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_pixel_reports_missing_frames_instead_of_panicking() {
+        assert_eq!(describe_pixel(&[], 80, 80, 40, 40), "no frame");
+        assert_eq!(describe_pixel(&[0; 16], 80, 80, 40, 40), "no frame");
+        let mut full = vec![0u8; 80 * 80 * 4];
+        let i = (40 * 80 + 40) * 4;
+        full[i..i + 4].copy_from_slice(&[1, 2, 3, 255]);
+        assert_eq!(describe_pixel(&full, 80, 80, 40, 40), "[3, 2, 1]");
+        assert_eq!(describe_pixel(&full, 80, 80, 80, 40), "no frame");
+    }
 }
