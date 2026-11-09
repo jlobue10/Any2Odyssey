@@ -14,12 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Verify tag matches VERSION
         shell: pwsh
         run: |
           $version=(Get-Content VERSION -Raw).Trim()
           if ("${{ github.ref_name }}" -ne "v$version") { throw "Tag ${{ github.ref_name }} does not match VERSION $version" }
+      # Same checks as ci.yml: a tag can be pushed from a commit whose CI never ran or failed.
+      - name: Format check
+        run: cargo fmt --all --check
       - name: Build (release)
         run: cargo build --locked --release --workspace
       - name: Verify worker DPI manifest
@@ -27,6 +32,22 @@ jobs:
         run: ./installer/tests/test-dpi-manifest.ps1
       - name: Test
         run: cargo test --locked --workspace
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Regenerate brand assets and check they are committed
+        shell: pwsh
+        run: |
+          cargo run --locked --release -p any2odyssey-iconmaker -- assets
+          git diff --exit-code -- assets
+      - name: Stage the built executable for the installer tests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path build -Force | Out-Null
+          Copy-Item target/release/Any2Odyssey.exe build/
+      - name: Installer tests (PowerShell 7)
+        shell: pwsh
+        run: |
+          foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
