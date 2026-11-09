@@ -4,7 +4,6 @@ fn main() {
     println!("cargo:rerun-if-changed=app.manifest");
     // The About page shows the commit a build came from. Absent outside a
     // git checkout (source archives), which the page reports as such.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
     if let Some(commit) = git_commit() {
         println!("cargo:rustc-env=ANY2ODYSSEY_GIT_SHA={commit}");
     }
@@ -35,13 +34,40 @@ fn main() {
 }
 
 fn git_commit() -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()?;
+    // HEAD is usually a symbolic ref whose contents stay unchanged across
+    // commits. Watch its target too, and ask Git for paths so linked worktrees
+    // (where .git is a file) use the right metadata directory.
+    watch_git_path("HEAD");
+    if let Some(reference) = git_output(&["symbolic-ref", "-q", "HEAD"]) {
+        watch_git_path(&reference);
+        watch_git_path("packed-refs");
+    }
+    let commit = git_output(&["rev-parse", "--short=12", "HEAD"])?;
+    (!commit.is_empty() && commit.bytes().all(|b| b.is_ascii_hexdigit())).then_some(commit)
+}
+
+fn watch_git_path(name: &str) {
+    let Some(path) = git_output(&["rev-parse", "--git-path", name]) else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    // If packed-refs does not exist, the branch has a loose ref already
+    // watched above. Its removal during packing will rerun this script.
+    if name == "packed-refs" && !path.exists() {
+        return;
+    }
+    // A branch stored only in packed-refs can gain a loose ref on its next
+    // commit. Watch its nearest existing directory until that file appears;
+    // watching a missing file would force every Cargo build to rerun.
+    if let Some(existing) = path.ancestors().find(|candidate| candidate.exists()) {
+        println!("cargo:rerun-if-changed={}", existing.display());
+    }
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
-    let commit = String::from_utf8(output.stdout).ok()?.trim().to_owned();
-    (!commit.is_empty() && commit.bytes().all(|b| b.is_ascii_hexdigit())).then_some(commit)
+    Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
 }
