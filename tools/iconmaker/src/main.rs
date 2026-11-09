@@ -20,6 +20,12 @@ fn main() {
         eprintln!("usage: any2odyssey-iconmaker <output-folder>");
         std::process::exit(2);
     });
+    // `cargo run -p any2odyssey-iconmaker -- --list` once created a folder named
+    // `--list` that was then committed; an option-shaped name is never a folder.
+    if folder.starts_with('-') {
+        eprintln!("usage: any2odyssey-iconmaker <output-folder> (got option-like {folder:?})");
+        std::process::exit(2);
+    }
     if let Err(e) = generate(Path::new(&folder)) {
         eprintln!("asset generation failed: {e}");
         std::process::exit(1);

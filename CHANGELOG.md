@@ -57,11 +57,11 @@ Controls:
 - `--toggle` and `--show` could be lost when they raced a starting instance that had not yet created its control events; the request is retried and the command exits 1 when it was never accepted. (#40)
 - "Automatic recovery cancelled" survives the relaunch that was already validating when recovery was unchecked; it was replaced a moment later by "3D is off". (#40)
 - Changing the automatic-start, recovery or tray checkbox no longer saves a depth or pop-out that was dragged but not applied; Apply is the only path that commits the sliders, as the tooltips say. (#40)
-- A damaged `ui-settings.json` (theme, last update-check time) is logged before it is reset; an unreadable `ConversionWrapper.dll` is reported as unreadable rather than missing; a relative `ANY2ODYSSEY_DATA_DIR` is resolved once so the controls and the worker use the same folder; an empty value means unset. (#39)
+- A damaged `ui-settings.json` (theme, last update-check time) is logged before it is reset; an unreadable `ConversionWrapper.dll` is reported as unreadable rather than missing; a relative `ANY2ODYSSEY_DATA_DIR` is resolved against the controls' working directory and an empty value means unset. (#39)
 
 Core:
 
-- `settings.json` and `ui-settings.json` are flushed to disk before the rename that publishes them, so a power loss right after Apply cannot leave an empty file that the next launch treats as damaged; temporaries left by an interrupted write are swept at launch after an hour. (#39)
+- `settings.json` and `ui-settings.json` are flushed to disk before the rename that publishes them, so a power loss right after Apply cannot leave an empty file that the next launch treats as damaged; temporaries left by an interrupted write are swept from the data folder at launch after an hour. (#39)
 - The package version is parsed at compile time, so a pre-release version in `Cargo.toml` fails the build instead of panicking in `--check-updates` and on the About page. The update check requires the published tag to be spelled exactly as the download links are built (`v0.8.4`); `V0.8.4` or `v0.08.4` parsed but every link would have led to a 404. (#39)
 
 Installer:
@@ -72,7 +72,12 @@ Installer:
 Documentation and CI:
 
 - Help: three passages still said a shortcut conflict blocks automatic start (changed in 0.8.3), and the input topic promised that checkbox changes save the slider values. (#39, #40)
-- The release workflow runs the offline-guide drift check before packaging (0.8.3 said the release workflow ran the full CI checks; the guide check only ran in the Linux CI job) and fails when no package matched. `docs/PORTING.md` no longer calls the installer and its tests untested on Windows; `docs/TESTING.md` lists every installer test; README states which release is current and which was last confirmed on hardware. (#38)
+- The release workflow runs the offline-guide drift check before packaging and fails when no package matched. `docs/PORTING.md` no longer calls the installer and its tests untested on Windows; `docs/TESTING.md` lists every installer test; README states which release is current and which was last confirmed on hardware. (#38)
+
+### Notes on earlier entries
+
+- 0.8.3, CI: the release workflow ran the Windows CI checks before packaging, not "the full CI checks"; the offline-guide drift check only ran in the Linux CI job until 0.8.4.
+- 0.8.4 (#39), `ANY2ODYSSEY_DATA_DIR`: the controls resolved a relative value against their own working directory, but the worker, which runs from the engine folder, still resolved it separately; the controls pass the resolved folder to the worker since 0.8.5.
 
 ### Hardware verification
 

@@ -4,6 +4,7 @@ description = "Generates the Any2Odyssey emblem icon, 256 px PNG and wordmark (v
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

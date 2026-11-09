@@ -892,7 +892,9 @@ mod tests {
         // A directory at settings.json reliably refuses replacement on both OSes.
         let settings = dir.path().join("settings.json");
         std::fs::create_dir(&settings).unwrap();
-        let old = std::env::var_os(paths::DATA_DIR_ENV);
+        // Restored by the guard even when an assertion below fails, so a
+        // failure cannot point later tests at a deleted directory.
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
         std::env::set_var(paths::DATA_DIR_ENV, dir.path());
         let mut core = isolated(dir.path());
         core.preview = false;
@@ -904,11 +906,6 @@ mod tests {
             assert!(core.operation.is_none());
             assert_eq!(core.generation, 0);
             assert!(core.status.starts_with("Could not save preferences:"));
-        }
-        if let Some(old) = old {
-            std::env::set_var(paths::DATA_DIR_ENV, old);
-        } else {
-            std::env::remove_var(paths::DATA_DIR_ENV);
         }
     }
 
