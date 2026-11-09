@@ -41,9 +41,16 @@ if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){thro
 # elevates for a worker it did not install: a helper that is still present then belongs to
 # another account's full installation or to an older release, and is removed by running
 # Install.cmd and uninstalling again from that account (or by an administrator by hand).
+# The installer writes the installing account's SID beside the helper (UninstallWorker.owner).
+# On a shared PC a later Install.cmd from another account replaces the worker and that marker,
+# so a full record whose marker names another account leaves both alone as well.
+$ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
 $helperPresent=Test-Path -LiteralPath $helper -PathType Leaf
-$needsHelper=(-not $controlsOnly) -and ((Test-Path -LiteralPath $worker) -or $helperPresent)
-if($controlsOnly -and $helperPresent){Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
+$ownerSid=''
+if($helperPresent -and (Test-Path -LiteralPath $ownerFile -PathType Leaf)){$ownerSid=([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim()}
+$helperIsForeign=$helperPresent -and $ownerSid -ne '' -and $ownerSid -ne $identity.User.Value
+$needsHelper=(-not $controlsOnly) -and ((Test-Path -LiteralPath $worker) -or $helperPresent) -and -not $helperIsForeign
+if($helperPresent -and ($controlsOnly -or $helperIsForeign)){Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
 if($needsHelper){
  if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'

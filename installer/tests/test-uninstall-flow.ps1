@@ -121,6 +121,15 @@ try{
  Assert ($launches.Count -eq 0 -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker)) 'Controls-only uninstall leaves a helper even when the marker names this account'
  Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The left-alone helper is explained for a controls-only record'
 
+ # Shared PC, full record: another account ran Install.cmd afterwards and owns the worker and helper now.
+ $launches.Clear()
+ New-Fixture -Elevated $false -HelperOwner 'S-1-5-21-1-2-3-1001'
+ $notes.Clear();& (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 0) 'Full uninstall never elevates for a worker and helper another account installed over it'
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $app)) 'Per-user installation is removed while another account owns the worker'
+ Assert ((Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $ownerFile)) 'Another account''s worker, helper and marker are left alone by a full uninstall'
+ Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The full uninstall explains what it left alone'
+
  # A truncated version.json must not block the uninstall; the worker and helper decide.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2",'
