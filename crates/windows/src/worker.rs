@@ -38,6 +38,13 @@ use crate::win;
 /// so a worker alive after it was either orphaned or is stuck.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(7);
 
+/// The engine invoked its `closed` callback without being asked: the case
+/// recovery exists for, so it exits with the renderer error code rather than
+/// as a clean stop.
+const ENGINE_CLOSED_LOG: &str = "The engine closed itself; stopping. See the conversion log.";
+const ENGINE_CLOSED_STATUS: &str =
+    "Conversion stopped: the engine closed itself. See conversion log.";
+
 fn report(state: &str) {
     let _ = any2odyssey_core::fsutil::write_json_atomic(
         &paths::worker_status_file(),
@@ -357,9 +364,26 @@ fn run_inner(
         // so sustained capture cannot starve stop, liveness or overlay checks.
         let now = Instant::now();
         if poll_deadline.due(now) {
-            let alive = parent.is_alive();
-            if stop_event.is_signaled() || !alive || engine::ENGINE_CLOSED.load(Ordering::Acquire) {
+            // Three triggers end the loop here; only the first is a clean,
+            // requested stop. Name each in the log so companion.log tells a
+            // user stop from the engine giving up or the controls vanishing.
+            if stop_event.is_signaled() {
+                log("Stop requested; stopping the engine.");
                 shutdown(&mut surface, &mut started, None);
+                continue;
+            }
+            if !parent.is_alive() {
+                // Nobody is left to read the code, but the log and status
+                // file should not call an orphaned stop clean.
+                log("The controls process ended; stopping the engine.");
+                report("Conversion stopped: the controls process ended.");
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
+                continue;
+            }
+            if engine::ENGINE_CLOSED.load(Ordering::Acquire) {
+                log(ENGINE_CLOSED_LOG);
+                report(ENGINE_CLOSED_STATUS);
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
             if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
@@ -392,7 +416,9 @@ fn run_inner(
             // The engine may close between two polls; re-showing its window
             // now would race its own teardown.
             if engine::ENGINE_CLOSED.load(Ordering::Acquire) {
-                shutdown(&mut surface, &mut started, None);
+                log(ENGINE_CLOSED_LOG);
+                report(ENGINE_CLOSED_STATUS);
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
             if let Err(e) = overlay.tick(restore_event.is_signaled()) {
