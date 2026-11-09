@@ -163,7 +163,15 @@ impl ControlsState {
                     ui.checkbox(recover, "Recover if the conversion process stops");
                 }
                 if column == 1 {
-                    ui.checkbox(minimize, "Minimize and close to the tray");
+                    // Without a notification area the setting cannot act: a
+                    // hidden window would have nothing to bring it back.
+                    ui.add_enabled(
+                        crate::platform::tray_available(),
+                        egui::Checkbox::new(minimize, "Minimize and close to the tray"),
+                    )
+                    .on_disabled_hover_text(
+                        "This desktop has no tray; Minimize and Close act normally.",
+                    );
                     ui.checkbox(
                         keep,
                         "Keep 3D above apps without taking focus (Apply to change)",
@@ -231,7 +239,12 @@ impl ControlsState {
             if gold_button(ui, "View logs", false, p).clicked() {
                 core.menu(MenuCommand::ViewLogs);
             }
-            if gold_button(ui, "Minimize to tray", false, p).clicked() {
+            let minimize_label = if crate::platform::tray_available() {
+                "Minimize to tray"
+            } else {
+                "Minimize"
+            };
+            if gold_button(ui, minimize_label, false, p).clicked() {
                 core.requests.push(UiRequest::MinimizeToTray);
             }
             if gold_button(ui, "Quit completely", false, p).clicked() {
