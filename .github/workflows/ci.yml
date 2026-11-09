@@ -9,10 +9,11 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same branch supersedes the running checks.
+# A newer push to a pull request supersedes its running checks. Pushes to main keep every
+# run, so each merged commit still produces its artifacts.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
