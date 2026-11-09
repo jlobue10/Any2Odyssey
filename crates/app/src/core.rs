@@ -120,6 +120,9 @@ pub struct Core {
     pub preview: bool,
     /// `--screenshot FILE [--dark] [--help-page]`: render, save, exit.
     pub screenshot: Option<ScreenshotRequest>,
+    /// How the screenshot ended, so the process can exit non-zero when the
+    /// image was never delivered or could not be saved.
+    pub screenshot_outcome: Option<Result<(), String>>,
     pub exiting: bool,
     pub requests: Vec<UiRequest>,
     pub logger: Logger,
@@ -188,6 +191,7 @@ impl Core {
             start_requested,
             preview,
             screenshot: None,
+            screenshot_outcome: None,
             exiting: false,
             requests: Vec::new(),
             logger,
@@ -410,7 +414,15 @@ impl Core {
                     self.status = format!("Could not start conversion: {e}");
                     self.log(&self.status);
                 }
-                Err(_) => {} // A cancelled attempt must not override newer intent.
+                Err(_) => {
+                    // A cancelled attempt must not override newer intent. But
+                    // when the user turned 3D off while this start was still
+                    // validating, "Stopping 3D…" is now stale: nothing else
+                    // will report that the desktop is back to normal.
+                    if !self.wanted() && self.worker.is_none() && !self.exiting {
+                        self.status = "3D is off. Your normal desktop is restored.".into();
+                    }
+                }
             },
             WorkerResult::Stopped(message) => {
                 if let Some(message) = message {
@@ -617,7 +629,7 @@ pub fn open_release_url(url: &str) {
 }
 
 fn settings_recovery_message(error: &str) -> String {
-    format!("{error}. Automatic conversion is disabled. Fix the settings file and reopen, or choose settings and click Apply to save them with a backup of the original.")
+    format!("{error}. Automatic conversion is disabled, and so is the daily update check until you turn it back on from the About page. Fix the settings file and reopen, or choose settings and click Apply to save them with a backup of the original.")
 }
 
 /// Load preferences, importing Any2Odd's file once when ours does not exist.
@@ -872,6 +884,7 @@ mod tests {
             start_requested: false,
             preview: true,
             screenshot: None,
+            screenshot_outcome: None,
             exiting: false,
             requests: Vec::new(),
             logger: Logger::new(dir.join("test.log")),
@@ -917,6 +930,28 @@ mod tests {
         assert!(core.wanted());
         assert_eq!(core.status, "Ready");
         assert!(core.operation.is_none());
+    }
+
+    #[test]
+    fn turning_off_during_a_failing_start_reports_the_desktop_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.supervisor.start_requested();
+        let generation = core.generation;
+        let (tx, rx) = mpsc::channel();
+        core.operation = Some(rx);
+        core.status = "Starting 3D — checking prerequisites and loading the AI model.".into();
+        core.stop_conversion(); // Turn off while the start is still validating.
+        assert_eq!(core.status, "Stopping 3D…");
+        tx.send(WorkerResult::Started {
+            generation,
+            result: Err("missing engine".into()),
+        })
+        .unwrap_or_else(|_| panic!("receiver closed"));
+        core.poll_operation();
+        assert!(!core.wanted());
+        assert!(core.operation.is_none());
+        assert_eq!(core.status, "3D is off. Your normal desktop is restored.");
     }
 
     #[test]
