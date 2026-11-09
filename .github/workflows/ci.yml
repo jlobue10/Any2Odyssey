@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -15,45 +18,56 @@ jobs:
     name: Windows x64 (build, test, lint, package)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Format check
         run: cargo fmt --all --check
       - name: Build (release)
-        run: cargo build --release --workspace
+        run: cargo build --locked --release --workspace
       - name: Verify worker DPI manifest
         shell: pwsh
         run: ./installer/tests/test-dpi-manifest.ps1
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Regenerate brand assets and check they are committed
         shell: pwsh
         run: |
-          cargo run --release -p any2odyssey-iconmaker -- assets
+          cargo run --locked --release -p any2odyssey-iconmaker -- assets
           git diff --exit-code -- assets
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
-      - name: Installer unit test
+      - name: Stage the built executable for the installer tests
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path build -Force | Out-Null
           Copy-Item target/release/Any2Odyssey.exe build/
-          ./installer/tests/test-uninstall-helper.ps1
-          ./installer/tests/test-installer.ps1
-          ./installer/tests/test-install-launcher.ps1
-          ./installer/tests/test-controls-install.ps1
-          ./installer/tests/test-install-flow.ps1
-      - uses: actions/upload-artifact@v4
+      # Every test-*.ps1 except the DPI manifest check above; the skip variable keeps
+      # install.ps1's Windows 11 24H2 gate from depending on the runner image.
+      - name: Installer tests (PowerShell 7)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: |
+          foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      # Install.cmd, Uninstall.ps1 and the registry UninstallString all run Windows PowerShell 5.1,
+      # so the same scripts must pass under that interpreter too.
+      - name: Installer tests (Windows PowerShell 5.1)
+        shell: powershell
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: |
+          foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Any2Odyssey-windows-x64-exe
           path: target/release/Any2Odyssey.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Any2Odyssey-windows-x64-zip
           path: |
@@ -72,11 +86,11 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-11
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Desktop build dependencies (eframe, tray-icon, global-hotkey)
         run: |
           sudo apt-get update
@@ -87,13 +101,19 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Build
-        run: cargo build -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+        run: cargo build --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+      # USER-GUIDE.html is the exported Help; 0.8.1 shipped a stale copy.
+      - name: Offline guide matches the embedded Help topics
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo run --locked -p any2odyssey -- --export-guide /tmp/guide.html
+          cmp /tmp/guide.html USER-GUIDE.html
       - name: Test
-        run: cargo test -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+        run: cargo test --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
       - name: Clippy
-        run: cargo clippy -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
+        run: cargo clippy --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
           rustup target add x86_64-pc-windows-msvc
-          cargo check --workspace --target x86_64-pc-windows-msvc
+          cargo check --locked --workspace --target x86_64-pc-windows-msvc
