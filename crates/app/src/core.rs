@@ -677,11 +677,17 @@ fn read_status(worker_pid: u32) -> Option<String> {
 }
 
 /// Open a page from an update result in the browser. Only GitHub's own hosts
-/// pass; anything else is ignored.
+/// pass; anything else is ignored. The check runs here, synchronously; the
+/// launch itself runs on its own thread because `open` can wait up to 250 ms
+/// for the launcher and the caller holds the shared state inside a GUI frame.
 pub fn open_release_url(url: &str) {
-    if update::allowed_url(url) {
-        let _ = open::that_detached(url);
+    if !update::allowed_url(url) {
+        return;
     }
+    let url = url.to_owned();
+    std::thread::spawn(move || {
+        let _ = open::that_detached(url);
+    });
 }
 
 fn settings_recovery_message(error: &str) -> String {
