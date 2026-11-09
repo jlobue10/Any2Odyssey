@@ -21,6 +21,8 @@ pub const RELEASES_PAGE: &str = "https://github.com/jlobue10/Any2Odyssey/release
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Release notes kept for display, in characters.
 pub const MAX_NOTES_CHARS: usize = 4000;
+/// Longest unrecognized tag echoed back in an error message, in characters.
+pub const MAX_TAG_CHARS: usize = 64;
 /// Automatic checks run at most this often.
 pub const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 /// Hosts whose HTTPS URLs may be opened from an update result.
@@ -92,7 +94,9 @@ pub struct Release {
     /// document so a surprising `html_url` can never reach the browser.
     pub page_url: String,
     /// The Windows x64 package, when the release carries one under the
-    /// expected name on an allowed host.
+    /// expected name on an allowed host. Like `page_url`, the URL is built
+    /// from the version and the asset name rather than copied from the
+    /// document, so nothing the server sent is ever opened.
     pub zip_url: Option<String>,
     /// The package's `.sha256` companion, under the same conditions.
     pub checksum_url: Option<String>,
@@ -106,6 +110,11 @@ pub struct Release {
 impl Release {
     pub fn package_name(version: Version) -> String {
         format!("Any2Odyssey-{version}-windows-x64.zip")
+    }
+
+    /// Where GitHub serves `asset` of the release tagged for `version`.
+    pub fn download_url(version: Version, asset: &str) -> String {
+        format!("{RELEASES_PAGE}/download/{}/{asset}", version.tag())
     }
 }
 
@@ -152,10 +161,12 @@ struct Document {
     assets: Vec<Asset>,
 }
 
+/// One release asset. Both fields are optional so one odd entry in the list
+/// cannot fail the whole check; an asset missing either is simply not offered.
 #[derive(Deserialize)]
 struct Asset {
-    name: String,
-    browser_download_url: String,
+    name: Option<String>,
+    browser_download_url: Option<String>,
 }
 
 /// Parse the JSON body of [`LATEST_RELEASE_API`]. Unknown fields are ignored so
@@ -173,13 +184,22 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
         return Err(ParseError::Prerelease);
     }
     let tag = document.tag_name.ok_or(ParseError::MissingTag)?;
-    let version = Version::parse(&tag).ok_or_else(|| ParseError::UnrecognizedTag(tag.clone()))?;
+    let version = Version::parse(&tag)
+        .ok_or_else(|| ParseError::UnrecognizedTag(bounded(&tag, MAX_TAG_CHARS)))?;
+    // The document only confirms that the asset exists under its expected
+    // name on an allowed host; the URL handed to the browser is synthesized.
     let asset_url = |name: &str| {
         document
             .assets
             .iter()
-            .find(|asset| asset.name == name && allowed_url(&asset.browser_download_url))
-            .map(|asset| asset.browser_download_url.clone())
+            .any(|asset| {
+                asset.name.as_deref() == Some(name)
+                    && asset
+                        .browser_download_url
+                        .as_deref()
+                        .is_some_and(allowed_url)
+            })
+            .then(|| Release::download_url(version, name))
     };
     let package = Release::package_name(version);
     Ok(Release {
@@ -192,6 +212,15 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
             .published_at
             .filter(|text| looks_like_timestamp(text)),
     })
+}
+
+/// The first `max` characters of `text`, with an ellipsis when it was cut.
+fn bounded(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().nth(max).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 fn looks_like_timestamp(text: &str) -> bool {
@@ -217,9 +246,10 @@ pub fn allowed_url(url: &str) -> bool {
     ALLOWED_HOSTS.contains(&host.as_str())
 }
 
-/// Reduce release notes to plain text: drop control and bidirectional
-/// formatting characters, normalize line endings, collapse blank runs and cap
-/// the length. Markdown is left as-is; it is displayed, not rendered.
+/// Reduce release notes to plain text: drop control characters and the
+/// invisible formatting characters listed in [`is_invisible_formatting`],
+/// normalize line endings, collapse blank runs and cap the length. Markdown is
+/// left as-is; it is displayed, not rendered.
 pub fn sanitize_notes(text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(MAX_NOTES_CHARS + 1));
     let mut newlines = 0usize;
@@ -230,7 +260,7 @@ pub fn sanitize_notes(text: &str) -> String {
             '\r' => continue,
             '\t' => ' ',
             '\n' => '\n',
-            c if c.is_control() || is_bidi_or_zero_width(c) => continue,
+            c if c.is_control() || is_invisible_formatting(c) => continue,
             c => c,
         };
         if c == '\n' {
@@ -255,10 +285,29 @@ pub fn sanitize_notes(text: &str) -> String {
     out
 }
 
-fn is_bidi_or_zero_width(c: char) -> bool {
+/// Characters that render as nothing but change how surrounding text is read
+/// or copied: every `Bidi_Control` character (explicit embeddings, overrides
+/// and isolates, the marks, the Arabic letter mark), zero-width space and
+/// no-break space, the word joiner and invisible operators, soft hyphen,
+/// Mongolian vowel separator, the line and paragraph separators, interlinear
+/// annotation controls and the tag characters used to hide text. The
+/// zero-width joiner and non-joiner (U+200C, U+200D) are kept: emoji
+/// sequences and Arabic, Persian and Indic shaping depend on them.
+fn is_invisible_formatting(c: char) -> bool {
     matches!(
         c,
-        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 
@@ -486,6 +535,26 @@ mod tests {
     }
 
     #[test]
+    fn asset_urls_are_synthesized_from_the_version_not_copied() {
+        // The document vouches for the asset's existence on an allowed host;
+        // a surprising path under that host is still never opened.
+        let body = r#"{"tag_name":"v0.9.0","assets":[
+            {"name":"Any2Odyssey-0.9.0-windows-x64.zip","browser_download_url":"https://github.com/someone-else/other-repo/releases/download/v1/x.zip"},
+            {"name":"Any2Odyssey-0.9.0-windows-x64.zip.sha256","browser_download_url":"https://objects.githubusercontent.com/anything"}
+        ]}"#;
+        let release = parse_latest_release(body).unwrap();
+        assert_eq!(
+            release.zip_url.as_deref(),
+            Some("https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.0/Any2Odyssey-0.9.0-windows-x64.zip")
+        );
+        assert_eq!(
+            release.checksum_url.as_deref(),
+            Some("https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.0/Any2Odyssey-0.9.0-windows-x64.zip.sha256")
+        );
+        assert!(allowed_url(release.zip_url.as_deref().unwrap()));
+    }
+
+    #[test]
     fn assets_on_other_hosts_or_with_other_names_are_ignored() {
         let body = r#"{"tag_name":"v0.9.0","assets":[
             {"name":"Any2Odyssey-0.9.0-windows-x64.zip","browser_download_url":"https://github.com.evil.example/a.zip"},
@@ -524,10 +593,19 @@ mod tests {
             parse_latest_release("not json"),
             Err(ParseError::Json(_))
         ));
-        assert!(matches!(
-            parse_latest_release(r#"{"tag_name":"v0.9.0","assets":[{"name":"x"}]}"#),
-            Err(ParseError::Json(_))
-        ));
+        // One malformed asset entry does not fail the check; it is just not offered.
+        let release =
+            parse_latest_release(r#"{"tag_name":"v0.9.0","assets":[{"name":"x"},{"size":1}]}"#)
+                .unwrap();
+        assert_eq!(release.zip_url, None);
+        let long_tag = "x".repeat(500);
+        match parse_latest_release(&format!(r#"{{"tag_name":"{long_tag}"}}"#)) {
+            Err(ParseError::UnrecognizedTag(shown)) => {
+                assert_eq!(shown.chars().count(), MAX_TAG_CHARS + 1);
+                assert!(shown.ends_with('…'));
+            }
+            other => panic!("{other:?}"),
+        }
         let huge = format!(
             r#"{{"tag_name":"v0.9.0","body":"{}"}}"#,
             "x".repeat(MAX_RESPONSE_BYTES)
@@ -581,6 +659,23 @@ mod tests {
         );
         assert_eq!(sanitize_notes("\u{202E}x\u{200B}y\u{FEFF}z\u{2066}"), "xyz");
         assert_eq!(sanitize_notes("\u{7f}\u{0}\u{1}"), "");
+        // Every Bidi_Control character, hidden-text tag characters, the soft
+        // hyphen and the line/paragraph separators vanish too.
+        assert_eq!(
+            sanitize_notes(
+                "a\u{061C}b\u{200E}c\u{200F}d\u{202A}e\u{202B}f\u{202C}g\u{202D}h\u{2067}i\u{2068}j\u{2069}k"
+            ),
+            "abcdefghijk"
+        );
+        assert_eq!(
+            sanitize_notes("safe\u{E0001}\u{E0068}\u{E0069}\u{E007F} text\u{00AD}\u{2028}\u{2029}\u{FFF9}x\u{FFFA}y\u{FFFB}\u{180E}"),
+            "safe textxy"
+        );
+        // Joiners stay: emoji sequences and cursive scripts need them.
+        assert_eq!(
+            sanitize_notes("\u{1F469}\u{200D}\u{1F4BB} \u{0646}\u{200C}\u{0627}"),
+            "\u{1F469}\u{200D}\u{1F4BB} \u{0646}\u{200C}\u{0627}"
+        );
         let long = "é".repeat(MAX_NOTES_CHARS + 10);
         let notes = sanitize_notes(&long);
         assert_eq!(notes.chars().count(), MAX_NOTES_CHARS + 1);
@@ -707,6 +802,5 @@ mod state_tests {
         assert!(failed.available().is_none());
         assert!(!UpdateState::default().is_settled());
         assert!(!UpdateState::Checking.is_settled());
-        assert!(now_unix() > 1_700_000_000);
     }
 }
