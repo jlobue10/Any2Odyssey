@@ -19,9 +19,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify tag matches VERSION
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           $version=(Get-Content VERSION -Raw).Trim()
-          if ("${{ github.ref_name }}" -ne "v$version") { throw "Tag ${{ github.ref_name }} does not match VERSION $version" }
+          if ($env:TAG -ne "v$version") { throw "Tag $env:TAG does not match VERSION $version" }
       # Same checks as ci.yml: a tag can be pushed from a commit whose CI never ran or failed.
       - name: Format check
         run: cargo fmt --all --check
