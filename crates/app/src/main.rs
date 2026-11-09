@@ -176,8 +176,7 @@ fn run_gui(
 ) -> i32 {
     if let Some(request) = screenshot {
         // Isolated preview: no single-instance guard, no events, no worker, no saved preferences.
-        let mut core = core::Core::new(logger, None, false);
-        core.preview = true;
+        let mut core = core::Core::new_preview(logger);
         core.ui.dark_mode = request.dark;
         core.screenshot = Some(request);
         return match ui::run(Arc::new(Mutex::new(core))) {
