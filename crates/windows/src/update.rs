@@ -16,10 +16,11 @@ use windows::Win32::Networking::WinHttp::{
     WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
     WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT,
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_FLAG_SECURE,
-    WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
-    WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
-    WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ENABLE_SSL_REVOCATION,
+    WINHTTP_FLAG_SECURE, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3,
+    WINHTTP_OPTION_ENABLE_FEATURE, WINHTTP_OPTION_REDIRECT_POLICY,
+    WINHTTP_OPTION_REDIRECT_POLICY_NEVER, WINHTTP_OPTION_SECURE_PROTOCOLS,
+    WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 
 use crate::win::wide;
@@ -166,6 +167,16 @@ pub fn fetch(request: &Request) -> Result<String, String> {
         WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
     )
     .map_err(|e| format!("request redirect policy: {e}"))?;
+    // Revocation checking needs CRL/OCSP reachability WinHTTP does not have
+    // behind every proxy, and the option itself is refused on some builds.
+    // The check is best effort: chain validation against the system store
+    // is still enforced when it cannot be enabled, so a failure here is
+    // ignored rather than turned into a failed update check.
+    let _ = set_u32(
+        &http,
+        WINHTTP_OPTION_ENABLE_FEATURE,
+        WINHTTP_ENABLE_SSL_REVOCATION,
+    );
     let headers: Vec<u16> = format!(
         "Accept: {}\r\nX-GitHub-Api-Version: {}\r\n",
         request.accept, request.api_version

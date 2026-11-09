@@ -79,6 +79,16 @@ impl ParentWatch {
         let state = unsafe { WaitForSingleObject(self.0, 0) };
         state == WAIT_TIMEOUT
     }
+
+    /// The raw handle, for multi-object waits. Valid while `self` lives.
+    pub fn handle(&self) -> HANDLE {
+        self.0
+    }
+
+    /// A second owned handle to the same process object.
+    pub fn try_clone(&self) -> windows::core::Result<ParentWatch> {
+        crate::ipc::duplicate_handle(self.0).map(ParentWatch)
+    }
 }
 
 impl Drop for ParentWatch {
@@ -104,7 +114,12 @@ mod tests {
             .spawn()
             .expect("spawn cmd");
         let watch = ParentWatch::open(child.id()).expect("child opens");
+        let copy = watch.try_clone().expect("duplicates");
+        assert_ne!(copy.handle(), watch.handle());
         child.wait().expect("child exits");
         assert!(!watch.is_alive());
+        drop(watch);
+        // The duplicate outlives the original and still sees the exit.
+        assert!(!copy.is_alive());
     }
 }

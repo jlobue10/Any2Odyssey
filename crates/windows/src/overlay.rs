@@ -85,6 +85,16 @@ impl OverlayController {
         let changed = old != next;
         if changed {
             win::set_ex_style(output, next);
+            // Win32 applies a GWL_EXSTYLE change only once SetWindowPos has
+            // been told the frame changed; this must not depend on whether
+            // the keep-on-top raise below runs. The styles are verified
+            // afterwards, so a refused notification needs no handling here.
+            let _ = win::set_window_pos(
+                output,
+                None,
+                None,
+                win::SWP_NOSIZE_NOMOVE_NOACTIVATE | win::SWP_NOZORDER | win::SWP_FRAMECHANGED,
+            );
         }
         if !self.configured || changed {
             let _ = win::set_title(output, ipc::OUTPUT_WINDOW_TITLE);
@@ -145,9 +155,7 @@ impl OverlayController {
             if win::is_iconic(output) || !win::is_visible(output) {
                 win::show_window(output, win::SW_SHOWNOACTIVATE);
             }
-            let flags = win::SWP_NOSIZE_NOMOVE_NOACTIVATE
-                | win::SWP_SHOWWINDOW
-                | if changed { win::SWP_FRAMECHANGED } else { 0 };
+            let flags = win::SWP_NOSIZE_NOMOVE_NOACTIVATE | win::SWP_SHOWWINDOW;
             win::set_window_pos(output, Some(win::hwnd_topmost()), None, flags)
                 .map_err(|e| format!("Could not restore the 3D overlay: {e}"))?;
             // Keep the controls (parent process) reachable above the output,
