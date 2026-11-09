@@ -47,6 +47,8 @@ function Invoke-Any2OdysseyFileTransaction {
  $backup=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-backup-'+[Guid]::NewGuid().ToString('N'))
  New-Item -ItemType Directory -Path $backup | Out-Null
  $snapshots=@();$written=New-Object 'System.Collections.Generic.List[object]'
+ # Folders this transaction creates, outermost first; rollback removes the ones left empty.
+ $createdFolders=New-Object 'System.Collections.Generic.List[string]'
  try {
   # Snapshot all destinations before replacing the first file.
   $index=0
@@ -58,6 +60,9 @@ function Invoke-Any2OdysseyFileTransaction {
    $snapshots+= [pscustomobject]@{Source=$operation.Source;Destination=$operation.Destination;Existed=$existed;Backup=$saved}
   }
   foreach($snapshot in $snapshots){
+   $folder=Split-Path -Parent $snapshot.Destination;$missing=@()
+   while($folder -and -not (Test-Path -LiteralPath $folder)){$missing=@($folder)+$missing;$folder=Split-Path -Parent $folder}
+   foreach($new in $missing){if(-not $createdFolders.Contains($new)){$createdFolders.Add($new)}}
    New-Item -ItemType Directory -Path (Split-Path -Parent $snapshot.Destination) -Force -ErrorAction Stop | Out-Null
    $written.Add($snapshot)
    Copy-Item -LiteralPath $snapshot.Source -Destination $snapshot.Destination -Force -ErrorAction Stop
@@ -67,6 +72,7 @@ function Invoke-Any2OdysseyFileTransaction {
   $failure=$_;$rollbackErrors=@()
   for($i=$written.Count-1;$i -ge 0;$i--){$snapshot=$written[$i];try{if($snapshot.Existed){Copy-Item -LiteralPath $snapshot.Backup -Destination $snapshot.Destination -Force -ErrorAction Stop}else{if(Test-Path -LiteralPath $snapshot.Destination -PathType Leaf){Remove-Item -LiteralPath $snapshot.Destination -ErrorAction Stop}}}catch{$rollbackErrors+=$_.Exception.Message}}
   try{& $RollbackState}catch{$rollbackErrors+=$_.Exception.Message}
+  for($i=$createdFolders.Count-1;$i -ge 0;$i--){$folder=$createdFolders[$i];try{if((Test-Path -LiteralPath $folder -PathType Container) -and -not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)){Remove-Item -LiteralPath $folder -ErrorAction Stop}}catch{$rollbackErrors+=$_.Exception.Message}}
   if($rollbackErrors.Count){throw "Update failed: $($failure.Exception.Message). Rollback needs attention: $($rollbackErrors -join '; '). Backups retained at $backup"}
   throw "Update failed; previous files and registration restored. $($failure.Exception.Message) Backups: $backup"
  }

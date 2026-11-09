@@ -58,8 +58,12 @@ try{
  $shell=New-Object -ComObject WScript.Shell
  Assert ($shell.CreateShortcut((Join-Path $desktop 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
  Assert ($shell.CreateShortcut((Join-Path $programs 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
+ New-ItemProperty -LiteralPath $registration -Name EstimatedSize -Value 4096 -PropertyType DWord -Force | Out-Null
  & $testInstall
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Repeated installer repairs the same release'
+ Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
+ Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
+ Assert (-not (Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'Any2Odyssey-install-*' | Where-Object {$_.CreationTime -gt (Get-Date).AddMinutes(-5)})) 'Installer removes its staging folder'
  $passed=$true
 }finally{
  if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
