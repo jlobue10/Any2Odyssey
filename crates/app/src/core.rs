@@ -724,8 +724,8 @@ fn load_preferences(logger: &Logger) -> Result<Preferences, String> {
 
 /// Only damage to our own file is an error (and gates automatic start and
 /// the saves until Apply, see `Core::initialize`). Any2Odd's file is a
-/// courtesy import: when it exists but cannot be read, that is logged and
-/// the controls start with defaults, as they would without it.
+/// courtesy import: failures are logged without blocking the controls, but
+/// automatic conversion and update checks stay off until the user opts in.
 fn load_preferences_from(
     logger: &Logger,
     own: &std::path::Path,
@@ -735,19 +735,34 @@ fn load_preferences_from(
         .try_exists()
         .map_err(|e| format!("Could not inspect saved settings: {e}"))?
     {
-        if let Some(legacy) = legacy.filter(|legacy| legacy.try_exists().unwrap_or(false)) {
-            match Preferences::load_from(legacy) {
-                Ok(mut imported) => {
+        if let Some(legacy) = legacy {
+            let imported = legacy.try_exists().and_then(|exists| {
+                if exists {
+                    Preferences::load_from(legacy).map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+            match imported {
+                Ok(Some(mut imported)) => {
                     imported
                         .save_to(own)
                         .map_err(|e| format!("Could not import legacy settings: {e}"))?;
                     logger.log(&format!("Imported preferences from {}", legacy.display()));
                     return Ok(imported);
                 }
-                Err(e) => logger.log(&format!(
-                    "Could not import Any2Odd's settings from {}: {e}. Starting with defaults; Any2Odd's file is left as it is.",
-                    legacy.display()
-                )),
+                Ok(None) => {}
+                Err(e) => {
+                    logger.log(&format!(
+                        "Could not import Any2Odd's settings from {}: {e}. Starting with automatic conversion and update checks disabled; Any2Odd's file is left as it is.",
+                        legacy.display()
+                    ));
+                    return Ok(Preferences {
+                        auto_convert: false,
+                        check_updates: false,
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
@@ -954,11 +969,18 @@ mod tests {
         assert_eq!(prefs.mode, CaptureMode::Active);
         assert!(!prefs.auto_convert);
         assert!(own.exists());
-        // Damaged legacy file: no error, defaults, nothing written, a log line.
+        // Damaged legacy file: no error or write, but no automatic work.
         std::fs::remove_file(&own).unwrap();
         std::fs::write(&legacy, b"not json").unwrap();
         let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
-        assert_eq!(prefs, Preferences::default());
+        assert_eq!(
+            prefs,
+            Preferences {
+                auto_convert: false,
+                check_updates: false,
+                ..Default::default()
+            }
+        );
         assert!(!own.exists(), "nothing is imported from a damaged file");
         assert_eq!(std::fs::read(&legacy).unwrap(), b"not json");
         assert!(std::fs::read_to_string(&log)
@@ -972,6 +994,48 @@ mod tests {
         // Our own file still gates: a damaged one is the error it always was.
         std::fs::write(&own, b"damaged").unwrap();
         assert!(load_preferences_from(&logger, &own, Some(&legacy)).is_err());
+    }
+
+    #[test]
+    fn failed_legacy_import_never_enables_automatic_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("settings.json");
+        let legacy = dir.path().join("legacy.json");
+        let logger = Logger::new(dir.path().join("test.log"));
+        // A truncated file can still contain the old opt-outs; failing to
+        // parse it must not turn desktop capture or network checks back on.
+        std::fs::write(
+            &legacy,
+            br#"{"AutoConvert":false,"CheckUpdates":false,"Mode":"Window","#,
+        )
+        .unwrap();
+        let check = |path: &std::path::Path| {
+            let prefs = load_preferences_from(&logger, &own, Some(path)).unwrap();
+            assert!(
+                !prefs.auto_convert,
+                "failed import enabled desktop conversion"
+            );
+            assert!(!prefs.check_updates, "failed import enabled update checks");
+            assert!(!own.exists());
+        };
+        check(&legacy);
+        // Some OSes report a path below a regular file as an inspection
+        // error; others report it as absent. Exercise the error when present.
+        let blocked = legacy.join("settings.json");
+        if blocked.try_exists().is_err() {
+            check(&blocked);
+        }
+        // An existing directory cannot be read as a settings file.
+        std::fs::remove_file(&legacy).unwrap();
+        std::fs::create_dir(&legacy).unwrap();
+        check(&legacy);
+        // A valid current file remains authoritative, including opt-ins.
+        let mut saved = Preferences::default();
+        saved.save_to(&own).unwrap();
+        assert_eq!(
+            load_preferences_from(&logger, &own, Some(&legacy)).unwrap(),
+            saved
+        );
     }
 
     #[test]
