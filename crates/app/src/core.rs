@@ -104,6 +104,11 @@ pub struct Core {
     pub prefs: Preferences,
     pub ui: UiSettings,
     pub status: String,
+    /// The status line answers a deliberate user action ("Automatic recovery
+    /// cancelled") and must survive the settling of an operation that was
+    /// already in flight. Cleared by the next user-initiated start, stop or
+    /// apply, which write their own status.
+    status_sticky: bool,
     settings_load_error: Option<String>,
     pub supervisor: Supervisor,
     pub worker: Option<Worker>,
@@ -179,6 +184,7 @@ impl Core {
                 .as_deref()
                 .map(settings_recovery_message)
                 .unwrap_or_else(|| "Ready".into()),
+            status_sticky: false,
             settings_load_error,
             worker: None,
             operation: None,
@@ -267,6 +273,7 @@ impl Core {
     }
 
     pub fn start_conversion(&mut self) {
+        self.status_sticky = false;
         if !self.save_preferences() {
             return;
         }
@@ -275,6 +282,7 @@ impl Core {
     }
 
     pub fn stop_conversion(&mut self) {
+        self.status_sticky = false;
         self.supervisor.stop_requested();
         self.stop_worker();
         self.status = if self.operation.is_some() {
@@ -295,6 +303,7 @@ impl Core {
 
     /// Apply settings / restart conversion.
     pub fn apply(&mut self) {
+        self.status_sticky = false;
         if self.settings_load_error.is_some() && !self.preview {
             // Apply is the explicit choice to replace unreadable settings.
             // Startup, hide, quit and ordinary saves leave the original alone.
@@ -328,6 +337,7 @@ impl Core {
     }
 
     pub fn restart(&mut self) {
+        self.status_sticky = false;
         if !self.save_preferences() {
             return;
         }
@@ -380,7 +390,11 @@ impl Core {
         if let Some(worker) = self.worker.take() {
             let (tx, rx) = mpsc::channel();
             self.operation = Some(rx);
-            self.status = "Stopping 3D…".into();
+            // A relaunch the user has just cancelled reports in and is stopped
+            // here; its progress is not what the status line is about then.
+            if !self.status_sticky {
+                self.status = "Stopping 3D…".into();
+            }
             std::thread::spawn(move || {
                 let _ = tx.send(WorkerResult::Stopped(worker.stop()));
             });
@@ -420,7 +434,7 @@ impl Core {
                     // validating, "Stopping 3D…" is now stale: nothing else
                     // will report that the desktop is back to normal.
                     if !self.wanted() && self.worker.is_none() && !self.exiting {
-                        self.status = "3D is off. Your normal desktop is restored.".into();
+                        self.report_off();
                     }
                 }
             },
@@ -429,9 +443,19 @@ impl Core {
                     self.log(&message);
                 }
                 if !self.wanted() {
-                    self.status = "3D is off. Your normal desktop is restored.".into();
+                    self.report_off();
                 }
             }
+        }
+    }
+
+    /// The settled state after a stop, unless the status line still carries
+    /// the answer to the user action that caused it (recovery cancelled while
+    /// its relaunch was in flight): that message already says 3D is off and
+    /// how to turn it back on, and must not be replaced a moment later.
+    fn report_off(&mut self) {
+        if !self.status_sticky {
+            self.status = "3D is off. Your normal desktop is restored.".into();
         }
     }
 
@@ -506,7 +530,10 @@ impl Core {
     pub fn recover_changed(&mut self, enabled: bool) {
         let running = self.worker_running();
         if let Some(message) = self.supervisor.recover_changed(enabled, running) {
+            // The cancelled relaunch may still be validating; when its result
+            // arrives, the settling messages must not replace this answer.
             self.status = message;
+            self.status_sticky = true;
         }
         self.save_preferences();
     }
@@ -688,8 +715,12 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
                 repaint = previous.needs_repaint(&core);
             }
             // Cross-thread Win32 window calls can synchronously dispatch on
-            // the GUI thread. Never hold Core while making them.
-            if show || quit {
+            // the GUI thread. Never hold Core while making them. Only a show
+            // request un-hides the window: a quit from the tray or `--quit`
+            // while hidden must not flash the controls and steal the focus
+            // from a game for one frame; the repaint below is enough to wake
+            // eframe's loop so the deferred Quit is processed.
+            if show {
                 platform::show_window(hwnd);
             }
             if repaint {
@@ -871,6 +902,7 @@ mod tests {
             prefs: Preferences::default(),
             ui: UiSettings::default(),
             status: "Ready".into(),
+            status_sticky: false,
             settings_load_error: None,
             supervisor: Supervisor::new(true),
             worker: None,
@@ -952,6 +984,58 @@ mod tests {
         assert!(!core.wanted());
         assert!(core.operation.is_none());
         assert_eq!(core.status, "3D is off. Your normal desktop is restored.");
+    }
+
+    #[test]
+    fn cancelling_recovery_keeps_its_message_when_the_relaunch_settles() {
+        use any2odyssey_core::supervisor::RECOVERY_DELAY;
+        const CANCELLED: &str = "Automatic recovery cancelled. Turn on 3D to restart manually.";
+        let dir = tempfile::tempdir().unwrap();
+        for relaunch_succeeds in [true, false] {
+            let mut core = isolated(dir.path());
+            core.supervisor.start_requested();
+            let now = Instant::now();
+            // The worker dies, recovery queues a retry, the retry fires and
+            // its launch is validating when the user unchecks recovery.
+            core.status = core.supervisor.worker_exited(1, now);
+            assert!(core.supervisor.retry_pending());
+            assert_eq!(
+                core.supervisor.tick_without_worker(now + RECOVERY_DELAY),
+                Action::StartWorker
+            );
+            let generation = core.generation;
+            let (tx, rx) = mpsc::channel();
+            core.operation = Some(rx);
+            core.status = "Starting 3D — checking prerequisites and loading the AI model.".into();
+            core.recover_changed(false);
+            assert!(!core.wanted());
+            assert_eq!(core.status, CANCELLED);
+            let result = if relaunch_succeeds {
+                Ok(Worker::fake())
+            } else {
+                Err("missing engine".to_owned())
+            };
+            tx.send(WorkerResult::Started { generation, result })
+                .unwrap_or_else(|_| panic!("receiver closed"));
+            // A launched worker is stopped on arrival; wait for that stop to
+            // report in so both settling messages have had their chance.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                core.poll(Instant::now());
+                if core.operation.is_none() || Instant::now() > deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(core.operation.is_none(), "the stop never reported in");
+            assert!(core.worker.is_none());
+            assert!(!core.wanted());
+            assert_eq!(core.status, CANCELLED, "relaunch ok: {relaunch_succeeds}");
+            // The next deliberate action speaks for itself again.
+            core.start_conversion();
+            assert!(!core.status_sticky);
+            assert_ne!(core.status, CANCELLED);
+        }
     }
 
     #[test]

@@ -60,6 +60,10 @@ impl Worker {
     pub fn spawn(_: isize, _: Preferences) -> Result<Worker, String> {
         Err("3D conversion is only available on Windows.".into())
     }
+    #[cfg(test)]
+    pub fn fake() -> Worker {
+        Worker
+    }
     pub fn pid(&self) -> u32 {
         0
     }

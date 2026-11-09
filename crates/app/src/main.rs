@@ -12,6 +12,7 @@ mod tray;
 mod ui;
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use any2odyssey_core::geometry::{fit, offscreen_bounds, Rect, Size};
 use any2odyssey_core::log::Logger;
@@ -118,6 +119,42 @@ fn attach_parent_console() {
 }
 #[cfg(not(windows))]
 fn attach_parent_console() {}
+
+/// A launch that loses the single-instance race may find the winner holding
+/// the mutex but not yet owning its control events, so a request handed over
+/// too early would be lost. Knock a few times before giving up.
+const SIGNAL_ATTEMPTS: u32 = 5;
+const SIGNAL_RETRY_PAUSE: Duration = Duration::from_millis(50);
+
+/// Run `attempt` until it succeeds or `attempts` tries are used up, pausing
+/// between tries (never after the last).
+fn retry(attempts: u32, pause: Duration, mut attempt: impl FnMut() -> bool) -> bool {
+    for n in 0..attempts {
+        if attempt() {
+            return true;
+        }
+        if n + 1 < attempts {
+            std::thread::sleep(pause);
+        }
+    }
+    false
+}
+
+/// Hand the request this launch carried to the instance that owns the
+/// controls. Exit 1 when it never accepted it, so a script can tell the
+/// request was lost rather than delivered.
+fn signal_running_instance(event: &str, logger: &Logger) -> i32 {
+    if retry(SIGNAL_ATTEMPTS, SIGNAL_RETRY_PAUSE, || {
+        platform::signal(event)
+    }) {
+        0
+    } else {
+        logger.log(&format!(
+            "Another instance owns the controls but did not accept {event} after {SIGNAL_ATTEMPTS} attempts."
+        ));
+        1
+    }
+}
 
 /// Modes that talk to a terminal rather than to the running instance.
 fn is_terminal_mode(args: &[String]) -> bool {
@@ -253,12 +290,14 @@ fn run_gui(
     let Some(_guard) = platform::single_instance() else {
         // Another instance owns the controls: hand it the request this launch
         // carried, so `--toggle` losing the race still toggles.
-        platform::signal(if start_requested {
-            ipc::TOGGLE_EVENT
-        } else {
-            ipc::SHOW_EVENT
-        });
-        return 0;
+        return signal_running_instance(
+            if start_requested {
+                ipc::TOGGLE_EVENT
+            } else {
+                ipc::SHOW_EVENT
+            },
+            &logger,
+        );
     };
     let events = match platform::ControlEvents::create() {
         Ok(e) => Some(e),
@@ -293,6 +332,25 @@ mod argument_tests {
         assert!(!screenshot_request("out.png", &[]).unwrap().dark);
         assert!(screenshot_request("--dark", &[]).is_none());
         assert!(screenshot_request("out.png", &args(&["--light"])).is_none());
+    }
+
+    #[test]
+    fn retry_stops_at_the_first_success_or_after_the_last_attempt() {
+        let mut calls = 0;
+        assert!(retry(5, Duration::ZERO, || {
+            calls += 1;
+            calls == 3
+        }));
+        assert_eq!(calls, 3);
+        let mut calls = 0;
+        assert!(!retry(5, Duration::ZERO, || {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 5);
+        assert!(!retry(0, Duration::ZERO, || panic!(
+            "no attempt was asked for"
+        )));
     }
 
     #[test]
