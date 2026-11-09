@@ -44,6 +44,7 @@ try{
  $engineHash=(Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash
  & (Join-Path $app 'Uninstall.ps1')
  Assert (-not (Test-Path -LiteralPath (Join-Path $app 'Any2Odyssey.exe')) -and -not (Test-Path -LiteralPath $registration)) 'Controls-only uninstall removes the app and registration without elevation'
+ Assert (-not (Test-Path -LiteralPath $app)) 'Uninstall removes the emptied program folder'
  Assert ((Test-Path -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')) -and (Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $engineHash) 'Controls-only uninstall leaves all Samsung-directory files untouched'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Uninstall preserves user preferences'
  Remove-Item -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')

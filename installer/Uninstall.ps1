@@ -48,4 +48,6 @@ foreach($file in $ownedFiles){
 $registration='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey'
 if(Test-Path -LiteralPath $versionFile){Remove-Item -LiteralPath $versionFile}
 if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}
+# The program folder held only the files above; it stays if anything else was placed in it.
+if((Test-Path -LiteralPath $app -PathType Container) -and -not (Get-ChildItem -LiteralPath $app -Force | Select-Object -First 1)){Remove-Item -LiteralPath $app -ErrorAction SilentlyContinue}
 Write-Host 'Any2Odyssey removed. Samsung software, your settings and logs were retained. No reboot is needed.'

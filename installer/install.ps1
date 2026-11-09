@@ -27,6 +27,7 @@ $engineDll=Join-Path $engine 'ConversionWrapper.dll'
 if($ControlsOnly){
  # Keep full-install app and renderer versions synchronized.
  if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed. Use Install.cmd to update the full installation together.'}
+ if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Use Install.cmd to update the full installation together, or uninstall it first.'}
  Write-Host 'Controls-only mode: GUI, tray and Help; 3D conversion is unavailable. Samsung files will not be installed or changed.'
 }else{
  if(-not (Test-Path -LiteralPath $engineDll)){throw 'Samsung Odyssey 3D Hub is not installed. For full 3D conversion, install the supported Hub first. To install just the desktop controls on this PC, run Install-GUI.cmd instead.'}
