@@ -126,7 +126,11 @@ impl EngineLibrary {
         unsafe { (self.start)(source.0, side_by_side as i32, cores, Some(on_engine_closed)) };
     }
 
-    pub fn stop(&self) {
+    /// Wake the worker watchdog before entering the vendor's blocking Stop.
+    /// Requiring the event here also covers timer setup failures and WM_QUIT,
+    /// which can bypass the worker loop's normal shutdown closure.
+    pub fn stop(&self, stop_event: &crate::ipc::Event) {
+        let _ = stop_event.set();
         unsafe { (self.stop)() };
     }
 }
@@ -139,6 +143,55 @@ mod tests {
     use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, LOAD_LIBRARY_FLAGS};
 
     const CHILD_ENV: &str = "ANY2ODYSSEY_DLL_SEARCH_TEST";
+
+    #[test]
+    fn stop_signals_the_watchdog_before_entering_the_engine() {
+        use std::cell::Cell;
+        use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
+        // The fake export observes the real kernel event at the instant Stop
+        // is entered. Thread-local state keeps parallel tests independent.
+        thread_local! {
+            static STOP_HANDLE: Cell<isize> = const { Cell::new(0) };
+            static WAS_SIGNALED: Cell<bool> = const { Cell::new(false) };
+        }
+        unsafe extern "C" fn start(
+            _: *mut c_void,
+            _: i32,
+            _: i32,
+            _: Option<unsafe extern "C" fn()>,
+        ) {
+        }
+        unsafe extern "C" fn stop() {
+            let handle = STOP_HANDLE.with(|h| HANDLE(h.get() as *mut _));
+            WAS_SIGNALED
+                .with(|seen| seen.set(unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0));
+        }
+        let name = format!(
+            "Local\\Any2Odyssey-stop-test-{}",
+            crate::ipc::new_session_id()
+        );
+        let event = crate::ipc::Event::create(&name, true).unwrap();
+        STOP_HANDLE.with(|h| h.set(event.handle().0 as isize));
+        let library = EngineLibrary {
+            _module: HMODULE::default(),
+            start,
+            stop,
+        };
+        assert!(!event.is_signaled());
+        library.stop(&event);
+        assert!(
+            WAS_SIGNALED.with(Cell::get),
+            "Stop entered before the watchdog was armed"
+        );
+        // A previously requested stop remains set for both the watchdog and
+        // the message loop; stopping must not reset or consume the signal.
+        WAS_SIGNALED.with(|seen| seen.set(false));
+        library.stop(&event);
+        assert!(WAS_SIGNALED.with(Cell::get));
+        assert!(event.is_signaled());
+    }
 
     #[test]
     fn dll_search_rejects_path_and_cwd_but_allows_explicit_directories() {
