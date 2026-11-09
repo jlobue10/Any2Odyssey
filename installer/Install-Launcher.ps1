@@ -26,7 +26,7 @@ try{
   & $installer @options
  }else{
   $report=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-setup-'+[Guid]::NewGuid().ToString('N')+'.json')
-  $arguments='-NoProfile -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -RunInstall -ResultFile "'+$report+'" -ExpectedUserSid "'+$identity.User.Value+'"'
+  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -RunInstall -ResultFile "'+$report+'" -ExpectedUserSid "'+$identity.User.Value+'"'
   $process=Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
   if(-not (Test-Path -LiteralPath $report)){throw "Installer exited with code $($process.ExitCode) without a result. Retry setup and check whether security software interrupted PowerShell."}
   $result=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
