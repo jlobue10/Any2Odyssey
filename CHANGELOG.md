@@ -2,6 +2,42 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.8.6 (unreleased)
+
+Eighth round: a second full audit of the code, installer and workflows after the sixth and seventh rounds, plus three Codex follow-ups (#49, #55, #56). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.5 ones below.
+
+### Fixed
+
+Worker (Windows):
+
+- **The watchdog now covers the exit itself.** It stood down as soon as the message loop had finished, and the worker then left through the normal process exit, which runs the unload code of Samsung's engine and its CUDA, ONNX and LeiaSR dependencies under the loader lock after their threads were killed. A blocked unload left an invisible process holding the renderer name, so every later start reported another renderer running until Task Manager. After its final log and status lines the worker now terminates itself directly; nothing is lost, since its output is discarded, the status file is complete and the engine is never unloaded. (#50)
+- A stop that arrives during the prerequisite checks is honoured before Samsung's `OverlaySettings.json` is rewritten and before the engine is loaded, instead of after both. Each of the three ways the message loop can end is named in `companion.log`; the engine closing itself and the controls process ending exit with the renderer error code and a status-file message instead of "Renderer stopped cleanly" and exit 0. (#50)
+
+Controls:
+
+- **The status line names why the renderer stopped**, from the last state the worker wrote before exiting, instead of only a number; the log carries the same line. Exits that a retry cannot cure (another renderer already running, a prerequisite check failed) turn 3D off with a message naming the cause instead of three pointless 8-second attempts; a clean exit while 3D is still wanted is treated as the engine having closed itself and recovered like any other unexpected stop. (#53)
+- Choosing *Always convert desktop (AI)* while a save of `settings.json` fails no longer stops the running conversion and then fails to restart it; like the other mode commands it keeps the worker and reports the failed save. (#49)
+- A tray double-click, Ctrl+Alt+F9 or the menus can no longer bring the window back and take the focus during a deferred quit; only `--show` was suppressed before, and a show request queued in the same poll as the Quit is discarded as well. The release-page and download buttons open the browser off the GUI thread, which 0.8.5 claimed and only did for *View logs*. (#53, #56)
+- An unreadable Any2Odd `settings.json` is logged and skipped instead of putting Any2Odyssey into recovery mode: only damage to its own file disables automatic start. Because a truncated Any2Odd file may have held the opposite choices, the controls then start with automatic conversion and the daily update check off until the user turns them on; valid current or legacy settings keep their values. Help now says the import happens whenever Any2Odyssey has no settings of its own. Any2Odd's integer capture-mode values (how C# JSON libraries write enums by default) import alongside the names. (#51, #53, #55)
+- Minimizing without a native window handle minimizes rather than hiding into a state nothing could restore; each preview run logs to its own temporary file. (#53)
+
+Core:
+
+- Samsung's `OverlaySettings.json` is flushed to disk before the rename that publishes it, like Any2Odyssey's own files since 0.8.4; a power loss right after the rename could leave it truncated, after which every start refused with no recovery path. A mis-spelled release tag (`V0.9.0`, `v0.09.0`) is reported as a spelling mismatch with the expected form instead of "not a version number". Release notes keep line and paragraph separators as line breaks and the narrow no-break space as a space instead of dropping them. (#51)
+
+Installer:
+
+- **A full uninstall leaves a worker and helper whose owner marker names another account**, and says so; 0.8.5's marker protected controls-only records only, so on a shared PC one administrator's uninstall still removed the worker another administrator had since installed, without telling either. The installer says, before the elevation prompt, when it is taking over another account's worker and helper. A controls-only record never runs the helper; the marker-based exception was unreachable through any supported flow and is removed with its test. (#52)
+- A declined elevation prompt is recognised by its Windows error code; any other launch failure keeps its own message instead of being reported as "Elevation was declined", including on the already-elevated path where no prompt exists. An unparsable registry `DisplayVersion` no longer blocks installation. README lists `UninstallWorker.owner`, the shared-PC rule and the `-Pause` switch the Installed-apps command carries. (#52)
+
+CI:
+
+- The toolchain action installs the pinned 1.99.1 instead of whatever stable is current (identical today; two downloads per run once 1.100 ships); superseded runs are cancelled only for pull requests, so every push to `main` keeps its artifacts; `docs/TESTING.md` notes that the pinned toolchain needs the Windows target added for the Linux cross-check. (#50, #52)
+
+### Hardware verification
+
+Pending. To check on the G90XF with the 0.8.6 package: a normal stop still ends `companion.log` with "Renderer stopped cleanly" and exit 0 or 4 (#50); kill the controls from Task Manager while converting and confirm the worker is gone and a relaunch starts (#50); toggle 3D off during the prerequisite phase and confirm "the engine was not loaded" with no `OverlaySettings.json` rewrite (#50); close Samsung's engine window during conversion and read the status line and log (#50, #53); start conversion with another renderer running and confirm 3D turns off with the named cause and no retries (#53); quit from the tray while hidden and double-click the tray icon during the stop (#53); decline the elevation prompt during uninstall and read the message, then make `powershell.exe` fail some other way and confirm the message differs (#52); on a PC with two administrator accounts, install from both and uninstall from the first (#52).
+
 ## 0.8.5 (2026-11-09)
 
 Seventh audit round: a fresh read of 0.8.4 found two regressions introduced by the sixth round and a gap in its watchdog. Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.4 ones below.
