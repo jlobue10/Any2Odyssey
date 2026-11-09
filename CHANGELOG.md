@@ -2,6 +2,51 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.8.3 (2026-11-09)
+
+Fifth audit round: the five follow-up fixes to 0.8.2 (#25–#29) and a full-repository audit of the code, installer, workflows and notices (#30–#35). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 and 0.8.2 ones below.
+
+### Fixed
+
+Worker (Windows):
+
+- The worker holds a handle to the controls process instead of polling its PID. If the controls died and Windows reused the PID within half a second, the worker believed its parent was alive and the click-through overlay stayed up with no way to stop it short of Task Manager, while a relaunched controls window's new worker exited as already running. (#32)
+- Conversion no longer aborts when the renderer's taskbar entry cannot be removed (Explorer stopped or restarting); the cleanup is logged and retried, and only the input-safety checks remain fatal. The diagnostic modes write their report instead of panicking when no frame ever arrived; after a shutdown the message loop stops overlay and capture work so a late error cannot overwrite the recorded stop reason; the update fetch has a 30-second overall deadline and refuses redirects on the request handle as well as the session. (#32)
+
+Controls:
+
+- Minimize and Close hide into the tray only on builds that have one. Without a notification icon (the Linux build) a hidden window could be recovered only by a global shortcut, which not every desktop offers; the checkbox is disabled there with an explanation. (#31)
+- `--screenshot` exits 1 when the image is not delivered or cannot be saved, and rejects an output path that looks like an option; the preview no longer imports or saves preferences, creates the tray icon or touches the data directory. (#29, #31)
+- `--check-updates`, `--self-test`, `--export-guide` and the diagnostics attach to the parent console on Windows, where the release build is a GUI-subsystem process whose printed line was otherwise lost (it may appear after the prompt returns). `--quit` exits 1 when no instance received the request; a `--toggle` that loses the single-instance race toggles instead of showing. (#31)
+- Turning 3D off while a start was still validating no longer leaves "Stopping 3D…" on screen when that start then fails. A shortcut conflict is reported but no longer blocks the automatic start; the button, tray and `--toggle` never required the shortcuts. (#31)
+- An unreadable `settings.json` also disables the daily update check, and the recovery message says so and where to turn it back on; the saved last-check time can no longer overflow the due-date arithmetic. The About page's commit identification refreshes after a commit on the current branch. (#25, #26, #27, #31)
+
+Core:
+
+- The *Download package* and checksum links are built from the release version and asset name, like the release page link already was; GitHub's document only confirms the asset exists. Release-note sanitisation removes every bidirectional-control character, the tag characters used to hide text, soft hyphens and line separators, and keeps the zero-width joiners that emoji and cursive scripts need. One malformed asset entry no longer fails the check. (#30)
+- A UTF-8 byte-order mark in `settings.json`, `ui-settings.json` or Samsung's `OverlaySettings.json` (Notepad's "UTF-8 with BOM", PowerShell 5.1's `-Encoding UTF8`) is no longer treated as damage. (#30)
+- The one-time `Samsung-OverlaySettings-before.json` backup and the `settings-recovery-*.json` backup are written through a temporary file, synced to disk and published without replacing an existing file, so neither a failed write nor a power loss can claim the one-time name with a truncated copy. (#28, #30)
+
+Installer:
+
+- Uninstall works when every process already holds an administrator token (UAC disabled, built-in Administrator); it ran the refusal meant for the normal-user path and nothing could be removed. An instance started elevated no longer crashes the uninstaller with an access-denied exception. The hidden elevated installer runs non-interactively. A controls-only install can no longer orphan the Program Files uninstall helper of a former full install, and the emptied program folder is removed on uninstall. (#34)
+- Tests: the full-installation uninstall flow is exercised end to end, the "never launches the per-user executable" check inspects the parsed script rather than two literal strings, fixtures and the shared test registry key are cleaned up, and the Windows 11 24H2 gate can be skipped by the tests. `installer/README.md` states the installer's trust model. (#34)
+
+Packaging, notices and CI:
+
+- `THIRD-PARTY-LICENSES.md` lists the crates compiled into the Windows binary and every embedded font. It previously said Libre Baskerville was not shipped (it is the display face) and did not attribute egui's bundled Ubuntu Light, Hack, Noto Emoji and emoji-icon-font. The ZIP ships the README screenshots, and packaging refuses an archive with backslash entry names. (#33)
+- Workflows pin every action to a commit, run with `--locked`, grant the CI token read access only, pass the tag through the environment, run the full CI checks before a release is packaged, run the installer tests under Windows PowerShell 5.1 as well as PowerShell 7, and fail when `USER-GUIDE.html` drifts from the embedded Help. (#35)
+
+### Notes on earlier entries
+
+- 0.8.1, display colour: a running capture tolerates four consecutive failed queries; the fifth stops it ("up to five" above overstated it by one).
+- 0.8.2, update check: a draft or pre-release at the `latest` endpoint is rejected and reported as a failed check rather than silently ignored (GitHub never returns one there), and the request carries the standard `Accept` and `X-GitHub-Api-Version` headers besides the client name.
+- 0.8.2, `--check-updates`: on the published 0.8.2 build the printed line is visible only when redirected to a file; the exit code and the log line were always reliable.
+
+### Hardware verification
+
+Pending. To check on the G90XF with the 0.8.3 package: kill the controls from Task Manager while converting (the worker and overlay should stop within a second) and relaunch (#32); start conversion with Explorer stopped (#32); `--check-updates` from a terminal shows its line (#31); `--screenshot` to a read-only folder exits 1 (#31); turn 3D on and immediately off while the model is loading and confirm the status settles (#31); fix a damaged `settings.json` in Notepad with "UTF-8 with BOM" and confirm it loads (#30); uninstall on a machine with UAC disabled (#34); the CI 5.1 installer-test run and the packaged ZIP's `docs/assets` (#33, #35).
+
 ## 0.8.2 (2026-11-08)
 
 Fourth audit round plus an About page and an update check. Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 ones below.

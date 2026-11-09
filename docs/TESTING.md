@@ -22,7 +22,7 @@ Run these with conversion stopped. They are GUI executables; use `Start-Process 
 - `Any2Odyssey.exe --test-capture-exclusion`: visible diagnostic windows check that the output is excluded from capture and that moved/closed content clears; result in `%LOCALAPPDATA%\Any2Odyssey\capture-exclusion-test.json`.
 - `Any2Odyssey.exe --test-offscreen`: verifies a GPU surface outside every physical screen stays live and capturable; result in `offscreen-surface-test.json`.
 - `Any2Odyssey.exe --inspect <pid>` and `--layout-probe <parentPid> <workerPid>`: window and projection diagnostics written as JSON to the data folder.
-- `Any2Odyssey.exe --check-updates`: one HTTPS request to GitHub for the latest release; prints and logs one line and exits 0 (current or ahead of the latest release), 10 (update available) or 1 (error). Needs network access; nothing is downloaded.
+- `Any2Odyssey.exe --check-updates`: one HTTPS request to GitHub for the latest release; prints and logs one line and exits 0 (current or ahead of the latest release), 10 (update available) or 1 (error). Needs network access; nothing is downloaded. The release build is a GUI-subsystem executable: it attaches to the terminal it was started from, so the line may appear after the prompt has returned; the exit code and the `companion.log` line are the reliable results.
 
 ## Installer (Windows only)
 
@@ -48,4 +48,4 @@ Useful evidence to collect while testing: `companion.log`, `worker-status.json`,
 
 ## UI previews
 
-`Any2Odyssey --screenshot FILE [--dark] [--help-page]` opens the controls with default preferences in an isolated preview (no single-instance guard, no worker, no preference loading or legacy import, no preference saves, no window enumeration, hotkeys not registered), captures the window after a few frames and exits. The PNGs under `docs/assets/` were produced this way on Linux; they show the desktop controls, not optical 3D.
+`Any2Odyssey --screenshot FILE [--dark] [--help-page]` opens the controls with default preferences in an isolated preview (no single-instance guard, no worker, no preference loading or legacy import, no preference saves, no window enumeration, hotkeys not registered), captures the window after a few frames and exits 0, or exits 1 when the image was not delivered or could not be saved. The PNGs under `docs/assets/` were produced this way on Linux; they show the desktop controls, not optical 3D.
