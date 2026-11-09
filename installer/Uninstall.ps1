@@ -17,7 +17,11 @@ $helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\Un
 try{
  $quit=[Threading.EventWaitHandle]::OpenExisting('Local\Any2OdysseyQuit')
  try{$null=$quit.Set()}finally{$quit.Dispose()}
-}catch [Threading.WaitHandleCannotBeOpenedException]{}
+}catch [Threading.WaitHandleCannotBeOpenedException]{
+}catch [UnauthorizedAccessException]{
+ # The instance was started elevated, so its event refuses this token. Fall through
+ # to the wait below; its message then asks for a manual quit instead of a raw error.
+}
 $deadline=(Get-Date).AddSeconds(12)
 while((Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
 if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
