@@ -17,6 +17,13 @@ Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.8.0.0')) -
 $blocked=$false;try{Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0')}catch{$blocked=$true};Assert $blocked 'Downgrade blocked by default'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0') -AllowDowngrade) -eq 'Downgrade') 'Explicit downgrade is supported'
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Empty installation has no version'
+# A truncated record must count as absent rather than throw from ConvertFrom-Json.
+Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.2",' -NoNewline
+Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '' -NoNewline
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Damaged version records are treated as absent'
+Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"0.8.1"}'
+Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq [version]'0.8.1') 'A damaged version.json falls through to the next readable record'
+Remove-Item -LiteralPath (Join-Path $app 'version.json'),(Join-Path $data 'install-result.json')
 Assert ((Get-Any2OdysseyPackageVersion -Binary $current) -eq [version]((Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()+'.0')) 'Packaged executable carries the VERSION file version in its resource'
 Copy-Item -LiteralPath $current -Destination (Join-Path $app 'Any2Odyssey.exe')
 Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq (Get-Any2OdysseyPackageVersion -Binary $current)) 'Installed executable version is read from its version resource'
@@ -33,13 +40,18 @@ $operations=@([pscustomobject]@{Source=$current;Destination=Join-Path $app 'Any2
 # A destination two folders deep that does not exist yet: a failed transaction must remove what it created.
 $newFolder=Join-Path $root 'programfiles\Any2Odyssey'
 $failingOperations=$operations+@([pscustomobject]@{Source=$current;Destination=Join-Path $newFolder 'UninstallWorker.ps1'})
-$rollback=[pscustomobject]@{Called=$false};$failed=$false
-try{Invoke-Any2OdysseyFileTransaction $failingOperations -AfterCopy {throw 'Simulated registration failure'} -RollbackState {$rollback.Called=$true}}catch{$failed=$true}
+$rollback=[pscustomobject]@{Called=$false};$failed=$false;$failureMessage=''
+try{Invoke-Any2OdysseyFileTransaction $failingOperations -AfterCopy {throw 'Simulated registration failure'} -RollbackState {$rollback.Called=$true}}catch{$failed=$true;$failureMessage=$_.Exception.Message}
 Assert ($failed -and $rollback.Called) 'Failure invokes registration rollback'
 Assert (-not (Test-Path -LiteralPath $newFolder) -and -not (Test-Path -LiteralPath (Split-Path -Parent $newFolder))) 'Failed install removes the folders it created'
 Assert ((Test-Path -LiteralPath $app) -and (Test-Path -LiteralPath $engine)) 'Failed install keeps the folders that already existed'
 Assert ((Get-FileHash -LiteralPath (Join-Path $app 'Any2Odyssey.exe')).Hash -eq $oldHash) 'Failed upgrade restores old executable byte-for-byte'
 Assert (-not (Test-Path -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe'))) 'Failed upgrade removes newly introduced worker'
+# A failed transaction deliberately keeps its backups under %TEMP%; the test removes the one it caused.
+Assert ($failureMessage -match 'Backups(?: retained at|:) (.+?)\s*$') 'Failed transaction names its retained backup folder'
+$retainedBackup=$Matches[1]
+Assert ((Split-Path -Leaf $retainedBackup) -like 'Any2Odyssey-backup-*' -and (Test-Path -LiteralPath $retainedBackup -PathType Container)) 'Retained backup folder exists under the temporary folder'
+Remove-Item -LiteralPath $retainedBackup -Recurse -Force
 Invoke-Any2OdysseyFileTransaction $operations
 Assert ((Get-FileHash -LiteralPath (Join-Path $app 'Any2Odyssey.exe')).Hash -eq (Get-FileHash -LiteralPath $current).Hash) 'Successful upgrade installs the new executable'
 Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')).Hash -eq (Get-FileHash -LiteralPath $current).Hash) 'App and worker match after upgrade'

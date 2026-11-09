@@ -29,7 +29,7 @@ $engineDll=Join-Path $engine 'ConversionWrapper.dll'
 if($ControlsOnly){
  # Keep full-install app and renderer versions synchronized.
  if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed. Use Install.cmd to update the full installation together.'}
- if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Use Install.cmd to update the full installation together, or uninstall it first.'}
+ if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Use Install.cmd to update the full installation together, or uninstall it first. If that full installation is already gone, remove C:\Program Files\Any2Odyssey as an administrator, then retry.'}
  Write-Host 'Controls-only mode: GUI, tray and Help; 3D conversion is unavailable. Samsung files will not be installed or changed.'
 }else{
  if(-not (Test-Path -LiteralPath $engineDll)){throw 'Samsung Odyssey 3D Hub is not installed. For full 3D conversion, install the supported Hub first. To install just the desktop controls on this PC, run Install-GUI.cmd instead.'}
@@ -51,6 +51,7 @@ if($running.Count){
  if($remaining.Count){throw 'Any2Odyssey is still running. Quit it from its tray using its normal Windows account, then retry. No installed files were changed.'}
 }
 $stage=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-install-'+[Guid]::NewGuid().ToString('N'))
+try{
 New-Item -ItemType Directory -Path $stage | Out-Null
 $operations=@()
 foreach($name in $documents){$operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot $name;Destination=Join-Path $app $name}}
@@ -58,6 +59,11 @@ $operations+=[pscustomobject]@{Source=$binary;Destination=Join-Path $app 'Any2Od
 if(-not $ControlsOnly){
  $operations+=[pscustomobject]@{Source=$binary;Destination=Join-Path $engine $workerName}
  $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'UninstallWorker.ps1';Destination=$helper}
+ # Ownership marker: on a shared PC, Uninstall.ps1 runs the helper for a controls-only record only
+ # when this account placed it, so another user's full installation is never removed by mistake.
+ $ownerSource=Join-Path $stage 'UninstallWorker.owner'
+ [IO.File]::WriteAllText($ownerSource,[Security.Principal.WindowsIdentity]::GetCurrent().User.Value,[Text.UTF8Encoding]::new($false))
+ $operations+=[pscustomobject]@{Source=$ownerSource;Destination=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'}
 }
 $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'assets\Any2Odyssey.ico';Destination=Join-Path $app 'Any2Odyssey.ico'}
 $record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionText;PreviousVersion=$(if($installed){$installed.Version.ToString()}else{$null});Action=$action;App=$app;ControlsOnly=[bool]$ControlsOnly;Worker=$(if(-not $ControlsOnly){Join-Path $engine $workerName}else{$null});Hash=(Get-FileHash -LiteralPath $binary).Hash}
@@ -70,10 +76,10 @@ $link.TargetPath=Join-Path $app 'Any2Odyssey.exe';$link.WorkingDirectory=$app;$l
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){$operations+=[pscustomobject]@{Source=$shortcutSource;Destination=Join-Path $folder 'Any2Odyssey.lnk'}}
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}
-$uninstall='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Uninstall.ps1')+'" -Pause'
+# Installed apps resolves a bare powershell.exe through the caller's PATH; name the system one.
+$uninstall='"'+(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')+'" -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Uninstall.ps1')+'" -Pause'
 $properties=@{DisplayName='Any2Odyssey';DisplayVersion=$versionText;Publisher='Jonathan LoBue';InstallLocation=$app;DisplayIcon=(Join-Path $app 'Any2Odyssey.ico')+',0';UninstallString=$uninstall;URLInfoAbout='https://github.com/jlobue10/Any2Odyssey'}
 if($ControlsOnly){$properties.DisplayName='Any2Odyssey (controls only)'}
-try{
 Invoke-Any2OdysseyFileTransaction -Operations $operations -AfterCopy {
  # -Force on an existing key clears its values; create it only when absent.
  if(-not (Test-Path -LiteralPath $registration)){New-Item -Path $registration -Force | Out-Null}

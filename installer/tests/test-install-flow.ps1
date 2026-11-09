@@ -43,6 +43,9 @@ if($PreviousPackage){
  Copy-Item -LiteralPath (Join-Path $PreviousPackage 'build\Any2Odyssey.exe') -Destination (Join-Path $engine 'Any2OdysseyWorker.exe')
  $expectedAction='Upgrade'
 }
+# Staging folders are named Any2Odyssey-install-<guid>; a run must leave the set in %TEMP% unchanged.
+$stagingNames={@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'Any2Odyssey-install-*' | Select-Object -ExpandProperty Name | Sort-Object) -join '|'}
+$stagingBefore=& $stagingNames
 $passed=$false
 try{
  & $testInstall -CheckOnly
@@ -54,6 +57,9 @@ try{
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Full installer preserves existing user preferences'
  Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $repo 'build\Any2Odyssey.exe')).Hash) 'Worker beside the engine is the packaged executable'
  Assert (Test-Path -LiteralPath (Join-Path $root 'programfiles\Any2Odyssey\UninstallWorker.ps1')) 'Full install places the privileged helper outside per-user app data'
+ $ownerFile=Join-Path $root 'programfiles\Any2Odyssey\UninstallWorker.owner'
+ Assert ((Test-Path -LiteralPath $ownerFile) -and (Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Full install marks the helper with the installing account SID'
+ Assert (([IO.File]::ReadAllBytes($ownerFile))[0] -eq [byte][char]'S') 'Owner marker is plain ASCII without a byte-order mark'
  Assert ((Test-Path -LiteralPath (Join-Path $app 'NOTICE')) -and (Test-Path -LiteralPath (Join-Path $app 'THIRD-PARTY-LICENSES.md'))) 'Credit and license files are installed'
  $shell=New-Object -ComObject WScript.Shell
  Assert ($shell.CreateShortcut((Join-Path $desktop 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
@@ -63,7 +69,8 @@ try{
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Repeated installer repairs the same release'
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
- Assert (-not (Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'Any2Odyssey-install-*' | Where-Object {$_.CreationTime -gt (Get-Date).AddMinutes(-5)})) 'Installer removes its staging folder'
+ Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '"*\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile *') 'Installed-apps uninstall names the system PowerShell by full path'
+ Assert ((& $stagingNames) -eq $stagingBefore) 'Installer removes its staging folder'
  $passed=$true
 }finally{
  if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
