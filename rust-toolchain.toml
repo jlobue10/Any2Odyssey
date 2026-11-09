@@ -1,5 +1,6 @@
-# Shared toolchain for local builds and every workflow. Pin `channel` to an exact
-# release (for example "1.91.0") once CI has verified a release build with it.
+# Shared toolchain for local builds and every workflow, pinned to the release the
+# 0.8.4 workflows ran with; bump it deliberately (clippy's -D warnings would otherwise
+# turn red on an unrelated PR or a tag push whenever a new stable lands).
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]

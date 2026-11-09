@@ -24,6 +24,8 @@ jobs:
         run: |
           $version=(Get-Content VERSION -Raw).Trim()
           if ($env:TAG -ne "v$version") { throw "Tag $env:TAG does not match VERSION $version" }
+          # The release notes link to the changelog entry; refuse to publish a version that has none.
+          if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($version)) " -Quiet)) { throw "CHANGELOG.md has no entry for $version" }
       # Same checks as ci.yml: a tag can be pushed from a commit whose CI never ran or failed.
       - name: Format check
         run: cargo fmt --all --check
