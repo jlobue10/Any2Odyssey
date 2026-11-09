@@ -328,6 +328,12 @@ pub fn sanitize_notes(text: &str) -> String {
             '\r' => continue,
             '\t' => ' ',
             '\n' => '\n',
+            // Unicode's own line and paragraph separators are visible breaks,
+            // not hidden formatting, and the display only breaks at '\n'.
+            '\u{2028}' | '\u{2029}' => '\n',
+            // Narrow no-break space has width (French punctuation, digit
+            // grouping); dropping it would run words together.
+            '\u{202F}' => ' ',
             c if c.is_control() || is_invisible_formatting(c) => continue,
             c => c,
         };
@@ -355,12 +361,13 @@ pub fn sanitize_notes(text: &str) -> String {
 
 /// Characters that render as nothing but change how surrounding text is read
 /// or copied: every `Bidi_Control` character (explicit embeddings, overrides
-/// and isolates, the marks, the Arabic letter mark), zero-width space and
-/// no-break space, the word joiner and invisible operators, soft hyphen,
-/// Mongolian vowel separator, the line and paragraph separators, interlinear
-/// annotation controls and the tag characters used to hide text. The
-/// zero-width joiner and non-joiner (U+200C, U+200D) are kept: emoji
-/// sequences and Arabic, Persian and Indic shaping depend on them.
+/// and isolates, the marks, the Arabic letter mark), zero-width space, the
+/// word joiner and invisible operators, soft hyphen, Mongolian vowel
+/// separator, interlinear annotation controls and the tag characters used to
+/// hide text. The zero-width joiner and non-joiner (U+200C, U+200D) are kept:
+/// emoji sequences and Arabic, Persian and Indic shaping depend on them. The
+/// line and paragraph separators and the narrow no-break space are visible
+/// and are mapped in [`sanitize_notes`] rather than listed here.
 fn is_invisible_formatting(c: char) -> bool {
     matches!(
         c,
@@ -370,7 +377,7 @@ fn is_invisible_formatting(c: char) -> bool {
             | '\u{200B}'
             | '\u{200E}'
             | '\u{200F}'
-            | '\u{2028}'..='\u{202E}'
+            | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
             | '\u{FEFF}'
@@ -745,8 +752,8 @@ mod tests {
         );
         assert_eq!(sanitize_notes("\u{202E}x\u{200B}y\u{FEFF}z\u{2066}"), "xyz");
         assert_eq!(sanitize_notes("\u{7f}\u{0}\u{1}"), "");
-        // Every Bidi_Control character, hidden-text tag characters, the soft
-        // hyphen and the line/paragraph separators vanish too.
+        // Every Bidi_Control character, hidden-text tag characters and the
+        // soft hyphen vanish too.
         assert_eq!(
             sanitize_notes(
                 "a\u{061C}b\u{200E}c\u{200F}d\u{202A}e\u{202B}f\u{202C}g\u{202D}h\u{2067}i\u{2068}j\u{2069}k"
@@ -754,9 +761,16 @@ mod tests {
             "abcdefghijk"
         );
         assert_eq!(
-            sanitize_notes("safe\u{E0001}\u{E0068}\u{E0069}\u{E007F} text\u{00AD}\u{2028}\u{2029}\u{FFF9}x\u{FFFA}y\u{FFFB}\u{180E}"),
+            sanitize_notes("safe\u{E0001}\u{E0068}\u{E0069}\u{E007F} text\u{00AD}\u{FFF9}x\u{FFFA}y\u{FFFB}\u{180E}"),
             "safe textxy"
         );
+        // Visible separators keep their meaning: line and paragraph separators
+        // become line breaks, the narrow no-break space a plain space.
+        assert_eq!(
+            sanitize_notes("one\u{2028}two\u{2029}three\u{202F}four 1\u{202F}000"),
+            "one\ntwo\nthree four 1 000"
+        );
+        assert_eq!(sanitize_notes("a\u{2029}\u{2029}\u{2029}b"), "a\n\nb");
         // Joiners stay: emoji sequences and cursive scripts need them.
         assert_eq!(
             sanitize_notes("\u{1F469}\u{200D}\u{1F4BB} \u{0646}\u{200C}\u{0627}"),
