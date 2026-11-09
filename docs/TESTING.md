@@ -47,4 +47,4 @@ Useful evidence to collect while testing: `companion.log`, `worker-status.json`,
 
 ## UI previews
 
-`Any2Odyssey --screenshot FILE [--dark] [--help-page]` opens the controls in an isolated preview (no single-instance guard, no worker, no saved preferences, hotkeys not registered), captures the window after a few frames and exits 0, or exits 1 when the image was not delivered or could not be saved. The PNGs under `docs/assets/` were produced this way on Linux; they show the desktop controls, not optical 3D.
+`Any2Odyssey --screenshot FILE [--dark] [--help-page]` opens the controls with default preferences in an isolated preview (no single-instance guard, no worker, no preference loading or legacy import, no preference saves, no window enumeration, hotkeys not registered), captures the window after a few frames and exits 0, or exits 1 when the image was not delivered or could not be saved. The PNGs under `docs/assets/` were produced this way on Linux; they show the desktop controls, not optical 3D.
