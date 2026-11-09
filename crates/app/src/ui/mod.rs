@@ -111,20 +111,26 @@ impl App {
             )
         };
         theme::apply(&cc.egui_ctx, &palette);
+        let preview = core.lock().expect("core").preview;
+        // An isolated preview renders and exits; it must not put a live icon
+        // in the notification area or register with the shell.
         #[cfg(windows)]
-        let tray = match load_png(include_bytes!("../../../../assets/Any2Odyssey.png"))
-            .ok_or_else(|| "icon".to_owned())
-            .and_then(|(rgba, w, h)| crate::tray::Tray::new(rgba, w, h))
-        {
-            Ok(t) => Some(t),
-            Err(e) => {
-                core.lock()
-                    .expect("core")
-                    .log(&format!("Tray icon unavailable: {e}"));
-                None
+        let tray = if preview {
+            None
+        } else {
+            match load_png(include_bytes!("../../../../assets/Any2Odyssey.png"))
+                .ok_or_else(|| "icon".to_owned())
+                .and_then(|(rgba, w, h)| crate::tray::Tray::new(rgba, w, h))
+            {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    core.lock()
+                        .expect("core")
+                        .log(&format!("Tray icon unavailable: {e}"));
+                    None
+                }
             }
         };
-        let preview = core.lock().expect("core").preview;
         if !preview {
             platform::install_jump_list();
         }
@@ -138,13 +144,18 @@ impl App {
             c.hotkeys_ok = hotkeys.is_some() || preview;
             if preview {
                 c.status = "Ready".into();
-            } else if !c.hotkeys_ok {
-                c.status =
-                    "One of Ctrl+Alt+F8/F9/F10 is in use. Free the shortcuts before starting 3D."
-                        .into();
-                c.log("Hotkey conflict: not all of Ctrl+Alt+F8/F9/F10 could be registered.");
-            } else if c.prefs.auto_convert || c.start_requested {
-                c.start_conversion();
+            } else {
+                // Shortcuts are a convenience, not a prerequisite: the button,
+                // tray and --toggle start conversion without them, so a
+                // conflict (or a desktop without global shortcuts) is reported
+                // but does not block the automatic start.
+                if !c.hotkeys_ok {
+                    c.status = "Global shortcuts Ctrl+Alt+F8/F9/F10 are unavailable; another app may hold them. The buttons, menus and tray still work.".into();
+                    c.log("Global shortcuts unavailable: not all of Ctrl+Alt+F8/F9/F10 could be registered.");
+                }
+                if c.prefs.auto_convert || c.start_requested {
+                    c.start_conversion();
+                }
             }
             if !preview
                 && c.prefs.check_updates
@@ -196,7 +207,19 @@ impl App {
         c.save_ui();
     }
 
+    /// Whether closing or minimizing may hide the window into the tray: the
+    /// preference must be on and this desktop must have a notification area
+    /// to bring the window back from. Without one, a hidden window could only
+    /// be recovered by a global shortcut, which not every desktop offers.
+    fn hides_to_tray(&self) -> bool {
+        platform::tray_available() && self.core.lock().expect("core").prefs.minimize_to_tray
+    }
+
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        if !platform::tray_available() {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+            return;
+        }
         self.core.lock().expect("core").save_preferences();
         self.hidden = true;
         let hwnd = self.core.lock().expect("core").controls_hwnd;
@@ -343,8 +366,7 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
         if chrome(&mut actions, "—", "Minimize").clicked() {
-            let to_tray = self.core.lock().expect("core").prefs.minimize_to_tray;
-            if to_tray {
+            if self.hides_to_tray() {
                 self.hide_to_tray(ctx);
             } else {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
@@ -371,11 +393,8 @@ impl App {
     }
 
     fn close_requested(&mut self, ctx: &egui::Context) {
-        let (exiting, to_tray) = {
-            let c = self.core.lock().expect("core");
-            (c.exiting, c.prefs.minimize_to_tray)
-        };
-        if !exiting && to_tray {
+        let exiting = self.core.lock().expect("core").exiting;
+        if !exiting && self.hides_to_tray() {
             self.hide_to_tray(ctx);
         } else {
             // Deferred quit: the window closes once the worker shutdown has finished.
@@ -466,8 +485,14 @@ impl App {
                 .ok_or("bad image".to_owned())
                 .and_then(|img| img.save(&request.path).map_err(|e| e.to_string()))
             {
-                Ok(()) => println!("{}", request.path.display()),
-                Err(e) => eprintln!("Could not save screenshot: {e}"),
+                Ok(()) => {
+                    println!("{}", request.path.display());
+                    self.core.lock().expect("core").screenshot_outcome = Some(Ok(()));
+                }
+                Err(e) => {
+                    self.core.lock().expect("core").screenshot_outcome =
+                        Some(Err(format!("Could not save screenshot: {e}")));
+                }
             }
             self.screenshot_taken = true;
             self.core.lock().expect("core").exiting = true;
@@ -475,8 +500,9 @@ impl App {
             return true;
         }
         if self.frames > 120 {
-            eprintln!("Screenshot was not delivered.");
-            self.core.lock().expect("core").exiting = true;
+            let mut c = self.core.lock().expect("core");
+            c.screenshot_outcome = Some(Err("Screenshot was not delivered.".into()));
+            c.exiting = true;
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return true;
         }
@@ -514,11 +540,8 @@ impl eframe::App for App {
         }
         self.handle_requests(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
-            let (exiting, to_tray) = {
-                let c = self.core.lock().expect("core");
-                (c.exiting, c.prefs.minimize_to_tray)
-            };
-            if !exiting && to_tray {
+            let exiting = self.core.lock().expect("core").exiting;
+            if !exiting && self.hides_to_tray() {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.hide_to_tray(ctx);
             } else {
@@ -529,11 +552,11 @@ impl eframe::App for App {
                 }
             }
         }
-        if ctx.input(|i| i.viewport().minimized.unwrap_or(false)) && !self.hidden {
-            let to_tray = self.core.lock().expect("core").prefs.minimize_to_tray;
-            if to_tray {
-                self.hide_to_tray(ctx);
-            }
+        if ctx.input(|i| i.viewport().minimized.unwrap_or(false))
+            && !self.hidden
+            && self.hides_to_tray()
+        {
+            self.hide_to_tray(ctx);
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
             self.help.select("start");
