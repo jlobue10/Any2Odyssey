@@ -76,15 +76,19 @@ fn spawn_watchdog(
             // satisfying this wait does not consume the signal the message
             // loop polls for.
             let woken = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-            let reason = if woken == WAIT_OBJECT_0 {
-                "the controls went away"
-            } else if woken == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
-                "the stop was requested"
-            } else {
+            if woken != WAIT_OBJECT_0 && woken != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
                 // WAIT_FAILED: nothing to wait on; the loop's own polls stay
                 // in charge, but say so, or a dead backstop leaves no trace.
                 thread_log("Watchdog: wait failed; the message loop's own checks remain the only stop path.");
                 return;
+            }
+            // The wait reports the lowest signalled index, so controls that
+            // asked for a stop and then quit would read as "went away". Ask
+            // the event itself: a requested stop is the more specific cause.
+            let reason = if stop.is_signaled() {
+                "the stop was requested"
+            } else {
+                "the controls went away"
             };
             std::thread::sleep(WATCHDOG_GRACE);
             if finished.load(Ordering::Acquire) {
