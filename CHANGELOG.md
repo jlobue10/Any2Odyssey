@@ -4,7 +4,7 @@ Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continu
 
 ## 0.8.6 (unreleased)
 
-Eighth round: a second full audit of the code, installer and workflows after the sixth and seventh rounds, plus one Codex follow-up (#49). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.5 ones below.
+Eighth round: a second full audit of the code, installer and workflows after the sixth and seventh rounds, plus three Codex follow-ups (#49, #55, #56). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.5 ones below.
 
 ### Fixed
 
@@ -17,8 +17,8 @@ Controls:
 
 - **The status line names why the renderer stopped**, from the last state the worker wrote before exiting, instead of only a number; the log carries the same line. Exits that a retry cannot cure (another renderer already running, a prerequisite check failed) turn 3D off with a message naming the cause instead of three pointless 8-second attempts; a clean exit while 3D is still wanted is treated as the engine having closed itself and recovered like any other unexpected stop. (#53)
 - Choosing *Always convert desktop (AI)* while a save of `settings.json` fails no longer stops the running conversion and then fails to restart it; like the other mode commands it keeps the worker and reports the failed save. (#49)
-- A tray double-click, Ctrl+Alt+F9 or the menus can no longer bring the window back and take the focus during a deferred quit; only `--show` was suppressed before. The release-page and download buttons open the browser off the GUI thread, which 0.8.5 claimed and only did for *View logs*. (#53)
-- An unreadable Any2Odd `settings.json` is logged and skipped instead of putting Any2Odyssey into recovery mode: only damage to its own file disables automatic start. Help now says the import happens whenever Any2Odyssey has no settings of its own. Any2Odd's integer capture-mode values (how C# JSON libraries write enums by default) import alongside the names. (#51, #53)
+- A tray double-click, Ctrl+Alt+F9 or the menus can no longer bring the window back and take the focus during a deferred quit; only `--show` was suppressed before, and a show request queued in the same poll as the Quit is discarded as well. The release-page and download buttons open the browser off the GUI thread, which 0.8.5 claimed and only did for *View logs*. (#53, #56)
+- An unreadable Any2Odd `settings.json` is logged and skipped instead of putting Any2Odyssey into recovery mode: only damage to its own file disables automatic start. Because a truncated Any2Odd file may have held the opposite choices, the controls then start with automatic conversion and the daily update check off until the user turns them on; valid current or legacy settings keep their values. Help now says the import happens whenever Any2Odyssey has no settings of its own. Any2Odd's integer capture-mode values (how C# JSON libraries write enums by default) import alongside the names. (#51, #53, #55)
 - Minimizing without a native window handle minimizes rather than hiding into a state nothing could restore; each preview run logs to its own temporary file. (#53)
 
 Core:
