@@ -48,6 +48,12 @@ try{
   $references.Count -gt 0 -and (-not $name -or $allowedCommands -notcontains $name)
  })
  Assert ($exeCommands.Count -eq 0) "Uninstaller never launches the per-user EXE (found: $(($exeCommands | ForEach-Object {$_.Extent.Text}) -join '; '))"
+ # Method calls ([Diagnostics.Process]::Start($exe), $shell.Run($exe)) are not CommandAsts; check them too.
+ $exeMethodCalls=@($uninstallAst.FindAll({param($node)$node -is [Management.Automation.Language.InvokeMemberExpressionAst]},$true) | Where-Object {
+  $call=$_
+  @($call.Arguments | Where-Object {$_.Extent.Text -match '\$exe\b|Any2Odyssey\.exe'}).Count -gt 0
+ })
+ Assert ($exeMethodCalls.Count -eq 0) "Uninstaller never passes the per-user EXE to a method call (found: $(($exeMethodCalls | ForEach-Object {$_.Extent.Text}) -join '; '))"
  $selfReferences=@($uninstallAst.FindAll({param($node)$node -is [Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -eq 'PSCommandPath'},$true))
  Assert ($selfReferences.Count -eq 0) 'Uninstaller never re-elevates itself'
 }finally{Remove-Item -LiteralPath $root -Recurse -Force}

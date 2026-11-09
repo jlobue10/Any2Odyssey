@@ -70,17 +70,22 @@ $link.TargetPath=Join-Path $app 'Any2Odyssey.exe';$link.WorkingDirectory=$app;$l
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){$operations+=[pscustomobject]@{Source=$shortcutSource;Destination=Join-Path $folder 'Any2Odyssey.lnk'}}
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}
-$uninstall='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Uninstall.ps1')+'"'
+$uninstall='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Uninstall.ps1')+'" -Pause'
 $properties=@{DisplayName='Any2Odyssey';DisplayVersion=$versionText;Publisher='Jonathan LoBue';InstallLocation=$app;DisplayIcon=(Join-Path $app 'Any2Odyssey.ico')+',0';UninstallString=$uninstall;URLInfoAbout='https://github.com/jlobue10/Any2Odyssey'}
 if($ControlsOnly){$properties.DisplayName='Any2Odyssey (controls only)'}
+try{
 Invoke-Any2OdysseyFileTransaction -Operations $operations -AfterCopy {
- New-Item -Path $registration -Force | Out-Null
+ # -Force on an existing key clears its values; create it only when absent.
+ if(-not (Test-Path -LiteralPath $registration)){New-Item -Path $registration -Force | Out-Null}
  foreach($entry in $properties.GetEnumerator()){New-ItemProperty -LiteralPath $registration -Name $entry.Key -Value $entry.Value -PropertyType String -Force | Out-Null}
  foreach($name in @('NoModify','NoRepair')){New-ItemProperty -LiteralPath $registration -Name $name -Value 1 -PropertyType DWord -Force | Out-Null}
 } -RollbackState {
  if(-not $registrationExisted){if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}}
  else{foreach($name in @($properties.Keys)+@('NoModify','NoRepair')){if($oldValues.ContainsKey($name)){New-ItemProperty -LiteralPath $registration -Name $name -Value $oldValues[$name].Value -PropertyType $oldValues[$name].Kind -Force | Out-Null}else{Remove-ItemProperty -LiteralPath $registration -Name $name -ErrorAction SilentlyContinue}}}
 }
-foreach($file in Get-ChildItem -LiteralPath $stage -File){Remove-Item -LiteralPath $file.FullName};Remove-Item -LiteralPath $stage
+}finally{
+ # The staging folder holds only this run's copies; remove it whether or not the transaction succeeded.
+ if(Test-Path -LiteralPath $stage){foreach($file in Get-ChildItem -LiteralPath $stage -File){Remove-Item -LiteralPath $file.FullName -ErrorAction SilentlyContinue};Remove-Item -LiteralPath $stage -ErrorAction SilentlyContinue}
+}
 Write-Host "Any2Odyssey $versionText $($action.ToLowerInvariant()) completed. Your settings and logs were kept. Open Any2Odyssey as your normal user. No reboot is needed."
 if($ControlsOnly){Write-Host 'Desktop controls are installed; 3D remains unavailable. After installing the supported Samsung Hub, run Install.cmd to add the conversion worker.'}

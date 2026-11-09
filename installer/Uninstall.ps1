@@ -1,4 +1,9 @@
+param([switch]$Pause)
 $ErrorActionPreference='Stop'
+# Installed apps launches this script in a console that closes with it, so with -Pause (the
+# registered UninstallString) a failure stays on screen until a key is pressed. Callers that
+# capture the error (the README command, the tests) omit the switch and get the throw as before.
+try{
 $app=Join-Path $env:LOCALAPPDATA 'Programs\Any2Odyssey'
 $controlsOnly=$false
 $versionFile=Join-Path $app 'version.json'
@@ -25,14 +30,22 @@ try{
 $deadline=(Get-Date).AddSeconds(12)
 while((Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
 if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
-if(-not $controlsOnly -and ((Test-Path -LiteralPath $worker) -or (Test-Path -LiteralPath $helper))){
+# A full installation removes its worker through the helper. A controls-only record never
+# elevates for a worker it did not install, but a helper left behind by a pre-0.8.3 reinstall
+# over a full installation is still ours to remove, or Install-GUI.cmd stays blocked by it.
+$needsHelper=if($controlsOnly){Test-Path -LiteralPath $helper -PathType Leaf}else{(Test-Path -LiteralPath $worker) -or (Test-Path -LiteralPath $helper)}
+if($needsHelper){
  if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'" -ExpectedUserSid "'+$identity.User.Value+'"'
  # The helper itself checks the approving account, its own Program Files path and the fixed worker path.
  $launch=@{FilePath=$powershell;ArgumentList=$arguments;Wait=$true;PassThru=$true}
  if(-not $alreadyElevated){$launch.Verb='RunAs'}
- $removal=Start-Process @launch
+ try{$removal=Start-Process @launch}
+ catch [InvalidOperationException]{
+  # Declining the UAC prompt surfaces as this exception; nothing has been removed yet.
+  throw 'Elevation was declined. The conversion worker needs administrator approval to be removed; no files were changed.'
+ }
  if($removal.ExitCode -ne 0){throw 'Worker removal did not complete. No per-user installation files were removed. Retry using the same Windows account.'}
 }
 $shell=New-Object -ComObject WScript.Shell
@@ -51,3 +64,12 @@ if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}
 # The program folder held only the files above; it stays if anything else was placed in it.
 if((Test-Path -LiteralPath $app -PathType Container) -and -not (Get-ChildItem -LiteralPath $app -Force | Select-Object -First 1)){Remove-Item -LiteralPath $app -ErrorAction SilentlyContinue}
 Write-Host 'Any2Odyssey removed. Samsung software, your settings and logs were retained. No reboot is needed.'
+}catch{
+ if($Pause){
+  Write-Host ('Uninstall did not complete: '+$_.Exception.Message) -ForegroundColor Red
+  Write-Host 'Press any key to close this window.'
+  try{[void][Console]::ReadKey($true)}catch{}
+  exit 1
+ }
+ throw
+}
