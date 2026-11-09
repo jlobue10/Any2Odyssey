@@ -108,8 +108,9 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
     };
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     // Set once `run_inner` has returned on any path: only then have the loop,
-    // the engine's Stop and the surface teardown all completed, which is what
-    // the watchdog must see before it stands down.
+    // the engine's Stop and the surface teardown all completed. The watchdog
+    // stands down so the final log and status lines below are written and
+    // the real exit code, not its generic one, reaches the controls.
     let finished = Arc::new(AtomicBool::new(false));
     let result = run_inner(
         event_name,
@@ -120,7 +121,7 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
         finished.clone(),
     );
     finished.store(true, Ordering::Release);
-    match result {
+    let code = match result {
         Ok(ready) => {
             log("Renderer stopped cleanly.");
             if ready {
@@ -136,7 +137,19 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
             }
             code
         }
-    }
+    };
+    // End the process here rather than returning into `std::process::exit`.
+    // ExitProcess would run DLL_PROCESS_DETACH for the vendor engine and its
+    // CUDA/ONNX/LeiaSR dependencies under the loader lock, after killing the
+    // engine's remaining threads mid-flight, with the watchdog already stood
+    // down: a detach that blocks would leave an invisible process holding the
+    // renderer mutex, so every later start reports "another renderer is
+    // running". Nothing is lost by skipping it: stdio is null, the status
+    // file and log lines above are complete, and the engine is never
+    // FreeLibrary'd anyway.
+    // SAFETY: terminating our own process with the exit code computed above.
+    let _ = unsafe { TerminateProcess(GetCurrentProcess(), code as u32) };
+    code
 }
 
 struct Exit {
