@@ -33,9 +33,10 @@ Build the release, copy `target\release\Any2Odyssey.exe` to `build\`, then run f
 .\installer\tests\test-install-launcher.ps1
 .\installer\tests\test-controls-install.ps1
 .\installer\tests\test-install-flow.ps1 [-PreviousPackage <extracted older release>]
+.\installer\tests\test-uninstall-flow.ps1
 ```
 
-They use temporary folders and an isolated `HKCU:\Software\Any2OdysseyInstallerTests` key; the Samsung engine hash and elevation are simulated. No real installation is performed and no Samsung file is read or written. CI runs the same scripts on `windows-latest`.
+They use temporary folders and an isolated `HKCU:\Software\Any2OdysseyInstallerTests` key, both removed after a passing run; the Samsung engine hash and elevation are simulated, and the tests set `ANY2ODYSSEY_SKIP_OS_CHECK=1` so `install.ps1`'s Windows 11 24H2 gate does not depend on the CI image. No real installation is performed and no Samsung file is read or written. CI runs the same scripts on `windows-latest`.
 
 ## Hardware acceptance (target machine)
 

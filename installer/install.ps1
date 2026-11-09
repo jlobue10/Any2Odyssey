@@ -11,14 +11,16 @@ $binary=Join-Path $PSScriptRoot 'build\Any2Odyssey.exe'
 $workerName='Any2OdysseyWorker.exe'
 $helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
 $documents=@('USER-GUIDE.html','Uninstall.ps1','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md')
-if(-not [Environment]::Is64BitProcess -or [Environment]::OSVersion.Version.Build -lt 26100){throw 'Use 64-bit PowerShell on Windows 11 24H2 or newer.'}
+if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to install Any2Odyssey.'}
+# ANY2ODYSSEY_SKIP_OS_CHECK=1 lets the isolated tests run on older CI images; it skips only this version gate.
+if($env:ANY2ODYSSEY_SKIP_OS_CHECK -ne '1' -and [Environment]::OSVersion.Version.Build -lt 26100){throw 'Use 64-bit PowerShell on Windows 11 24H2 or newer.'}
 foreach($relative in @('VERSION','build\Any2Odyssey.exe','assets\Any2Odyssey.ico','UninstallWorker.ps1')+$documents){
  if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $relative) -PathType Leaf)){throw "Missing package file: $relative. Build or extract the complete release first."}
 }
 $versionText=(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw).Trim()
 if($versionText -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid package VERSION.'}
 $version=[version]($versionText+'.0')
-if((Get-Any2OdysseyPackageVersion -Binary $binary) -ne $version){throw 'Package VERSION and executable version disagree. Extract a complete release or rebuild it.'}
+if((ConvertTo-Any2OdysseyFourPartVersion (Get-Any2OdysseyPackageVersion -Binary $binary)) -ne $version){throw 'Package VERSION and executable version disagree. Extract a complete release or rebuild it.'}
 $installed=Get-Any2OdysseyInstalledVersion -AppPath $app -Registration $registration -DataPath $data
 $installedVersion=if($installed){$installed.Version}else{$null}
 $action=Get-Any2OdysseyInstallAction -PackageVersion $version -InstalledVersion $installedVersion -AllowDowngrade:$AllowDowngrade
@@ -27,6 +29,7 @@ $engineDll=Join-Path $engine 'ConversionWrapper.dll'
 if($ControlsOnly){
  # Keep full-install app and renderer versions synchronized.
  if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed. Use Install.cmd to update the full installation together.'}
+ if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Use Install.cmd to update the full installation together, or uninstall it first.'}
  Write-Host 'Controls-only mode: GUI, tray and Help; 3D conversion is unavailable. Samsung files will not be installed or changed.'
 }else{
  if(-not (Test-Path -LiteralPath $engineDll)){throw 'Samsung Odyssey 3D Hub is not installed. For full 3D conversion, install the supported Hub first. To install just the desktop controls on this PC, run Install-GUI.cmd instead.'}

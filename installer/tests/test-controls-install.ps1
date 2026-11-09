@@ -1,5 +1,7 @@
 # Controls-only install/repair/uninstall and promotion to a full install, in isolated folders. Windows only.
 $ErrorActionPreference='Stop'
+# install.ps1 refuses Windows builds before 24H2; the fixture is about files, not the OS version.
+$previousSkip=$env:ANY2ODYSSEY_SKIP_OS_CHECK;$env:ANY2ODYSSEY_SKIP_OS_CHECK='1'
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-controls-test-'+[Guid]::NewGuid().ToString('N'))
@@ -15,9 +17,9 @@ foreach($file in @('install.ps1','Uninstall.ps1')){
  $script=$script.Replace('$env:LOCALAPPDATA',("'"+$local+"'")).Replace('C:\Program Files\Odyssey 3D Hub\Conversion',$engine).Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey',$registration)
  $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktop+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
  $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+(Join-Path $root 'programfiles')+"'"))
- $script=$script.Replace('if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')
+ if($file -eq 'Uninstall.ps1'){$script=$script.Replace('$alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)','$alreadyElevated=$false')}
  if($file -eq 'install.ps1'){$script=$script.Replace('if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')}
- if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath')){throw 'Fixture routing incomplete; refusing to run.'}
+ if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole')){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath (Join-Path $package $file) -Value $script -Encoding UTF8
 }
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
@@ -27,6 +29,7 @@ $installer=Join-Path $package 'install.ps1';$app=Join-Path $local 'Programs\Any2
 New-Item -ItemType Directory -Path $data -Force | Out-Null
 Set-Content -LiteralPath (Join-Path $data 'settings.json') -Value '{"AutoConvert":false,"Depth":1.2}'
 $settingsHash=(Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash
+$passed=$false
 try{
  & $installer -CheckOnly -ControlsOnly
  Assert (-not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $engine)) 'Controls-only preflight makes no installation changes'
@@ -44,6 +47,7 @@ try{
  $engineHash=(Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash
  & (Join-Path $app 'Uninstall.ps1')
  Assert (-not (Test-Path -LiteralPath (Join-Path $app 'Any2Odyssey.exe')) -and -not (Test-Path -LiteralPath $registration)) 'Controls-only uninstall removes the app and registration without elevation'
+ Assert (-not (Test-Path -LiteralPath $app)) 'Uninstall removes the emptied program folder'
  Assert ((Test-Path -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')) -and (Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $engineHash) 'Controls-only uninstall leaves all Samsung-directory files untouched'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Uninstall preserves user preferences'
  Remove-Item -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')
@@ -56,8 +60,14 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayName -eq 'Any2Odyssey') 'Full setup clears the controls-only registration label'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Promotion preserves user preferences'
  $failed=$false;try{& $installer -ControlsOnly}catch{$failed=$_.Exception.Message.Contains('full installation')};Assert $failed 'Controls-only setup refuses to split an existing full installation'
- Write-Host "Isolated test files: $root"
-}finally{if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}}
+ $passed=$true
+}finally{
+ if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
+ $testKeys=Split-Path -Parent $registration
+ if((Test-Path -LiteralPath $testKeys) -and -not (Get-ChildItem -LiteralPath $testKeys | Select-Object -First 1) -and -not (Get-Item -LiteralPath $testKeys).GetValueNames().Count){Remove-Item -LiteralPath $testKeys}
+ if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}
+ $env:ANY2ODYSSEY_SKIP_OS_CHECK=$previousSkip
+}
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
 exit 0

@@ -20,6 +20,10 @@ PowerShell installer family, ported from Any2Odd 0.7.3's installer (GPL-3.0-only
 - `Uninstall.ps1`: runs as the normal user, signals the quit event without launching the installed EXE, and removes exactly the files the installer placed; Samsung files, settings and logs stay.
 - `tests/`: isolated tests that run on Windows only (temporary folders, isolated registry key, simulated engine hash and elevation). They need `build\Any2Odyssey.exe` in the repository root; see `docs/TESTING.md`.
 
+## Trust model
+
+`Install.cmd` elevates `Install-Launcher.ps1` from the folder the ZIP was extracted to. That elevated process runs `install.ps1` and `InstallSupport.ps1` from the same folder, runs `build\Any2Odyssey.exe --quit` from it when an instance is still open, copies `build\Any2Odyssey.exe` and `UninstallWorker.ps1` from it into Program Files, and stages rollback copies of the files it replaces under `%TEMP%`, restoring them from there if the installation fails. Everything the elevated step reads is therefore under the control of the user who extracted the package, exactly as with any setup program run from a Downloads folder: extract to a folder you control, verify the ZIP against the published `.sha256` first, and approve elevation only for a package you trust. The same-account check in the launcher prevents installing into the wrong user profile; it is not what protects the elevated step. The uninstall side is deliberately different: its only elevated step, `UninstallWorker.ps1`, runs from Program Files and never from `%LOCALAPPDATA%` or a temporary folder.
+
 ## Package layout expected
 
 ```
