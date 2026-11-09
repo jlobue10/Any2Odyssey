@@ -203,9 +203,23 @@ fn main() {
                 }
             }
         }
-        [flag, pid] if flag == "--inspect" => platform::inspect(pid.parse().unwrap_or(0)),
+        // A process id that does not parse is a usage error, not PID 0: with 0
+        // the probes ran against nothing and reported success.
+        [flag, pid] if flag == "--inspect" => match pid.parse() {
+            Ok(pid) => platform::inspect(pid),
+            Err(_) => {
+                eprintln!("{}", usage());
+                2
+            }
+        },
         [flag, parent, worker] if flag == "--layout-probe" => {
-            platform::layout_probe(parent.parse().unwrap_or(0), worker.parse().unwrap_or(0))
+            match (parent.parse(), worker.parse()) {
+                (Ok(parent), Ok(worker)) => platform::layout_probe(parent, worker),
+                _ => {
+                    eprintln!("{}", usage());
+                    2
+                }
+            }
         }
         [flag] if flag == "--test-capture-exclusion" => platform::test_capture_exclusion(),
         [flag] if flag == "--test-offscreen" => platform::test_offscreen(),
