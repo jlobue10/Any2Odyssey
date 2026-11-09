@@ -119,6 +119,28 @@ fn pixel(pixels: &[u8], width: i32, x: i32, y: i32) -> [u8; 3] {
     [pixels[i + 2], pixels[i + 1], pixels[i]] // BGRA -> RGB
 }
 
+/// `pixel` for error messages: a buffer that never received a frame (or a
+/// short one) reads as "no frame" instead of indexing out of bounds.
+fn describe_pixel(pixels: &[u8], width: i32, height: i32, x: i32, y: i32) -> String {
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return "no frame".to_owned();
+    }
+    let end = ((y * width + x) * 4) as usize + 4;
+    if pixels.len() < (width * height * 4) as usize || pixels.len() < end {
+        return "no frame".to_owned();
+    }
+    format!("{:?}", pixel(pixels, width, x, y))
+}
+
+/// Destroy the windows a diagnostic created, in reverse creation order.
+fn destroy_windows(windows: &[HWND]) {
+    for &h in windows.iter().rev() {
+        if win::is_window(h) {
+            let _ = unsafe { DestroyWindow(h) };
+        }
+    }
+}
+
 /// Pump messages for roughly `millis`, then return.
 fn pump(millis: u64) {
     let until = Instant::now() + std::time::Duration::from_millis(millis);
@@ -163,13 +185,18 @@ pub fn test_capture_exclusion() -> i32 {
     };
     let bounds = Rect::new(screen.x + 80, screen.y + 80, 160, 80);
     let mut checks = Vec::new();
+    // Every window created inside the closure is destroyed after it, on the
+    // success and the failure path alike.
+    let mut windows: Vec<HWND> = Vec::new();
     let outcome = (|| -> Result<(), String> {
         let background =
             create_plain_window("Any2Odyssey test background", bounds, Some(CYAN), true)
                 .map_err(|e| e.to_string())?;
+        windows.push(background);
         let excluded =
             create_plain_window("Any2Odyssey test excluded", bounds, Some(MAGENTA), true)
                 .map_err(|e| e.to_string())?;
+        windows.push(excluded);
         let popup = create_plain_window(
             "Any2Odyssey test popup",
             Rect::new(bounds.x, bounds.y, 40, 80),
@@ -177,6 +204,7 @@ pub fn test_capture_exclusion() -> i32 {
             true,
         )
         .map_err(|e| e.to_string())?;
+        windows.push(popup);
         let mut capture = GpuDesktopCapture::new(bounds, &device, || {}, &|_| {})?;
         win::show_window(background, win::SW_SHOWNOACTIVATE);
         pump(300);
@@ -198,9 +226,9 @@ pub fn test_capture_exclusion() -> i32 {
                 }
             }
             Err(format!(
-                "Stage {stage} failed: left={:?} right={:?} frames={}",
-                pixel(pixels, bounds.width, 20, 40),
-                pixel(pixels, bounds.width, 120, 40),
+                "Stage {stage} failed: left={} right={} frames={}",
+                describe_pixel(pixels, bounds.width, bounds.height, 20, 40),
+                describe_pixel(pixels, bounds.width, bounds.height, 120, 40),
                 capture.frames
             ))
         };
@@ -259,11 +287,9 @@ pub fn test_capture_exclusion() -> i32 {
             "4 closing popup restores background",
         )?;
         checks.push("Closing popup restores the background".into());
-        for h in [popup, excluded, background] {
-            let _ = unsafe { DestroyWindow(h) };
-        }
         Ok(())
     })();
+    destroy_windows(&windows);
     match outcome {
         Ok(()) => report(
             true,
@@ -294,9 +320,11 @@ pub fn test_offscreen() -> i32 {
     let monitors = win::monitor_rects();
     let outside = offscreen_bounds(screen.size(), &monitors);
     let on_screen = Rect::new(screen.x + 80, screen.y + 80, 80, 80);
+    let mut windows: Vec<HWND> = Vec::new();
     let outcome = (|| -> Result<(), String> {
         let source = create_plain_window("Any2Odyssey offscreen source", outside, None, true)
             .map_err(|e| e.to_string())?;
+        windows.push(source);
         let preview = create_plain_window(
             "Any2Odyssey offscreen preview",
             on_screen,
@@ -304,6 +332,7 @@ pub fn test_offscreen() -> i32 {
             true,
         )
         .map_err(|e| e.to_string())?;
+        windows.push(preview);
         let mut capture = GpuDesktopCapture::new(on_screen, &device, || {}, &|_| {})?;
         let mut device_obj: Option<ID3D11Device> = None;
         unsafe {
@@ -359,16 +388,16 @@ pub fn test_offscreen() -> i32 {
             }
             if !ok {
                 return Err(format!(
-                    "Offscreen surface did not deliver fresh pixels at stage {stage}; pixel {:?}",
-                    pixel(&pixels, 80, 40, 40)
+                    "Offscreen surface did not deliver fresh pixels at stage {stage}; pixel {}",
+                    describe_pixel(&pixels, 80, 80, 40, 40)
                 ));
             }
         }
         drop(thumb);
-        let _ = unsafe { DestroyWindow(source) };
-        let _ = unsafe { DestroyWindow(preview) };
         Ok(())
     })();
+    // The thumbnail, swap chain and capture were dropped with the closure.
+    destroy_windows(&windows);
     match outcome {
         Ok(()) => report(
             true,
@@ -384,4 +413,20 @@ pub fn test_offscreen() -> i32 {
 #[allow(dead_code)]
 fn _unused(_: HWND, _: &MSG) {
     let _ = (GetMessageW, WM_TIMER, set_timer, kill_timer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_pixel_reports_missing_frames_instead_of_panicking() {
+        assert_eq!(describe_pixel(&[], 80, 80, 40, 40), "no frame");
+        assert_eq!(describe_pixel(&[0; 16], 80, 80, 40, 40), "no frame");
+        let mut full = vec![0u8; 80 * 80 * 4];
+        let i = (40 * 80 + 40) * 4;
+        full[i..i + 4].copy_from_slice(&[1, 2, 3, 255]);
+        assert_eq!(describe_pixel(&full, 80, 80, 40, 40), "[3, 2, 1]");
+        assert_eq!(describe_pixel(&full, 80, 80, 80, 40), "no frame");
+    }
 }

@@ -8,6 +8,7 @@
 //! where every value from the server is checked.
 
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
 use any2odyssey_core::update::{Request, MAX_RESPONSE_BYTES};
 use windows::core::PCWSTR;
@@ -25,6 +26,9 @@ use crate::win::wide;
 
 /// Resolve, connect, send and receive each get this long.
 const TIMEOUT_MS: i32 = 10_000;
+/// The whole body read must finish within this, whatever the per-call
+/// timeouts allow: a server trickling bytes cannot hold the check thread.
+const BODY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// A WinHTTP handle closed on drop, so every early return releases it.
 struct Handle(*mut c_void);
@@ -154,6 +158,14 @@ pub fn fetch(request: &Request) -> Result<String, String> {
         },
         "WinHttpOpenRequest",
     )?;
+    // Belt and braces: the session-level policy is inherited, but the request
+    // handle is where a redirect would actually be followed.
+    set_u32(
+        &http,
+        WINHTTP_OPTION_REDIRECT_POLICY,
+        WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
+    )
+    .map_err(|e| format!("request redirect policy: {e}"))?;
     let headers: Vec<u16> = format!(
         "Accept: {}\r\nX-GitHub-Api-Version: {}\r\n",
         request.accept, request.api_version
@@ -171,7 +183,14 @@ pub fn fetch(request: &Request) -> Result<String, String> {
         return Err(format!("{host} answered HTTP {status}"));
     }
     let mut body = Vec::new();
+    let begun = Instant::now();
     loop {
+        if begun.elapsed() > BODY_DEADLINE {
+            return Err(format!(
+                "response from {host} did not complete within {} seconds",
+                BODY_DEADLINE.as_secs()
+            ));
+        }
         let mut available = 0u32;
         unsafe { WinHttpQueryDataAvailable(http.0, &mut available) }
             .map_err(|e| format!("reading response: {e}"))?;
