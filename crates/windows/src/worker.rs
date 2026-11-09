@@ -25,7 +25,7 @@ use crate::engine::{self, EngineLibrary};
 use crate::ipc::{Event, InstanceGuard};
 use crate::mirror::{self, Mirror, TIMER_OVERLAY, TIMER_POLL, TIMER_UPDATE, WM_FRAME_ARRIVED};
 use crate::overlay::OverlayController;
-use crate::processes::{current_pid, is_pid_alive};
+use crate::processes::{current_pid, ParentWatch};
 use crate::win;
 
 fn report(state: &str) {
@@ -124,6 +124,14 @@ fn run_inner(
             format!("Could not update Samsung overlay settings; conversion was not started: {e}"),
         )
     })?;
+    // Hold the parent open for the whole run: a held handle pins the process
+    // object, so a recycled PID can never be mistaken for a living parent.
+    let parent = ParentWatch::open(parent_pid).ok_or_else(|| {
+        fail(
+            exit_code::RENDERER_ERROR,
+            "Renderer error: the controls process is not running.",
+        )
+    })?;
     let library = EngineLibrary::load()
         .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?;
     let (screen, device_name, _) = win::primary_monitor().ok_or_else(|| {
@@ -204,7 +212,7 @@ fn run_inner(
         // so sustained capture cannot starve stop, liveness or overlay checks.
         let now = Instant::now();
         if poll_deadline.due(now) {
-            let alive = is_pid_alive(parent_pid);
+            let alive = parent.is_alive();
             if stop_event.is_signaled() || !alive || engine::ENGINE_CLOSED.load(Ordering::Acquire) {
                 shutdown(&mut surface, &mut started);
                 continue;

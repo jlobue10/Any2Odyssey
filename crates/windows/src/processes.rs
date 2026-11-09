@@ -1,6 +1,6 @@
-//! Process queries: is a named process running, is a PID still alive.
+//! Process queries: is a named process running, is the parent still alive.
 
-use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -50,12 +50,61 @@ pub fn is_process_running(name: &str) -> bool {
         .any(|n| n.eq_ignore_ascii_case(name))
 }
 
-/// True while the process with `pid` has not exited. Unknown PIDs count as dead.
-pub fn is_pid_alive(pid: u32) -> bool {
-    let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }) else {
-        return false;
-    };
-    let alive = unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT;
-    let _ = unsafe { CloseHandle(handle) };
-    alive
+/// A `SYNCHRONIZE` handle to another process, opened once and held open.
+///
+/// Holding the handle keeps the kernel process object alive after the process
+/// exits, so its PID cannot be recycled to an unrelated process while this
+/// watch exists. Polling `OpenProcess(pid)` instead would report a reused PID
+/// as "still running".
+pub struct ParentWatch(HANDLE);
+
+// Kernel handles may be used from any thread.
+unsafe impl Send for ParentWatch {}
+unsafe impl Sync for ParentWatch {}
+
+impl ParentWatch {
+    /// Open `pid` for synchronization. `None` when the process cannot be
+    /// opened (already gone, PID 0, or access denied): callers treat that as
+    /// an absent parent.
+    pub fn open(pid: u32) -> Option<ParentWatch> {
+        if pid == 0 {
+            return None;
+        }
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok()?;
+        Some(ParentWatch(handle))
+    }
+
+    /// True while the watched process has not exited.
+    pub fn is_alive(&self) -> bool {
+        let state = unsafe { WaitForSingleObject(self.0, 0) };
+        state == WAIT_TIMEOUT
+    }
+}
+
+impl Drop for ParentWatch {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_follows_a_real_process_and_rejects_pid_zero() {
+        assert!(ParentWatch::open(0).is_none());
+        let watch = ParentWatch::open(current_pid()).expect("own process opens");
+        assert!(watch.is_alive());
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cmd");
+        let watch = ParentWatch::open(child.id()).expect("child opens");
+        child.wait().expect("child exits");
+        assert!(!watch.is_alive());
+    }
 }
