@@ -17,17 +17,24 @@ $dist=Join-Path $repo 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 # Fresh staging directory: never pick up logs, diagnostics or Samsung assets.
 $stage=Join-Path $dist ('stage-'+[Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $stage 'build'),(Join-Path $stage 'assets'),(Join-Path $stage 'docs') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stage 'build'),(Join-Path $stage 'assets'),(Join-Path $stage 'docs'),(Join-Path $stage 'docs\assets') -Force | Out-Null
 Copy-Item -LiteralPath $Binary -Destination (Join-Path $stage 'build\Any2Odyssey.exe')
 foreach($name in @('Any2Odyssey.ico','Any2Odyssey.png','Any2Odyssey-wordmark.png')){Copy-Item -LiteralPath (Join-Path $repo ('assets\'+$name)) -Destination (Join-Path $stage 'assets')}
 foreach($name in @('README.md','CHANGELOG.md','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','VERSION')){Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $stage}
 $guide=Join-Path $repo 'USER-GUIDE.html'
 if(Test-Path -LiteralPath $guide){Copy-Item -LiteralPath $guide -Destination $stage}else{throw 'USER-GUIDE.html is missing; export the offline guide before packaging.'}
 Get-ChildItem -LiteralPath (Join-Path $repo 'docs') -Filter '*.md' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage 'docs') }
+# README.md links the controls screenshots; ship them so the packaged copy has no broken images.
+Get-ChildItem -LiteralPath (Join-Path $repo 'docs\assets') -Filter '*.png' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage 'docs\assets') }
 foreach($name in @('install.ps1','InstallSupport.ps1','Install-Launcher.ps1','Uninstall.ps1','UninstallWorker.ps1','Install.cmd','Install-GUI.cmd')){Copy-Item -LiteralPath (Join-Path $repo ('installer\'+$name)) -Destination $stage}
 $zip=Join-Path $dist ('Any2Odyssey-'+$version+'-windows-x64.zip')
 if(Test-Path -LiteralPath $zip){Remove-Item -LiteralPath $zip}
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
+# Windows PowerShell 5.1 writes backslash entry names, which non-Windows unzip tools extract as literal file names.
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive=[IO.Compression.ZipFile]::OpenRead($zip)
+try{$bad=@($archive.Entries | Where-Object { $_.FullName -like '*\*' })}finally{$archive.Dispose()}
+if($bad.Count -gt 0){Remove-Item -LiteralPath $zip;throw "The archive has backslash entry names ($($bad[0].FullName)); package with PowerShell 7 (pwsh)."}
 $hash=(Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 [IO.File]::WriteAllText(($zip+'.sha256'),$hash+'  '+[IO.Path]::GetFileName($zip)+[Environment]::NewLine,[Text.UTF8Encoding]::new($false))
 Remove-Item -LiteralPath $stage -Recurse
