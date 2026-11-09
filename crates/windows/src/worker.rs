@@ -188,12 +188,13 @@ fn run_inner(
     mirror::set_timer(hwnd, TIMER_OVERLAY, 100);
 
     let mut ready = false;
-    let mut closing = false;
-    let mut shutdown = |surface: &mut Mirror, started: &mut bool| {
-        if closing {
+    // Shared, not captured by unique borrow, so the loop can read it while
+    // the shutdown closure is alive.
+    let closing = std::cell::Cell::new(false);
+    let shutdown = |surface: &mut Mirror, started: &mut bool| {
+        if closing.replace(true) {
             return;
         }
-        closing = true;
         mirror::kill_timer(hwnd, TIMER_POLL);
         mirror::kill_timer(hwnd, TIMER_OVERLAY);
         mirror::kill_timer(hwnd, TIMER_UPDATE);
@@ -208,6 +209,16 @@ fn run_inner(
     let mut poll_deadline = DispatchDeadline::new(Instant::now(), Mirror::poll_interval());
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+        if closing.get() {
+            // The stop reason is already in worker-status.json and the
+            // surface is destroyed. Only pump the engine's own windows until
+            // WM_QUIT; a late overlay or capture error must not overwrite it.
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            continue;
+        }
         // Timers wake an idle loop; deadlines also run between posted frames
         // so sustained capture cannot starve stop, liveness or overlay checks.
         let now = Instant::now();
