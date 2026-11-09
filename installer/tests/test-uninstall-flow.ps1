@@ -42,7 +42,8 @@ function New-Fixture {
 # (the uninstaller is invoked from this script), so no $script: or $global: state is needed.
 $launches=New-Object 'System.Collections.Generic.List[object]'
 $helperExitCode=0
-$declineElevation=$false
+# '' (helper runs), 'declined' (UAC prompt cancelled: Win32 error 1223) or 'other' (any other launch failure).
+$launchFailure=''
 # Notes the uninstaller prints are recorded here: capturing the information stream with 6>&1
 # behaves differently under Windows PowerShell 5.1, a function shadowing the cmdlet does not.
 $notes=New-Object 'System.Collections.Generic.List[string]'
@@ -51,8 +52,9 @@ function Get-Process {param($Name,$ErrorAction)return @()}
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
  $launches.Add([pscustomobject]@{FilePath=$FilePath;ArgumentList=$ArgumentList;Verb=$Verb;Wait=[bool]$Wait})
- # A declined UAC prompt surfaces from Start-Process -Verb RunAs as this exception type.
- if($declineElevation){throw (New-Object InvalidOperationException 'This command cannot be run due to the error: The operation was canceled by the user.')}
+ # A declined UAC prompt surfaces from Start-Process -Verb RunAs as InvalidOperationException wrapping Win32Exception 1223.
+ if($launchFailure -eq 'declined'){throw (New-Object InvalidOperationException -ArgumentList 'This command cannot be run due to the error: The operation was canceled by the user.',(New-Object ComponentModel.Win32Exception 1223))}
+ if($launchFailure -eq 'other'){throw (New-Object InvalidOperationException -ArgumentList 'This command cannot be run due to the error: simulated launch failure.',(New-Object ComponentModel.Win32Exception 2))}
  if($helperExitCode -eq 0){
   # Stand in for UninstallWorker.ps1: it removes the fixed worker path, itself and its owner marker.
   Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
@@ -90,20 +92,19 @@ try{
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and (Test-Path -LiteralPath $worker)) 'Helper failure leaves per-user files, shortcuts, registration and worker in place'
 
  $launches.Clear()
- $helperExitCode=0;$declineElevation=$true
+ $helperExitCode=0;$launchFailure='declined'
  New-Fixture -Elevated $false
  $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('Elevation was declined')}
  Assert $failed 'Declined UAC prompt stops the uninstall with a plain message'
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'Declined elevation leaves everything in place'
- $declineElevation=$false
 
- # A pre-0.8.3 controls-only reinstall over a full install left this record with the helper still
- # present; the owner marker names this account, so the helper is ours to run.
  $launches.Clear()
- New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
- & (Join-Path $app 'Uninstall.ps1')
- Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Controls-only record with an orphaned helper still runs the helper'
- Assert (-not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $ownerFile)) 'Orphaned helper, worker and owner marker are removed along with the controls'
+ $launchFailure='other'
+ New-Fixture -Elevated $false
+ $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('simulated launch failure') -and -not $_.Exception.Message.Contains('Elevation was declined')}
+ Assert $failed 'A launch failure other than a declined prompt keeps its own message'
+ Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper)) 'A failed helper launch leaves everything in place'
+ $launchFailure=''
 
  # Shared PC: another account's full installation owns the helper; a controls-only uninstall leaves it.
  $launches.Clear()
@@ -114,12 +115,29 @@ try{
  Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $ownerFile)) 'Another account''s helper, worker and owner marker are left alone'
  Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The left-alone helper is explained to the user'
 
- # A helper without an owner marker (installed before the marker existed) is not assumed to be ours.
+ # A helper without an owner marker (installed before the marker existed) is left like any other.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner ''
  & (Join-Path $app 'Uninstall.ps1')
  Assert ($launches.Count -eq 0) 'Controls-only uninstall never elevates for a helper without an owner marker'
  Assert ((Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $exe)) 'Unmarked helper and worker are left; the controls are removed'
+
+ # A controls-only record never runs the helper, whatever the marker says: the installer refuses a
+ # controls-only install while a helper exists, so this account's marker beside one cannot arise.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+ $notes.Clear();& (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 0 -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $worker)) 'Controls-only uninstall leaves a helper even when the marker names this account'
+ Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The left-alone helper is explained for a controls-only record'
+
+ # Shared PC, full record: another account ran Install.cmd afterwards and owns the worker and helper now.
+ $launches.Clear()
+ New-Fixture -Elevated $false -HelperOwner 'S-1-5-21-1-2-3-1001'
+ $notes.Clear();& (Join-Path $app 'Uninstall.ps1')
+ Assert ($launches.Count -eq 0) 'Full uninstall never elevates for a worker and helper another account installed over it'
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $app)) 'Per-user installation is removed while another account owns the worker'
+ Assert ((Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $ownerFile)) 'Another account''s worker, helper and marker are left alone by a full uninstall'
+ Assert (($notes -join [char]10).Contains('belong to another account or an older release')) 'The full uninstall explains what it left alone'
 
  # A truncated version.json must not block the uninstall; the worker and helper decide.
  $launches.Clear()

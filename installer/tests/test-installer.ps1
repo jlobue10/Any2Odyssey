@@ -4,6 +4,7 @@ $ErrorActionPreference='Stop'
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-installer-test-'+[Guid]::NewGuid().ToString('N'))
 $app=Join-Path $root 'app';$data=Join-Path $root 'data';$engine=Join-Path $root 'engine'
+$registration='HKCU:\Software\Any2OdysseyInstallerTests\'+[Guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Path $app,$data,$engine | Out-Null
 $passed=$false
 try{
@@ -24,6 +25,13 @@ Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Damaged vers
 Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"0.8.1"}'
 Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq [version]'0.8.1') 'A damaged version.json falls through to the next readable record'
 Remove-Item -LiteralPath (Join-Path $app 'version.json'),(Join-Path $data 'install-result.json')
+# The registration's DisplayVersion is consulted before the records; an unparsable one must count as absent too.
+New-Item -Path $registration -Force | Out-Null
+New-ItemProperty -LiteralPath $registration -Name DisplayVersion -Value 'not a version' -PropertyType String -Force | Out-Null
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'An unparsable registry DisplayVersion is treated as absent'
+Set-ItemProperty -LiteralPath $registration -Name DisplayVersion -Value '0.8.1'
+Assert ((Get-Any2OdysseyInstalledVersion $app $registration $data).Version -eq [version]'0.8.1') 'A valid registry DisplayVersion is read when no executable is installed'
+Remove-Item -LiteralPath $registration -Recurse
 Assert ((Get-Any2OdysseyPackageVersion -Binary $current) -eq [version]((Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()+'.0')) 'Packaged executable carries the VERSION file version in its resource'
 Copy-Item -LiteralPath $current -Destination (Join-Path $app 'Any2Odyssey.exe')
 Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq (Get-Any2OdysseyPackageVersion -Binary $current)) 'Installed executable version is read from its version resource'
@@ -59,7 +67,12 @@ Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $
 Assert ((Get-FileHash -LiteralPath (Join-Path $data 'Samsung-OverlaySettings-before.json')).Hash -eq $backupHash) 'Samsung settings backup preserved'
 Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $samsungHash) 'Samsung engine untouched'
 $passed=$true
-}finally{if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}}
+}finally{
+ if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
+ $testKeys=Split-Path -Parent $registration
+ if((Test-Path -LiteralPath $testKeys) -and -not (Get-ChildItem -LiteralPath $testKeys | Select-Object -First 1) -and -not (Get-Item -LiteralPath $testKeys).GetValueNames().Count){Remove-Item -LiteralPath $testKeys}
+ if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}
+}
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
 exit 0

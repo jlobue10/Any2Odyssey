@@ -1,6 +1,7 @@
 # Shared toolchain for local builds and every workflow, pinned to the release the
 # 0.8.4 workflows ran with; bump it deliberately (clippy's -D warnings would otherwise
-# turn red on an unrelated PR or a tag push whenever a new stable lands).
+# turn red on an unrelated PR or a tag push whenever a new stable lands). The `toolchain:`
+# input of the dtolnay/rust-toolchain steps in .github/workflows must name the same version.
 [toolchain]
 channel = "1.99.1"
 components = ["clippy", "rustfmt"]

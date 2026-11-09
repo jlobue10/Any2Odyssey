@@ -10,6 +10,7 @@ $registration='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Ody
 $binary=Join-Path $PSScriptRoot 'build\Any2Odyssey.exe'
 $workerName='Any2OdysseyWorker.exe'
 $helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
+$ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
 $documents=@('USER-GUIDE.html','Uninstall.ps1','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md')
 if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to install Any2Odyssey.'}
 # ANY2ODYSSEY_SKIP_OS_CHECK=1 lets the isolated tests run on older CI images; it skips only this version gate.
@@ -34,6 +35,12 @@ if($ControlsOnly){
 }else{
  if(-not (Test-Path -LiteralPath $engineDll)){throw 'Samsung Odyssey 3D Hub is not installed. For full 3D conversion, install the supported Hub first. To install just the desktop controls on this PC, run Install-GUI.cmd instead.'}
  if((Get-FileHash -LiteralPath $engineDll).Hash -ne '0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'){throw 'Samsung engine changed. This release needs a compatibility update.'}
+ # One worker path per PC. When another account placed the current worker and helper, say so here in
+ # the preflight pass, which runs in the visible console; the elevated installer's own output is hidden.
+ if(Test-Path -LiteralPath $ownerFile -PathType Leaf){
+  $previousOwner=([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim()
+  if($previousOwner -and $previousOwner -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
+ }
 }
 if($CheckOnly){Write-Host "$action preflight passed$(if($ControlsOnly){' for controls only'}else{': package, version and Samsung engine are compatible'}). No changes made.";return}
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -63,7 +70,7 @@ if(-not $ControlsOnly){
  # when this account placed it, so another user's full installation is never removed by mistake.
  $ownerSource=Join-Path $stage 'UninstallWorker.owner'
  [IO.File]::WriteAllText($ownerSource,[Security.Principal.WindowsIdentity]::GetCurrent().User.Value,[Text.UTF8Encoding]::new($false))
- $operations+=[pscustomobject]@{Source=$ownerSource;Destination=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'}
+ $operations+=[pscustomobject]@{Source=$ownerSource;Destination=$ownerFile}
 }
 $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'assets\Any2Odyssey.ico';Destination=Join-Path $app 'Any2Odyssey.ico'}
 $record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionText;PreviousVersion=$(if($installed){$installed.Version.ToString()}else{$null});Action=$action;App=$app;ControlsOnly=[bool]$ControlsOnly;Worker=$(if(-not $ControlsOnly){Join-Path $engine $workerName}else{$null});Hash=(Get-FileHash -LiteralPath $binary).Hash}

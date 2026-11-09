@@ -31,6 +31,9 @@ function Get-FileHash {
  Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256
 }
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
+# Notes the installer prints are recorded here (a function shadowing Write-Host works under 5.1 and 7 alike).
+$notes=New-Object 'System.Collections.Generic.List[string]'
+function Write-Host {param($Object,$ForegroundColor,$BackgroundColor,[switch]$NoNewline)$text=[string]::Join(' ',@($Object));$notes.Add($text);$Host.UI.WriteLine($text)}
 $app=Join-Path $local 'Programs\Any2Odyssey';$data=Join-Path $local 'Any2Odyssey'
 New-Item -ItemType Directory -Path $app,$data | Out-Null
 Set-Content -LiteralPath (Join-Path $engine 'ConversionWrapper.dll') -Value 'Simulated Samsung engine; never loaded'
@@ -65,8 +68,13 @@ try{
  Assert ($shell.CreateShortcut((Join-Path $desktop 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
  Assert ($shell.CreateShortcut((Join-Path $programs 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
  New-ItemProperty -LiteralPath $registration -Name EstimatedSize -Value 4096 -PropertyType DWord -Force | Out-Null
+ # Shared PC: another account ran Install.cmd in between; the repair must say so and take the marker over.
+ [IO.File]::WriteAllText($ownerFile,'S-1-5-21-1-2-3-1001',[Text.UTF8Encoding]::new($false))
+ $notes.Clear()
  & $testInstall
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Repeated installer repairs the same release'
+ Assert (($notes -join [char]10).Contains('installed by another Windows account (S-1-5-21-1-2-3-1001)')) 'Installing over another account''s worker prints a notice'
+ Assert ((Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Installing over another account''s installation takes over the owner marker'
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '"*\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile *') 'Installed-apps uninstall names the system PowerShell by full path'
