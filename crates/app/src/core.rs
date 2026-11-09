@@ -136,6 +136,7 @@ impl Core {
                 (
                     Preferences {
                         auto_convert: false,
+                        check_updates: false,
                         ..Default::default()
                     },
                     Some(error),
@@ -700,11 +701,15 @@ mod tests {
         let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
         std::env::set_var(paths::DATA_DIR_ENV, dir.path());
         let path = dir.path().join("settings.json");
-        let original = br#"{"Mode":"Window","AutoConvert":false,"Depth":"#;
+        let original = br#"{"Mode":"Window","AutoConvert":false,"CheckUpdates":false,"Depth":"#;
         std::fs::write(&path, original).unwrap();
         let make_core = || Core::new(Logger::new(dir.path().join("test.log")), None, true);
         let mut core = make_core();
         assert!(!core.prefs.auto_convert);
+        assert!(
+            !core.prefs.check_updates,
+            "unreadable preferences must not enable automatic network checks"
+        );
         assert!(core.settings_load_error.is_some());
         assert!(core.status.contains("Automatic conversion is disabled"));
         core.start_conversion();
@@ -724,6 +729,7 @@ mod tests {
         assert_eq!(saved.mode, CaptureMode::Window);
         assert_eq!(saved.depth, 1.25);
         assert!(!saved.auto_convert);
+        assert!(!saved.check_updates);
         let backups: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().path())
