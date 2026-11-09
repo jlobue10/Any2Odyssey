@@ -114,7 +114,7 @@ impl Tray {
 pub fn drain(core: &mut Core) {
     while let Ok(event) = TrayIconEvent::receiver().try_recv() {
         if let TrayIconEvent::DoubleClick { .. } = event {
-            core.requests.push(UiRequest::ShowControls);
+            core.request(UiRequest::ShowControls);
         }
     }
     let Some(ids) = IDS.get() else { return };

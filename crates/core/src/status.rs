@@ -44,7 +44,10 @@ pub struct CaptureBorderStatus {
     pub error: Option<String>,
 }
 
-/// Worker exit codes, shared with the supervisor's messages.
+/// Worker exit codes. `supervisor::classify` maps them to what the controls
+/// say and whether recovery may retry: `ALREADY_RUNNING` and
+/// `PREREQUISITES_FAILED` turn conversion off until the user acts, the others
+/// are retried.
 pub mod exit_code {
     pub const READY_AND_STOPPED_CLEANLY: i32 = 0;
     pub const RENDERER_ERROR: i32 = 1;

@@ -184,9 +184,13 @@ fn main() {
         attach_parent_console();
     }
     // An isolated preview leaves the real data directory alone, log included.
+    // Its log name carries the process id, so two previews never share a
+    // file and a fixed name in a shared temp folder is never reused.
     let preview = args.first().is_some_and(|a| a == "--screenshot");
     let logger = if preview {
-        Logger::new(std::env::temp_dir().join("any2odyssey-preview.log"))
+        Logger::new(
+            std::env::temp_dir().join(format!("any2odyssey-preview-{}.log", std::process::id())),
+        )
     } else {
         let _ = std::fs::create_dir_all(paths::data_dir());
         Logger::default_location()

@@ -553,9 +553,27 @@ impl Core {
         self.save_preferences();
     }
 
+    /// Queue a command for the GUI thread. While a deferred quit runs, the
+    /// window must stay where it is: a show request (tray double-click,
+    /// Ctrl+Alt+F9, the menus) would un-hide and activate the controls for
+    /// the seconds the worker takes to stop, stealing the focus from a game
+    /// just as `--show` did before 0.8.5. Such requests are dropped; the
+    /// others (theme, tray, quit) still apply.
+    pub fn request(&mut self, request: UiRequest) {
+        if self.exiting
+            && matches!(
+                request,
+                UiRequest::ShowControls | UiRequest::ShowHelp | UiRequest::ShowAbout
+            )
+        {
+            return;
+        }
+        self.requests.push(request);
+    }
+
     pub fn menu(&mut self, command: MenuCommand) {
         match command {
-            MenuCommand::ShowControls => self.requests.push(UiRequest::ShowControls),
+            MenuCommand::ShowControls => self.request(UiRequest::ShowControls),
             MenuCommand::Toggle => self.toggle(),
             MenuCommand::RestoreOverlay => self.restore_overlay(),
             MenuCommand::KeepOverlayOnTop(value) => {
@@ -588,15 +606,15 @@ impl Core {
                 }
             }
             MenuCommand::Restart => self.restart(),
-            MenuCommand::Help => self.requests.push(UiRequest::ShowHelp),
-            MenuCommand::About => self.requests.push(UiRequest::ShowAbout),
+            MenuCommand::Help => self.request(UiRequest::ShowHelp),
+            MenuCommand::About => self.request(UiRequest::ShowAbout),
             MenuCommand::CheckUpdates => {
                 self.check_updates();
-                self.requests.push(UiRequest::ShowAbout);
+                self.request(UiRequest::ShowAbout);
             }
-            MenuCommand::ToggleTheme => self.requests.push(UiRequest::ToggleTheme),
+            MenuCommand::ToggleTheme => self.request(UiRequest::ToggleTheme),
             MenuCommand::ViewLogs => platform::open_path(&paths::data_dir()),
-            MenuCommand::MinimizeToTray => self.requests.push(UiRequest::MinimizeToTray),
+            MenuCommand::MinimizeToTray => self.request(UiRequest::MinimizeToTray),
             MenuCommand::Quit => self.quit(),
         }
     }
@@ -606,6 +624,14 @@ impl Core {
             return;
         }
         self.exiting = true;
+        // The poller may drain Show and Quit in the same batch. Remove
+        // previously accepted shows as well as refusing new ones in request.
+        self.requests.retain(|request| {
+            !matches!(
+                request,
+                UiRequest::ShowControls | UiRequest::ShowHelp | UiRequest::ShowAbout
+            )
+        });
         self.save_preferences();
         self.stop_conversion();
         // Keep the window and poller responsive until background cleanup finishes.
@@ -618,13 +644,14 @@ impl Core {
                 self.quit();
                 return;
             }
-            // A deferred quit is under way: the window must not come back
-            // for one frame, and the launch that asked is told nothing was
-            // shown through its exit code.
-            if events.show.is_signaled() && !self.exiting {
-                self.requests.push(UiRequest::ShowControls);
+            let (show, toggle) = (events.show.is_signaled(), events.toggle.is_signaled());
+            // During a deferred quit `request` drops the show, so the window
+            // does not come back for a frame; the `--show` launch that set
+            // the event has already exited 0 and is not told.
+            if show {
+                self.request(UiRequest::ShowControls);
             }
-            if events.toggle.is_signaled() {
+            if toggle {
                 self.toggle();
             }
         }
@@ -647,8 +674,17 @@ impl Core {
                 }
             }
             (true, Some(code)) => {
+                // The worker's error paths write their reason to
+                // worker-status.json before exiting. Read it while the pid
+                // still matches, so the status line carries it instead of
+                // only a number; the log keeps the line as well.
+                let reason = self.worker.as_ref().and_then(|w| read_status(w.pid()));
                 self.worker = None;
-                self.status = self.supervisor.worker_exited(code, now);
+                self.status = self.supervisor.worker_exited(code, reason.as_deref(), now);
+                self.log(&format!(
+                    "Renderer exited with code {code}: {}",
+                    self.status
+                ));
             }
             (true, None) => {
                 if let Some(worker) = &self.worker {
@@ -668,44 +704,77 @@ fn read_status(worker_pid: u32) -> Option<String> {
 }
 
 /// Open a page from an update result in the browser. Only GitHub's own hosts
-/// pass; anything else is ignored.
+/// pass; anything else is ignored. The check runs here, synchronously; the
+/// launch itself runs on its own thread because `open` can wait up to 250 ms
+/// for the launcher and the caller holds the shared state inside a GUI frame.
 pub fn open_release_url(url: &str) {
-    if update::allowed_url(url) {
-        let _ = open::that_detached(url);
+    if !update::allowed_url(url) {
+        return;
     }
+    let url = url.to_owned();
+    std::thread::spawn(move || {
+        let _ = open::that_detached(url);
+    });
 }
 
 fn settings_recovery_message(error: &str) -> String {
     format!("{error}. Automatic conversion is disabled, and so is the daily update check until you turn it back on from the About page. Fix the settings file and reopen, or choose settings and click Apply to save them with a backup of the original.")
 }
 
-/// Load preferences, importing Any2Odd's file once when ours does not exist.
+/// Load preferences, importing Any2Odd's file when ours does not exist.
 fn load_preferences(logger: &Logger) -> Result<Preferences, String> {
-    let own = paths::settings_file();
+    load_preferences_from(
+        logger,
+        &paths::settings_file(),
+        paths::legacy_any2odd_settings_file().as_deref(),
+    )
+}
+
+/// Only damage to our own file is an error (and gates automatic start and
+/// the saves until Apply, see `Core::initialize`). Any2Odd's file is a
+/// courtesy import: failures are logged without blocking the controls, but
+/// automatic conversion and update checks stay off until the user opts in.
+fn load_preferences_from(
+    logger: &Logger,
+    own: &std::path::Path,
+    legacy: Option<&std::path::Path>,
+) -> Result<Preferences, String> {
     if !own
         .try_exists()
         .map_err(|e| format!("Could not inspect saved settings: {e}"))?
     {
-        if let Some(legacy) = paths::legacy_any2odd_settings_file() {
-            if legacy
-                .try_exists()
-                .map_err(|e| format!("Could not inspect legacy settings: {e}"))?
-            {
-                let mut imported = Preferences::load_from(&legacy).map_err(|e| {
-                    format!(
-                        "Could not import Any2Odd's settings from {}: {e}",
+        if let Some(legacy) = legacy {
+            let imported = legacy.try_exists().and_then(|exists| {
+                if exists {
+                    Preferences::load_from(legacy).map(Some)
+                } else {
+                    Ok(None)
+                }
+            });
+            match imported {
+                Ok(Some(mut imported)) => {
+                    imported
+                        .save_to(own)
+                        .map_err(|e| format!("Could not import legacy settings: {e}"))?;
+                    logger.log(&format!("Imported preferences from {}", legacy.display()));
+                    return Ok(imported);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    logger.log(&format!(
+                        "Could not import Any2Odd's settings from {}: {e}. Starting with automatic conversion and update checks disabled; Any2Odd's file is left as it is.",
                         legacy.display()
-                    )
-                })?;
-                imported
-                    .save_to(&own)
-                    .map_err(|e| format!("Could not import legacy settings: {e}"))?;
-                logger.log(&format!("Imported preferences from {}", legacy.display()));
-                return Ok(imported);
+                    ));
+                    return Ok(Preferences {
+                        auto_convert: false,
+                        check_updates: false,
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
-    Preferences::load().map_err(|e| format!("Could not load saved settings: {e}"))
+    Preferences::load_from(own).map_err(|e| format!("Could not load saved settings: {e}"))
 }
 
 /// Start the poller thread. It wakes the GUI (and un-hides the window when
@@ -895,6 +964,89 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_any2odd_file_is_logged_and_skipped_not_treated_as_our_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("settings.json");
+        let legacy = dir.path().join("Odyssey3DCompanion").join("settings.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let log = dir.path().join("test.log");
+        let logger = Logger::new(log.clone());
+        // Readable legacy file: imported and written as our own.
+        std::fs::write(&legacy, br#"{"Mode":"Active","AutoConvert":false}"#).unwrap();
+        let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
+        assert_eq!(prefs.mode, CaptureMode::Active);
+        assert!(!prefs.auto_convert);
+        assert!(own.exists());
+        // Damaged legacy file: no error or write, but no automatic work.
+        std::fs::remove_file(&own).unwrap();
+        std::fs::write(&legacy, b"not json").unwrap();
+        let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
+        assert_eq!(
+            prefs,
+            Preferences {
+                auto_convert: false,
+                check_updates: false,
+                ..Default::default()
+            }
+        );
+        assert!(!own.exists(), "nothing is imported from a damaged file");
+        assert_eq!(std::fs::read(&legacy).unwrap(), b"not json");
+        assert!(std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("Could not import Any2Odd's settings"));
+        // A legacy path that does not exist imports nothing and writes nothing.
+        std::fs::remove_file(&legacy).unwrap();
+        let prefs = load_preferences_from(&logger, &own, Some(&legacy)).unwrap();
+        assert_eq!(prefs, Preferences::default());
+        assert!(!own.exists());
+        // Our own file still gates: a damaged one is the error it always was.
+        std::fs::write(&own, b"damaged").unwrap();
+        assert!(load_preferences_from(&logger, &own, Some(&legacy)).is_err());
+    }
+
+    #[test]
+    fn failed_legacy_import_never_enables_automatic_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = dir.path().join("settings.json");
+        let legacy = dir.path().join("legacy.json");
+        let logger = Logger::new(dir.path().join("test.log"));
+        // A truncated file can still contain the old opt-outs; failing to
+        // parse it must not turn desktop capture or network checks back on.
+        std::fs::write(
+            &legacy,
+            br#"{"AutoConvert":false,"CheckUpdates":false,"Mode":"Window","#,
+        )
+        .unwrap();
+        let check = |path: &std::path::Path| {
+            let prefs = load_preferences_from(&logger, &own, Some(path)).unwrap();
+            assert!(
+                !prefs.auto_convert,
+                "failed import enabled desktop conversion"
+            );
+            assert!(!prefs.check_updates, "failed import enabled update checks");
+            assert!(!own.exists());
+        };
+        check(&legacy);
+        // Some OSes report a path below a regular file as an inspection
+        // error; others report it as absent. Exercise the error when present.
+        let blocked = legacy.join("settings.json");
+        if blocked.try_exists().is_err() {
+            check(&blocked);
+        }
+        // An existing directory cannot be read as a settings file.
+        std::fs::remove_file(&legacy).unwrap();
+        std::fs::create_dir(&legacy).unwrap();
+        check(&legacy);
+        // A valid current file remains authoritative, including opt-ins.
+        let mut saved = Preferences::default();
+        saved.save_to(&own).unwrap();
+        assert_eq!(
+            load_preferences_from(&logger, &own, Some(&legacy)).unwrap(),
+            saved
+        );
+    }
+
+    #[test]
     fn unreadable_settings_cannot_be_replaced_without_a_backup() {
         let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -1073,7 +1225,7 @@ mod tests {
             let now = Instant::now();
             // The worker dies, recovery queues a retry, the retry fires and
             // its launch is validating when the user unchecks recovery.
-            core.status = core.supervisor.worker_exited(1, now);
+            core.status = core.supervisor.worker_exited(1, None, now);
             assert!(core.supervisor.retry_pending());
             assert_eq!(
                 core.supervisor.tick_without_worker(now + RECOVERY_DELAY),
@@ -1150,6 +1302,40 @@ mod tests {
         core.requests.clear();
         core.quit();
         assert!(previous.needs_repaint(&core));
+    }
+
+    #[test]
+    fn show_requests_are_dropped_during_a_deferred_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.menu(MenuCommand::ShowControls);
+        assert_eq!(core.requests, vec![UiRequest::ShowControls]);
+        // These requests arrived before Quit but have not reached a frame.
+        core.request(UiRequest::ShowHelp);
+        core.request(UiRequest::ShowAbout);
+        core.request(UiRequest::ToggleTheme);
+        core.quit();
+        for command in [
+            MenuCommand::ShowControls,
+            MenuCommand::Help,
+            MenuCommand::About,
+            MenuCommand::CheckUpdates,
+        ] {
+            core.menu(command);
+        }
+        core.request(UiRequest::ShowControls); // the hotkey and tray path
+        assert!(
+            !core.requests.iter().any(|r| matches!(
+                r,
+                UiRequest::ShowControls | UiRequest::ShowHelp | UiRequest::ShowAbout
+            )),
+            "{:?}",
+            core.requests
+        );
+        core.request(UiRequest::ToggleTheme);
+        assert!(core.requests.contains(&UiRequest::ToggleTheme));
+        core.poll(Instant::now());
+        assert!(core.requests.contains(&UiRequest::Quit));
     }
 
     #[test]
