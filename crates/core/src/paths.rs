@@ -21,10 +21,18 @@ pub fn data_dir() -> PathBuf {
 fn data_dir_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
     // The worker runs with the engine folder as its working directory, so a
     // relative override would split the controls' and the worker's files;
-    // resolve it here, once, against this process's directory. An empty
-    // value means unset rather than "the current directory".
-    if let Some(dir) = override_dir.filter(|dir| !dir.is_empty()) {
-        let dir = PathBuf::from(dir);
+    // resolve it here, once, against this process's directory. An empty or
+    // blank value means unset rather than "the current directory", and
+    // surrounding whitespace is an artefact of how the variable was set, not
+    // part of the folder name. A value that is not UTF-8 is used as given.
+    let override_dir = override_dir.and_then(|dir| match dir.to_str() {
+        Some(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| PathBuf::from(text))
+        }
+        None => Some(PathBuf::from(dir)),
+    });
+    if let Some(dir) = override_dir {
         return std::path::absolute(&dir).unwrap_or(dir);
     }
     let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
@@ -143,5 +151,8 @@ mod tests {
         assert!(relative.is_absolute(), "{relative:?}");
         assert!(relative.ends_with("data"));
         assert_eq!(data_dir_from(Some("".into())), data_dir_from(None));
+        assert_eq!(data_dir_from(Some("  \t ".into())), data_dir_from(None));
+        let padded = data_dir_from(Some("  data \n".into()));
+        assert_eq!(padded, relative, "surrounding whitespace is not a name");
     }
 }
