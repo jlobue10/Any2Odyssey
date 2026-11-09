@@ -290,7 +290,7 @@ fn run_inner(
     if !mirror::set_timer(hwnd, TIMER_POLL, Mirror::poll_interval().as_millis() as u32)
         || !mirror::set_timer(hwnd, TIMER_OVERLAY, 100)
     {
-        library.stop();
+        library.stop(&stop_event);
         return Err(fail(
             exit_code::RENDERER_ERROR,
             "Renderer error: could not start the poll timer",
@@ -308,17 +308,11 @@ fn run_inner(
             return;
         }
         failure.set(code);
-        // The watchdog waits on this event. A stop the worker decides on
-        // itself (ready timeout, overlay or capture error, engine closed)
-        // has nobody else to signal it, and the engine's Stop below is the
-        // very call that may never return; arm the backstop first. The
-        // controls only ever set this event, never read it.
-        let _ = stop_event.set();
         mirror::kill_timer(hwnd, TIMER_POLL);
         mirror::kill_timer(hwnd, TIMER_OVERLAY);
         mirror::kill_timer(hwnd, TIMER_UPDATE);
         if *started {
-            library.stop();
+            library.stop(&stop_event);
             *started = false;
         }
         surface.close();
@@ -412,7 +406,7 @@ fn run_inner(
         }
     }
     if started {
-        library.stop();
+        library.stop(&stop_event);
     }
     if let Some(code) = failure.get() {
         // The reason is already in worker-status.json and the log; a message
