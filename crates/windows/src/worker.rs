@@ -18,7 +18,9 @@ use any2odyssey_core::prefs::{CaptureMode, Preferences};
 use any2odyssey_core::status::{exit_code, WorkerStatus};
 use windows::Win32::Foundation::{HWND, WAIT_EVENT, WAIT_OBJECT_0};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, TerminateProcess, WaitForMultipleObjects, INFINITE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_TIMER,
 };
@@ -79,7 +81,13 @@ fn spawn_watchdog(
                 "Watchdog: the message loop did not stop within {} s after the controls went away; exiting.",
                 WATCHDOG_GRACE.as_secs()
             ));
-            std::process::exit(exit_code::RENDERER_ERROR);
+            // Not `std::process::exit`: ExitProcess runs every DLL's detach
+            // under the loader lock, and the thread we are rescuing may be
+            // blocked inside the engine holding exactly what its DllMain
+            // needs. TerminateProcess skips all of that; the kernel destroys
+            // the overlay window with the process either way.
+            // SAFETY: terminating our own process with a plain exit code.
+            let _ = unsafe { TerminateProcess(GetCurrentProcess(), exit_code::RENDERER_ERROR as u32) };
         });
     if let Err(e) = spawned {
         log(&format!("Watchdog thread not started: {e}"));
