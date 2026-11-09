@@ -129,7 +129,27 @@ pub struct Core {
 
 impl Core {
     pub fn new(logger: Logger, events: Option<ControlEvents>, start_requested: bool) -> Core {
-        let (prefs, settings_load_error) = match load_preferences(&logger) {
+        Self::initialize(logger, events, start_requested, false)
+    }
+
+    pub fn new_preview(logger: Logger) -> Core {
+        Self::initialize(logger, None, false, true)
+    }
+
+    fn initialize(
+        logger: Logger,
+        events: Option<ControlEvents>,
+        start_requested: bool,
+        preview: bool,
+    ) -> Core {
+        // Preview isolation must precede preference loading: normal startup
+        // can import and save legacy settings before the UI is constructed.
+        let loaded = if preview {
+            Ok(Preferences::default())
+        } else {
+            load_preferences(&logger)
+        };
+        let (prefs, settings_load_error) = match loaded {
             Ok(prefs) => (prefs, None),
             Err(error) => {
                 logger.log(&error);
@@ -142,7 +162,11 @@ impl Core {
                 )
             }
         };
-        let ui = UiSettings::load();
+        let ui = if preview {
+            UiSettings::default()
+        } else {
+            UiSettings::load()
+        };
         let mut core = Core {
             supervisor: Supervisor::new(prefs.recover),
             prefs,
@@ -161,7 +185,7 @@ impl Core {
             selected_window: None,
             hotkeys_ok: false,
             start_requested,
-            preview: false,
+            preview,
             screenshot: None,
             exiting: false,
             requests: Vec::new(),
@@ -169,7 +193,9 @@ impl Core {
             events,
             controls_hwnd: 0,
         };
-        core.refresh_windows();
+        if !preview {
+            core.refresh_windows();
+        }
         core
     }
 
@@ -691,6 +717,46 @@ mod tests {
                 std::env::remove_var(paths::DATA_DIR_ENV);
             }
         }
+    }
+
+    #[test]
+    fn preview_initialization_ignores_saved_settings_and_never_saves_them() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let settings = dir.path().join("settings.json");
+        let ui = dir.path().join("ui-settings.json");
+        let saved_ui = br#"{"DarkMode":true,"LastUpdateCheck":1800000000}"#;
+        std::fs::write(&ui, saved_ui).unwrap();
+        for original in [
+            br#"{"Mode":"Window","AutoConvert":false,"Depth":1.5}"#.as_slice(),
+            b"damaged preferences".as_slice(),
+        ] {
+            std::fs::write(&settings, original).unwrap();
+            let mut core = Core::new_preview(Logger::new(dir.path().join("test.log")));
+            assert!(core.preview);
+            assert_eq!(core.prefs, Preferences::default());
+            assert_eq!(core.ui, UiSettings::default());
+            assert!(core.settings_load_error.is_none());
+            assert!(core.windows.is_empty());
+            core.prefs.depth = 1.25;
+            core.apply();
+            core.save_ui();
+            core.check_updates();
+            core.quit();
+            assert!(core.operation.is_none());
+            assert!(core.update_task.is_none());
+            assert_eq!(std::fs::read(&settings).unwrap(), original);
+            assert_eq!(std::fs::read(&ui).unwrap(), saved_ui);
+        }
+        std::fs::remove_file(&settings).unwrap();
+        let mut core = Core::new_preview(Logger::new(dir.path().join("test.log")));
+        core.apply();
+        assert!(
+            !settings.exists(),
+            "previews do not create or import preferences"
+        );
     }
 
     #[test]
