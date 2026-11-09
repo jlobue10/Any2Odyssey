@@ -100,7 +100,13 @@ pub fn update_file(
         }
     }
     apply(&mut doc, side_by_side, depth, popout);
-    crate::fsutil::write_json_atomic(path, &doc)
+    // Durable, unlike the status files: this is the one file written into
+    // another vendor's tree, and a truncated copy left by a power loss right
+    // after the rename would make every later start refuse ("must contain
+    // JSON objects") with no Apply or recovery path, while Odyssey 3D Hub
+    // itself reads a corrupt settings file. It is written once per start, so
+    // the flush costs nothing noticeable.
+    crate::fsutil::write_json_atomic_durable(path, &doc)
 }
 
 #[cfg(test)]

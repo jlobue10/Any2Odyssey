@@ -172,7 +172,15 @@ pub enum ParseError {
     Draft,
     Prerelease,
     MissingTag,
+    /// The tag is not a version number at all.
     UnrecognizedTag(String),
+    /// The tag parses as a version but is not spelled the way the release
+    /// workflow tags and the download links are built (`v<major>.<minor>.<patch>`,
+    /// no capital `V`, no leading zeros), so every synthesized link would 404.
+    TagMismatch {
+        tag: String,
+        expected: String,
+    },
 }
 
 impl fmt::Display for ParseError {
@@ -189,6 +197,10 @@ impl fmt::Display for ParseError {
             ParseError::UnrecognizedTag(tag) => {
                 write!(f, "the release tag {tag:?} is not a version number")
             }
+            ParseError::TagMismatch { tag, expected } => write!(
+                f,
+                "the release tag {tag:?} is not spelled {expected:?}, so its download links would not resolve"
+            ),
         }
     }
 }
@@ -235,8 +247,13 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
     // and GitHub's tag paths are literal, so a tag spelled any other way
     // (`V0.9.0`, `v0.09.0`) would 404 even though the version parses.
     let version = Version::parse(&tag)
-        .filter(|version| version.tag() == tag.trim())
         .ok_or_else(|| ParseError::UnrecognizedTag(bounded(&tag, MAX_TAG_CHARS)))?;
+    if version.tag() != tag.trim() {
+        return Err(ParseError::TagMismatch {
+            tag: bounded(&tag, MAX_TAG_CHARS),
+            expected: version.tag(),
+        });
+    }
     // The document only confirms that the asset exists under its expected
     // name on an allowed host; the URL handed to the browser is synthesized.
     let asset_url = |name: &str| {
@@ -311,6 +328,12 @@ pub fn sanitize_notes(text: &str) -> String {
             '\r' => continue,
             '\t' => ' ',
             '\n' => '\n',
+            // Unicode's own line and paragraph separators are visible breaks,
+            // not hidden formatting, and the display only breaks at '\n'.
+            '\u{2028}' | '\u{2029}' => '\n',
+            // Narrow no-break space has width (French punctuation, digit
+            // grouping); dropping it would run words together.
+            '\u{202F}' => ' ',
             c if c.is_control() || is_invisible_formatting(c) => continue,
             c => c,
         };
@@ -338,12 +361,13 @@ pub fn sanitize_notes(text: &str) -> String {
 
 /// Characters that render as nothing but change how surrounding text is read
 /// or copied: every `Bidi_Control` character (explicit embeddings, overrides
-/// and isolates, the marks, the Arabic letter mark), zero-width space and
-/// no-break space, the word joiner and invisible operators, soft hyphen,
-/// Mongolian vowel separator, the line and paragraph separators, interlinear
-/// annotation controls and the tag characters used to hide text. The
-/// zero-width joiner and non-joiner (U+200C, U+200D) are kept: emoji
-/// sequences and Arabic, Persian and Indic shaping depend on them.
+/// and isolates, the marks, the Arabic letter mark), zero-width space, the
+/// word joiner and invisible operators, soft hyphen, Mongolian vowel
+/// separator, interlinear annotation controls and the tag characters used to
+/// hide text. The zero-width joiner and non-joiner (U+200C, U+200D) are kept:
+/// emoji sequences and Arabic, Persian and Indic shaping depend on them. The
+/// line and paragraph separators and the narrow no-break space are visible
+/// and are mapped in [`sanitize_notes`] rather than listed here.
 fn is_invisible_formatting(c: char) -> bool {
     matches!(
         c,
@@ -353,7 +377,7 @@ fn is_invisible_formatting(c: char) -> bool {
             | '\u{200B}'
             | '\u{200E}'
             | '\u{200F}'
-            | '\u{2028}'..='\u{202E}'
+            | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
             | '\u{FEFF}'
@@ -636,12 +660,22 @@ mod tests {
             parse_latest_release(r#"{"tag_name":"nightly"}"#),
             Err(ParseError::UnrecognizedTag("nightly".into()))
         );
-        // Parses as a version, but the synthesized download URLs would not match it.
+        // Parses as a version, but the synthesized download URLs would not
+        // match it; the error names the spelling they are built from.
         for tag in ["V0.9.0", "v0.09.0", "0.9.0"] {
+            let error = parse_latest_release(&format!(r#"{{"tag_name":"{tag}"}}"#)).unwrap_err();
             assert_eq!(
-                parse_latest_release(&format!(r#"{{"tag_name":"{tag}"}}"#)),
-                Err(ParseError::UnrecognizedTag(tag.into())),
+                error,
+                ParseError::TagMismatch {
+                    tag: tag.into(),
+                    expected: "v0.9.0".into(),
+                },
                 "{tag}"
+            );
+            let shown = error.to_string();
+            assert!(
+                shown.contains("\"v0.9.0\"") && !shown.contains("not a version number"),
+                "{shown}"
             );
         }
         assert!(matches!(
@@ -718,8 +752,8 @@ mod tests {
         );
         assert_eq!(sanitize_notes("\u{202E}x\u{200B}y\u{FEFF}z\u{2066}"), "xyz");
         assert_eq!(sanitize_notes("\u{7f}\u{0}\u{1}"), "");
-        // Every Bidi_Control character, hidden-text tag characters, the soft
-        // hyphen and the line/paragraph separators vanish too.
+        // Every Bidi_Control character, hidden-text tag characters and the
+        // soft hyphen vanish too.
         assert_eq!(
             sanitize_notes(
                 "a\u{061C}b\u{200E}c\u{200F}d\u{202A}e\u{202B}f\u{202C}g\u{202D}h\u{2067}i\u{2068}j\u{2069}k"
@@ -727,9 +761,16 @@ mod tests {
             "abcdefghijk"
         );
         assert_eq!(
-            sanitize_notes("safe\u{E0001}\u{E0068}\u{E0069}\u{E007F} text\u{00AD}\u{2028}\u{2029}\u{FFF9}x\u{FFFA}y\u{FFFB}\u{180E}"),
+            sanitize_notes("safe\u{E0001}\u{E0068}\u{E0069}\u{E007F} text\u{00AD}\u{FFF9}x\u{FFFA}y\u{FFFB}\u{180E}"),
             "safe textxy"
         );
+        // Visible separators keep their meaning: line and paragraph separators
+        // become line breaks, the narrow no-break space a plain space.
+        assert_eq!(
+            sanitize_notes("one\u{2028}two\u{2029}three\u{202F}four 1\u{202F}000"),
+            "one\ntwo\nthree four 1 000"
+        );
+        assert_eq!(sanitize_notes("a\u{2029}\u{2029}\u{2029}b"), "a\n\nb");
         // Joiners stay: emoji sequences and cursive scripts need them.
         assert_eq!(
             sanitize_notes("\u{1F469}\u{200D}\u{1F4BB} \u{0646}\u{200C}\u{0627}"),

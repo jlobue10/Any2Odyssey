@@ -93,7 +93,11 @@ pub fn remove_stale_temporaries(dir: &Path) -> usize {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
     };
-    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 60);
+    // `SystemTime - Duration` panics on underflow; a clock near the platform's
+    // earliest representable time then sweeps nothing instead of aborting.
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(60 * 60))
+        .unwrap_or(std::time::UNIX_EPOCH);
     entries
         .flatten()
         .filter(|entry| {
