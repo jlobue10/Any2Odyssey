@@ -46,6 +46,14 @@ jobs:
           Copy-Item target/release/Any2Odyssey.exe build/
       - name: Installer tests (PowerShell 7)
         shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: |
+          foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      - name: Installer tests (Windows PowerShell 5.1)
+        shell: powershell
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
         run: |
           foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
       - name: Package

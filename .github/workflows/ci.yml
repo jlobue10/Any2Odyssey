@@ -42,16 +42,27 @@ jobs:
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
-      - name: Installer unit test
+      - name: Stage the built executable for the installer tests
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path build -Force | Out-Null
           Copy-Item target/release/Any2Odyssey.exe build/
-          ./installer/tests/test-uninstall-helper.ps1
-          ./installer/tests/test-installer.ps1
-          ./installer/tests/test-install-launcher.ps1
-          ./installer/tests/test-controls-install.ps1
-          ./installer/tests/test-install-flow.ps1
+      # Every test-*.ps1 except the DPI manifest check above; the skip variable keeps
+      # install.ps1's Windows 11 24H2 gate from depending on the runner image.
+      - name: Installer tests (PowerShell 7)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: |
+          foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      # Install.cmd, Uninstall.ps1 and the registry UninstallString all run Windows PowerShell 5.1,
+      # so the same scripts must pass under that interpreter too.
+      - name: Installer tests (Windows PowerShell 5.1)
+        shell: powershell
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: |
+          foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
       - uses: actions/upload-artifact@v4
         with:
           name: Any2Odyssey-windows-x64-exe
