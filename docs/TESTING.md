@@ -12,7 +12,7 @@ cargo fmt --all --check
 
 The core tests port Any2Odd's checks: the `--self-test` geometry (fit, offscreen placement across monitor arrangements), `SliderValidation` (slider position/value/readout mapping), `RecoveryValidation` (queued retry cancelled by disabling recovery, re-enabling does not start, running worker left alone) and `test_portable.py`'s stereo assertions (anaglyph channel mapping, SBS eye swap, half-width geometry, flat pass-through, invalid input). Help content is checked for rebranding and the absence of donation material.
 
-On Linux the Windows crate is only compile-checked: `cargo check --workspace --target x86_64-pc-windows-msvc`.
+On Linux the Windows crate is only compile-checked: `cargo check --workspace --target x86_64-pc-windows-msvc`. The pinned toolchain in `rust-toolchain.toml` does not ship that target; add it once with `rustup target add x86_64-pc-windows-msvc --toolchain 1.99.1` before the cross-check or clippy run.
 
 ## Windows diagnostics (provided by the Windows crate)
 

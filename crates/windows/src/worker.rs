@@ -38,6 +38,13 @@ use crate::win;
 /// so a worker alive after it was either orphaned or is stuck.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(7);
 
+/// The engine invoked its `closed` callback without being asked: the case
+/// recovery exists for, so it exits with the renderer error code rather than
+/// as a clean stop.
+const ENGINE_CLOSED_LOG: &str = "The engine closed itself; stopping. See the conversion log.";
+const ENGINE_CLOSED_STATUS: &str =
+    "Conversion stopped: the engine closed itself. See conversion log.";
+
 fn report(state: &str) {
     let _ = any2odyssey_core::fsutil::write_json_atomic(
         &paths::worker_status_file(),
@@ -69,15 +76,19 @@ fn spawn_watchdog(
             // satisfying this wait does not consume the signal the message
             // loop polls for.
             let woken = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-            let reason = if woken == WAIT_OBJECT_0 {
-                "the controls went away"
-            } else if woken == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
-                "the stop was requested"
-            } else {
+            if woken != WAIT_OBJECT_0 && woken != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
                 // WAIT_FAILED: nothing to wait on; the loop's own polls stay
                 // in charge, but say so, or a dead backstop leaves no trace.
                 thread_log("Watchdog: wait failed; the message loop's own checks remain the only stop path.");
                 return;
+            }
+            // The wait reports the lowest signalled index, so controls that
+            // asked for a stop and then quit would read as "went away". Ask
+            // the event itself: a requested stop is the more specific cause.
+            let reason = if stop.is_signaled() {
+                "the stop was requested"
+            } else {
+                "the controls went away"
             };
             std::thread::sleep(WATCHDOG_GRACE);
             if finished.load(Ordering::Acquire) {
@@ -108,8 +119,9 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
     };
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     // Set once `run_inner` has returned on any path: only then have the loop,
-    // the engine's Stop and the surface teardown all completed, which is what
-    // the watchdog must see before it stands down.
+    // the engine's Stop and the surface teardown all completed. The watchdog
+    // stands down so the final log and status lines below are written and
+    // the real exit code, not its generic one, reaches the controls.
     let finished = Arc::new(AtomicBool::new(false));
     let result = run_inner(
         event_name,
@@ -120,7 +132,7 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
         finished.clone(),
     );
     finished.store(true, Ordering::Release);
-    match result {
+    let code = match result {
         Ok(ready) => {
             log("Renderer stopped cleanly.");
             if ready {
@@ -136,7 +148,19 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
             }
             code
         }
-    }
+    };
+    // End the process here rather than returning into `std::process::exit`.
+    // ExitProcess would run DLL_PROCESS_DETACH for the vendor engine and its
+    // CUDA/ONNX/LeiaSR dependencies under the loader lock, after killing the
+    // engine's remaining threads mid-flight, with the watchdog already stood
+    // down: a detach that blocks would leave an invisible process holding the
+    // renderer mutex, so every later start reports "another renderer is
+    // running". Nothing is lost by skipping it: stdio is null, the status
+    // file and log lines above are complete, and the engine is never
+    // FreeLibrary'd anyway.
+    // SAFETY: terminating our own process with the exit code computed above.
+    let _ = unsafe { TerminateProcess(GetCurrentProcess(), code as u32) };
+    code
 }
 
 struct Exit {
@@ -190,6 +214,23 @@ fn run_inner(
                 format!("Renderer error: restore event: {e}"),
             )
         })?;
+    // Hold the parent open for the whole run: a held handle pins the process
+    // object, so a recycled PID can never be mistaken for a living parent.
+    let parent = ParentWatch::open(parent_pid).ok_or_else(|| {
+        fail(
+            exit_code::RENDERER_ERROR,
+            "Renderer error: the controls process is not running.",
+        )
+    })?;
+    // A toggle that was undone, or a parent that quit, while prerequisites
+    // ran: nothing is on screen yet, so leave without touching Samsung's
+    // settings file or loading the engine and its dependency tree, which
+    // takes seconds the controls' 7-second stop clock is already counting.
+    let stopped_early = || stop_event.is_signaled() || !parent.is_alive();
+    if stopped_early() {
+        log("Stop requested during the prerequisite checks; the engine was not loaded.");
+        return Ok(false);
+    }
     // The engine reads depth/pop-out and output flags from Samsung's file.
     // Do not load or start it with stale values after a failed Apply.
     any2odyssey_core::overlay_settings::update_file(
@@ -203,14 +244,6 @@ fn run_inner(
         fail(
             exit_code::RENDERER_ERROR,
             format!("Could not update Samsung overlay settings; conversion was not started: {e}"),
-        )
-    })?;
-    // Hold the parent open for the whole run: a held handle pins the process
-    // object, so a recycled PID can never be mistaken for a living parent.
-    let parent = ParentWatch::open(parent_pid).ok_or_else(|| {
-        fail(
-            exit_code::RENDERER_ERROR,
-            "Renderer error: the controls process is not running.",
         )
     })?;
     // Duplicates, so the watchdog's wait never touches a handle this function
@@ -228,9 +261,8 @@ fn run_inner(
             "Renderer error: no primary monitor",
         )
     })?;
-    // A toggle that was undone, or a parent that quit, while prerequisites
-    // ran: nothing is on screen yet, so leave without touching the engine.
-    let stopped_early = || stop_event.is_signaled() || !parent.is_alive();
+    // Loading the engine can take seconds; a stop that arrived meanwhile must
+    // not create the capture.
     if stopped_early() {
         log("Stop requested before the capture was created; the engine was not started.");
         return Ok(false);
@@ -336,9 +368,26 @@ fn run_inner(
         // so sustained capture cannot starve stop, liveness or overlay checks.
         let now = Instant::now();
         if poll_deadline.due(now) {
-            let alive = parent.is_alive();
-            if stop_event.is_signaled() || !alive || engine::ENGINE_CLOSED.load(Ordering::Acquire) {
+            // Three triggers end the loop here; only the first is a clean,
+            // requested stop. Name each in the log so companion.log tells a
+            // user stop from the engine giving up or the controls vanishing.
+            if stop_event.is_signaled() {
+                log("Stop requested; stopping the engine.");
                 shutdown(&mut surface, &mut started, None);
+                continue;
+            }
+            if !parent.is_alive() {
+                // Nobody is left to read the code, but the log and status
+                // file should not call an orphaned stop clean.
+                log("The controls process ended; stopping the engine.");
+                report("Conversion stopped: the controls process ended.");
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
+                continue;
+            }
+            if engine::ENGINE_CLOSED.load(Ordering::Acquire) {
+                log(ENGINE_CLOSED_LOG);
+                report(ENGINE_CLOSED_STATUS);
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
             if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
@@ -371,7 +420,9 @@ fn run_inner(
             // The engine may close between two polls; re-showing its window
             // now would race its own teardown.
             if engine::ENGINE_CLOSED.load(Ordering::Acquire) {
-                shutdown(&mut surface, &mut started, None);
+                log(ENGINE_CLOSED_LOG);
+                report(ENGINE_CLOSED_STATUS);
+                shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
             if let Err(e) = overlay.tick(restore_event.is_signaled()) {
