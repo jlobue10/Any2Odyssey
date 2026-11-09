@@ -54,7 +54,7 @@ pub fn drain(core: &mut Core) {
         if event.id == reg.toggle {
             core.toggle();
         } else if event.id == reg.show {
-            core.requests.push(UiRequest::ShowControls);
+            core.request(UiRequest::ShowControls);
         } else if event.id == reg.restore {
             core.restore_overlay();
         }

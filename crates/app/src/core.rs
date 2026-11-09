@@ -553,9 +553,27 @@ impl Core {
         self.save_preferences();
     }
 
+    /// Queue a command for the GUI thread. While a deferred quit runs, the
+    /// window must stay where it is: a show request (tray double-click,
+    /// Ctrl+Alt+F9, the menus) would un-hide and activate the controls for
+    /// the seconds the worker takes to stop, stealing the focus from a game
+    /// just as `--show` did before 0.8.5. Such requests are dropped; the
+    /// others (theme, tray, quit) still apply.
+    pub fn request(&mut self, request: UiRequest) {
+        if self.exiting
+            && matches!(
+                request,
+                UiRequest::ShowControls | UiRequest::ShowHelp | UiRequest::ShowAbout
+            )
+        {
+            return;
+        }
+        self.requests.push(request);
+    }
+
     pub fn menu(&mut self, command: MenuCommand) {
         match command {
-            MenuCommand::ShowControls => self.requests.push(UiRequest::ShowControls),
+            MenuCommand::ShowControls => self.request(UiRequest::ShowControls),
             MenuCommand::Toggle => self.toggle(),
             MenuCommand::RestoreOverlay => self.restore_overlay(),
             MenuCommand::KeepOverlayOnTop(value) => {
@@ -588,15 +606,15 @@ impl Core {
                 }
             }
             MenuCommand::Restart => self.restart(),
-            MenuCommand::Help => self.requests.push(UiRequest::ShowHelp),
-            MenuCommand::About => self.requests.push(UiRequest::ShowAbout),
+            MenuCommand::Help => self.request(UiRequest::ShowHelp),
+            MenuCommand::About => self.request(UiRequest::ShowAbout),
             MenuCommand::CheckUpdates => {
                 self.check_updates();
-                self.requests.push(UiRequest::ShowAbout);
+                self.request(UiRequest::ShowAbout);
             }
-            MenuCommand::ToggleTheme => self.requests.push(UiRequest::ToggleTheme),
+            MenuCommand::ToggleTheme => self.request(UiRequest::ToggleTheme),
             MenuCommand::ViewLogs => platform::open_path(&paths::data_dir()),
-            MenuCommand::MinimizeToTray => self.requests.push(UiRequest::MinimizeToTray),
+            MenuCommand::MinimizeToTray => self.request(UiRequest::MinimizeToTray),
             MenuCommand::Quit => self.quit(),
         }
     }
@@ -618,13 +636,14 @@ impl Core {
                 self.quit();
                 return;
             }
-            // A deferred quit is under way: the window must not come back
-            // for one frame, and the launch that asked is told nothing was
-            // shown through its exit code.
-            if events.show.is_signaled() && !self.exiting {
-                self.requests.push(UiRequest::ShowControls);
+            let (show, toggle) = (events.show.is_signaled(), events.toggle.is_signaled());
+            // During a deferred quit `request` drops the show, so the window
+            // does not come back for a frame; the `--show` launch that set
+            // the event has already exited 0 and is not told.
+            if show {
+                self.request(UiRequest::ShowControls);
             }
-            if events.toggle.is_signaled() {
+            if toggle {
                 self.toggle();
             }
         }
@@ -1165,6 +1184,37 @@ mod tests {
         core.requests.clear();
         core.quit();
         assert!(previous.needs_repaint(&core));
+    }
+
+    #[test]
+    fn show_requests_are_dropped_during_a_deferred_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.menu(MenuCommand::ShowControls);
+        assert_eq!(core.requests, vec![UiRequest::ShowControls]);
+        core.requests.clear();
+        core.quit();
+        for command in [
+            MenuCommand::ShowControls,
+            MenuCommand::Help,
+            MenuCommand::About,
+            MenuCommand::CheckUpdates,
+        ] {
+            core.menu(command);
+        }
+        core.request(UiRequest::ShowControls); // the hotkey and tray path
+        assert!(
+            !core.requests.iter().any(|r| matches!(
+                r,
+                UiRequest::ShowControls | UiRequest::ShowHelp | UiRequest::ShowAbout
+            )),
+            "{:?}",
+            core.requests
+        );
+        core.request(UiRequest::ToggleTheme);
+        assert!(core.requests.contains(&UiRequest::ToggleTheme));
+        core.poll(Instant::now());
+        assert!(core.requests.contains(&UiRequest::Quit));
     }
 
     #[test]
