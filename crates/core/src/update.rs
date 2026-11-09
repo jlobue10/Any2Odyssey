@@ -288,7 +288,7 @@ pub fn check_due(last_check: Option<i64>, now: i64) -> bool {
     match last_check {
         None => true,
         Some(last) if last > now => true,
-        Some(last) => now - last >= CHECK_INTERVAL_SECONDS,
+        Some(last) => now.saturating_sub(last) >= CHECK_INTERVAL_SECONDS,
     }
 }
 
@@ -614,6 +614,28 @@ mod tests {
         assert!(!check_due(Some(now - CHECK_INTERVAL_SECONDS + 1), now));
         assert!(check_due(Some(now - CHECK_INTERVAL_SECONDS), now));
         assert!(check_due(Some(now + 60), now));
+    }
+
+    #[test]
+    fn automatic_checks_accept_the_full_saved_timestamp_range() {
+        let saved: crate::prefs::UiSettings =
+            serde_json::from_str(r#"{"LastUpdateCheck":-9223372036854775808}"#).unwrap();
+        assert!(check_due(saved.last_update_check, 1_800_000_000));
+        let times = [
+            i64::MIN,
+            -CHECK_INTERVAL_SECONDS,
+            -1,
+            0,
+            CHECK_INTERVAL_SECONDS,
+            i64::MAX,
+        ];
+        for now in times {
+            for last in times {
+                let due = last > now
+                    || i128::from(now) - i128::from(last) >= i128::from(CHECK_INTERVAL_SECONDS);
+                assert_eq!(check_due(Some(last), now), due, "last={last}, now={now}");
+            }
+        }
     }
 
     #[test]
