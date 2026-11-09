@@ -11,7 +11,9 @@ $binary=Join-Path $PSScriptRoot 'build\Any2Odyssey.exe'
 $workerName='Any2OdysseyWorker.exe'
 $helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
 $documents=@('USER-GUIDE.html','Uninstall.ps1','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md')
-if(-not [Environment]::Is64BitProcess -or [Environment]::OSVersion.Version.Build -lt 26100){throw 'Use 64-bit PowerShell on Windows 11 24H2 or newer.'}
+if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to install Any2Odyssey.'}
+# ANY2ODYSSEY_SKIP_OS_CHECK=1 lets the isolated tests run on older CI images; it skips only this version gate.
+if($env:ANY2ODYSSEY_SKIP_OS_CHECK -ne '1' -and [Environment]::OSVersion.Version.Build -lt 26100){throw 'Use 64-bit PowerShell on Windows 11 24H2 or newer.'}
 foreach($relative in @('VERSION','build\Any2Odyssey.exe','assets\Any2Odyssey.ico','UninstallWorker.ps1')+$documents){
  if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $relative) -PathType Leaf)){throw "Missing package file: $relative. Build or extract the complete release first."}
 }

@@ -3,6 +3,8 @@
 # copy/registration/shortcuts run for real inside the temporary folders.
 param([string]$PreviousPackage)
 $ErrorActionPreference='Stop'
+# install.ps1 refuses Windows builds before 24H2; the fixture is about files, not the OS version.
+$previousSkip=$env:ANY2ODYSSEY_SKIP_OS_CHECK;$env:ANY2ODYSSEY_SKIP_OS_CHECK='1'
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-flow-test-'+[Guid]::NewGuid().ToString('N'))
@@ -64,6 +66,7 @@ try{
  $testKeys=Split-Path -Parent $registration
  if((Test-Path -LiteralPath $testKeys) -and -not (Get-ChildItem -LiteralPath $testKeys | Select-Object -First 1) -and -not (Get-Item -LiteralPath $testKeys).GetValueNames().Count){Remove-Item -LiteralPath $testKeys}
  if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}
+ $env:ANY2ODYSSEY_SKIP_OS_CHECK=$previousSkip
 }
 
 # Assertion failures throw above; a clean run must not inherit a native command's exit code.
