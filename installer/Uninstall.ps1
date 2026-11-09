@@ -5,9 +5,10 @@ $versionFile=Join-Path $app 'version.json'
 if(Test-Path -LiteralPath $versionFile){$record=Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json;$controlsOnly=$record.ControlsOnly -eq $true}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 $principal=New-Object Security.Principal.WindowsPrincipal($identity)
-if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
- throw 'Run Uninstall.ps1 as your normal user. Only the protected worker-removal helper requests elevation.'
-}
+# True when this process already holds an administrator token (UAC disabled, the
+# built-in Administrator account or an elevated console). There is no higher token
+# to request then, so the helper runs as this process instead of through UAC.
+$alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to uninstall Any2Odyssey.'}
 $exe=Join-Path $app 'Any2Odyssey.exe'
 $worker='C:\Program Files\Odyssey 3D Hub\Conversion\Any2OdysseyWorker.exe'
@@ -24,8 +25,11 @@ if(-not $controlsOnly -and ((Test-Path -LiteralPath $worker) -or (Test-Path -Lit
  if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'" -ExpectedUserSid "'+$identity.User.Value+'"'
- $elevated=Start-Process -FilePath $powershell -ArgumentList $arguments -Verb RunAs -Wait -PassThru
- if($elevated.ExitCode -ne 0){throw 'Worker removal did not complete. No per-user installation files were removed. Retry using the same Windows account.'}
+ # The helper itself checks the approving account, its own Program Files path and the fixed worker path.
+ $launch=@{FilePath=$powershell;ArgumentList=$arguments;Wait=$true;PassThru=$true}
+ if(-not $alreadyElevated){$launch.Verb='RunAs'}
+ $removal=Start-Process @launch
+ if($removal.ExitCode -ne 0){throw 'Worker removal did not complete. No per-user installation files were removed. Retry using the same Windows account.'}
 }
 $shell=New-Object -ComObject WScript.Shell
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){

@@ -95,7 +95,7 @@ Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LO
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Any2Odyssey\Uninstall.ps1"
    ```
 
-Run the uninstaller as your normal user and approve the helper using the same account. Older installations must be repaired with this release before using the protected helper.
+Run the uninstaller as your normal user and approve the helper using the same account. When UAC is disabled, or you are signed in as the built-in Administrator, there is no prompt to approve: the uninstaller runs the helper directly, and the helper still checks the account and its own path before removing anything. Older installations must be repaired with this release before using the protected helper.
 
 What is removed: `Any2Odyssey.exe`, the icon, LICENSE/NOTICE/third-party notices, `USER-GUIDE.html`, `Uninstall.ps1` and `version.json` from `%LOCALAPPDATA%\Programs\Any2Odyssey`; `Any2OdysseyWorker.exe` from `C:\Program Files\Odyssey 3D Hub\Conversion` and `C:\Program Files\Any2Odyssey\UninstallWorker.ps1` (full installs only); the desktop and Start menu shortcuts that point at this installation; and the `HKCU\...\Uninstall\Any2Odyssey` registration. Nothing else in Samsung's folders is touched, and no reboot is needed.
 
