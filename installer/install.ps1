@@ -18,7 +18,7 @@ foreach($relative in @('VERSION','build\Any2Odyssey.exe','assets\Any2Odyssey.ico
 $versionText=(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw).Trim()
 if($versionText -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid package VERSION.'}
 $version=[version]($versionText+'.0')
-if((Get-Any2OdysseyPackageVersion -Binary $binary) -ne $version){throw 'Package VERSION and executable version disagree. Extract a complete release or rebuild it.'}
+if((ConvertTo-Any2OdysseyFourPartVersion (Get-Any2OdysseyPackageVersion -Binary $binary)) -ne $version){throw 'Package VERSION and executable version disagree. Extract a complete release or rebuild it.'}
 $installed=Get-Any2OdysseyInstalledVersion -AppPath $app -Registration $registration -DataPath $data
 $installedVersion=if($installed){$installed.Version}else{$null}
 $action=Get-Any2OdysseyInstallAction -PackageVersion $version -InstalledVersion $installedVersion -AllowDowngrade:$AllowDowngrade

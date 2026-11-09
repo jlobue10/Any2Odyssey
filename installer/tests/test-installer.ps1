@@ -8,6 +8,7 @@ New-Item -ItemType Directory -Path $app,$data,$engine | Out-Null
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $current=Join-Path $repo 'build\Any2Odyssey.exe'
 if(-not (Test-Path -LiteralPath $current)){throw "Build the release first: $current is missing (copy target\release\Any2Odyssey.exe to build\)."}
+Assert ((ConvertTo-Any2OdysseyFourPartVersion ([version]'0.8.2')) -eq [version]'0.8.2.0' -and (ConvertTo-Any2OdysseyFourPartVersion ([version]'0.8.2.0')) -eq [version]'0.8.2.0') 'Resource versions compare on four parts'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') $null) -eq 'Install') 'Fresh installation recognized'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.1') ([version]'0.8.0.0')) -eq 'Upgrade') 'Older installation is upgraded in place'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.8.0.0')) -eq 'Repair') 'Same version is a repair'
