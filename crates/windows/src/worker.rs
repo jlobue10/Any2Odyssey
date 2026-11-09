@@ -69,16 +69,22 @@ fn spawn_watchdog(
             // satisfying this wait does not consume the signal the message
             // loop polls for.
             let woken = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
-            if woken != WAIT_OBJECT_0 && woken != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
-                // WAIT_FAILED: nothing to wait on; the loop's own polls stay in charge.
+            let reason = if woken == WAIT_OBJECT_0 {
+                "the controls went away"
+            } else if woken == WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
+                "the stop was requested"
+            } else {
+                // WAIT_FAILED: nothing to wait on; the loop's own polls stay
+                // in charge, but say so, or a dead backstop leaves no trace.
+                thread_log("Watchdog: wait failed; the message loop's own checks remain the only stop path.");
                 return;
-            }
+            };
             std::thread::sleep(WATCHDOG_GRACE);
             if finished.load(Ordering::Acquire) {
                 return;
             }
             thread_log(&format!(
-                "Watchdog: the message loop did not stop within {} s after the controls went away; exiting.",
+                "Watchdog: the message loop did not stop within {} s after {reason}; exiting.",
                 WATCHDOG_GRACE.as_secs()
             ));
             // Not `std::process::exit`: ExitProcess runs every DLL's detach
@@ -157,6 +163,7 @@ fn run_inner(
         .map_err(|e| fail(exit_code::RENDERER_ERROR, format!("Renderer error: {e}")))?
     else {
         report("Another companion renderer is running.");
+        log("Another companion renderer is running; this one exits.");
         return Err(Exit {
             code: exit_code::ALREADY_RUNNING,
             message: None,
@@ -164,6 +171,7 @@ fn run_inner(
     };
     if let Err(e) = engine::validate() {
         report(&e.to_string());
+        log(&format!("Prerequisite check failed: {e}"));
         return Err(Exit {
             code: exit_code::PREREQUISITES_FAILED,
             message: None,
@@ -220,6 +228,13 @@ fn run_inner(
             "Renderer error: no primary monitor",
         )
     })?;
+    // A toggle that was undone, or a parent that quit, while prerequisites
+    // ran: nothing is on screen yet, so leave without touching the engine.
+    let stopped_early = || stop_event.is_signaled() || !parent.is_alive();
+    if stopped_early() {
+        log("Stop requested before the capture was created; the engine was not started.");
+        return Ok(false);
+    }
     let mut surface = Mirror::new(
         prefs,
         parent_pid,
@@ -261,6 +276,12 @@ fn run_inner(
             format!("Cannot snapshot conversion log: {e}"),
         )
     })?;
+    // Building the capture can take seconds (the capture-border broker waits
+    // up to 10 s); a stop that arrived meanwhile must not start the model.
+    if stopped_early() {
+        log("Stop requested before the engine started; leaving without it.");
+        return Ok(false);
+    }
     library.start(surface.hwnd(), prefs.side_by_side, ENGINE_CORE_HINT);
     let mut started = true;
     let hwnd = surface.hwnd();
@@ -287,6 +308,12 @@ fn run_inner(
             return;
         }
         failure.set(code);
+        // The watchdog waits on this event. A stop the worker decides on
+        // itself (ready timeout, overlay or capture error, engine closed)
+        // has nobody else to signal it, and the engine's Stop below is the
+        // very call that may never return; arm the backstop first. The
+        // controls only ever set this event, never read it.
+        let _ = stop_event.set();
         mirror::kill_timer(hwnd, TIMER_POLL);
         mirror::kill_timer(hwnd, TIMER_OVERLAY);
         mirror::kill_timer(hwnd, TIMER_UPDATE);
@@ -333,6 +360,9 @@ fn run_inner(
             }
             if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
                 report("Conversion did not initialize. See conversion log.");
+                log(&format!(
+                    "Conversion did not initialize within {ENGINE_READY_TIMEOUT_SECS} s; stopping the engine."
+                ));
                 // Same code a pre-ready stop produced before; the supervisor
                 // treats every exit alike, only the log line distinguishes it.
                 shutdown(

@@ -97,6 +97,10 @@ impl Worker {
                 &snapshot,
             ])
             .current_dir(paths::engine_dir())
+            // The worker resolves a relative ANY2ODYSSEY_DATA_DIR against its
+            // own working directory (the engine folder); hand it the folder
+            // the controls resolved so both processes share one data dir.
+            .env(paths::DATA_DIR_ENV, paths::data_dir())
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
