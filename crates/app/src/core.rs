@@ -571,7 +571,9 @@ impl Core {
             MenuCommand::AlwaysConvertDesktop => {
                 self.prefs.mode = CaptureMode::Desktop;
                 self.prefs.side_by_side = false;
-                self.save_preferences();
+                if !self.save_preferences() {
+                    return;
+                }
                 self.stop_conversion();
                 self.start_conversion();
             }
@@ -929,6 +931,45 @@ mod tests {
             assert!(core.operation.is_none());
             assert_eq!(core.generation, 0);
             assert!(core.status.starts_with("Could not save preferences:"));
+        }
+    }
+
+    #[test]
+    fn failed_menu_save_keeps_the_existing_worker_running() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        // Refuse every settings write without depending on OS permissions.
+        std::fs::create_dir(dir.path().join("settings.json")).unwrap();
+        for command in [
+            MenuCommand::KeepOverlayOnTop(false),
+            MenuCommand::SideBySide,
+            MenuCommand::AiMode,
+            MenuCommand::AlwaysConvertDesktop,
+        ] {
+            let mut core = isolated(dir.path());
+            core.preview = false;
+            core.prefs.mode = CaptureMode::Window;
+            core.prefs.side_by_side = true;
+            core.supervisor.start_requested();
+            core.worker = Some(Worker::fake());
+            let pid = core.worker.as_ref().unwrap().pid();
+
+            core.menu(command);
+
+            assert!(
+                core.wanted(),
+                "{command:?}: conversion intent was cancelled"
+            );
+            assert_eq!(core.generation, 0, "{command:?}: stop was requested");
+            assert!(
+                core.operation.is_none(),
+                "{command:?}: worker control task started"
+            );
+            assert_eq!(core.worker.as_ref().map(Worker::pid), Some(pid));
+            assert!(core.status.starts_with("Could not save preferences:"));
+            core.take_shutdown()();
         }
     }
 
