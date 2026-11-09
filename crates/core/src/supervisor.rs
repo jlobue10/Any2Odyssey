@@ -104,8 +104,11 @@ impl Supervisor {
     }
 
     /// The recovery checkbox changed. Never stops a running worker and never
-    /// starts one; only a queued retry is cancelled when recovery is disabled.
-    /// Returns a status line when something user-visible changed.
+    /// starts one. Disabling recovery while no worker is running after a
+    /// failure cancels the recovery attempt, whether its retry is still queued
+    /// or its relaunch is already in flight (the caller then stops that worker
+    /// when it reports in). Returns a status line when something user-visible
+    /// changed.
     pub fn recover_changed(&mut self, enabled: bool, worker_running: bool) -> Option<String> {
         self.recover = enabled;
         if !enabled && self.wanted && !worker_running && self.failures > 0 {
