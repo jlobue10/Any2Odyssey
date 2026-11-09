@@ -85,26 +85,48 @@ impl WgcFrameSource {
         let item_size = item.Size()?;
         let pool =
             Direct3D11CaptureFramePool::CreateFreeThreaded(&wrapped, pixel_format, 2, item_size)?;
-        let session = pool.CreateCaptureSession(&item)?;
-        session.SetIsCursorCaptureEnabled(false)?;
-        if session.IsCursorCaptureEnabled()? {
-            return Err(windows::core::Error::new(
-                windows::Win32::Foundation::E_FAIL,
-                "Windows did not disable cursor capture.",
-            ));
-        }
-        let border = configure_border(&session, log);
-        // 16 ms minimum interval; TimeSpan is in 100 ns units.
-        session.SetMinUpdateInterval(TimeSpan { Duration: 160_000 })?;
-        let handler = windows::Foundation::TypedEventHandler::<
-            Direct3D11CaptureFramePool,
-            windows::core::IInspectable,
-        >::new(move |_, _| {
-            on_frame();
-            Ok(())
-        });
-        let token = pool.FrameArrived(&handler)?;
-        session.StartCapture()?;
+        let session = match pool.CreateCaptureSession(&item) {
+            Ok(session) => session,
+            Err(e) => {
+                let _ = pool.Close();
+                return Err(e);
+            }
+        };
+        // Configure and start in one fallible step so every failure closes
+        // the session and pool instead of leaving them to a plain Release.
+        let configured = (|| -> windows::core::Result<(BorderOutcome, i64)> {
+            session.SetIsCursorCaptureEnabled(false)?;
+            if session.IsCursorCaptureEnabled()? {
+                return Err(windows::core::Error::new(
+                    windows::Win32::Foundation::E_FAIL,
+                    "Windows did not disable cursor capture.",
+                ));
+            }
+            let border = configure_border(&session, log);
+            // 16 ms minimum interval; TimeSpan is in 100 ns units.
+            session.SetMinUpdateInterval(TimeSpan { Duration: 160_000 })?;
+            let handler = windows::Foundation::TypedEventHandler::<
+                Direct3D11CaptureFramePool,
+                windows::core::IInspectable,
+            >::new(move |_, _| {
+                on_frame();
+                Ok(())
+            });
+            let token = pool.FrameArrived(&handler)?;
+            if let Err(e) = session.StartCapture() {
+                let _ = pool.RemoveFrameArrived(token);
+                return Err(e);
+            }
+            Ok((border, token))
+        })();
+        let (border, token) = match configured {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = session.Close();
+                let _ = pool.Close();
+                return Err(e);
+            }
+        };
         log("WGC desktop capture started: cursor excluded, latest frame only, 16 ms minimum interval.");
         Ok((
             WgcFrameSource {
