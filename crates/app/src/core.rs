@@ -624,6 +624,14 @@ impl Core {
             return;
         }
         self.exiting = true;
+        // The poller may drain Show and Quit in the same batch. Remove
+        // previously accepted shows as well as refusing new ones in request.
+        self.requests.retain(|request| {
+            !matches!(
+                request,
+                UiRequest::ShowControls | UiRequest::ShowHelp | UiRequest::ShowAbout
+            )
+        });
         self.save_preferences();
         self.stop_conversion();
         // Keep the window and poller responsive until background cleanup finishes.
@@ -1238,7 +1246,10 @@ mod tests {
         let mut core = isolated(dir.path());
         core.menu(MenuCommand::ShowControls);
         assert_eq!(core.requests, vec![UiRequest::ShowControls]);
-        core.requests.clear();
+        // These requests arrived before Quit but have not reached a frame.
+        core.request(UiRequest::ShowHelp);
+        core.request(UiRequest::ShowAbout);
+        core.request(UiRequest::ToggleTheme);
         core.quit();
         for command in [
             MenuCommand::ShowControls,
