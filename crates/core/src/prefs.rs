@@ -2,7 +2,7 @@
 //! (`ui-settings.json`). Keys keep Any2Odd's PascalCase names so a one-time
 //! import of an existing Any2Odd `settings.json` is a plain load.
 
-use crate::fsutil::write_json_atomic;
+use crate::fsutil::write_json_atomic_durable;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -117,7 +117,7 @@ impl Preferences {
 
     pub fn save_to(&mut self, path: &Path) -> std::io::Result<()> {
         self.sanitize();
-        write_json_atomic(path, self)
+        write_json_atomic_durable(path, self)
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {
@@ -159,17 +159,25 @@ pub struct UiSettings {
 }
 
 impl UiSettings {
-    pub fn load_from(path: &Path) -> UiSettings {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(crate::fsutil::strip_utf8_bom_str(&t)).ok())
-            .unwrap_or_default()
+    /// Presentation settings fall back to defaults when the file is damaged,
+    /// unlike `settings.json`; the second value says why, so the launch can
+    /// log it before the next save overwrites the file.
+    pub fn load_from(path: &Path) -> (UiSettings, Option<String>) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), None),
+            Err(e) => return (Self::default(), Some(e.to_string())),
+        };
+        match serde_json::from_str(crate::fsutil::strip_utf8_bom_str(&text)) {
+            Ok(settings) => (settings, None),
+            Err(e) => (Self::default(), Some(e.to_string())),
+        }
     }
-    pub fn load() -> UiSettings {
+    pub fn load() -> (UiSettings, Option<String>) {
         Self::load_from(&crate::paths::ui_settings_file())
     }
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        write_json_atomic(path, self)
+        write_json_atomic_durable(path, self)
     }
     pub fn save(&self) -> std::io::Result<()> {
         self.save_to(&crate::paths::ui_settings_file())
@@ -279,23 +287,39 @@ mod tests {
     fn ui_settings_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ui-settings.json");
-        assert!(!UiSettings::load_from(&path).dark_mode);
+        let (missing, problem) = UiSettings::load_from(&path);
+        assert!(!missing.dark_mode);
+        assert_eq!(
+            problem, None,
+            "a missing file is the first launch, not a problem"
+        );
         UiSettings {
             dark_mode: true,
             last_update_check: Some(1_800_000_000),
         }
         .save_to(&path)
         .unwrap();
-        let back = UiSettings::load_from(&path);
+        let (back, problem) = UiSettings::load_from(&path);
         assert!(back.dark_mode);
         assert_eq!(back.last_update_check, Some(1_800_000_000));
+        assert_eq!(problem, None);
         let json = std::fs::read_to_string(&path).unwrap();
         assert!(json.contains("\"DarkMode\": true"));
         assert!(json.contains("\"LastUpdateCheck\": 1800000000"));
         // Files from earlier versions have no check time.
         std::fs::write(&path, "{\"DarkMode\": false}").unwrap();
-        assert_eq!(UiSettings::load_from(&path).last_update_check, None);
+        assert_eq!(UiSettings::load_from(&path).0.last_update_check, None);
         std::fs::write(&path, "\u{FEFF}{\"DarkMode\": true}").unwrap();
-        assert!(UiSettings::load_from(&path).dark_mode);
+        assert!(UiSettings::load_from(&path).0.dark_mode);
+    }
+
+    #[test]
+    fn damaged_ui_settings_reset_to_defaults_and_say_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui-settings.json");
+        std::fs::write(&path, "{\"DarkMode\": tru").unwrap();
+        let (settings, problem) = UiSettings::load_from(&path);
+        assert_eq!(settings, UiSettings::default());
+        assert!(problem.is_some());
     }
 }

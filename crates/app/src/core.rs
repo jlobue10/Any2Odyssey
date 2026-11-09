@@ -169,7 +169,22 @@ impl Core {
         let ui = if preview {
             UiSettings::default()
         } else {
-            UiSettings::load()
+            let (ui, problem) = UiSettings::load();
+            if let Some(problem) = problem {
+                // Presentation settings are not worth a recovery prompt, but
+                // the theme and the update-check timestamp silently reset, so
+                // leave a trace before the next save overwrites the file.
+                logger.log(&format!(
+                    "ui-settings.json could not be read and was reset to defaults: {problem}"
+                ));
+            }
+            let swept = any2odyssey_core::fsutil::remove_stale_temporaries(&paths::data_dir());
+            if swept > 0 {
+                logger.log(&format!(
+                    "Removed {swept} stale temporary file(s) left by an interrupted write."
+                ));
+            }
+            ui
         };
         let mut core = Core {
             supervisor: Supervisor::new(prefs.recover),
