@@ -2,6 +2,46 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.8.4 (unreleased)
+
+Sixth audit round: a fresh read of the code, installer, workflows and documentation after 0.8.3, with one Codex follow-up (#37). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.3 ones below.
+
+### Fixed
+
+Worker (Windows):
+
+- An in-process watchdog ends the worker when its message loop cannot: every stop and liveness check ran on that one thread, so an engine `Stop` that never returned or a window call blocked inside the engine would have left the click-through overlay on screen once the controls were gone (the controls themselves kill the worker after 7 seconds while they are alive). The watchdog waits on the controls process and the stop event, allows the same 7 seconds, then terminates the process. A poll or overlay timer that cannot be created now fails the start instead of leaving the loop idle. (#41)
+- Overlay and capture errors exit with the renderer error code and no longer log "Renderer stopped cleanly" while `worker-status.json` holds the error; the overlay issues the frame-change notification Win32 requires after its style change whether or not Keep 3D above apps is on; the overlay is not re-shown between the engine's own close and the next poll; a DLL-directory registration error is read before its buffer is freed; the per-worker event names mix the process id as their comment claimed; the update check asks WinHTTP for certificate revocation checking. (#41)
+- A failed display-colour query at worker start is retried briefly instead of seeding the FP16 fallback at once, and when the first real answer does replace that fallback the message says so ("became available after startup") instead of claiming the display changed. The restart through recovery still costs one attempt. (#39)
+
+Controls:
+
+- Minimize and Close hide into the tray only when the notification icon was actually created, not merely on Windows; if its creation fails, Minimize stays on the taskbar, Close quits, the tray preference is disabled, the title-bar button and menu read "Minimize", and the status line says why. (#37, #40)
+- Quit from the tray or `--quit` while the controls were hidden un-hid and activated the window for one frame, stealing the focus from the foreground game. The controls now stay hidden while the deferred quit runs. (#40)
+- `--toggle` and `--show` could be lost when they raced a starting instance that had not yet created its control events; the request is retried and the command exits 1 when it was never accepted. (#40)
+- "Automatic recovery cancelled" survives the relaunch that was already validating when recovery was unchecked; it was replaced a moment later by "3D is off". (#40)
+- Changing the automatic-start, recovery or tray checkbox no longer saves a depth or pop-out that was dragged but not applied; Apply is the only path that commits the sliders, as the tooltips say. (#40)
+- A damaged `ui-settings.json` (theme, last update-check time) is logged before it is reset; an unreadable `ConversionWrapper.dll` is reported as unreadable rather than missing; a relative `ANY2ODYSSEY_DATA_DIR` is resolved once so the controls and the worker use the same folder; an empty value means unset. (#39)
+
+Core:
+
+- `settings.json` and `ui-settings.json` are flushed to disk before the rename that publishes them, so a power loss right after Apply cannot leave an empty file that the next launch treats as damaged; temporaries left by an interrupted write are swept at launch after an hour. (#39)
+- The package version is parsed at compile time, so a pre-release version in `Cargo.toml` fails the build instead of panicking in `--check-updates` and on the About page. The update check requires the published tag to be spelled exactly as the download links are built (`v0.8.4`); `V0.8.4` or `v0.08.4` parsed but every link would have led to a 404. (#39)
+
+Installer:
+
+- Uninstall failures were invisible from Settings > Apps: the console closed with the script, so an instance that was still running, a missing helper or a declined elevation prompt left the app listed with no explanation. The registered uninstall command now keeps the window open with the reason until a key is pressed; a declined prompt gets a plain message. (#38)
+- A controls-only record left by a pre-0.8.3 reinstall over a full installation kept the Program Files helper, which blocked `Install-GUI.cmd` while uninstall never ran the helper for that record; the helper now runs whenever it exists. Repairs and upgrades no longer clear values on the registration key that the installer does not own; a failed installation removes its staging folder and the folders it created. (#38)
+
+Documentation and CI:
+
+- Help: three passages still said a shortcut conflict blocks automatic start (changed in 0.8.3), and the input topic promised that checkbox changes save the slider values. (#39, #40)
+- The release workflow runs the offline-guide drift check before packaging (0.8.3 said the release workflow ran the full CI checks; the guide check only ran in the Linux CI job) and fails when no package matched. `docs/PORTING.md` no longer calls the installer and its tests untested on Windows; `docs/TESTING.md` lists every installer test; README states which release is current and which was last confirmed on hardware. (#38)
+
+### Hardware verification
+
+Pending. To check on the G90XF with the 0.8.4 package: kill the controls from Task Manager while converting and again while the model is loading (the overlay must be gone within about 8 seconds even if the engine's Stop hangs) (#41); quit from the tray while the controls are hidden with a game in the foreground (no flash, no focus loss) (#40); `Any2Odyssey --toggle` twice in quick succession from a cold start (#40); uncheck recovery during a recovery countdown and confirm the cancel message stays (#40); drag Depth, toggle a checkbox, restart the app and confirm the old depth is still saved (#40); uninstall from Settings > Apps with the controls still running and read the message (#38); stop Explorer, start conversion, and confirm the status line reports the missing notification icon and Minimize stays on the taskbar (#37, #40).
+
 ## 0.8.3 (2026-11-09)
 
 Fifth audit round: the five follow-up fixes to 0.8.2 (#25–#29) and a full-repository audit of the code, installer, workflows and notices (#30–#35). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 and 0.8.2 ones below.
