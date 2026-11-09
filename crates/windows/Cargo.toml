@@ -4,6 +4,7 @@ description = "Windows-only half of Any2Odyssey: Win32 window management, Window
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+publish = false
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
