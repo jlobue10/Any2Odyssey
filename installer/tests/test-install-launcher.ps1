@@ -14,8 +14,9 @@ Set-Content -LiteralPath $installer -Encoding UTF8 -Value "param([switch]`$Contr
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated missing engine; run Install-GUI.cmd.')) 'Preflight failure remains visible in the original launcher console'
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -RunInstall -ResultFile $report 2>&1 | Out-String
-$result=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+$result=[IO.File]::ReadAllText($report,[Text.Encoding]::UTF8) | ConvertFrom-Json
 Assert ($LASTEXITCODE -eq 1 -and -not $result.Success -and $result.Message.Contains('Simulated missing engine')) 'Worker failure writes a precise error report'
+Assert (([IO.File]::ReadAllBytes($report))[0] -eq [byte][char]'{') 'The error report is UTF-8 without a byte-order mark'
 # The fake installer records whether -AllowDowngrade reached it.
 $marker=Join-Path $root 'marker.txt'
 Set-Content -LiteralPath $installer -Encoding UTF8 -Value "param([switch]`$ControlsOnly,[switch]`$CheckOnly,[switch]`$AllowDowngrade);if(-not `$CheckOnly){Set-Content -LiteralPath (Join-Path `$PSScriptRoot 'marker.txt') -Value ('test only; AllowDowngrade='+[bool]`$AllowDowngrade)}"
@@ -51,9 +52,12 @@ $guiLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') 
 $fullLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" *'})
 Assert ($guiLine.Count -eq 1 -and $fullLine.Count -eq 1 -and $guiLine[0].EndsWith(' -ControlsOnly %*') -and $fullLine[0] -eq $guiLine[0].Replace(' -ControlsOnly %*',' %*')) 'Install.cmd passes its arguments on the same way'
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -RunInstall -ResultFile $report -ExpectedUserSid 'S-1-0-0' 2>&1 | Out-String
-$result=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+$result=[IO.File]::ReadAllText($report,[Text.Encoding]::UTF8) | ConvertFrom-Json
 Assert (-not $result.Success -and $result.Message.Contains('different Windows account') -and -not (Test-Path -LiteralPath (Join-Path $root 'marker.txt'))) 'Different-account elevation is refused before installation'
-# Simulate the elevated process's response without showing UAC or installing anything.
+# Simulate the elevated process's response without showing UAC or installing anything. The stub
+# writes the result exactly as the elevated step does (UTF-8, no byte-order mark), with a character
+# outside ASCII in it, as a profile path can have; what the launcher prints is recorded as UTF-8 in
+# host.txt so that the console's code page plays no part in the comparison.
 $source=Get-Content -LiteralPath $launcher -Raw
 $source=$source.Replace('if($ControlsOnly -or $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')
 Set-Content -LiteralPath $launcher -Value $source -Encoding UTF8
@@ -64,8 +68,13 @@ function Start-Process {
  if($ArgumentList -notmatch '-ResultFile "([^"]+)"'){throw 'Missing result path'}
  $resultPath=$Matches[1]
  if($ArgumentList -match 'AllowDowngrade'){throw 'The elevated command line allows a downgrade nobody asked for'}
- @{Success=$false;Message='Simulated elevated file-copy failure'} | ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
+ [IO.File]::WriteAllText($resultPath,(@{Success=$false;Message=('Simulated elevated file-copy failure in C:\Users\Zo'+[char]0xEB)} | ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
  return [pscustomobject]@{ExitCode=1}
+}
+function Write-Host {
+ param($Object,$ForegroundColor,$BackgroundColor,[switch]$NoNewline)
+ [IO.File]::AppendAllText((Join-Path $PSScriptRoot 'host.txt'),([string]$Object+[Environment]::NewLine),(New-Object Text.UTF8Encoding $false))
+ Microsoft.PowerShell.Utility\Write-Host $Object
 }
 & (Join-Path $PSScriptRoot 'Install-Launcher.ps1')
 exit $LASTEXITCODE
@@ -73,6 +82,7 @@ exit $LASTEXITCODE
 $wrapper=Join-Path $root 'simulate-elevation.ps1';Set-Content -LiteralPath $wrapper -Value $stub -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $wrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Simulated elevated file-copy failure')) 'Elevated installation error is relayed to the original console'
+Assert ([IO.File]::ReadAllText((Join-Path $root 'host.txt'),[Text.Encoding]::UTF8).Contains('Installation did not complete: Simulated elevated file-copy failure in C:\Users\Zo'+[char]0xEB)) 'A relayed message keeps characters outside ASCII'
 # With -AllowDowngrade the elevated command line carries the switch, and a success is relayed too.
 $allowed=@'
 function Start-Process {
@@ -80,7 +90,7 @@ function Start-Process {
  if($ArgumentList -notmatch '-ResultFile "([^"]+)"'){throw 'Missing result path'}
  $resultPath=$Matches[1]
  if($ArgumentList -notmatch ' -RunInstall .* -AllowDowngrade$'){throw 'The elevated command line lost -AllowDowngrade'}
- @{Success=$true;Message='Simulated elevated success'} | ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
+ [IO.File]::WriteAllText($resultPath,(@{Success=$true;Message='Simulated elevated success'} | ConvertTo-Json),(New-Object Text.UTF8Encoding $false))
  return [pscustomobject]@{ExitCode=0}
 }
 & (Join-Path $PSScriptRoot 'Install-Launcher.ps1') -AllowDowngrade

@@ -44,7 +44,9 @@ try{
    throw
   }
   if(-not (Test-Path -LiteralPath $report)){throw "Installer exited with code $($process.ExitCode) without a result. Retry setup and check whether security software interrupted PowerShell, or extract the package to a local folder: an elevated process cannot see mapped network drives."}
-  $result=Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+  # Written as UTF-8 without a byte-order mark by the elevated step; Windows PowerShell's Get-Content
+  # would read such a file in the ANSI code page and garble a profile path with other characters.
+  $result=[IO.File]::ReadAllText($report,[Text.Encoding]::UTF8) | ConvertFrom-Json
   if(-not $result.Success -or $process.ExitCode -ne 0){throw $result.Message}
   Write-Host $result.Message
  }
