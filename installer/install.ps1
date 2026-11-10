@@ -26,10 +26,12 @@ $installed=Get-Any2OdysseyInstalledVersion -AppPath $app -Registration $registra
 $installedVersion=if($installed){$installed.Version}else{$null}
 $action=Get-Any2OdysseyInstallAction -PackageVersion $version -InstalledVersion $installedVersion -AllowDowngrade:$AllowDowngrade
 Write-Host ("$action Any2Odyssey " + $(if($installed){(Format-Any2OdysseyVersion $installed.Version)+' -> '}else{''}) + $versionText)
+# Everything except the worker is per user; name the account, since an elevated console may not be the one expected.
+Write-Host "Target: Windows account $([Security.Principal.WindowsIdentity]::GetCurrent().Name), application folder $app"
 $engineDll=Join-Path $engine 'ConversionWrapper.dll'
 if($ControlsOnly){
  # Keep full-install app and renderer versions synchronized.
- if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed. Use Install.cmd to update the full installation together.'}
+ if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed on this PC by a full installation (possibly from another Windows account). Controls only cannot be installed beside it; use Install.cmd from an administrator account to install or update the full installation together.'}
  if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Use Install.cmd to update the full installation together, or uninstall it first. If that full installation is already gone, remove C:\Program Files\Any2Odyssey as an administrator, then retry.'}
  Write-Host 'Controls-only mode: GUI, tray and Help; 3D conversion is unavailable. Samsung files will not be installed or changed.'
 }else{
@@ -55,7 +57,7 @@ foreach($place in @(@{Name='Desktop';Path=[Environment]::GetFolderPath('Desktop'
 if($CheckOnly){Write-Host "$action preflight passed$(if($ControlsOnly){' for controls only'}else{': package, version and Samsung engine are compatible'}). No changes made.";return}
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $ControlsOnly){
- if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Run Install.cmd or administrator PowerShell using the same Windows account as the existing installation.'}
+ if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'A full installation needs administrator rights. Run Install.cmd and approve the prompt with this same Windows account (it has to be an administrator account), or run install.ps1 from an administrator PowerShell of the account that will use Any2Odyssey. For the desktop controls only, run Install-GUI.cmd.'}
  if(Get-Process Odyssey3DPlayer -ErrorAction SilentlyContinue){throw 'Stop conversion in Samsung player before installing.'}
 }
 $running=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue)

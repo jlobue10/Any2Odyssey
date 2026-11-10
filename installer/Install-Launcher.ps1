@@ -11,7 +11,10 @@ if($RunInstall){
  # Relay the elevated result to the original console instead of losing its error.
  $result=@{Success=$false;Message='Installer did not complete.'}
  try{
-  if($ExpectedUserSid -and $identity.User.Value -ne $ExpectedUserSid){throw 'Elevation used a different Windows account. Cancel and run setup using the account that will use Any2Odyssey.'}
+  # From a standard account the elevation prompt asks for an administrator's password, and the
+  # elevated step then runs as that administrator: the application, shortcuts and settings would
+  # land in the administrator's profile, not in the profile of the person who started setup.
+  if($ExpectedUserSid -and $identity.User.Value -ne $ExpectedUserSid){throw "Elevation used a different Windows account ($($identity.Name)) than the one that started setup, so nothing was installed. The full converter is installed for the account that approves elevation, which therefore has to be an administrator account itself. Sign in to the administrator account that will use Any2Odyssey and run Install.cmd there, or run Install-GUI.cmd from this account for the desktop controls only (no 3D conversion)."}
   & $installer @options
   $result.Success=$true;$result.Message='Any2Odyssey installation completed. Open Any2Odyssey from the desktop or Start menu.'
  }catch{$result.Message=$_.Exception.Message}
@@ -25,6 +28,9 @@ try{
  & $installer @options -CheckOnly
  $principal=New-Object Security.Principal.WindowsPrincipal($identity)
  if($ControlsOnly -or $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
+  # Already elevated ("Run as administrator", UAC switched off, the built-in Administrator): no
+  # prompt will show which account this is, so say whose installation this becomes.
+  if(-not $ControlsOnly){Write-Host "This window already has administrator rights. Any2Odyssey, its shortcuts and its settings are installed for the Windows account $($identity.Name) only ($env:LOCALAPPDATA\Programs\Any2Odyssey). If it was meant for another account, uninstall it afterwards and run Install.cmd signed in as that account, without 'Run as administrator'."}
   & $installer @options
  }else{
   $report=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-setup-'+[Guid]::NewGuid().ToString('N')+'.json')

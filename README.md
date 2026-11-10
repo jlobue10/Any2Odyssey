@@ -48,7 +48,7 @@ These apply to the full Windows converter. A controls-only installation needs on
 | Connection | DisplayPort and the monitor's USB upstream connection; working `3D Stereo WebCam` |
 | GPU | NVIDIA RTX 5090 (Any2Odyssey 0.8.0, driver 621.14) and RTX 4090 (upstream Any2Odd) confirmed; the engine receives a fixed 16,384-core hint. Other GPUs are unvalidated |
 | Samsung software | Odyssey 3D Hub 1.5.1 and its installed LeiaSR dependencies, in their default `C:\Program Files` locations |
-| Install | 64-bit Windows PowerShell 5.1 for the installer scripts; administrator access only to place the worker beside Samsung's engine |
+| Install | 64-bit Windows PowerShell 5.1 for the installer scripts. For the full converter, a Windows account that is itself an administrator: elevation is used only to place the worker beside Samsung's engine, but it has to be approved by the account that will use Any2Odyssey. A standard account can install the controls only |
 
 **Who supplies what:** Any2Odyssey supplies the desktop controls, capture, click-through/window management and the worker that loads Samsung's engine. Windows supplies Win32/DWM, Windows Graphics Capture and Direct3D/DXGI. Samsung supplies the conversion engine and AI assets; Samsung/Leia components provide tracking, calibration and optical output. No Samsung or Leia binaries, models or calibration files are included or redistributed.
 
@@ -66,7 +66,7 @@ A different engine stops installation and conversion with a compatibility messag
 
 1. Install and configure Samsung Odyssey 3D Hub and verify that its ordinary 3D playback works. Stop Samsung's separate 3D player.
 2. Download `Any2Odyssey-<version>-windows-x64.zip` from [Releases](https://github.com/jlobue10/Any2Odyssey/releases), verify it against the attached `.sha256`, and extract it to a normal folder.
-3. Double-click **Install.cmd** and approve elevation **using the same Windows account** as the existing installation. Alternatively, from 64-bit PowerShell as administrator in the extracted folder:
+3. Double-click **Install.cmd** and approve the elevation prompt **with the Windows account you are signed in to** (it has to be an administrator account; see below). Alternatively, from 64-bit PowerShell as administrator in the extracted folder:
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
@@ -74,7 +74,9 @@ A different engine stops installation and conversion with a compatibility messag
 
 4. Open **Any2Odyssey** from its desktop or Start menu shortcut as your normal user. By default, conversion starts when the app opens. It does not register itself to start at Windows sign-in.
 
-Administrator access is needed only to install the worker beside Samsung's engine. The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. Every account's Any2Odyssey has to be the same release as that one worker, so the installer refuses a package that is older than the worker already on the PC (`-AllowDowngrade` overrides this as well): keep the accounts on the same release. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
+Administrator access is needed only to install the worker beside Samsung's engine, but the account matters: the application, its shortcuts and its settings are per user and are installed for the account that approves elevation. If the prompt asks for an administrator's user name and password, you are signed in to a standard account; entering another account's credentials is detected and refused, and nothing is installed. Do not work around that with **Run as administrator** on `Install.cmd` either: that installs Any2Odyssey for the administrator account (the installer prints which account it is installing for). Sign in to the administrator account that will use Any2Odyssey and run `Install.cmd` there. A standard account can run **Install-GUI.cmd** for the controls only, except on a PC that already has a full installation, where the controls-only installer refuses to install beside the shared worker.
+
+The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. Every account's Any2Odyssey has to be the same release as that one worker, so the installer refuses a package that is older than the worker already on the PC (`-AllowDowngrade` overrides this as well): keep the accounts on the same release. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
 
 ### Windows controls without a 3D setup
 
