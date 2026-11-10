@@ -67,7 +67,7 @@ pub fn is_caps_heading(line: &str) -> bool {
 }
 
 pub fn export(path: &Path) -> std::io::Result<()> {
-    any2odyssey_core::fsutil::write_atomic(path, render().as_bytes())
+    any2odyssey_core::fsutil::write_atomic_document(path, render().as_bytes())
 }
 
 #[cfg(test)]
