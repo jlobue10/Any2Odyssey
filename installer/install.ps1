@@ -37,10 +37,14 @@ if($ControlsOnly){
  if((Get-FileHash -LiteralPath $engineDll).Hash -ne '0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'){throw 'Samsung engine changed. This release needs a compatibility update.'}
  # One worker path per PC. When another account placed the current worker and helper, say so here in
  # the preflight pass, which runs in the visible console; the elevated installer's own output is hidden.
- if(Test-Path -LiteralPath $ownerFile -PathType Leaf){
-  $previousOwner=([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim()
-  if($previousOwner -and $previousOwner -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
- }
+ $previousOwner=''
+ if(Test-Path -LiteralPath $ownerFile -PathType Leaf){$previousOwner=([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim()}
+ $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+ # The worker serves every account on the PC: an older package must not replace a newer worker that
+ # another installation relies on, unless -AllowDowngrade says so.
+ $existingWorker=Join-Path $engine $workerName
+ if(Test-Path -LiteralPath $existingWorker -PathType Leaf){Assert-Any2OdysseyWorkerNotNewer -PackageVersion $version -WorkerVersion (Get-Any2OdysseyFileVersion -Path $existingWorker) -AllowDowngrade:$AllowDowngrade -OwnerSid $previousOwner -CurrentSid $currentSid}
+ if($previousOwner -and $previousOwner -ne $currentSid){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
 }
 if($CheckOnly){Write-Host "$action preflight passed$(if($ControlsOnly){' for controls only'}else{': package, version and Samsung engine are compatible'}). No changes made.";return}
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())

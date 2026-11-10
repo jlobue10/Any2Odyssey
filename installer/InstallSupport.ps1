@@ -7,14 +7,21 @@ function Get-Any2OdysseyRecordedVersion {
  try{$record=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json;if($record.Version){return [version]$record.Version}}catch{}
  return $null
 }
+function Get-Any2OdysseyFileVersion {
+ param([string]$Path)
+ # A native executable: read its VERSIONINFO resource, not a .NET assembly name. $null when the
+ # file carries no readable version (a truncated copy, or a file that is not this program).
+ $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+ $text=if($info.FileVersion){$info.FileVersion}elseif($info.ProductVersion){$info.ProductVersion}else{$null}
+ if($text -and $text -match '^\d+(\.\d+){1,3}'){return [version]$Matches[0]}
+ return $null
+}
 function Get-Any2OdysseyInstalledVersion {
  param([string]$AppPath,[string]$Registration,[string]$DataPath)
  $path=Join-Path $AppPath 'Any2Odyssey.exe'
  if(Test-Path -LiteralPath $path -PathType Leaf){
-  # A native executable: read its VERSIONINFO resource, not a .NET assembly name.
-  $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($path)
-  $text=if($info.FileVersion){$info.FileVersion}elseif($info.ProductVersion){$info.ProductVersion}else{$null}
-  if($text -and $text -match '^\d+(\.\d+){1,3}'){return [pscustomobject]@{Version=[version]$Matches[0];Source=$path}}
+  $fromResource=Get-Any2OdysseyFileVersion -Path $path
+  if($fromResource){return [pscustomobject]@{Version=$fromResource;Source=$path}}
   $record=Join-Path $AppPath 'version.json'
   $recorded=Get-Any2OdysseyRecordedVersion -Path $record
   if($recorded){return [pscustomobject]@{Version=$recorded;Source=$record}}
@@ -37,10 +44,9 @@ function Get-Any2OdysseyInstalledVersion {
 }
 function Get-Any2OdysseyPackageVersion {
  param([string]$Binary)
- $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($Binary)
- $text=if($info.FileVersion){$info.FileVersion}else{$info.ProductVersion}
- if(-not $text -or $text -notmatch '^\d+(\.\d+){1,3}'){throw "The packaged executable has no readable version resource: $Binary"}
- return [version]$Matches[0]
+ $fromResource=Get-Any2OdysseyFileVersion -Path $Binary
+ if(-not $fromResource){throw "The packaged executable has no readable version resource: $Binary"}
+ return $fromResource
 }
 function ConvertTo-Any2OdysseyFourPartVersion {
  param([version]$Version)
@@ -63,6 +69,19 @@ function Get-Any2OdysseyInstallAction {
  if($package -eq $installed){return 'Repair'}
  if(-not $AllowDowngrade){throw "Installed version $(Format-Any2OdysseyVersion $installed) is newer than this package ($(Format-Any2OdysseyVersion $package)). Downgrade blocked; nothing was changed. To install this older version on purpose, open a terminal in the extracted folder and run .\Install.cmd -AllowDowngrade (or .\Install-GUI.cmd -AllowDowngrade for the controls only)."}
  return 'Downgrade'
+}
+function Assert-Any2OdysseyWorkerNotNewer {
+ param([version]$PackageVersion,$WorkerVersion,[switch]$AllowDowngrade,[string]$OwnerSid,[string]$CurrentSid)
+ # The conversion worker beside Samsung's engine is one file for the whole PC, and every account's
+ # Any2Odyssey must drive a worker of its own version. The per-user downgrade guard cannot see it:
+ # for a second account an older package is a plain Install. A worker without a readable version
+ # is not judged and is replaced as before.
+ if($null -eq $WorkerVersion -or $AllowDowngrade){return}
+ $package=ConvertTo-Any2OdysseyFourPartVersion $PackageVersion
+ $worker=ConvertTo-Any2OdysseyFourPartVersion $WorkerVersion
+ if($worker -le $package){return}
+ $whose=if($OwnerSid -and $OwnerSid -ne $CurrentSid){" It was installed by another Windows account ($OwnerSid); replacing it would leave that account's newer Any2Odyssey with an older worker."}else{''}
+ throw "The conversion worker on this PC is version $(Format-Any2OdysseyVersion $worker), newer than this package ($(Format-Any2OdysseyVersion $package)).$whose Downgrade blocked; nothing was changed. Install the newer release instead, or to replace the worker with this older one on purpose open a terminal in the extracted folder and run .\Install.cmd -AllowDowngrade."
 }
 function Invoke-Any2OdysseyFileTransaction {
  param([object[]]$Operations,[scriptblock]$AfterCopy={},[scriptblock]$RollbackState={})

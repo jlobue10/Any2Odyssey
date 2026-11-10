@@ -78,6 +78,27 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '"*\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile *') 'Installed-apps uninstall names the system PowerShell by full path'
+ # Shared PC: another account has installed a newer release since. Its worker is the one worker of
+ # this PC, so this older package must refuse to replace it, and say whose it is, in the preflight.
+ $workerPath=Join-Path $engine 'Any2OdysseyWorker.exe'
+ $packageResource=(Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()+'.0'
+ $newerResource='9'+$packageResource.Substring(1)
+ # The version resource holds its strings as UTF-16, and ISO-8859-1 maps bytes to characters one to
+ # one: the stand-in below is the packaged executable with only those version strings changed.
+ $latin1=[Text.Encoding]::GetEncoding(28591)
+ $image=$latin1.GetString([IO.File]::ReadAllBytes((Join-Path $repo 'build\Any2Odyssey.exe')))
+ $image=$image.Replace($latin1.GetString([Text.Encoding]::Unicode.GetBytes($packageResource)),$latin1.GetString([Text.Encoding]::Unicode.GetBytes($newerResource)))
+ [IO.File]::WriteAllBytes($workerPath,$latin1.GetBytes($image))
+ Assert ([Diagnostics.FileVersionInfo]::GetVersionInfo($workerPath).FileVersion -eq $newerResource) 'Fixture: the stand-in worker reads as a newer release'
+ [IO.File]::WriteAllText($ownerFile,'S-1-5-21-1-2-3-1001',[Text.UTF8Encoding]::new($false))
+ $newerHash=(Get-FileHash -LiteralPath $workerPath).Hash
+ $refusal='';try{& $testInstall -CheckOnly}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('newer than this package') -and $refusal.Contains('another Windows account (S-1-5-21-1-2-3-1001)') -and $refusal.Contains('-AllowDowngrade')) 'The preflight refuses to replace a newer worker and names the account that installed it'
+ $refusal='';try{& $testInstall}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('newer than this package') -and (Get-FileHash -LiteralPath $workerPath).Hash -eq $newerHash) 'The installation refuses too and leaves the newer worker in place'
+ & $testInstall -AllowDowngrade
+ Assert ((Get-FileHash -LiteralPath $workerPath).Hash -eq (Get-FileHash -LiteralPath (Join-Path $repo 'build\Any2Odyssey.exe')).Hash) 'AllowDowngrade replaces the newer worker with the packaged one'
+ Assert ((Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'The allowed replacement takes over the owner marker'
  Assert ((& $stagingNames) -eq $stagingBefore) 'Installer removes its staging folder'
  $passed=$true
 }finally{

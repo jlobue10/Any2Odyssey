@@ -74,7 +74,7 @@ A different engine stops installation and conversion with a compatibility messag
 
 4. Open **Any2Odyssey** from its desktop or Start menu shortcut as your normal user. By default, conversion starts when the app opens. It does not register itself to start at Windows sign-in.
 
-Administrator access is needed only to install the worker beside Samsung's engine. The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
+Administrator access is needed only to install the worker beside Samsung's engine. The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. Every account's Any2Odyssey has to be the same release as that one worker, so the installer refuses a package that is older than the worker already on the PC (`-AllowDowngrade` overrides this as well): keep the accounts on the same release. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
 
 ### Windows controls without a 3D setup
 

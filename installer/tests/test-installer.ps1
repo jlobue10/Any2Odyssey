@@ -19,6 +19,18 @@ Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.8.0.0')) -
 $blocked=$false;try{Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0')}catch{$blocked=$_.Exception.Message.Contains('0.9.0 is newer than this package (0.8.0)') -and $_.Exception.Message.Contains('.\Install.cmd -AllowDowngrade')};Assert $blocked 'Downgrade blocked by default, with the command that allows it'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0') -AllowDowngrade) -eq 'Downgrade') 'Explicit downgrade is supported'
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Empty installation has no version'
+# The conversion worker is one file for the whole PC: an older package must not replace a newer one unless asked.
+Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.8.6.0') -WorkerVersion $null
+Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.8.6.0') -WorkerVersion ([version]'0.8.6.0')
+Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.8.6.0') -WorkerVersion ([version]'0.8.5')
+Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.8.6.0') -WorkerVersion ([version]'0.9.0.0') -AllowDowngrade
+Assert $true 'An unreadable, equal or older worker, and an allowed downgrade, pass the worker check'
+$message='';try{Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.8.6.0') -WorkerVersion ([version]'0.9.0.0') -OwnerSid 'S-1-5-21-1' -CurrentSid 'S-1-5-21-1'}catch{$message=$_.Exception.Message}
+Assert ($message.Contains('version 0.9.0, newer than this package (0.8.6)') -and $message.Contains('.\Install.cmd -AllowDowngrade') -and -not $message.Contains('another Windows account')) 'A newer worker of the same account is refused with the command that allows it'
+$message='';try{Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.8.6.0') -WorkerVersion ([version]'0.9.0.0') -OwnerSid 'S-1-5-21-2' -CurrentSid 'S-1-5-21-1'}catch{$message=$_.Exception.Message}
+Assert ($message.Contains('newer than this package') -and $message.Contains('another Windows account (S-1-5-21-2)')) 'A newer worker installed by another account is refused and that account is named'
+Set-Content -LiteralPath (Join-Path $root 'not-a-program.exe') -Value 'no version resource'
+Assert ($null -eq (Get-Any2OdysseyFileVersion -Path (Join-Path $root 'not-a-program.exe'))) 'A file without a version resource has no version'
 # A truncated record must count as absent rather than throw from ConvertFrom-Json.
 Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.2",' -NoNewline
 Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '' -NoNewline
