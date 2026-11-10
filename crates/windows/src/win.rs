@@ -214,7 +214,11 @@ pub fn monitors() -> Vec<(Rect, bool, String, HMONITOR)> {
             },
             ..Default::default()
         };
-        if unsafe { GetMonitorInfoW(m, &mut info.monitorInfo as *mut MONITORINFO) }.as_bool() {
+        // The pointer must cover the whole extended struct, which cbSize
+        // tells Windows to fill: one derived from `info.monitorInfo` alone
+        // would not be valid for the device name written after it.
+        let whole = &mut info as *mut MONITORINFOEXW as *mut MONITORINFO;
+        if unsafe { GetMonitorInfoW(m, whole) }.as_bool() {
             let name_len = info
                 .szDevice
                 .iter()
