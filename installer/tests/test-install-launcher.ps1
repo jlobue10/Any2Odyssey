@@ -32,7 +32,10 @@ Remove-Item -LiteralPath $marker
 # Install-GUI.cmd passes its arguments on (.\Install-GUI.cmd -AllowDowngrade). A controls-only setup never
 # elevates, so running the real launcher file is safe on any PC; the piped empty line answers its pause.
 Copy-Item -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') -Destination $root
-$output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String
+# Under PowerShell 7 the Windows PowerShell that cmd.exe starts must not inherit PowerShell 7's module path.
+$savedModulePath=$env:PSModulePath
+if($PSVersionTable.PSEdition -eq 'Core'){$env:PSModulePath=[Environment]::GetEnvironmentVariable('PSModulePath','Machine')}
+try{$output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String}finally{$env:PSModulePath=$savedModulePath}
 Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -Raw).Contains('AllowDowngrade=True')) 'Install-GUI.cmd passes -AllowDowngrade on to the installer'
 Remove-Item -LiteralPath $marker
 # Install.cmd would ask for elevation here, so its command line is compared with the one just exercised.
