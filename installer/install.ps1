@@ -12,6 +12,8 @@ $workerName='Any2OdysseyWorker.exe'
 $helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
 $ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
 $documents=@('USER-GUIDE.html','Uninstall.ps1','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md')
+# Windows session of this console. Another signed-in account's Any2Odyssey runs in a different one.
+$session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to install Any2Odyssey.'}
 # ANY2ODYSSEY_SKIP_OS_CHECK=1 lets the isolated tests run on older CI images; it skips only this version gate.
 if($env:ANY2ODYSSEY_SKIP_OS_CHECK -ne '1' -and [Environment]::OSVersion.Version.Build -lt 26100){throw 'Use 64-bit PowerShell on Windows 11 24H2 or newer.'}
@@ -46,6 +48,13 @@ if($ControlsOnly){
  # another installation relies on, unless -AllowDowngrade says so.
  $existingWorker=Join-Path $engine $workerName
  if(Test-Path -LiteralPath $existingWorker -PathType Leaf){Assert-Any2OdysseyWorkerNotNewer -PackageVersion $version -WorkerVersion (Get-Any2OdysseyFileVersion -Path $existingWorker) -AllowDowngrade:$AllowDowngrade -OwnerSid $previousOwner -CurrentSid $currentSid}
+ # Both of the following are checked here, in the preflight, so that they are reported in the visible
+ # console before the elevation prompt; the elevated pass runs the same lines again.
+ if(Get-Process Odyssey3DPlayer -ErrorAction SilentlyContinue){throw 'Stop conversion in Samsung player before installing.'}
+ # The worker is replaced for the whole PC. An instance in another signed-in session is using it and
+ # cannot be asked to quit from here: the quit signal reaches this session only.
+ $elsewhere=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -ne $session})
+ if($elsewhere.Count){throw "Any2Odyssey is running in another signed-in Windows session (session $((@($elsewhere | ForEach-Object {$_.SessionId} | Sort-Object -Unique)) -join ', ')), where it uses the conversion worker this installation replaces. Quit it there from its tray menu (Quit completely) or sign that account out, then retry. No installed files were changed."}
  if($previousOwner -and $previousOwner -ne $currentSid){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
 }
 # Windows reports a known folder that does not exist (a redirected Desktop that was removed, for
@@ -58,15 +67,16 @@ if($CheckOnly){Write-Host "$action preflight passed$(if($ControlsOnly){' for con
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $ControlsOnly){
  if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'A full installation needs administrator rights. Run Install.cmd and approve the prompt with this same Windows account (it has to be an administrator account), or run install.ps1 from an administrator PowerShell of the account that will use Any2Odyssey. For the desktop controls only, run Install-GUI.cmd.'}
- if(Get-Process Odyssey3DPlayer -ErrorAction SilentlyContinue){throw 'Stop conversion in Samsung player before installing.'}
 }
-$running=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue)
+# Only this session's instance can be asked to quit, and only it runs this account's files. A
+# controls-only installation is not concerned with another account's instance at all.
+$running=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})
 if($running.Count){
  Write-Host 'Closing Any2Odyssey and waiting for its renderer to stop cleanly...'
  $signal=Start-Process -FilePath $binary -ArgumentList '--quit' -WindowStyle Hidden -Wait -PassThru
  if($signal.ExitCode){throw 'Could not request a clean shutdown. Quit Any2Odyssey from its tray and retry.'}
  $deadline=(Get-Date).AddSeconds(15)
- do{$remaining=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue);if(-not $remaining.Count){break};Start-Sleep -Milliseconds 250}while((Get-Date) -lt $deadline)
+ do{$remaining=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session});if(-not $remaining.Count){break};Start-Sleep -Milliseconds 250}while((Get-Date) -lt $deadline)
  if($remaining.Count){throw 'Any2Odyssey is still running. Quit it from its tray using its normal Windows account, then retry. No installed files were changed.'}
 }
 $stage=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-install-'+[Guid]::NewGuid().ToString('N'))

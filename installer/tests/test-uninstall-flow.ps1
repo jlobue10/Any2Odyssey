@@ -50,7 +50,12 @@ $launchFailure=''
 # behaves differently under Windows PowerShell 5.1, a function shadowing the cmdlet does not.
 $notes=New-Object 'System.Collections.Generic.List[string]'
 function Write-Host {param($Object,$ForegroundColor,$BackgroundColor,[switch]$NoNewline)$text=[string]::Join(' ',@($Object));$notes.Add($text);$Host.UI.WriteLine($text)}
-function Get-Process {param($Name,$ErrorAction)return @()}
+# Get-Process reports what $processes.List holds, so no real instance is consulted. Start-Sleep is
+# what the uninstaller's wait loop calls: the stub lets a simulated instance of this session exit.
+$processes=[pscustomobject]@{List=@();Waits=0}
+$thisSession=[Diagnostics.Process]::GetCurrentProcess().SessionId
+function Get-Process {param($Name,$ErrorAction)return @($processes.List | Where-Object {@($Name) -contains $_.Name})}
+function Start-Sleep {param($Milliseconds,$Seconds)$processes.Waits++;$processes.List=@($processes.List | Where-Object {$_.SessionId -ne $thisSession})}
 function Start-Process {
  param($FilePath,$ArgumentList,$Verb,$WindowStyle,[switch]$Wait,[switch]$PassThru)
  $launches.Add([pscustomobject]@{FilePath=$FilePath;ArgumentList=$ArgumentList;Verb=$Verb;Wait=[bool]$Wait})
@@ -148,6 +153,18 @@ try{
  Assert (($notes -join [char]10).Contains('version.json) is unreadable')) 'Damaged installation record is reported'
  Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Damaged record falls back to the files present and runs the helper'
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $registration)) 'Uninstall completes despite the damaged record'
+
+ # Another signed-in account's instance runs its own files and never received this session's quit
+ # signal: it does not block removing this account's controls. This session's instance is waited for.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+ Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
+ $processes.Waits=0
+ $processes.List=@([pscustomobject]@{Name='Any2Odyssey';SessionId=($thisSession+1)},[pscustomobject]@{Name='Any2Odyssey';SessionId=$thisSession})
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert ($processes.Waits -eq 1 -and $processes.List.Count -eq 1) 'The uninstaller waits for the instance of its own session only'
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'An instance in another session does not block removing this account''s controls'
+ $processes.List=@()
 
  # An account whose Desktop folder is gone (Windows reports an empty path) can still uninstall.
  $launches.Clear()

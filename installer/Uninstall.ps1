@@ -34,9 +34,14 @@ try{
  # The instance was started elevated, so its event refuses this token. Fall through
  # to the wait below; its message then asks for a manual quit instead of a raw error.
 }
+# Only this session's instance received that signal (the event is per session), and only it runs
+# this account's files. An instance in another signed-in session does not block removing them; the
+# elevated helper still refuses to delete a worker that is running anywhere, and says in which session.
+$session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+$running={@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})}
 $deadline=(Get-Date).AddSeconds(12)
-while((Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
-if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
+while(@(& $running).Count -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 250}
+if(@(& $running).Count){throw 'Exit Any2Odyssey from its tray, then run uninstall again.'}
 # A full installation removes its worker through the helper. A controls-only record never
 # elevates for a worker it did not install: a helper that is still present then belongs to
 # another account's full installation or to an older release, and is removed by running

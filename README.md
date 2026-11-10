@@ -90,7 +90,7 @@ Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LO
 
 ### Uninstall
 
-1. Quit Any2Odyssey from its tray menu (**Quit completely**). The uninstaller asks a running instance to quit and waits up to 12 seconds, but a clean exit first is simplest.
+1. Quit Any2Odyssey from its tray menu (**Quit completely**). The uninstaller asks a running instance to quit and waits up to 12 seconds, but a clean exit first is simplest. On a shared PC, also quit it in any other signed-in account before a full uninstall or `Install.cmd`: the conversion worker cannot be removed or replaced while another account is using it, and the message names that Windows session.
 2. Open Windows **Settings → Apps → Installed apps**, find **Any2Odyssey** (or **Any2Odyssey (controls only)**) and choose **Uninstall**. This runs the `Uninstall.ps1` that the installer placed in `%LOCALAPPDATA%\Programs\Any2Odyssey` (Installed apps adds `-Pause`, which keeps the window open with the reason when something fails). A full installation requests elevation once for a protected worker-removal helper in Program Files; a controls-only installation needs no elevation. Equivalent command from PowerShell:
 
    ```powershell

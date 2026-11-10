@@ -1,6 +1,6 @@
 # Full-install flow against isolated folders and an isolated registry key. Windows only.
-# Only Samsung compatibility, elevation and running-process discovery are simulated;
-# copy/registration/shortcuts run for real inside the temporary folders.
+# Only Samsung compatibility, elevation, running-process discovery and the quit request to a
+# running instance are simulated; copy/registration/shortcuts run for real inside the temporary folders.
 param([string]$PreviousPackage)
 $ErrorActionPreference='Stop'
 # install.ps1 refuses Windows builds before 24H2; the fixture is about files, not the OS version.
@@ -28,7 +28,19 @@ $testInstall=Join-Path $package 'install.ps1';Set-Content -LiteralPath $testInst
 $noDesktopScript=$script.Replace(("{Name='Desktop';Path='"+$desktop+"'}"),"{Name='Desktop';Path=''}")
 if($noDesktopScript -ceq $script){throw 'Fixture routing incomplete; refusing to run.'}
 $noDesktopInstall=Join-Path $package 'install-no-desktop.ps1';Set-Content -LiteralPath $noDesktopInstall -Value $noDesktopScript -Encoding UTF8
-function Get-Process {param($Name,$ErrorAction) return @()}
+# Running processes are simulated: Get-Process reports what $processes.List holds, so no real
+# instance is consulted. install.ps1 asks an instance to quit by starting the packaged executable
+# with --quit; the Start-Process stub records that request and lets the simulated instance exit.
+$processes=[pscustomobject]@{List=@()}
+$thisSession=[Diagnostics.Process]::GetCurrentProcess().SessionId
+function Get-Process {param($Name,$ErrorAction) return @($processes.List | Where-Object {@($Name) -contains $_.Name})}
+$quitRequests=New-Object 'System.Collections.Generic.List[object]'
+function Start-Process {
+ param($FilePath,$ArgumentList,$WindowStyle,$Verb,[switch]$Wait,[switch]$PassThru)
+ $quitRequests.Add([pscustomobject]@{FilePath=$FilePath;ArgumentList=[string]$ArgumentList})
+ $processes.List=@()
+ return [pscustomobject]@{ExitCode=0}
+}
 function Get-FileHash {
  param([string]$LiteralPath,$Algorithm)
  if($LiteralPath -eq (Join-Path $engine 'ConversionWrapper.dll')){return [pscustomobject]@{Hash='0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'}}
@@ -82,6 +94,19 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '"*\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile *') 'Installed-apps uninstall names the system PowerShell by full path'
+ # An instance in another signed-in session uses the worker a full installation replaces and cannot
+ # be asked to quit from here: refused in the preflight, before any elevation, naming the session.
+ $processes.List=@([pscustomobject]@{Name='Any2OdysseyWorker';SessionId=($thisSession+1)})
+ $refusal='';try{& $testInstall -CheckOnly}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('another signed-in Windows session (session '+($thisSession+1)+')') -and $quitRequests.Count -eq 0) 'An instance in another session stops a full installation in the preflight and is not asked to quit'
+ $processes.List=@([pscustomobject]@{Name='Odyssey3DPlayer';SessionId=$thisSession})
+ $refusal='';try{& $testInstall -CheckOnly}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('Samsung player')) 'Samsung''s running player is reported in the preflight'
+ # An instance in this session is asked to quit, and the installation continues once it has gone.
+ $processes.List=@([pscustomobject]@{Name='Any2Odyssey';SessionId=$thisSession})
+ & $testInstall
+ Assert ($quitRequests.Count -eq 1 -and $quitRequests[0].ArgumentList -eq '--quit' -and $quitRequests[0].FilePath -eq (Join-Path $package 'build\Any2Odyssey.exe')) 'A running instance in this session is asked to quit through the packaged executable'
+ Assert ($processes.List.Count -eq 0 -and (Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'The installation continues after the instance has quit'
  # No Desktop folder: the installation completes and places the Start menu shortcut only.
  Remove-Item -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')
  $notes.Clear()

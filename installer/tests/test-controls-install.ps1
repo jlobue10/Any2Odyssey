@@ -23,7 +23,9 @@ foreach($file in @('install.ps1','Uninstall.ps1')){
  Set-Content -LiteralPath (Join-Path $package $file) -Value $script -Encoding UTF8
 }
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
-function Get-Process {param($Name,$ErrorAction)return @()}
+# Get-Process reports what $processes.List holds, so no real instance is consulted.
+$processes=[pscustomobject]@{List=@()}
+function Get-Process {param($Name,$ErrorAction)return @($processes.List | Where-Object {@($Name) -contains $_.Name})}
 function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,[switch]$Wait,$Verb,[switch]$PassThru)if($Verb){throw 'Controls-only uninstall must not elevate.'};return [pscustomobject]@{ExitCode=0}}
 $installer=Join-Path $package 'install.ps1';$app=Join-Path $local 'Programs\Any2Odyssey';$data=Join-Path $local 'Any2Odyssey'
 New-Item -ItemType Directory -Path $data -Force | Out-Null
@@ -39,8 +41,12 @@ try{
  Assert ($record.ControlsOnly -eq $true -and $null -eq $record.Worker) 'Controls-only mode records no conversion worker'
  Assert (-not (Test-Path -LiteralPath $engine)) 'Controls-only install does not create or modify the Samsung directory'
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayName -eq 'Any2Odyssey (controls only)') 'Installed apps identifies controls-only mode'
+ # Another signed-in account's Any2Odyssey runs that account's files, not these: it is no reason to
+ # refuse a controls-only installation, and it is not asked to quit.
+ $processes.List=@([pscustomobject]@{Name='Any2Odyssey';SessionId=([Diagnostics.Process]::GetCurrentProcess().SessionId+1)})
  & $installer -ControlsOnly
- Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Controls-only reinstall repairs in place'
+ $processes.List=@()
+ Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Controls-only reinstall repairs in place, also while another session runs Any2Odyssey'
  New-Item -ItemType Directory -Path $engine | Out-Null
  Set-Content -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe') -Value 'Unrelated sentinel created after controls-only install'
  Set-Content -LiteralPath (Join-Path $engine 'ConversionWrapper.dll') -Value 'Simulated Samsung engine; never loaded'
