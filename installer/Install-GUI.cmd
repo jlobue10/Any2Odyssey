@@ -7,6 +7,9 @@ rem A 32-bit host (a 32-bit file manager or console) redirects System32 to SysWO
 rem PowerShell is 32-bit and refused by install.ps1; Sysnative reaches the 64-bit one from there.
 set "ANY2ODYSSEY_POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if defined PROCESSOR_ARCHITEW6432 set "ANY2ODYSSEY_POWERSHELL=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+rem Started from a PowerShell 7 prompt, this console inherits its module path, and Windows PowerShell
+rem then cannot load its own modules: Get-FileHash is not found. Cleared, it builds its default.
+set "PSModulePath="
 rem Arguments are passed on, for example: Install-GUI.cmd -AllowDowngrade
 "%ANY2ODYSSEY_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Launcher.ps1" -ControlsOnly %*
 set "ANY2ODYSSEY_SETUP_EXIT=%ERRORLEVEL%"

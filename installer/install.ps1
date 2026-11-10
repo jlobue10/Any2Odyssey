@@ -51,10 +51,11 @@ if($ControlsOnly){
  # Both of the following are checked here, in the preflight, so that they are reported in the visible
  # console before the elevation prompt; the elevated pass runs the same lines again.
  if(Get-Process Odyssey3DPlayer -ErrorAction SilentlyContinue){throw 'Stop conversion in Samsung player before installing.'}
- # The worker is replaced for the whole PC. An instance in another signed-in session is using it and
- # cannot be asked to quit from here: the quit signal reaches this session only.
- $elsewhere=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -ne $session})
- if($elsewhere.Count){throw "Any2Odyssey is running in another signed-in Windows session (session $((@($elsewhere | ForEach-Object {$_.SessionId} | Sort-Object -Unique)) -join ', ')). A full installation replaces the conversion worker that every account's Any2Odyssey uses, and that instance cannot be asked to quit from here. Quit it there from its tray menu (Quit completely) or sign that account out, then retry. No installed files were changed."}
+ # The worker beside Samsung's engine is one file per PC: a conversion running in another account's
+ # session holds it open, and nothing here can ask that session to stop (the quit signal reaches
+ # this session only). Controls that are open there without converting do not hold the file.
+ $elsewhere=@(Get-Process Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -ne $session})
+ if($elsewhere.Count){throw "Any2Odyssey is converting in another signed-in Windows session (session $((@($elsewhere | ForEach-Object {$_.SessionId} | Sort-Object -Unique)) -join ', ')). Its conversion worker is the file this installation replaces, and it cannot be asked to stop from here. Sign in to that account and quit Any2Odyssey from its tray menu (Quit completely), or sign that account out, then retry. No installed files were changed."}
  if($previousOwner -and $previousOwner -ne $currentSid){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
 }
 # Windows reports a known folder that does not exist (a redirected Desktop that was removed, for
@@ -70,13 +71,17 @@ if(-not $ControlsOnly){
 }
 # Only this session's instance can be asked to quit, and only it runs this account's files. A
 # controls-only installation is not concerned with another account's instance at all.
-$running=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})
+$running=@(Get-Any2OdysseySessionProcess)
 if($running.Count){
  Write-Host 'Closing Any2Odyssey and waiting for its renderer to stop cleanly...'
- $signal=Start-Process -FilePath $binary -ArgumentList '--quit' -WindowStyle Hidden -Wait -PassThru
- if($signal.ExitCode){throw 'Could not request a clean shutdown. Quit Any2Odyssey from its tray and retry.'}
+ # Only the controls answer --quit. A worker left without them ends by itself within a second
+ # of noticing; asking would fail with nothing to ask, so just wait for it below.
+ if(@(Get-Any2OdysseySessionProcess -Name Any2Odyssey).Count){
+  $signal=Start-Process -FilePath $binary -ArgumentList '--quit' -WindowStyle Hidden -Wait -PassThru
+  if($signal.ExitCode){throw 'Could not request a clean shutdown. Quit Any2Odyssey from its tray and retry.'}
+ }
  $deadline=(Get-Date).AddSeconds(15)
- do{$remaining=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session});if(-not $remaining.Count){break};Start-Sleep -Milliseconds 250}while((Get-Date) -lt $deadline)
+ do{$remaining=@(Get-Any2OdysseySessionProcess);if(-not $remaining.Count){break};Start-Sleep -Milliseconds 250}while((Get-Date) -lt $deadline)
  if($remaining.Count){throw 'Any2Odyssey is still running. Quit it from its tray using its normal Windows account, then retry. No installed files were changed.'}
 }
 $stage=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-install-'+[Guid]::NewGuid().ToString('N'))
@@ -99,9 +104,8 @@ $record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionTex
 $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8
 $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destination=Join-Path $app 'version.json'}
 $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destination=Join-Path $data 'install-result.json'}
-$shell=New-Object -ComObject WScript.Shell
-$shortcutSource=Join-Path $stage 'Any2Odyssey.lnk';$link=$shell.CreateShortcut($shortcutSource)
-$link.TargetPath=Join-Path $app 'Any2Odyssey.exe';$link.WorkingDirectory=$app;$link.IconLocation=(Join-Path $app 'Any2Odyssey.ico')+',0';$link.Description='Any2Odyssey - continuous Odyssey 3D; right-click the tray icon for controls.';$link.Save()
+$shortcutSource=Join-Path $stage 'Any2Odyssey.lnk'
+New-Any2OdysseyShortcut -Path $shortcutSource -Target (Join-Path $app 'Any2Odyssey.exe') -WorkingDirectory $app -Icon (Join-Path $app 'Any2Odyssey.ico') -Description 'Any2Odyssey - continuous Odyssey 3D; right-click the tray icon for controls.'
 foreach($folder in $shortcutFolders){$operations+=[pscustomobject]@{Source=$shortcutSource;Destination=Join-Path $folder 'Any2Odyssey.lnk'}}
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}

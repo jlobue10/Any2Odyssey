@@ -38,7 +38,7 @@ try{
 }
 # Only this session's instance received that signal (the event is per session), and only it runs
 # this account's files. An instance in another signed-in session does not block removing them; the
-# elevated helper still refuses to delete a worker that is running anywhere, and says in which session.
+# elevated helper checks every session before it removes the worker, and says which one holds it.
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
 $running={@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})}
 $deadline=(Get-Date).AddSeconds(12)
@@ -87,12 +87,16 @@ if($needsHelper){
   throw "Worker removal did not complete and its helper gave no reason (exit code $($removal.ExitCode)). No per-user installation files were removed. Retry; if it fails again, check whether security software or a policy stops Windows PowerShell from running $helper"
  }
 }
-$shell=New-Object -ComObject WScript.Shell
+# Shell.Application reads the target as Unicode; WScript.Shell goes through the ANSI code page and
+# fails or misreads it when the profile folder has characters outside that page.
+$shellApp=New-Object -ComObject Shell.Application
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){
  # Windows reports a known folder that does not exist as an empty path; there is no shortcut to look for.
  if(-not $folder){continue}
  $link=Join-Path $folder 'Any2Odyssey.lnk'
- if((Test-Path -LiteralPath $link) -and $shell.CreateShortcut($link).TargetPath -eq $exe){Remove-Item -LiteralPath $link}
+ if(-not (Test-Path -LiteralPath $link -PathType Leaf)){continue}
+ $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
+ if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){Remove-Item -LiteralPath $link}
 }
 # Exact file list only: leave Samsung files, personal settings and logs intact.
 $ownedFiles=@($exe,(Join-Path $app 'Any2Odyssey.ico'),(Join-Path $app 'LICENSE'),(Join-Path $app 'NOTICE'),(Join-Path $app 'THIRD-PARTY-LICENSES.md'),(Join-Path $app 'USER-GUIDE.html'),(Join-Path $app 'Uninstall.ps1'))

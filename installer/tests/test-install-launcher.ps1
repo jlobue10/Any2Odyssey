@@ -33,10 +33,9 @@ Remove-Item -LiteralPath $marker
 # Install-GUI.cmd passes its arguments on (.\Install-GUI.cmd -AllowDowngrade). A controls-only setup never
 # elevates, so running the real launcher file is safe on any PC; the piped empty line answers its pause.
 Copy-Item -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') -Destination $root
-# Under PowerShell 7 the Windows PowerShell that cmd.exe starts must not inherit PowerShell 7's module path.
-$savedModulePath=$env:PSModulePath
-if($PSVersionTable.PSEdition -eq 'Core'){$env:PSModulePath=[Environment]::GetEnvironmentVariable('PSModulePath','Machine')}
-try{$output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String}finally{$env:PSModulePath=$savedModulePath}
+# Under PowerShell 7 this also exercises the launcher's own remedy: it clears the inherited
+# PSModulePath, with which the Windows PowerShell it starts could not load its modules.
+$output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -Raw).Contains('AllowDowngrade=True')) 'Install-GUI.cmd passes -AllowDowngrade on to the installer'
 Remove-Item -LiteralPath $marker
 # Double-clicked inside the ZIP preview, Windows extracts only the .cmd file to a temporary folder.

@@ -39,15 +39,18 @@ Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Damaged vers
 # not an installation: a reinstall is an Install and an older release is not a blocked downgrade.
 Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"99.0.0"}'
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'A record left by an uninstall is not an installed version'
-Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'A record is not an installed version while the registration key is absent'
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'The record uninstall leaves in the data folder is not an installation'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') (Get-Any2OdysseyInstalledVersion $app $registration $data)) -eq 'Install') 'An older release installs after a newer one was uninstalled'
-# The registration's DisplayVersion is consulted before the records; an unparsable one must count as absent too.
+# version.json in the application folder is what the uninstaller removes: readable, it does count.
+Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.1"}'
+Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq [version]'0.8.1') 'A readable version.json is the record of an installation without its executable'
+Remove-Item -LiteralPath (Join-Path $app 'version.json')
+# The registration's DisplayVersion is consulted before version.json; an unparsable one must count as
+# absent too, and the kept install-result.json (still naming 99.0.0 here) is not consulted then either.
 New-Item -Path $registration -Force | Out-Null
 New-ItemProperty -LiteralPath $registration -Name DisplayVersion -Value 'not a version' -PropertyType String -Force | Out-Null
-Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"0.8.1"}'
-Assert ((Get-Any2OdysseyInstalledVersion $app $registration $data).Version -eq [version]'0.8.1') 'While registered, a damaged version.json falls through to the next readable record'
-Remove-Item -LiteralPath (Join-Path $app 'version.json'),(Join-Path $data 'install-result.json')
-Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'An unparsable registry DisplayVersion is treated as absent'
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'An unparsable registry DisplayVersion is treated as absent, with or without a kept install-result.json'
+Remove-Item -LiteralPath (Join-Path $data 'install-result.json')
 Set-ItemProperty -LiteralPath $registration -Name DisplayVersion -Value '0.8.1'
 Assert ((Get-Any2OdysseyInstalledVersion $app $registration $data).Version -eq [version]'0.8.1') 'A valid registry DisplayVersion is read when no executable is installed'
 Remove-Item -LiteralPath $registration -Recurse
