@@ -18,6 +18,7 @@ pub mod ipc;
 pub mod mirror;
 pub mod overlay;
 pub mod processes;
+mod source_notice;
 pub mod taskbar;
 pub mod update;
 pub mod win;

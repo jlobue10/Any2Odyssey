@@ -30,6 +30,7 @@ use crate::ipc::{Event, InstanceGuard};
 use crate::mirror::{self, Mirror, TIMER_OVERLAY, TIMER_POLL, TIMER_UPDATE, WM_FRAME_ARRIVED};
 use crate::overlay::OverlayController;
 use crate::processes::{current_pid, ParentWatch};
+use crate::source_notice::SourceNotice;
 use crate::win;
 
 /// How long the controls wait for a signalled worker before killing it
@@ -358,6 +359,8 @@ fn run_inner(
 
     let mut overlay_deadline = DispatchDeadline::new(Instant::now(), Duration::from_millis(100));
     let mut poll_deadline = DispatchDeadline::new(Instant::now(), Mirror::poll_interval());
+    // Window modes only: the status line while there is no source to show.
+    let mut source_notice = SourceNotice::default();
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         if closing.get() {
@@ -445,6 +448,8 @@ fn run_inner(
                     log(&format!("Desktop capture failed: {e}"));
                     report(&format!("Desktop capture error: {e}"));
                     shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
+                } else if let Some(shown) = surface.take_source_change() {
+                    source_notice.source_changed(shown);
                 }
             }
             continue;
