@@ -11,7 +11,7 @@ use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+    IsIconic, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 pub use any2odyssey_windows::ipc::ControlEvents;
@@ -197,7 +197,16 @@ pub fn show_window(hwnd: isize) {
             win::set_ex_style(h, style & !WS_EX_TOOLWINDOW_BIT);
         }
         let _ = ShowWindow(h, SW_SHOW);
-        let _ = ShowWindow(h, SW_RESTORE);
+        // Restore only a minimized window. `SW_RESTORE` also un-maximizes a
+        // maximized one, so "show controls" on a visible maximized window
+        // shrank it; and because both the poller and the frame call this
+        // for one request, a window hidden while maximized came back
+        // maximized on the first call and was un-maximized by the second.
+        // A window hidden by `hide_window` is minimized, so it is iconic
+        // here and is restored to the state it was hidden in.
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
         let _ = SetForegroundWindow(h);
     }
 }
