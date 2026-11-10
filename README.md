@@ -74,7 +74,7 @@ A different engine stops installation and conversion with a compatibility messag
 
 4. Open **Any2Odyssey** from its desktop or Start menu shortcut as your normal user. By default, conversion starts when the app opens. It does not register itself to start at Windows sign-in.
 
-Administrator access is needed only to install the worker beside Samsung's engine. The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
+Administrator access is needed only to install the worker beside Samsung's engine. The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](https://github.com/jlobue10/Any2Odyssey/blob/main/installer/README.md).
 
 ### Windows controls without a 3D setup
 
@@ -82,9 +82,9 @@ On a PC without Odyssey Hub or the Samsung display, double-click **Install-GUI.c
 
 ### Upgrading and migrating from Any2Odd
 
-Extract the new ZIP into a new folder and run `Install.cmd`; the installer reports install, upgrade or same-version repair and preserves preferences and logs. It refuses to replace a newer version unless you pass `-AllowDowngrade`.
+Extract the new ZIP into a new folder and run `Install.cmd`; the installer reports install, upgrade or same-version repair and preserves preferences and logs. It refuses to replace a newer version. `Install.cmd` takes no options; to go back to an older release, uninstall first, or run `install.ps1 -AllowDowngrade` from 64-bit administrator Windows PowerShell in the extracted folder.
 
-Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LOCALAPPDATA%\Any2Odyssey`), worker name, registry key and IPC names. Whenever its own `%LOCALAPPDATA%\Any2Odyssey\settings.json` is absent, including on first launch, it imports Any2Odd's conversion preferences if that file exists and can be read (an unreadable Any2Odd file is noted in `companion.log` and skipped, and the controls start with defaults); deleting `%LOCALAPPDATA%\Any2Odyssey` for a complete reset therefore re-imports them rather than giving defaults, so also delete or rename Any2Odd's `%LOCALAPPDATA%\Odyssey3DCompanion\settings.json` for true defaults. Both can stay installed, but run only one at a time because both drive the same Samsung engine.
+Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LOCALAPPDATA%\Any2Odyssey`), worker name, registry key and IPC names. Whenever its own `%LOCALAPPDATA%\Any2Odyssey\settings.json` is absent, including on first launch, it imports Any2Odd's conversion preferences if that file exists and can be read (an unreadable Any2Odd file is noted in `companion.log` and skipped; the controls then start with defaults except that automatic conversion and the daily update check are off until you turn them on); deleting `%LOCALAPPDATA%\Any2Odyssey` for a complete reset therefore re-imports them rather than giving defaults, so also delete or rename Any2Odd's `%LOCALAPPDATA%\Odyssey3DCompanion\settings.json` for true defaults. Both can stay installed, but run only one at a time because both drive the same Samsung engine.
 
 ### Uninstall
 

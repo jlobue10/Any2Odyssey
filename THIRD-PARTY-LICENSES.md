@@ -182,7 +182,7 @@ Samsung's Odyssey 3D Hub, its `ConversionWrapper.dll`, the LeiaSR runtime, AI mo
 
 ## Fonts embedded in the application
 
-The controls window embeds five typefaces. Their license texts follow.
+The controls window embeds six typefaces. Their license texts follow.
 
 ### Fira Sans (`assets/fonts/FiraSans-Regular.ttf`)
 
