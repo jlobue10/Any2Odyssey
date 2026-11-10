@@ -281,6 +281,9 @@ pub fn pick_save_png(_: &str) -> Result<Option<std::path::PathBuf>, String> {
 pub fn take_open_requests() -> Vec<std::path::PathBuf> {
     Vec::new()
 }
+pub fn estimate_depth(_: &image::RgbaImage) -> Result<any2odyssey_core::dibr::DepthMap, String> {
+    Err(NO_VIEWER.into())
+}
 const NO_VIEWER: &str = "The stereo viewer is part of the Linux build.";
 
 pub fn install_jump_list() {

@@ -325,6 +325,24 @@ pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
     ])
 }
 
+/// Estimate depth for the viewer's 2D → 3D mode. The model and the runtime
+/// are loaded on the first call and kept for the life of the process; a
+/// failed load is tried again on the next call, so installing the model
+/// while the program runs is enough. Blocks: call it off the UI thread.
+pub fn estimate_depth(
+    image: &image::RgbaImage,
+) -> Result<any2odyssey_core::dibr::DepthMap, String> {
+    static ESTIMATOR: Mutex<Option<crate::depth::Estimator>> = Mutex::new(None);
+    let mut slot = ESTIMATOR
+        .lock()
+        .map_err(|_| "The depth model is not usable after an earlier failure.")?;
+    if slot.is_none() {
+        let model = crate::depth::locate_model()?;
+        *slot = Some(crate::depth::Estimator::load(&model)?);
+    }
+    slot.as_mut().expect("loaded above").estimate(image)
+}
+
 pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
     eprintln!("The conversion worker runs only on Windows.");
     1
