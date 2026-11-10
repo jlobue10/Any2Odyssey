@@ -60,8 +60,8 @@ $helperExitCode=0
 $helperReason=''
 # '' (helper runs), 'declined' (UAC prompt cancelled: Win32 error 1223) or 'other' (any other launch failure).
 $launchFailure=''
-$keyWaits=[pscustomobject]@{Count=0}
-function Add-TestKeyWait {$keyWaits.Count++}
+$keyWaits=[pscustomobject]@{Total=0}
+function Add-TestKeyWait {$keyWaits.Total++}
 # Notes the uninstaller prints are recorded here: capturing the information stream with 6>&1
 # behaves differently under Windows PowerShell 5.1, a function shadowing the cmdlet does not.
 $notes=New-Object 'System.Collections.Generic.List[string]'
@@ -192,20 +192,20 @@ try{
  # something left in place must wait for a key; a run with nothing to report must not.
  $launches.Clear()
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -HelperOwner 'S-1-5-21-1-2-3-1001'
- $keyWaits.Count=0;$notes.Clear()
+ $keyWaits.Total=0;$notes.Clear()
  & (Join-Path $app 'Uninstall.ps1') -Pause
- Assert ($keyWaits.Count -eq 1 -and ($notes -join [char]10).Contains('belong to another account or an older release') -and -not (Test-Path -LiteralPath $exe)) 'With -Pause a notice keeps the window open after a completed uninstall'
+ Assert ($keyWaits.Total -eq 1 -and ($notes -join [char]10).Contains('belong to another account or an older release') -and -not (Test-Path -LiteralPath $exe)) 'With -Pause a notice keeps the window open after a completed uninstall'
  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
  Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
- $keyWaits.Count=0
+ $keyWaits.Total=0
  & (Join-Path $app 'Uninstall.ps1') -Pause
- Assert ($keyWaits.Count -eq 0 -and -not (Test-Path -LiteralPath $exe)) 'With -Pause and nothing to report the window closes by itself'
+ Assert ($keyWaits.Total -eq 0 -and -not (Test-Path -LiteralPath $exe)) 'With -Pause and nothing to report the window closes by itself'
  # A failure with -Pause is printed, waits for a key and ends with exit code 1 instead of throwing.
  $helperExitCode=1;$helperReason='Simulated helper failure'
  New-Fixture -Elevated $false
- $keyWaits.Count=0;$notes.Clear()
+ $keyWaits.Total=0;$notes.Clear()
  & (Join-Path $app 'Uninstall.ps1') -Pause
- Assert ($LASTEXITCODE -eq 1 -and $keyWaits.Count -eq 1 -and ($notes -join [char]10).Contains('Uninstall did not complete: Worker removal did not complete: Simulated helper failure.') -and (Test-Path -LiteralPath $exe)) 'With -Pause a failure stays on screen until a key is pressed'
+ Assert ($LASTEXITCODE -eq 1 -and $keyWaits.Total -eq 1 -and ($notes -join [char]10).Contains('Uninstall did not complete: Worker removal did not complete: Simulated helper failure.') -and (Test-Path -LiteralPath $exe)) 'With -Pause a failure stays on screen until a key is pressed'
  $helperExitCode=0;$helperReason=''
 
  # Another signed-in account's instance runs its own files and never received this session's quit

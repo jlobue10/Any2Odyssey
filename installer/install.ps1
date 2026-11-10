@@ -54,7 +54,7 @@ if($ControlsOnly){
  # The worker is replaced for the whole PC. An instance in another signed-in session is using it and
  # cannot be asked to quit from here: the quit signal reaches this session only.
  $elsewhere=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -ne $session})
- if($elsewhere.Count){throw "Any2Odyssey is running in another signed-in Windows session (session $((@($elsewhere | ForEach-Object {$_.SessionId} | Sort-Object -Unique)) -join ', ')), where it uses the conversion worker this installation replaces. Quit it there from its tray menu (Quit completely) or sign that account out, then retry. No installed files were changed."}
+ if($elsewhere.Count){throw "Any2Odyssey is running in another signed-in Windows session (session $((@($elsewhere | ForEach-Object {$_.SessionId} | Sort-Object -Unique)) -join ', ')). A full installation replaces the conversion worker that every account's Any2Odyssey uses, and that instance cannot be asked to quit from here. Quit it there from its tray menu (Quit completely) or sign that account out, then retry. No installed files were changed."}
  if($previousOwner -and $previousOwner -ne $currentSid){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
 }
 # Windows reports a known folder that does not exist (a redirected Desktop that was removed, for

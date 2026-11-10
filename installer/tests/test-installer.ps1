@@ -91,22 +91,22 @@ Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).
 # no time and, when asked, release the lock the way a program that finishes quitting would.
 $appExe=Join-Path $app 'Any2Odyssey.exe';$workerExe=Join-Path $engine 'Any2OdysseyWorker.exe'
 $older=[byte[]]([IO.File]::ReadAllBytes($current)+[byte[]](0))
-$wait=[pscustomobject]@{Count=0;Release=$false;Lock=$null}
-function Start-Sleep {param($Milliseconds,$Seconds)$wait.Count++;if($wait.Release -and $wait.Lock){$wait.Lock.Dispose();$wait.Lock=$null}}
+$wait=[pscustomobject]@{Sleeps=0;Release=$false;Lock=$null}
+function Start-Sleep {param($Milliseconds,$Seconds)$wait.Sleeps++;if($wait.Release -and $wait.Lock){$wait.Lock.Dispose();$wait.Lock=$null}}
 [IO.File]::WriteAllBytes($appExe,$older);[IO.File]::WriteAllBytes($workerExe,$older)
 $wait.Lock=[IO.File]::Open($workerExe,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 $lockedMessage=''
 try{Invoke-Any2OdysseyFileTransaction $operations}catch{$lockedMessage=$_.Exception.Message}finally{$wait.Lock.Dispose();$wait.Lock=$null}
-Assert ($wait.Count -eq 4) 'A copy onto a file in use is retried before the installer gives up'
+Assert ($wait.Sleeps -eq 4) 'A copy onto a file in use is retried before the installer gives up'
 Assert ($lockedMessage.Contains('nothing was changed') -and $lockedMessage.Contains('The file is in use') -and -not $lockedMessage.Contains('Rollback needs attention')) 'A file that stays in use fails the update without a false rollback report'
 Assert ((Get-FileHash -LiteralPath $appExe).Hash -eq $oldHash -and (Get-FileHash -LiteralPath $workerExe).Hash -eq $oldHash) 'The file replaced before the locked one is restored; the locked one was never touched'
 Assert ((& $backupNames) -eq $backupsBefore) 'A rollback that skipped an untouched file still removes its backup copies'
-$wait.Count=0;$wait.Release=$true
+$wait.Sleeps=0;$wait.Release=$true
 $wait.Lock=[IO.File]::Open($workerExe,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 try{Invoke-Any2OdysseyFileTransaction $operations}finally{if($wait.Lock){$wait.Lock.Dispose();$wait.Lock=$null}}
-Assert ($wait.Count -eq 1 -and (Get-FileHash -LiteralPath $workerExe).Hash -eq (Get-FileHash -LiteralPath $current).Hash -and (Get-FileHash -LiteralPath $appExe).Hash -eq (Get-FileHash -LiteralPath $current).Hash) 'A file released while the installer waits is replaced on the next attempt'
+Assert ($wait.Sleeps -eq 1 -and (Get-FileHash -LiteralPath $workerExe).Hash -eq (Get-FileHash -LiteralPath $current).Hash -and (Get-FileHash -LiteralPath $appExe).Hash -eq (Get-FileHash -LiteralPath $current).Hash) 'A file released while the installer waits is replaced on the next attempt'
 # A rollback that cannot put a file back is the one case that keeps the backups, and says where.
-$wait.Count=0;$wait.Release=$false
+$wait.Sleeps=0;$wait.Release=$false
 [IO.File]::WriteAllBytes($appExe,$older)
 $attention=''
 try{Invoke-Any2OdysseyFileTransaction $operations -AfterCopy {$wait.Lock=[IO.File]::Open($appExe,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);throw 'Simulated registration failure'}}catch{$attention=$_.Exception.Message}finally{if($wait.Lock){$wait.Lock.Dispose();$wait.Lock=$null}}
