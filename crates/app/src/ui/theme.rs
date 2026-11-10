@@ -44,6 +44,17 @@ pub fn install_fonts(ctx: &egui::Context) {
 }
 
 pub fn apply(ctx: &egui::Context, p: &Palette) {
+    // egui keeps one style per theme and, left on its default preference,
+    // follows the operating system. `set_visuals` and `set_style` below write
+    // only the active one, so an OS light/dark switch while the controls ran
+    // flipped egui to its untouched default style: stock colours and spacing
+    // under the custom-painted cards. The palette is the app's own choice
+    // (the Light / Dark button), so pin egui to it.
+    ctx.set_theme(if p.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
     let mut v = if p.dark {
         Visuals::dark()
     } else {
@@ -96,4 +107,57 @@ pub fn apply(ctx: &egui::Context, p: &Palette) {
     style.spacing.combo_width = 220.0;
     style.spacing.interact_size.y = 26.0;
     ctx.set_style(style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the frame sees after the operating system reports `system`.
+    fn style_after(ctx: &egui::Context, system: egui::Theme) -> std::sync::Arc<egui::Style> {
+        let input = egui::RawInput {
+            system_theme: Some(system),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |_| {});
+        ctx.style()
+    }
+
+    #[test]
+    fn an_os_theme_switch_does_not_replace_the_palette() {
+        for dark in [false, true] {
+            let palette = Palette::for_dark(dark);
+            let ctx = egui::Context::default();
+            // The OS agrees with the palette at launch, then switches.
+            let (same, other) = if dark {
+                (egui::Theme::Dark, egui::Theme::Light)
+            } else {
+                (egui::Theme::Light, egui::Theme::Dark)
+            };
+            style_after(&ctx, same);
+            apply(&ctx, &palette);
+            let applied = style_after(&ctx, same);
+            assert_eq!(
+                applied.visuals.override_text_color,
+                Some(color(palette.text))
+            );
+            for system in [other, same, other] {
+                let style = style_after(&ctx, system);
+                assert_eq!(
+                    style.visuals.override_text_color,
+                    Some(color(palette.text)),
+                    "dark palette {dark}, OS {system:?}"
+                );
+                assert_eq!(style.visuals.selection.bg_fill, color(palette.accent));
+                assert_eq!(style.spacing.button_padding, egui::vec2(13.0, 7.0));
+                assert_eq!(style.spacing.slider_width, 180.0);
+            }
+            // The Light / Dark button still switches.
+            let toggled = Palette::for_dark(!dark);
+            apply(&ctx, &toggled);
+            let style = style_after(&ctx, same);
+            assert_eq!(style.visuals.override_text_color, Some(color(toggled.text)));
+            assert_eq!(style.spacing.button_padding, egui::vec2(13.0, 7.0));
+        }
+    }
 }
