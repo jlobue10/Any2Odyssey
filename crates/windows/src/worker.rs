@@ -392,14 +392,20 @@ fn run_inner(
             }
             if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
                 ready = true;
-                report(&format!(
+                // `ready` in the status file, not the wording of the state,
+                // tells the controls that this start or recovery succeeded.
+                let state = format!(
                     "3D active — click-through overlay; {}",
                     if prefs.keep_overlay_on_top {
                         "stays above apps"
                     } else {
                         "Ctrl+Alt+F8 restores it"
                     }
-                ));
+                );
+                let _ = any2odyssey_core::fsutil::write_json_atomic(
+                    &paths::worker_status_file(),
+                    &WorkerStatus::ready_now(state, current_pid()),
+                );
             }
             if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
                 report("Conversion did not initialize. See conversion log.");
