@@ -9,10 +9,12 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request supersedes its running checks. Pushes to main keep every
-# run, so each merged commit still produces its artifacts.
+# A newer push to a pull request supersedes its running checks. Every other run gets a group of
+# its own, so each commit on main still produces its artifacts: within one group GitHub keeps only
+# the newest pending run even with cancel-in-progress off, which is how a per-branch group cancelled
+# the queued run of one merge when the next merge arrived.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
