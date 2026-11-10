@@ -1,6 +1,8 @@
 # Full-installation uninstall flow in isolated folders and an isolated registry key. Windows only.
 # Start-Process is stubbed to record how the protected helper is launched and to stand in for its
-# removal of the worker and itself; Get-Process is stubbed so no real instance is consulted.
+# removal of the worker and itself; Get-Process is stubbed so no real instance is consulted, and the
+# quit event is routed to a name of this test's own, so an Any2Odyssey running on this PC is never
+# told to quit.
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
@@ -13,6 +15,10 @@ $ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
 # Where the real helper leaves the reason for a failure, for the uninstaller to relay.
 $resultFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.result'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+# The uninstaller signals Local\Any2OdysseyQuit. The fixture routes it to this event, which the
+# test owns, so the signal can be observed and never reaches a real instance.
+$quitEventName='Local\Any2OdysseyTestQuit-'+[Guid]::NewGuid().ToString('N')
+$quitEvent=New-Object Threading.EventWaitHandle -ArgumentList $false,([Threading.EventResetMode]::ManualReset),$quitEventName
 $ownedNames=@('Any2Odyssey.exe','Any2Odyssey.ico','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','USER-GUIDE.html')
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
 function New-Fixture {
@@ -38,12 +44,12 @@ function New-Fixture {
  $desktopRoute=if($NoDesktop){''}else{$desktop}
  $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktopRoute+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
  $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+$programFiles+"'"))
+ $script=$script.Replace('Local\Any2OdysseyQuit',$quitEventName)
  $token=if($Elevated){'$alreadyElevated=$true'}else{'$alreadyElevated=$false'}
  $script=$script.Replace('$alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',$token)
  # With -Pause the uninstaller waits for a key; the fixture counts those waits instead of blocking.
  $script=$script.Replace('[void][Console]::ReadKey($true)','Add-TestKeyWait')
- if($script.Contains('ReadKey')){throw 'Fixture routing incomplete; refusing to run.'}
- if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole')){throw 'Fixture routing incomplete; refusing to run.'}
+ if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole') -or $script.Contains('Any2OdysseyQuit') -or $script.Contains('ReadKey')){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath (Join-Path $app 'Uninstall.ps1') -Value $script -Encoding UTF8
 }
 # The stubs find $launches, $helperExitCode, $helperReason, $worker and $helper through the caller
@@ -85,6 +91,7 @@ try{
  New-Fixture -Elevated $false
  $settingsHash=(Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash
  & (Join-Path $app 'Uninstall.ps1')
+ Assert ($quitEvent.WaitOne(0)) 'The uninstaller signals the quit event (routed here to the test''s own event)'
  Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs' -and $launches[0].Wait) 'Full uninstall requests elevation exactly once and waits for it'
  Assert ($launches[0].FilePath -like '*\WindowsPowerShell\v1.0\powershell.exe') 'Helper runs under the system Windows PowerShell'
  Assert ($launches[0].ArgumentList -like ('*-NonInteractive*-File "'+$helper+'" -ExpectedUserSid "'+$sid+'"*')) 'Helper receives its installed path and the invoking account SID'
@@ -229,6 +236,7 @@ try{
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'Controls-only uninstall removes the controls and registration'
  $passed=$true
 }finally{
+ $quitEvent.Dispose()
  if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
  $testKeys=Split-Path -Parent $registration
  if((Test-Path -LiteralPath $testKeys) -and -not (Get-ChildItem -LiteralPath $testKeys | Select-Object -First 1) -and -not (Get-Item -LiteralPath $testKeys).GetValueNames().Count){Remove-Item -LiteralPath $testKeys}

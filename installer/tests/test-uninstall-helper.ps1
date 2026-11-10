@@ -13,6 +13,9 @@ function Assert($condition,[string]$message){if(-not $condition){throw $message}
 try{
  $source=Get-Content -LiteralPath (Join-Path $installer 'UninstallWorker.ps1') -Raw
  $source=$source.Replace('C:\Program Files\Odyssey 3D Hub\Conversion\Any2OdysseyWorker.exe',$worker)
+ # The functions below delete what this path names. If the literal in UninstallWorker.ps1 ever
+ # changes, the replacement above matches nothing and an elevated run would delete the real worker.
+ if($source.Contains('C:\Program Files') -or -not $source.Contains($worker)){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath $helper -Value $source
  . $helper
  $context=@{ExpectedSid='S-1-5-21-1';ActualSid='S-1-5-21-1';IsAdmin=$true;ScriptPath=$helper;InstalledPath=$helper}

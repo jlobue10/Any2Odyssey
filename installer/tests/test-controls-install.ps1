@@ -1,4 +1,6 @@
 # Controls-only install/repair/uninstall and promotion to a full install, in isolated folders. Windows only.
+# Process discovery and the --quit launch are stubbed and the uninstaller's quit event is routed to a
+# name nothing listens on, so an Any2Odyssey running on this PC is neither consulted nor told to quit.
 $ErrorActionPreference='Stop'
 # install.ps1 refuses Windows builds before 24H2; the fixture is about files, not the OS version.
 $previousSkip=$env:ANY2ODYSSEY_SKIP_OS_CHECK;$env:ANY2ODYSSEY_SKIP_OS_CHECK='1'
@@ -17,9 +19,10 @@ foreach($file in @('install.ps1','Uninstall.ps1')){
  $script=$script.Replace('$env:LOCALAPPDATA',("'"+$local+"'")).Replace('C:\Program Files\Odyssey 3D Hub\Conversion',$engine).Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey',$registration)
  $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktop+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
  $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+(Join-Path $root 'programfiles')+"'"))
+ $script=$script.Replace('Local\Any2OdysseyQuit',('Local\Any2OdysseyTestQuit-'+[Guid]::NewGuid().ToString('N')))
  if($file -eq 'Uninstall.ps1'){$script=$script.Replace('$alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)','$alreadyElevated=$false')}
  if($file -eq 'install.ps1'){$script=$script.Replace('if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')}
- if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole')){throw 'Fixture routing incomplete; refusing to run.'}
+ if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole') -or $script.Contains('Any2OdysseyQuit')){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath (Join-Path $package $file) -Value $script -Encoding UTF8
 }
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
