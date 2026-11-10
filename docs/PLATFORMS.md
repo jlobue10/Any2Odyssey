@@ -6,7 +6,7 @@
 | Tray / menu | Windows notification icon, jump list | No tray icon yet (planned: StatusNotifier where the desktop supports it); Minimize and Close act normally |
 | Ordinary 2D → AI depth | Installed Samsung engine, live on the whole desktop | Still images only: an open model (Depth Anything V2 Small, Apache-2.0) through the system's ONNX Runtime, then left and right views rendered from the depth map; depth strength and pop-out as on Windows. Needs `onnxruntime-cpu` or `onnxruntime-cuda` and `any2odyssey --install-depth-model` |
 | Existing SBS input | Samsung/Leia calibrated output | Stereo viewer: an SBS image as red/cyan anaglyph or SBS, half-width stretch, eye swap, preview, output window with full screen, PNG export |
-| G90XF tracking, calibration and lens output | Samsung/Leia runtime required | Not available |
+| G90XF tracking, calibration and lens output | Samsung/Leia runtime required | Experimental and unverified on the display: a two-view lens interleave of our own (`core::weave`) with a calibration pattern and three numbers the user tunes (pitch, slant, offset), full screen only. No eye tracking, no use of Samsung's calibration files, and no way yet to switch the lens on from Linux |
 | Whole-desktop source | Windows Graphics Capture | Not yet. Planned: a bounded capture of one screen through the portal/X11, shown on a different display; Wayland stays disabled until source/output exclusion is verified |
 | Selected / follow-active window | DWM thumbnails | Not planned |
 | Click-through output | Win32 layered + transparent styles | No: the output is an ordinary window you place and make full screen |

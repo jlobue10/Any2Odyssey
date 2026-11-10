@@ -126,7 +126,7 @@ Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice
 
 ## Linux
 
-The Linux build is a stereo viewer, the first part of the scope of Any2Odd's experimental portable edition: it opens a side-by-side image and shows it as red/cyan anaglyph or side by side, in a preview and in an output window you can place on any display and make full screen, and exports PNG. Samsung's engine, LeiaSR eye tracking and the G90XF's calibrated output do not exist on Linux, so there is no AI depth and no glasses-free output there. Not there yet: the tray icon and the live capture of one screen onto another display.
+The Linux build is a stereo viewer, the first part of the scope of Any2Odd's experimental portable edition: it opens a side-by-side image and shows it as red/cyan anaglyph or side by side, in a preview and in an output window you can place on any display and make full screen, and exports PNG. Samsung's engine, LeiaSR eye tracking and the G90XF's calibrated output do not exist on Linux, so nothing of Samsung's runs there: 2D → 3D uses an open depth model, and the experimental lens-interleaved output uses numbers you calibrate yourself and cannot switch the Odyssey's lens on yet. Not there yet: the tray icon and the live capture of one screen onto another display.
 
 On Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro), build and install the package from a checkout:
 

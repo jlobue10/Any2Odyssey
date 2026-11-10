@@ -3,6 +3,7 @@
 mod about;
 mod controls;
 mod help;
+mod lens;
 mod theme;
 mod viewer;
 mod widgets;
@@ -215,7 +216,7 @@ impl App {
             core,
             page,
             controls,
-            viewer: ViewerState::default(),
+            viewer: ViewerState::with_saved_lens(),
             help: HelpState::default(),
             about: AboutState::new(),
             palette,
