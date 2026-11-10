@@ -45,6 +45,13 @@ function ConvertTo-Any2OdysseyFourPartVersion {
  # A version resource may omit build or revision ([version] reports -1); compare on four parts.
  return [version]::new($Version.Major,$Version.Minor,[Math]::Max(0,$Version.Build),[Math]::Max(0,$Version.Revision))
 }
+function Format-Any2OdysseyVersion {
+ param([version]$Version)
+ # 0.8.6.0 reads as 0.8.6, the form VERSION and the release names use; a real fourth part is kept.
+ $four=ConvertTo-Any2OdysseyFourPartVersion $Version
+ if($four.Revision -eq 0){return $four.ToString(3)}
+ return $four.ToString()
+}
 function Get-Any2OdysseyInstallAction {
  param([version]$PackageVersion,$InstalledVersion,[switch]$AllowDowngrade)
  if($null -eq $InstalledVersion){return 'Install'}

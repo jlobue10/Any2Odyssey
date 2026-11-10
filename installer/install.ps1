@@ -25,7 +25,7 @@ if((ConvertTo-Any2OdysseyFourPartVersion (Get-Any2OdysseyPackageVersion -Binary 
 $installed=Get-Any2OdysseyInstalledVersion -AppPath $app -Registration $registration -DataPath $data
 $installedVersion=if($installed){$installed.Version}else{$null}
 $action=Get-Any2OdysseyInstallAction -PackageVersion $version -InstalledVersion $installedVersion -AllowDowngrade:$AllowDowngrade
-Write-Host ("$action Any2Odyssey " + $(if($installed){$installed.Version.ToString()+' -> '}else{''}) + $versionText)
+Write-Host ("$action Any2Odyssey " + $(if($installed){(Format-Any2OdysseyVersion $installed.Version)+' -> '}else{''}) + $versionText)
 $engineDll=Join-Path $engine 'ConversionWrapper.dll'
 if($ControlsOnly){
  # Keep full-install app and renderer versions synchronized.
