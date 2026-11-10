@@ -1,7 +1,7 @@
 # Shared, independently testable installer operations. No work is done when dot-sourced.
 function Get-Any2OdysseyRecordedVersion {
  param([string]$Path)
- # version.json / install-result.json: a damaged record (truncated JSON, empty file) counts as
+ # version.json: a damaged record (truncated JSON, empty file) counts as
  # absent so the next source decides, instead of blocking every install and uninstall.
  if(-not (Test-Path -LiteralPath $Path -PathType Leaf)){return $null}
  try{$record=Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json;if($record.Version){return [version]$record.Version}}catch{}
@@ -27,11 +27,41 @@ function Get-Any2OdysseyInstalledVersion {
   if($value){try{$registered=[version]$value}catch{}}
   if($registered){return [pscustomobject]@{Version=$registered;Source=$Registration}}
  }
- foreach($path in @((Join-Path $AppPath 'version.json'),(Join-Path $DataPath 'install-result.json'))){
-  $recorded=Get-Any2OdysseyRecordedVersion -Path $path
-  if($recorded){return [pscustomobject]@{Version=$recorded;Source=$path}}
- }
+ # install-result.json in the data folder is not consulted: uninstall keeps it on purpose, so it
+ # describes the last installation, not a present one. Read as installed, it blocked going back to
+ # an older release after an uninstall and recorded a fresh install as a repair or upgrade.
+ $path=Join-Path $AppPath 'version.json'
+ $recorded=Get-Any2OdysseyRecordedVersion -Path $path
+ if($recorded){return [pscustomobject]@{Version=$recorded;Source=$path}}
  return $null
+}
+function Get-Any2OdysseySessionProcess {
+ # Any2Odyssey processes of this Windows session. Get-Process lists every session, but the quit
+ # signal and the per-user files concern only this one: on a shared PC another account's
+ # disconnected session must not block, or be asked to quit by, this account's setup.
+ param([string[]]$Name=@('Any2Odyssey','Any2OdysseyWorker'))
+ $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+ return @(Get-Process $Name -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -eq $session})
+}
+function Get-Any2OdysseyShortcutTarget {
+ param([string]$Path)
+ $item=(New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $Path)).ParseName((Split-Path -Leaf $Path))
+ if(-not $item -or -not $item.IsLink){return $null}
+ return $item.GetLink.Path
+}
+function New-Any2OdysseyShortcut {
+ # Shell.Application's link object takes Unicode strings. WScript.Shell converts paths through the
+ # ANSI code page: with a profile folder outside it (Cyrillic, CJK, some Latin letters) it throws
+ # or saves a shortcut to a different path. The link object edits an existing file, so start empty.
+ param([string]$Path,[string]$Target,[string]$WorkingDirectory,[string]$Icon,[string]$Description)
+ [IO.File]::WriteAllBytes($Path,[byte[]]@())
+ $item=(New-Object -ComObject Shell.Application).Namespace((Split-Path -Parent $Path)).ParseName((Split-Path -Leaf $Path))
+ if(-not $item){throw "Could not open the new shortcut file: $Path"}
+ $link=$item.GetLink
+ $link.Path=$Target;$link.WorkingDirectory=$WorkingDirectory;$link.Description=$Description
+ [void]$link.SetIconLocation($Icon,0)
+ $link.Save()
+ if((Get-Any2OdysseyShortcutTarget -Path $Path) -ne $Target){throw "The shortcut was not saved with its target ($Target)."}
 }
 function Get-Any2OdysseyPackageVersion {
  param([string]$Binary)

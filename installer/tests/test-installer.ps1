@@ -22,8 +22,11 @@ Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Empty instal
 Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.2",' -NoNewline
 Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '' -NoNewline
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Damaged version records are treated as absent'
+# Uninstall keeps install-result.json in the data folder; it must not make a removed copy count as installed.
 Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"0.8.1"}'
-Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq [version]'0.8.1') 'A damaged version.json falls through to the next readable record'
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'The record uninstall leaves in the data folder is not an installation'
+Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.1"}'
+Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq [version]'0.8.1') 'A readable version.json is the record of an installation without its executable'
 Remove-Item -LiteralPath (Join-Path $app 'version.json'),(Join-Path $data 'install-result.json')
 # The registration's DisplayVersion is consulted before the records; an unparsable one must count as absent too.
 New-Item -Path $registration -Force | Out-Null
