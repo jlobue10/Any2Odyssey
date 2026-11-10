@@ -668,7 +668,7 @@ impl eframe::App for App {
                             .id_salt("controls-scroll")
                             .auto_shrink([false, false])
                             .show(&mut body, |ui| {
-                                ui.set_width(ui.available_width() - 4.0);
+                                ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 let tray_available = self.tray_available();
                                 let notices = startup_notices(c.hotkeys_ok, self.tray_failed);

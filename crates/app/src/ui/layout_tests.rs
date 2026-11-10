@@ -558,3 +558,23 @@ fn long_about_values_wrap_inside_the_window() {
         );
     }
 }
+
+/// The viewport asks for at least 700x580, but a tiling window manager or a
+/// frame during a restore can hand over anything. Sizes derived by
+/// subtracting margins went negative there, which egui rejects with a debug
+/// assertion: a panic in debug builds.
+#[test]
+fn no_page_panics_in_a_window_smaller_than_its_margins() {
+    for page in [Page::Controls, Page::Help, Page::About] {
+        for size in [
+            (300.0, 200.0),
+            (120.0, 90.0),
+            (40.0, 40.0),
+            (20.0, 20.0),
+            (1.0, 1.0),
+            (0.0, 0.0),
+        ] {
+            Harness::new(size, page).settle();
+        }
+    }
+}

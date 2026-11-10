@@ -46,7 +46,9 @@ impl HelpState {
             .corner_radius(CornerRadius::same(10))
             .inner_margin(6)
             .show(&mut list_ui, |ui| {
-                ui.set_min_size(egui::vec2(left.width() - 12.0, left.height() - 12.0));
+                ui.set_min_size(
+                    egui::vec2(left.width() - 12.0, left.height() - 12.0).max(egui::Vec2::ZERO),
+                );
                 ScrollArea::vertical()
                     .id_salt("help-topics")
                     .auto_shrink([false, false])
@@ -113,7 +115,9 @@ impl HelpState {
             .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(&mut article_ui, |ui| {
-                ui.set_min_size(egui::vec2(right.width() - 28.0, right.height() - 20.0));
+                ui.set_min_size(
+                    egui::vec2(right.width() - 28.0, right.height() - 20.0).max(egui::Vec2::ZERO),
+                );
                 ScrollArea::vertical()
                     .id_salt("help-article")
                     .auto_shrink([false, false])

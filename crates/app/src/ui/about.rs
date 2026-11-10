@@ -57,7 +57,9 @@ impl AboutState {
             .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(&mut panel, |ui| {
-                ui.set_min_size(egui::vec2(area.width() - 28.0, area.height() - 20.0));
+                ui.set_min_size(
+                    egui::vec2(area.width() - 28.0, area.height() - 20.0).max(egui::Vec2::ZERO),
+                );
                 ScrollArea::vertical()
                     .id_salt("about-article")
                     .auto_shrink([false, false])
