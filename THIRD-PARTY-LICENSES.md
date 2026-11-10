@@ -172,6 +172,10 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `zune-core` | 0.5.3 | MIT OR Apache-2.0 OR Zlib |
 | `zune-jpeg` | 0.5.15 | MIT OR Apache-2.0 OR Zlib |
 
+## Microsoft C runtime
+
+The Windows executable links the startup and runtime-support code of Microsoft's Visual C++ toolchain statically (`-C target-feature=+crt-static`), so it does not need the Visual C++ Redistributable. That code is part of the compiler's runtime libraries, which Microsoft licenses for inclusion in programs built with the toolchain; the Universal C Runtime itself remains a component of Windows and is not included.
+
 ## Samsung / Leia
 
 Samsung's Odyssey 3D Hub, its `ConversionWrapper.dll`, the LeiaSR runtime, AI models and calibration data are **not** included. They are obtained and licensed separately from Samsung and are loaded from their own installation folders at run time.

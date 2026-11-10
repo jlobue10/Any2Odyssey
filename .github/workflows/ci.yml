@@ -35,7 +35,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Build (release)
         run: cargo build --locked --release --workspace
-      - name: Verify worker DPI manifest
+      - name: Verify the built executable (static C runtime, DPI manifest)
         shell: pwsh
         run: ./installer/tests/test-dpi-manifest.ps1
       - name: Test

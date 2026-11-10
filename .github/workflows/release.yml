@@ -33,9 +33,12 @@ jobs:
         run: cargo fmt --all --check
       - name: Build (release)
         run: cargo build --locked --release --workspace
-      - name: Verify worker DPI manifest
+      - name: Verify the built executable (static C runtime, DPI manifest)
         shell: pwsh
-        run: ./installer/tests/test-dpi-manifest.ps1
+        run: |
+          ./installer/tests/test-dpi-manifest.ps1
+          # Remembered so the Package step can refuse an executable that a later step rebuilt.
+          "TESTED_EXE_SHA256=$((Get-FileHash -LiteralPath target/release/Any2Odyssey.exe -Algorithm SHA256).Hash)" >> $env:GITHUB_ENV
       - name: Test
         run: cargo test --locked --workspace
       - name: Clippy
@@ -67,13 +70,20 @@ jobs:
         shell: pwsh
         run: |
           $exported=Join-Path $env:RUNNER_TEMP 'guide.html'
-          cargo run --locked --release -p any2odyssey -- --export-guide $exported
-          if ($LASTEXITCODE -ne 0) { throw "--export-guide exited $LASTEXITCODE" }
+          # Run the executable that was built and tested above. `cargo run -p any2odyssey` resolves
+          # features for one package instead of the workspace and relinks Any2Odyssey.exe, so the
+          # package would carry a binary no check had seen (as 0.8.6 did). It is a GUI-subsystem
+          # program: Start-Process -Wait is what makes PowerShell wait for it and see its exit code.
+          $export=Start-Process -FilePath target/release/Any2Odyssey.exe -ArgumentList '--export-guide',('"'+$exported+'"') -Wait -PassThru
+          if ($export.ExitCode -ne 0) { throw "--export-guide exited $($export.ExitCode)" }
           $normalize={param($path)([IO.File]::ReadAllText($path)).Replace("`r`n","`n")}
           if ((& $normalize $exported) -ne (& $normalize 'USER-GUIDE.html')) { throw 'USER-GUIDE.html differs from the embedded Help; regenerate it with --export-guide' }
       - name: Package
         shell: pwsh
-        run: ./scripts/package.ps1
+        run: |
+          $now=(Get-FileHash -LiteralPath target/release/Any2Odyssey.exe -Algorithm SHA256).Hash
+          if ($now -ne $env:TESTED_EXE_SHA256) { throw "Any2Odyssey.exe changed after it was verified and tested ($env:TESTED_EXE_SHA256 -> $now); a later step rebuilt it." }
+          ./scripts/package.ps1
       - name: Create GitHub release with the ZIP and its SHA-256
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
