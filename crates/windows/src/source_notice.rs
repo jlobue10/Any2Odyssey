@@ -41,6 +41,23 @@ impl SourceNotice {
         }
     }
 
+    /// The worker wrote a status of its own (conversion became ready). While
+    /// there is still no source, that status would hide the notice for good:
+    /// no further change is raised until a source appears and goes again.
+    /// Put the notice back over it; the new status is what returns later.
+    pub fn status_written(&mut self) {
+        if let Some(mut status) = self.reassert(read_own_status()) {
+            status.time = any2odyssey_core::log::now_iso();
+            let _ = write_json_atomic(&paths::worker_status_file(), &status);
+        }
+    }
+
+    /// The notice to write over a newer `current` while the notice is up.
+    fn reassert(&mut self, current: Option<WorkerStatus>) -> Option<WorkerStatus> {
+        self.replaced.as_ref()?;
+        self.raise(current)
+    }
+
     /// The notice to write over `current`, which is remembered. Nothing when
     /// this worker has not written a status yet.
     fn raise(&mut self, current: Option<WorkerStatus>) -> Option<WorkerStatus> {
@@ -96,6 +113,30 @@ mod tests {
         assert_eq!(notice.restore(Some(&status("3D active"))), None);
         // The stale "Starting conversion" is forgotten, not kept for later.
         assert_eq!(notice.restore(Some(&status(NO_SOURCE_STATUS))), None);
+    }
+
+    #[test]
+    fn a_status_written_while_there_is_no_source_gets_the_notice_back() {
+        let mut notice = SourceNotice::default();
+        notice.raise(Some(status("Starting conversion"))).unwrap();
+        // Conversion became ready with still nothing to show.
+        let ready = WorkerStatus::ready_now("3D active", 7);
+        let again = notice.reassert(Some(ready.clone())).unwrap();
+        assert_eq!(again.state, NO_SOURCE_STATUS);
+        // The controls read readiness from the field, not the wording.
+        assert!(again.ready);
+        // When a source arrives, the ready status comes back, not the stale one.
+        assert_eq!(notice.restore(Some(&again)), Some(ready));
+    }
+
+    #[test]
+    fn a_new_status_is_left_alone_when_no_notice_is_up() {
+        let mut notice = SourceNotice::default();
+        assert_eq!(notice.reassert(Some(status("3D active"))), None);
+        // A notice that was restored is no longer up either.
+        let raised = notice.raise(Some(status("Starting conversion"))).unwrap();
+        notice.restore(Some(&raised)).unwrap();
+        assert_eq!(notice.reassert(Some(status("3D active"))), None);
     }
 
     #[test]

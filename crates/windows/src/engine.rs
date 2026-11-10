@@ -270,6 +270,13 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        // The harness also exits 0 when the filter matches nothing, so a
+        // renamed or moved child would pass here with no loader assertion run.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed"),
+            "the child test did not run: {stdout}"
+        );
     }
 
     #[test]
