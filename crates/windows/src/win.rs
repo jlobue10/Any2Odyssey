@@ -2,7 +2,7 @@
 
 use any2odyssey_core::geometry::Rect;
 use windows::core::BOOL;
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmQueryThumbnailSourceSize, DwmRegisterThumbnail,
@@ -214,7 +214,11 @@ pub fn monitors() -> Vec<(Rect, bool, String, HMONITOR)> {
             },
             ..Default::default()
         };
-        if unsafe { GetMonitorInfoW(m, &mut info.monitorInfo as *mut MONITORINFO) }.as_bool() {
+        // The pointer must cover the whole extended struct, which cbSize
+        // tells Windows to fill: one derived from `info.monitorInfo` alone
+        // would not be valid for the device name written after it.
+        let whole = &mut info as *mut MONITORINFOEXW as *mut MONITORINFO;
+        if unsafe { GetMonitorInfoW(m, whole) }.as_bool() {
             let name_len = info
                 .szDevice
                 .iter()
@@ -330,11 +334,6 @@ impl Drop for Thumbnail {
     fn drop(&mut self) {
         let _ = unsafe { DwmUnregisterThumbnail(self.0) };
     }
-}
-
-/// Convenience for APIs that want a mutable UTF-16 buffer.
-pub fn pwstr(buf: &mut [u16]) -> PWSTR {
-    PWSTR(buf.as_mut_ptr())
 }
 
 #[allow(dead_code)]

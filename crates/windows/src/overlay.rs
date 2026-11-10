@@ -13,6 +13,12 @@ use crate::win::{
     self, desired_overlay_ex_style, INPUT_SAFE_EX_STYLES, WS_EX_APPWINDOW_BIT, WS_EX_TOPMOST_BIT,
 };
 
+/// With Keep 3D above apps (the default) every foreground change raises the
+/// output. One log line each would grow `companion.log`, which is never
+/// trimmed, with every Alt+Tab and click on another window; these raises are
+/// summarised at most this often. A requested restore is always logged.
+const RAISE_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
 pub struct OverlayController {
     worker_pid: u32,
     parent_pid: u32,
@@ -21,6 +27,10 @@ pub struct OverlayController {
     output: Option<HWND>,
     previous_focus: HWND,
     last_raise: Option<Instant>,
+    /// When a foreground-change raise was last logged, and how many have
+    /// happened since.
+    raise_logged: Option<Instant>,
+    raises_unlogged: u32,
     verify_taskbar_at: Option<Instant>,
     configured: bool,
     pub log: Box<dyn Fn(&str)>,
@@ -41,6 +51,8 @@ impl OverlayController {
             output: None,
             previous_focus: HWND::default(),
             last_raise: None,
+            raise_logged: None,
+            raises_unlogged: 0,
             verify_taskbar_at: None,
             configured: false,
             log,
@@ -172,11 +184,24 @@ impl OverlayController {
                 }
             });
             self.last_raise = Some(Instant::now());
-            if focus_changed || restore {
+            if restore {
                 (self.log)(&format!(
                     "Restored 3D overlay without activation; foreground HWND {:?}",
                     focus.0
                 ));
+            } else if focus_changed {
+                self.raises_unlogged = self.raises_unlogged.saturating_add(1);
+                if self
+                    .raise_logged
+                    .is_none_or(|t| t.elapsed() >= RAISE_LOG_INTERVAL)
+                {
+                    (self.log)(&format!(
+                        "Raised 3D overlay without activation after a foreground change ({} since the last such line); foreground HWND {:?}",
+                        self.raises_unlogged, focus.0
+                    ));
+                    self.raise_logged = Some(Instant::now());
+                    self.raises_unlogged = 0;
+                }
             }
         }
         Ok(())

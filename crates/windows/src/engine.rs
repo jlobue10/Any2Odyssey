@@ -23,6 +23,23 @@ pub type StopFn = unsafe extern "C" fn();
 /// Set by the engine's "closed" callback; polled by the worker loop.
 pub static ENGINE_CLOSED: AtomicBool = AtomicBool::new(false);
 
+/// Set when [`EngineLibrary::stop`] had to signal the stop event itself: the
+/// worker is stopping on its own (ready timeout, capture or overlay error,
+/// engine closed) rather than because the controls asked. The watchdog reads
+/// it to name the cause; the event alone looks the same in both cases.
+pub static STOP_SELF_INITIATED: AtomicBool = AtomicBool::new(false);
+
+/// What a stop under way was caused by, for the watchdog's log line. A set
+/// stop event alone does not mean the controls asked: the worker signals it
+/// itself before every engine `Stop`.
+pub fn stop_cause(stop_signaled: bool, self_initiated: bool) -> &'static str {
+    match (stop_signaled, self_initiated) {
+        (true, false) => "the stop was requested",
+        (true, true) => "the worker began to stop on its own",
+        (false, _) => "the controls went away",
+    }
+}
+
 pub unsafe extern "C" fn on_engine_closed() {
     ENGINE_CLOSED.store(true, Ordering::Release);
 }
@@ -130,6 +147,10 @@ impl EngineLibrary {
     /// Requiring the event here also covers timer setup failures and WM_QUIT,
     /// which can bypass the worker loop's normal shutdown closure.
     pub fn stop(&self, stop_event: &crate::ipc::Event) {
+        // Before the event, so a watchdog woken by it already sees the flag.
+        if !stop_event.is_signaled() {
+            STOP_SELF_INITIATED.store(true, Ordering::Release);
+        }
         let _ = stop_event.set();
         unsafe { (self.stop)() };
     }
@@ -180,17 +201,33 @@ mod tests {
             stop,
         };
         assert!(!event.is_signaled());
+        assert!(!STOP_SELF_INITIATED.load(Ordering::Acquire));
         library.stop(&event);
         assert!(
             WAS_SIGNALED.with(Cell::get),
             "Stop entered before the watchdog was armed"
         );
+        // Nobody had requested this stop: the watchdog must not say so.
+        assert!(STOP_SELF_INITIATED.load(Ordering::Acquire));
         // A previously requested stop remains set for both the watchdog and
         // the message loop; stopping must not reset or consume the signal.
         WAS_SIGNALED.with(|seen| seen.set(false));
         library.stop(&event);
         assert!(WAS_SIGNALED.with(Cell::get));
         assert!(event.is_signaled());
+    }
+
+    #[test]
+    fn a_self_initiated_stop_is_named_apart_from_a_requested_one() {
+        assert_eq!(stop_cause(true, false), "the stop was requested");
+        assert_eq!(
+            stop_cause(true, true),
+            "the worker began to stop on its own"
+        );
+        // The controls died first: the worker's own stop comes later and
+        // must not change what the watchdog was woken by.
+        assert_eq!(stop_cause(false, false), "the controls went away");
+        assert_eq!(stop_cause(false, true), "the controls went away");
     }
 
     #[test]
