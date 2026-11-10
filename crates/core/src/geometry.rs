@@ -87,15 +87,30 @@ impl Rect {
 }
 
 /// Fit `source` into `target` preserving aspect ratio, centred, in `target`'s
-/// own coordinate space (origin 0,0). An empty source yields an empty rect.
+/// own coordinate space (origin 0,0). An empty source or target yields an
+/// empty rect.
+///
+/// The limiting dimension always equals the target's exactly and the other
+/// is rounded to the nearest pixel (at least one). Integer arithmetic on
+/// purpose: `target / source * source` in floating point lands just below
+/// the target for about one source size in fourteen (1680 x 1050 into
+/// 3840 x 2160 gave 3455 wide), which left a one-pixel strip uncovered.
 pub fn fit(source: Rect, target: Rect) -> Rect {
-    if source.width < 1 || source.height < 1 {
+    if source.is_empty() || target.is_empty() {
         return Rect::EMPTY;
     }
-    let scale = (target.width as f64 / source.width as f64)
-        .min(target.height as f64 / source.height as f64);
-    let w = (source.width as f64 * scale) as i32;
-    let h = (source.height as f64 * scale) as i32;
+    // Products of two positive i32 values and the rounding term fit in i64.
+    let (sw, sh) = (i64::from(source.width), i64::from(source.height));
+    let (tw, th) = (i64::from(target.width), i64::from(target.height));
+    let scaled = |length: i64, numerator: i64, denominator: i64| {
+        ((length * numerator + denominator / 2) / denominator).max(1) as i32
+    };
+    // Width limits when tw/sw <= th/sh; cross-multiplied to stay exact.
+    let (w, h) = if tw * sh <= th * sw {
+        (target.width, scaled(sh, tw, sw))
+    } else {
+        (scaled(sw, th, sh), target.height)
+    };
     Rect::new((target.width - w) / 2, (target.height - h) / 2, w, h)
 }
 
@@ -125,6 +140,90 @@ mod tests {
     fn fit_letterboxes_and_centres() {
         let fitted = fit(Rect::new(0, 0, 1000, 1000), Rect::new(0, 0, 3840, 2160));
         assert_eq!(fitted, Rect::new(840, 0, 2160, 2160));
+    }
+
+    #[test]
+    fn fit_fills_the_limiting_dimension_and_rounds_the_other() {
+        let target = Rect::new(0, 0, 3840, 2160);
+        // 16:10 into 16:9 is exactly 3456 wide; floating point said 3455.
+        assert_eq!(
+            fit(Rect::new(0, 0, 1680, 1050), target),
+            Rect::new(192, 0, 3456, 2160)
+        );
+        // 2158.95 high rounds to 2159, not down to 2158.
+        assert_eq!(
+            fit(Rect::new(0, 0, 1366, 768), target),
+            Rect::new(0, 0, 3840, 2159)
+        );
+        assert_eq!(
+            fit(Rect::new(0, 0, 3440, 1440), target),
+            Rect::new(0, 276, 3840, 1607)
+        );
+        // The target's own position is not part of the result.
+        assert_eq!(
+            fit(
+                Rect::new(5, 5, 1680, 1050),
+                Rect::new(-3840, 100, 3840, 2160)
+            ),
+            Rect::new(192, 0, 3456, 2160)
+        );
+        // Downscaling, and a source so thin that its width rounds to nothing.
+        assert_eq!(
+            fit(Rect::new(0, 0, 7680, 4320), target),
+            Rect::new(0, 0, 3840, 2160)
+        );
+        assert_eq!(
+            fit(Rect::new(0, 0, 1, 100_000), target),
+            Rect::new(1919, 0, 1, 2160)
+        );
+        assert_eq!(
+            fit(Rect::new(0, 0, i32::MAX, 1), target),
+            Rect::new(0, 1079, 3840, 1)
+        );
+        assert_eq!(
+            fit(
+                Rect::new(0, 0, 1, 1),
+                Rect::new(0, 0, i32::MAX, i32::MAX - 1)
+            ),
+            Rect::new(0, 0, i32::MAX - 1, i32::MAX - 1)
+        );
+        for empty in [
+            Rect::EMPTY,
+            Rect::new(0, 0, -50, 100),
+            Rect::new(0, 0, 9, 0),
+        ] {
+            assert_eq!(fit(Rect::new(0, 0, 100, 100), empty), Rect::EMPTY);
+            assert_eq!(fit(empty, target), Rect::EMPTY);
+        }
+    }
+
+    #[test]
+    fn fit_is_exact_for_every_sampled_source_size() {
+        let target = Rect::new(0, 0, 3840, 2160);
+        for w in (1..=4200).step_by(7) {
+            for h in (1..=2400).step_by(5) {
+                let f = fit(Rect::new(0, 0, w, h), target);
+                assert!(
+                    (f.width == 3840 || f.height == 2160) && f.width <= 3840 && f.height <= 2160,
+                    "{w}x{h} -> {f:?} does not reach the target"
+                );
+                assert_eq!(
+                    (f.x, f.y),
+                    ((3840 - f.width) / 2, (2160 - f.height) / 2),
+                    "{w}x{h} -> {f:?} is not centred"
+                );
+                // The free dimension is the nearest pixel to the exact ratio.
+                let (w, h) = (i64::from(w), i64::from(h));
+                let exact = if f.width == 3840 && f.height != 2160 {
+                    (2 * (i64::from(f.height) * w - h * 3840)).abs() <= w
+                } else if f.height == 2160 && f.width != 3840 {
+                    (2 * (i64::from(f.width) * h - w * 2160)).abs() <= h
+                } else {
+                    true
+                };
+                assert!(exact || f.width == 1 || f.height == 1, "{w}x{h} -> {f:?}");
+            }
+        }
     }
 
     #[test]
