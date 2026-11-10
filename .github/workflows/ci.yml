@@ -125,7 +125,8 @@ jobs:
           test -f /usr/share/icons/hicolor/256x256/apps/any2odyssey.png
           any2odyssey --help
           # Exit 1, not a hang or a crash, when no instance is running.
-          any2odyssey --quit; test $? -eq 1
+          code=0; any2odyssey --quit || code=$?
+          test "$code" -eq 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: any2odyssey-arch-x86_64
