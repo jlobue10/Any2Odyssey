@@ -10,6 +10,9 @@ mod platform;
 #[cfg(windows)]
 mod tray;
 mod ui;
+// Used by the Windows start path; compiled for tests everywhere.
+#[cfg(any(windows, test))]
+mod worker_version;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,7 +23,7 @@ use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
     format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls\n  Any2Odyssey --quit               ask the running instance to quit\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
         any2odyssey_core::VERSION
     )
 }
@@ -156,6 +159,33 @@ fn signal_running_instance(event: &str, logger: &Logger) -> i32 {
     }
 }
 
+/// A usage error: say what was expected and exit 2. The instance commands
+/// (`--toggle`, `--show`, `--quit`) and `--worker` are not terminal modes, so
+/// a release build has no console yet when one of them is misspelled or given
+/// a stray argument; attach before printing, or the text goes nowhere.
+/// Attaching twice is harmless: the second call fails and changes nothing.
+fn usage_error() -> i32 {
+    attach_parent_console();
+    eprintln!("{}", usage());
+    2
+}
+
+/// The command line as text. Every argument this program takes is an option
+/// word, a number, an event name, JSON or a path it prints back, so one that
+/// is not Unicode is a usage error rather than something to pass on lossily.
+/// `Err` carries the 1-based position of the first such argument.
+fn unicode_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>, usize> {
+    args.enumerate()
+        .map(|(index, arg)| arg.into_string().map_err(|_| index + 1))
+        .collect()
+}
+
+/// An output path may not look like an option: `--export-guide --dark` once
+/// wrote a file named `--dark`.
+fn option_like(path: &str) -> bool {
+    path.starts_with("--")
+}
+
 /// Modes that talk to a terminal rather than to the running instance.
 fn is_terminal_mode(args: &[String]) -> bool {
     !matches!(
@@ -168,7 +198,7 @@ fn is_terminal_mode(args: &[String]) -> bool {
 /// path may not look like an option, and unknown words are an error rather
 /// than silently ignored.
 fn screenshot_request(path: &str, rest: &[String]) -> Option<core::ScreenshotRequest> {
-    if path.starts_with("--") || !rest.iter().all(|a| a == "--dark" || a == "--help-page") {
+    if option_like(path) || !rest.iter().all(|a| a == "--dark" || a == "--help-page") {
         return None;
     }
     Some(core::ScreenshotRequest {
@@ -179,7 +209,15 @@ fn screenshot_request(path: &str, rest: &[String]) -> Option<core::ScreenshotReq
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args` panics on an argument that is not Unicode.
+    let args = match unicode_args(std::env::args_os().skip(1)) {
+        Ok(args) => args,
+        Err(position) => {
+            attach_parent_console();
+            eprintln!("Argument {position} is not valid Unicode.\n");
+            std::process::exit(usage_error());
+        }
+    };
     if is_terminal_mode(&args) {
         attach_parent_console();
     }
@@ -211,24 +249,19 @@ fn main() {
         // the probes ran against nothing and reported success.
         [flag, pid] if flag == "--inspect" => match pid.parse() {
             Ok(pid) => platform::inspect(pid),
-            Err(_) => {
-                eprintln!("{}", usage());
-                2
-            }
+            Err(_) => usage_error(),
         },
         [flag, parent, worker] if flag == "--layout-probe" => {
             match (parent.parse(), worker.parse()) {
                 (Ok(parent), Ok(worker)) => platform::layout_probe(parent, worker),
-                _ => {
-                    eprintln!("{}", usage());
-                    2
-                }
+                _ => usage_error(),
             }
         }
         [flag] if flag == "--test-capture-exclusion" => platform::test_capture_exclusion(),
         [flag] if flag == "--test-offscreen" => platform::test_offscreen(),
         [flag] if flag == "--self-test" => self_test(&logger),
         [flag] if flag == "--check-updates" => check_updates_cli(&logger),
+        [flag, path] if flag == "--export-guide" && option_like(path) => usage_error(),
         [flag, path] if flag == "--export-guide" => match guide::export(std::path::Path::new(path))
         {
             Ok(()) => 0,
@@ -253,20 +286,14 @@ fn main() {
         }
         [flag, path, rest @ ..] if flag == "--screenshot" => match screenshot_request(path, rest) {
             Some(request) => run_gui(false, logger, Some(request)),
-            None => {
-                eprintln!("{}", usage());
-                2
-            }
+            None => usage_error(),
         },
         [] => run_gui(false, logger, None),
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{}", usage());
             0
         }
-        _ => {
-            eprintln!("{}", usage());
-            2
-        }
+        _ => usage_error(),
     };
     std::process::exit(code);
 }
@@ -350,6 +377,49 @@ mod argument_tests {
         assert!(!screenshot_request("out.png", &[]).unwrap().dark);
         assert!(screenshot_request("--dark", &[]).is_none());
         assert!(screenshot_request("out.png", &args(&["--light"])).is_none());
+    }
+
+    #[test]
+    fn output_paths_may_not_look_like_options() {
+        assert!(option_like("--dark"));
+        assert!(option_like("--guide.html"));
+        assert!(!option_like("guide.html"));
+        assert!(!option_like("-guide.html"), "a single dash is a file name");
+        assert!(!option_like("./--dark"));
+    }
+
+    #[test]
+    fn arguments_that_are_not_unicode_are_reported_by_position() {
+        use std::ffi::OsString;
+        let good = vec![OsString::from("--export-guide"), OsString::from("g.html")];
+        assert_eq!(
+            unicode_args(good.into_iter()),
+            Ok(args(&["--export-guide", "g.html"]))
+        );
+        #[cfg(unix)]
+        let broken = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![0xff, b'.', b'h', b't', b'm', b'l'])
+        };
+        #[cfg(windows)]
+        let broken = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0xD800, u16::from(b'.'), u16::from(b'h')])
+        };
+        #[cfg(any(unix, windows))]
+        assert_eq!(
+            unicode_args(vec![OsString::from("--export-guide"), broken].into_iter()),
+            Err(2)
+        );
+    }
+
+    #[test]
+    fn usage_names_every_instance_command_and_help() {
+        let text = usage();
+        for word in ["--toggle", "--show", "--quit", "--help", "--export-guide"] {
+            assert!(text.contains(word), "{word}");
+        }
+        assert!(text.contains("or open them when no instance is running"));
     }
 
     #[test]

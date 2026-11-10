@@ -30,6 +30,7 @@ use crate::ipc::{Event, InstanceGuard};
 use crate::mirror::{self, Mirror, TIMER_OVERLAY, TIMER_POLL, TIMER_UPDATE, WM_FRAME_ARRIVED};
 use crate::overlay::OverlayController;
 use crate::processes::{current_pid, ParentWatch};
+use crate::source_notice::SourceNotice;
 use crate::win;
 
 /// How long the controls wait for a signalled worker before killing it
@@ -37,6 +38,12 @@ use crate::win;
 /// grace: past it the controls would have killed us if they were still there,
 /// so a worker alive after it was either orphaned or is stuck.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(7);
+
+/// WM_QUIT ended the loop without any of its own stop paths having run.
+const UNREQUESTED_QUIT_LOG: &str =
+    "The message loop ended without a stop request; stopping the engine.";
+const UNREQUESTED_QUIT_STATUS: &str =
+    "Conversion stopped: the message loop ended without a stop request.";
 
 /// The engine invoked its `closed` callback without being asked: the case
 /// recovery exists for, so it exits with the renderer error code rather than
@@ -85,11 +92,10 @@ fn spawn_watchdog(
             // The wait reports the lowest signalled index, so controls that
             // asked for a stop and then quit would read as "went away". Ask
             // the event itself: a requested stop is the more specific cause.
-            let reason = if stop.is_signaled() {
-                "the stop was requested"
-            } else {
-                "the controls went away"
-            };
+            let reason = engine::stop_cause(
+                stop.is_signaled(),
+                engine::STOP_SELF_INITIATED.load(Ordering::Acquire),
+            );
             std::thread::sleep(WATCHDOG_GRACE);
             if finished.load(Ordering::Acquire) {
                 return;
@@ -352,6 +358,8 @@ fn run_inner(
 
     let mut overlay_deadline = DispatchDeadline::new(Instant::now(), Duration::from_millis(100));
     let mut poll_deadline = DispatchDeadline::new(Instant::now(), Mirror::poll_interval());
+    // Window modes only: the status line while there is no source to show.
+    let mut source_notice = SourceNotice::default();
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
         if closing.get() {
@@ -390,16 +398,32 @@ fn run_inner(
                 shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
-            if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
+            if !ready
+                && overlay.attached()
+                && readiness.poll_or_report(|e| {
+                    log(&format!(
+                        "Cannot read Samsung's conversion log: {e}. Readiness cannot be detected until it can be read."
+                    ))
+                })
+            {
                 ready = true;
-                report(&format!(
+                // `ready` in the status file, not the wording of the state,
+                // tells the controls that this start or recovery succeeded.
+                let state = format!(
                     "3D active — click-through overlay; {}",
                     if prefs.keep_overlay_on_top {
                         "stays above apps"
                     } else {
                         "Ctrl+Alt+F8 restores it"
                     }
-                ));
+                );
+                let _ = any2odyssey_core::fsutil::write_json_atomic(
+                    &paths::worker_status_file(),
+                    &WorkerStatus::ready_now(state, current_pid()),
+                );
+                // A window mode that started without a source has its notice
+                // up; "3D active" over a surface showing nothing would hide it.
+                source_notice.status_written();
             }
             if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
                 report("Conversion did not initialize. See conversion log.");
@@ -439,6 +463,8 @@ fn run_inner(
                     log(&format!("Desktop capture failed: {e}"));
                     report(&format!("Desktop capture error: {e}"));
                     shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
+                } else if let Some(shown) = surface.take_source_change() {
+                    source_notice.source_changed(shown);
                 }
             }
             continue;
@@ -456,8 +482,21 @@ fn run_inner(
             DispatchMessageW(&msg);
         }
     }
-    if started {
-        library.stop(&stop_event);
+    if !closing.get() {
+        // WM_QUIT reached the loop although nothing here asked for it: the
+        // capture surface was destroyed from outside, or code running on this
+        // thread posted a quit. Not a clean stop, and the status file still
+        // says whatever the last poll wrote; name it before the engine's Stop,
+        // which the watchdog may have to cut short.
+        log(UNREQUESTED_QUIT_LOG);
+        report(UNREQUESTED_QUIT_STATUS);
+        if started {
+            library.stop(&stop_event);
+        }
+        return Err(Exit {
+            code: exit_code::RENDERER_ERROR,
+            message: None,
+        });
     }
     if let Some(code) = failure.get() {
         // The reason is already in worker-status.json and the log; a message

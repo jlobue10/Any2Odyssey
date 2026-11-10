@@ -220,10 +220,6 @@ impl GpuDesktopCapture {
         })
     }
 
-    pub fn device(&self) -> &ID3D11Device {
-        &self.device
-    }
-
     /// Present the newest frame into `window`'s swap chain. `Ok(false)` when
     /// no new frame was available.
     pub fn present(&mut self, window: HWND) -> Result<bool, String> {
@@ -244,6 +240,14 @@ impl GpuDesktopCapture {
         // normal recovery path recreates it with the new display settings.
         if self.color_checked.elapsed() >= Duration::from_secs(1) {
             self.color_checked = Instant::now();
+            // A removed or reset device delivers no more frames, and every
+            // other call that could report it (the frame's texture, Present,
+            // Map) runs only once a frame has arrived. Ask the device itself,
+            // or the last image would stay on screen with nothing failing.
+            // SAFETY: a plain query on the device this capture owns.
+            unsafe { self.device.GetDeviceRemovedReason() }.map_err(|e| {
+                format!("Direct3D device was removed or reset ({e}). Restart conversion.")
+            })?;
             self.color
                 .observe(display_color::capture_color(&self.device_name))
                 .map_err(str::to_owned)?;
@@ -257,6 +261,22 @@ impl GpuDesktopCapture {
         let texture = WgcFrameSource::texture(&frame).map_err(|e| e.to_string())?;
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
+        // The copies below assume a frame the size of the display as DXGI
+        // reported it when the capture was built. The pool takes its size
+        // from the capture item, read a moment later, so a mode change in
+        // between leaves the two apart for good; Direct3D drops a copy
+        // between different sizes without an error (black output), and a
+        // source box outside the frame is undefined.
+        let (width, height) = (
+            self.output_bounds.width as u32,
+            self.output_bounds.height as u32,
+        );
+        if desc.Width != width || desc.Height != height {
+            return Err(format!(
+                "Captured frames are {} x {} but the display is {width} x {height}. Restart conversion.",
+                desc.Width, desc.Height
+            ));
+        }
         let full = self.capture == self.output_bounds;
         let current: ID3D11Texture2D = if desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT {
             self.ensure_hdr_converter()

@@ -12,6 +12,18 @@ pub fn current_pid() -> u32 {
     unsafe { GetCurrentProcessId() }
 }
 
+/// `name` without one trailing `.exe`, whatever its letter case (`.Exe` is
+/// as valid a spelling as `.exe` and `.EXE`). Only one is removed: a second
+/// extension is part of the name.
+fn strip_exe(name: &str) -> &str {
+    match name.len().checked_sub(4) {
+        Some(at) if name.is_char_boundary(at) && name[at..].eq_ignore_ascii_case(".exe") => {
+            &name[..at]
+        }
+        _ => name,
+    }
+}
+
 /// Names (without `.exe`, case-insensitive) of all running processes.
 pub fn running_process_names() -> Vec<String> {
     let mut names = Vec::new();
@@ -30,11 +42,7 @@ pub fn running_process_names() -> Vec<String> {
                 .position(|&c| c == 0)
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
-            names.push(
-                name.trim_end_matches(".exe")
-                    .trim_end_matches(".EXE")
-                    .to_owned(),
-            );
+            names.push(strip_exe(&name).to_owned());
             if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
                 break;
             }
@@ -100,6 +108,33 @@ impl Drop for ParentWatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_exe_extension_is_stripped_in_any_letter_case() {
+        for spelled in [
+            "Odyssey3DPlayer.exe",
+            "Odyssey3DPlayer.EXE",
+            "Odyssey3DPlayer.Exe",
+            "Odyssey3DPlayer.eXe",
+        ] {
+            assert_eq!(strip_exe(spelled), "Odyssey3DPlayer", "{spelled}");
+        }
+        // Only one, and only at the end.
+        assert_eq!(strip_exe("setup.exe.exe"), "setup.exe");
+        assert_eq!(strip_exe("my.exe.tool"), "my.exe.tool");
+        // Names without the extension, shorter than it, or not ASCII there.
+        for unchanged in [
+            "System",
+            "[System Process]",
+            "exe",
+            "",
+            "Registry",
+            "\u{e9}abc",
+        ] {
+            assert_eq!(strip_exe(unchanged), unchanged, "{unchanged}");
+        }
+        assert_eq!(strip_exe("caf\u{e9}.exe"), "caf\u{e9}");
+    }
 
     #[test]
     fn watch_follows_a_real_process_and_rejects_pid_zero() {

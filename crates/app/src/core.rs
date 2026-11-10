@@ -17,6 +17,10 @@ use crate::platform::{self, ControlEvents, Worker};
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long the answer to a user action stays on the status line while a
+/// running worker keeps reporting the same state. See `show_worker_state`.
+const ACTION_STATUS_HOLD: Duration = Duration::from_secs(6);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenshotRequest {
     pub path: std::path::PathBuf,
@@ -109,6 +113,11 @@ pub struct Core {
     /// already in flight. Cleared by the next user-initiated start, stop or
     /// apply, which write their own status.
     status_sticky: bool,
+    /// The state the running worker last reported, as last shown.
+    worker_state: Option<String>,
+    /// A status line something other than the worker wrote while the worker
+    /// was running, and when the poller first saw it.
+    held_status: Option<(String, Instant)>,
     settings_load_error: Option<String>,
     pub supervisor: Supervisor,
     pub worker: Option<Worker>,
@@ -200,6 +209,8 @@ impl Core {
                 .map(settings_recovery_message)
                 .unwrap_or_else(|| "Ready".into()),
             status_sticky: false,
+            worker_state: None,
+            held_status: None,
             settings_load_error,
             worker: None,
             operation: None,
@@ -288,6 +299,14 @@ impl Core {
     }
 
     pub fn start_conversion(&mut self) {
+        // A deferred quit is waiting for the worker to stop. A start asked
+        // for now (the button, Ctrl+Alt+F10, --toggle, a tray command) could
+        // not launch anything, but it did mark conversion as wanted again,
+        // which flipped the button and tray labels and suppressed the "3D is
+        // off" report while the process was on its way out.
+        if self.exiting {
+            return;
+        }
         self.status_sticky = false;
         if !self.save_preferences() {
             return;
@@ -352,6 +371,9 @@ impl Core {
     }
 
     pub fn restart(&mut self) {
+        if self.exiting {
+            return;
+        }
         self.status_sticky = false;
         if !self.save_preferences() {
             return;
@@ -376,7 +398,7 @@ impl Core {
         let preferences = self.prefs.clone();
         let source = self.selected_window.unwrap_or(0);
         if self.prefs.mode == CaptureMode::Window && source == 0 {
-            self.status = "Choose a source window first.".into();
+            self.status = "Choose a source window and click Apply first.".into();
             self.supervisor.start_failed();
             return;
         }
@@ -434,6 +456,8 @@ impl Core {
                 Ok(worker) => {
                     self.log(&format!("Started renderer PID {}", worker.pid()));
                     self.worker = Some(worker);
+                    self.worker_state = None;
+                    self.held_status = None;
                     if generation != self.generation || !self.wanted() || self.exiting {
                         self.stop_worker();
                     }
@@ -471,6 +495,37 @@ impl Core {
     fn report_off(&mut self) {
         if !self.status_sticky {
             self.status = "3D is off. Your normal desktop is restored.".into();
+        }
+    }
+
+    /// Put the running worker's reported state on the status line.
+    ///
+    /// The poller reads that state four times a second and used to copy it
+    /// every time, so anything else written to the line while 3D was active
+    /// (a checkbox whose save failed, for one) was replaced within a tick
+    /// and never read. A new state from the worker still shows at once. An
+    /// unchanged one waits [`ACTION_STATUS_HOLD`] after another message
+    /// appears, then takes the line back.
+    fn show_worker_state(&mut self, state: String, now: Instant) {
+        if self.worker_state.as_deref() != Some(state.as_str()) {
+            self.worker_state = Some(state.clone());
+            self.status = state;
+            self.held_status = None;
+            return;
+        }
+        if self.status == state {
+            self.held_status = None;
+            return;
+        }
+        match &self.held_status {
+            Some((text, since)) if *text == self.status => {
+                if now.duration_since(*since) >= ACTION_STATUS_HOLD {
+                    self.status = state;
+                    self.held_status = None;
+                }
+            }
+            // A message the poller has not seen before: its hold starts now.
+            _ => self.held_status = Some((self.status.clone(), now)),
         }
     }
 
@@ -687,20 +742,28 @@ impl Core {
                 ));
             }
             (true, None) => {
-                if let Some(worker) = &self.worker {
-                    if let Some(status) = read_status(worker.pid()) {
-                        self.status = status;
+                let pid = self.worker.as_ref().map(Worker::pid);
+                if let Some(status) = pid.and_then(read_worker_status) {
+                    if status.ready {
+                        // This start, or this recovery attempt, succeeded.
+                        self.supervisor.worker_ready(now);
                     }
+                    self.show_worker_state(status.state, now);
                 }
             }
         }
     }
 }
 
-fn read_status(worker_pid: u32) -> Option<String> {
+/// The status file, when it was written by the worker with this pid.
+fn read_worker_status(worker_pid: u32) -> Option<WorkerStatus> {
     let text = std::fs::read_to_string(paths::worker_status_file()).ok()?;
     let status: WorkerStatus = serde_json::from_str(&text).ok()?;
-    (status.pid == worker_pid).then_some(status.state)
+    (status.pid == worker_pid).then_some(status)
+}
+
+fn read_status(worker_pid: u32) -> Option<String> {
+    read_worker_status(worker_pid).map(|status| status.state)
 }
 
 /// Open a page from an update result in the browser. Only GitHub's own hosts
@@ -1131,6 +1194,8 @@ mod tests {
             ui: UiSettings::default(),
             status: "Ready".into(),
             status_sticky: false,
+            worker_state: None,
+            held_status: None,
             settings_load_error: None,
             supervisor: Supervisor::new(true),
             worker: None,
@@ -1267,6 +1332,47 @@ mod tests {
     }
 
     #[test]
+    fn an_unchanged_worker_state_does_not_erase_an_action_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        let t0 = Instant::now();
+        let tick = |n: u32| t0 + POLL_INTERVAL * n;
+        let active = || "3D active".to_owned();
+        core.status = "Starting 3D".into();
+        core.show_worker_state(active(), tick(0));
+        assert_eq!(
+            core.status, "3D active",
+            "news from the worker shows at once"
+        );
+        core.show_worker_state(active(), tick(1));
+        assert!(core.held_status.is_none());
+
+        // A checkbox save fails while 3D is active.
+        let failed = "Could not save preferences: disk full";
+        core.status = failed.into();
+        let hold_ticks = (ACTION_STATUS_HOLD.as_millis() / POLL_INTERVAL.as_millis()) as u32;
+        for n in 2..2 + hold_ticks {
+            core.show_worker_state(active(), tick(n));
+            assert_eq!(core.status, failed, "erased after {n} ticks");
+        }
+        core.show_worker_state(active(), tick(2 + hold_ticks));
+        assert_eq!(core.status, "3D active", "the worker's state returns");
+
+        // A second message during a hold gets a full hold of its own.
+        core.status = failed.into();
+        core.show_worker_state(active(), tick(100));
+        core.status = "Preferences saved.".into();
+        core.show_worker_state(active(), tick(100 + hold_ticks - 1));
+        core.show_worker_state(active(), tick(100 + hold_ticks));
+        assert_eq!(core.status, "Preferences saved.");
+
+        // A changed worker state is never held back.
+        core.show_worker_state("Desktop capture error: lost".into(), tick(101 + hold_ticks));
+        assert_eq!(core.status, "Desktop capture error: lost");
+        assert!(core.held_status.is_none());
+    }
+
+    #[test]
     fn current_start_failure_clears_intent_and_reports_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut core = isolated(dir.path());
@@ -1336,6 +1442,27 @@ mod tests {
         assert!(core.requests.contains(&UiRequest::ToggleTheme));
         core.poll(Instant::now());
         assert!(core.requests.contains(&UiRequest::Quit));
+    }
+
+    #[test]
+    fn nothing_starts_or_is_wanted_again_during_a_deferred_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.supervisor.start_requested();
+        // A stop is still in flight when the requests arrive.
+        let (_tx, rx) = mpsc::channel();
+        core.operation = Some(rx);
+        core.quit();
+        assert!(!core.wanted());
+        let status = core.status.clone();
+        core.toggle(); // the button, the hotkey, --toggle
+        core.start_conversion();
+        core.restart();
+        core.menu(MenuCommand::AlwaysConvertDesktop);
+        core.menu(MenuCommand::Restart);
+        assert!(!core.wanted(), "a start was accepted while quitting");
+        assert_eq!(core.status, status);
+        assert!(core.exiting);
     }
 
     #[test]

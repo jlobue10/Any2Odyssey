@@ -51,15 +51,30 @@ impl InstallRecord {
 
     /// The installation time as `YYYY-MM-DD HH:MM` when the installer's
     /// round-trip timestamp is recognized, otherwise the text as written.
+    ///
+    /// Recognized means the text starts with `YYYY-MM-DDTHH:MM` in digits and
+    /// continues, if at all, with seconds, a fraction or a zone. The time is
+    /// shown as recorded, in the installing machine's local time; the zone
+    /// is not converted.
     pub fn installed_display(&self) -> Option<String> {
         let text = self.installed.as_deref()?.trim();
         if text.is_empty() {
             return None;
         }
-        if text.is_ascii() && text.len() >= 16 && text.as_bytes()[10] == b'T' {
-            let mut short = text[..16].to_owned();
-            short.replace_range(10..11, " ");
-            return Some(short);
+        const SHAPE: &[u8] = b"9999-99-99T99:99";
+        let bytes = text.as_bytes();
+        let recognized = bytes.len() >= SHAPE.len()
+            && bytes.iter().zip(SHAPE).all(|(&b, &shape)| match shape {
+                b'9' => b.is_ascii_digit(),
+                literal => b == literal,
+            })
+            && matches!(
+                bytes.get(SHAPE.len()),
+                None | Some(b':' | b'.' | b'Z' | b'+' | b'-')
+            );
+        if recognized {
+            // The matched prefix is ASCII, so both slices end on a boundary.
+            return Some(format!("{} {}", &text[..10], &text[11..SHAPE.len()]));
         }
         Some(text.to_owned())
     }
@@ -226,6 +241,47 @@ mod tests {
         };
         assert_eq!(record.installed_display(), None);
         assert_eq!(InstallRecord::default().installed_display(), None);
+    }
+
+    #[test]
+    fn only_a_real_timestamp_is_shortened() {
+        let shown = |text: &str| {
+            InstallRecord {
+                installed: Some(text.into()),
+                ..Default::default()
+            }
+            .installed_display()
+            .unwrap()
+        };
+        for recognized in [
+            "2026-11-08T14:10:33.1234567-05:00",
+            "2026-11-08T14:10:33Z",
+            "2026-11-08T14:10:33",
+            "2026-11-08T14:10Z",
+            "2026-11-08T14:10+01:00",
+            "2026-11-08T14:10",
+            "  2026-11-08T14:10:33.5+05:30 ",
+        ] {
+            assert_eq!(shown(recognized), "2026-11-08 14:10", "{recognized}");
+        }
+        // Anything else is shown as written, never cut or re-spaced: text
+        // that merely has a T in the eleventh place, other separators, a
+        // short or over-long time, and non-ASCII digits (which must not be
+        // sliced mid-character either).
+        for other in [
+            "aaaaaaaaaaTbbbbbbbbbb",
+            "2026-11-08 14:10:33",
+            "2026/11/08T14:10:33",
+            "2026-11-08T14:1",
+            "2026-11-08T14:100",
+            "2026-11-08T14:10 or so",
+            "08-11-2026T14:10:33",
+            "２０２６-11-08T14:10:33",
+            "2026-11-08T14:1０:33",
+            "/Date(1794147033000)/",
+        ] {
+            assert_eq!(shown(other), other, "{other}");
+        }
     }
 
     #[test]

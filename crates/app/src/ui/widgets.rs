@@ -174,12 +174,30 @@ pub fn gold_button_sized(
     fixed: Option<Vec2>,
     font: FontId,
 ) -> Response {
+    gold_button_named(ui, text, text, primary, p, fixed, font)
+}
+
+/// [`gold_button_sized`] with a separate accessible name, for the buttons
+/// whose face is a glyph ("×", "▾"): assistive output and egui's widget
+/// information get `name`, not the glyph. The button is hand-painted, so
+/// without this it is an anonymous rectangle to anything but the eye.
+pub fn gold_button_named(
+    ui: &mut Ui,
+    text: &str,
+    name: &str,
+    primary: bool,
+    p: &Palette,
+    fixed: Option<Vec2>,
+    font: FontId,
+) -> Response {
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER);
     let padding = vec2(13.0, 7.0);
     let size = fixed.unwrap_or(galley.size() + padding * 2.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
         let pressed = response.is_pointer_button_down_on();

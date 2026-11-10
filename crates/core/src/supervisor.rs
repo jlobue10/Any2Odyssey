@@ -9,8 +9,15 @@ use std::time::{Duration, Instant};
 
 use crate::status::exit_code;
 
+/// Recovery attempts in a row before the supervisor gives up. The count
+/// starts again once a relaunched worker has stayed ready for
+/// [`RECOVERY_RESET_AFTER`], or when the user starts conversion.
 pub const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 pub const RECOVERY_DELAY: Duration = Duration::from_secs(8);
+/// How long a worker must stay ready before earlier failures stop counting.
+/// Not zero: a renderer that becomes ready and dies seconds later, every
+/// time, would otherwise be relaunched forever instead of three times.
+pub const RECOVERY_RESET_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -26,8 +33,16 @@ pub struct Supervisor {
     pub wanted: bool,
     /// Automatic recovery preference.
     pub recover: bool,
+    /// Recovery attempts since the last manual start or the last worker that
+    /// stayed ready for [`RECOVERY_RESET_AFTER`].
     failures: u32,
     retry_after: Option<Instant>,
+    /// A recovery is under way: its retry is queued, or its relaunch has not
+    /// reported ready yet. This, not `failures`, is what the recovery
+    /// checkbox cancels; `failures` outlives a recovery that succeeded.
+    recovering: bool,
+    /// When the running worker was first seen ready.
+    ready_since: Option<Instant>,
 }
 
 impl Default for Supervisor {
@@ -37,6 +52,8 @@ impl Default for Supervisor {
             recover: true,
             failures: 0,
             retry_after: None,
+            recovering: false,
+            ready_since: None,
         }
     }
 }
@@ -54,25 +71,54 @@ impl Supervisor {
     pub fn retry_pending(&self) -> bool {
         self.wanted && self.retry_after.is_some()
     }
+    /// A recovery attempt is queued or its relaunch has not become ready yet.
+    pub fn recovering(&self) -> bool {
+        self.recovering
+    }
 
     /// User pressed "Turn on 3D" (or auto-convert at launch). Resets retries.
     pub fn start_requested(&mut self) -> Action {
         self.wanted = true;
         self.failures = 0;
-        self.retry_after = None;
+        self.end_attempt();
         Action::StartWorker
     }
 
     /// User pressed "Turn off 3D" or quit. The caller stops the process.
     pub fn stop_requested(&mut self) {
         self.wanted = false;
-        self.retry_after = None;
+        self.end_attempt();
     }
 
     /// A start attempt could not even launch (prerequisite failure, bad source).
     pub fn start_failed(&mut self) {
         self.wanted = false;
+        self.end_attempt();
+    }
+
+    /// Nothing is queued, relaunching or ready any more.
+    fn end_attempt(&mut self) {
         self.retry_after = None;
+        self.recovering = false;
+        self.ready_since = None;
+    }
+
+    /// The running worker reports that its output is live. Call on every poll
+    /// that sees it ready, with the poll's time.
+    ///
+    /// A recovery that got this far is complete, so the recovery checkbox no
+    /// longer has anything to cancel. Once the worker has stayed ready for
+    /// [`RECOVERY_RESET_AFTER`], the failures before it stop counting: three
+    /// attempts are a limit on failures in a row, not on a whole session in
+    /// which every relaunch worked (a display colour-mode change deliberately
+    /// restarts the renderer through recovery).
+    pub fn worker_ready(&mut self, now: Instant) {
+        self.recovering = false;
+        self.retry_after = None;
+        let since = *self.ready_since.get_or_insert(now);
+        if now.saturating_duration_since(since) >= RECOVERY_RESET_AFTER {
+            self.failures = 0;
+        }
     }
 
     /// The worker process exited on its own. Returns the status line to show.
@@ -90,14 +136,16 @@ impl Supervisor {
                 reason.trim_end_matches('.')
             );
         }
+        self.ready_since = None;
         if classify(exit_code) == ExitKind::NotRetryable {
             self.wanted = false;
-            self.retry_after = None;
+            self.end_attempt();
             return format!("{what}. {}", advice(exit_code));
         }
         if self.wanted && self.recover && self.failures < MAX_RECOVERY_ATTEMPTS {
             self.failures += 1;
             self.retry_after = Some(now + RECOVERY_DELAY);
+            self.recovering = true;
             format!(
                 "{what}. Recovery attempt {} in {} seconds.",
                 self.failures,
@@ -105,13 +153,16 @@ impl Supervisor {
             )
         } else {
             self.wanted = false;
-            self.retry_after = None;
+            self.end_attempt();
             format!("{what}. Check the USB connection and logs, then turn 3D on again.")
         }
     }
 
     /// Periodic poll while no worker is running.
     pub fn tick_without_worker(&mut self, now: Instant) -> Action {
+        // No worker, so none is ready: a worker the caller stopped and is
+        // about to relaunch (Apply) must earn its own stable interval.
+        self.ready_since = None;
         match self.retry_after {
             Some(at) if self.wanted && now >= at => {
                 self.retry_after = None;
@@ -123,16 +174,18 @@ impl Supervisor {
     }
 
     /// The recovery checkbox changed. Never stops a running worker and never
-    /// starts one. Disabling recovery while no worker is running after a
-    /// failure cancels the recovery attempt, whether its retry is still queued
-    /// or its relaunch is already in flight (the caller then stops that worker
-    /// when it reports in). Returns a status line when something user-visible
-    /// changed.
+    /// starts one. Disabling recovery while a recovery attempt is under way
+    /// and no worker is running cancels that attempt, whether its retry is
+    /// still queued or its relaunch is already in flight (the caller then
+    /// stops that worker when it reports in). A recovery that already reached
+    /// ready is over: a restart the user asked for afterwards (Apply, the
+    /// tray's mode commands) is not a recovery and is left alone. Returns a
+    /// status line when something user-visible changed.
     pub fn recover_changed(&mut self, enabled: bool, worker_running: bool) -> Option<String> {
         self.recover = enabled;
-        if !enabled && self.wanted && !worker_running && self.failures > 0 {
+        if !enabled && self.wanted && !worker_running && self.recovering {
             self.wanted = false;
-            self.retry_after = None;
+            self.end_attempt();
             return Some(
                 "Automatic recovery cancelled. Turn on 3D to restart manually.".to_owned(),
             );
@@ -277,10 +330,147 @@ mod tests {
         assert!(s.wanted, "the running worker keeps its wanted state");
         // Even with an earlier failure count, a running worker is not touched.
         s.recover = true;
-        s.worker_exited(1, None, t0());
-        s.tick_without_worker(t0() + RECOVERY_DELAY); // restarted
+        let now = t0();
+        s.worker_exited(1, None, now);
+        assert_eq!(
+            s.tick_without_worker(now + RECOVERY_DELAY),
+            Action::StartWorker,
+            "the relaunch is what makes a worker run again"
+        );
+        assert!(s.recovering(), "relaunched, not ready yet");
         assert_eq!(s.recover_changed(false, true), None);
         assert!(s.wanted);
+    }
+
+    #[test]
+    fn isolated_exits_that_each_recover_never_exhaust_the_attempts() {
+        // A colour-mode change restarts the renderer through recovery; over a
+        // long session that must not add up to "three strikes".
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let mut now = t0();
+        for _ in 0..10 {
+            let msg = s.worker_exited(1, None, now);
+            assert!(msg.contains("Recovery attempt 1 in 8 seconds"), "{msg}");
+            now += RECOVERY_DELAY;
+            assert_eq!(s.tick_without_worker(now), Action::StartWorker);
+            s.worker_ready(now);
+            assert!(!s.recovering());
+            assert_eq!(s.failures(), 1, "not forgiven before it proved stable");
+            now += RECOVERY_RESET_AFTER;
+            s.worker_ready(now);
+            assert_eq!(s.failures(), 0);
+        }
+        assert!(s.wanted);
+    }
+
+    #[test]
+    fn a_renderer_that_gets_ready_and_dies_again_is_still_limited() {
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let mut now = t0();
+        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
+            let msg = s.worker_exited(1, None, now);
+            assert!(
+                msg.contains(&format!("Recovery attempt {attempt} in")),
+                "{msg}"
+            );
+            now += RECOVERY_DELAY;
+            assert_eq!(s.tick_without_worker(now), Action::StartWorker);
+            // Ready, polled a few times, gone again within the stable interval.
+            for _ in 0..4 {
+                s.worker_ready(now);
+                now += Duration::from_secs(5);
+            }
+        }
+        let msg = s.worker_exited(1, None, now);
+        assert!(msg.contains("Check the USB connection"), "{msg}");
+        assert!(!s.wanted && !s.recovering());
+    }
+
+    #[test]
+    fn a_stable_interval_is_per_worker_not_per_session() {
+        // Ready for 50 s, stopped and relaunched by the caller (Apply), ready
+        // again for 50 s: neither worker proved stable, so nothing is forgiven.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let mut now = t0();
+        s.worker_exited(1, None, now);
+        now += RECOVERY_DELAY;
+        assert_eq!(s.tick_without_worker(now), Action::StartWorker);
+        s.worker_ready(now);
+        now += Duration::from_secs(50);
+        s.worker_ready(now);
+        assert_eq!(s.tick_without_worker(now), Action::StartWorker);
+        s.worker_ready(now);
+        now += Duration::from_secs(50);
+        s.worker_ready(now);
+        assert_eq!(s.failures(), 1);
+    }
+
+    #[test]
+    fn unticking_recovery_during_a_user_restart_after_a_finished_recovery_keeps_3d_on() {
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let now = t0();
+        s.worker_exited(1, None, now);
+        assert_eq!(
+            s.tick_without_worker(now + RECOVERY_DELAY),
+            Action::StartWorker
+        );
+        // The relaunch became ready: that recovery is over, though its
+        // failure still counts until the worker has proved stable.
+        s.worker_ready(now + RECOVERY_DELAY);
+        assert_eq!(s.failures(), 1);
+        // Apply: the caller stops the worker and relaunches it, so for a few
+        // seconds none is running. Unticking the checkbox then cancels nothing.
+        assert_eq!(s.recover_changed(false, false), None);
+        assert!(s.wanted && !s.recover);
+        assert_eq!(
+            s.tick_without_worker(now + RECOVERY_DELAY),
+            Action::StartWorker,
+            "the user's restart goes ahead"
+        );
+    }
+
+    #[test]
+    fn a_ready_worker_leaves_no_retry_queued() {
+        // Apply during the countdown starts a worker at once; the deadline it
+        // overtook must not delay a later restart.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let now = t0();
+        s.worker_exited(1, None, now);
+        assert!(s.retry_pending());
+        s.worker_ready(now + Duration::from_secs(1));
+        assert!(!s.retry_pending());
+        assert_eq!(
+            s.tick_without_worker(now + Duration::from_secs(2)),
+            Action::StartWorker
+        );
+    }
+
+    #[test]
+    fn manual_start_stop_and_unretryable_exits_end_a_recovery() {
+        let recovering = || {
+            let mut s = Supervisor::new(true);
+            s.start_requested();
+            s.worker_exited(1, None, t0());
+            assert!(s.recovering());
+            s
+        };
+        let mut s = recovering();
+        s.start_requested();
+        assert!(!s.recovering());
+        let mut s = recovering();
+        s.stop_requested();
+        assert!(!s.recovering());
+        let mut s = recovering();
+        s.start_failed();
+        assert!(!s.recovering());
+        let mut s = recovering();
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, t0());
+        assert!(!s.recovering());
     }
 
     #[test]

@@ -30,6 +30,12 @@ impl AboutState {
         }
     }
 
+    /// The page for facts a test supplies, instead of this process's own.
+    #[cfg(test)]
+    pub fn with_info(info: AboutInfo) -> AboutState {
+        AboutState { info }
+    }
+
     /// Returns true when the user pressed "Controls".
     pub fn show(&mut self, ui: &mut Ui, p: &Palette, core: &mut Core) -> bool {
         let mut back = false;
@@ -51,7 +57,9 @@ impl AboutState {
             .corner_radius(CornerRadius::same(10))
             .inner_margin(egui::Margin::symmetric(14, 10))
             .show(&mut panel, |ui| {
-                ui.set_min_size(egui::vec2(area.width() - 28.0, area.height() - 20.0));
+                ui.set_min_size(
+                    egui::vec2(area.width() - 28.0, area.height() - 20.0).max(egui::Vec2::ZERO),
+                );
                 ScrollArea::vertical()
                     .id_salt("about-article")
                     .auto_shrink([false, false])
@@ -151,10 +159,18 @@ fn body(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(14.0));
 }
 
+/// Room kept for the label column when sizing the value column.
+const ROW_LABEL_WIDTH: f32 = 150.0;
+
 fn rows(ui: &mut Ui, p: &Palette, id: &str, rows: &[(String, String)]) {
+    // A grid wraps its cells only when it has a finite column width; without
+    // one a long folder (a deep profile path, a portable copy) ran out of
+    // the window and widened everything laid out below it.
+    let value_width = (ui.available_width() - ROW_LABEL_WIDTH - 18.0).max(120.0);
     egui::Grid::new(id)
         .num_columns(2)
         .spacing([18.0, 6.0])
+        .max_col_width(value_width)
         .show(ui, |ui| {
             for (label, value) in rows {
                 ui.label(RichText::new(label).color(color(p.muted)).size(14.0));
