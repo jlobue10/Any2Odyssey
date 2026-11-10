@@ -51,7 +51,13 @@ try{
  Assert ((Test-Path -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')) -and (Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $engineHash) 'Controls-only uninstall leaves all Samsung-directory files untouched'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Uninstall preserves user preferences'
  Remove-Item -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')
+ # The uninstall keeps install-result.json. It must not make this a Repair, nor, when it names a
+ # newer release than the package, a blocked downgrade.
+ $kept=Join-Path $data 'install-result.json'
+ Assert (Test-Path -LiteralPath $kept) 'Uninstall keeps the install-result.json record'
+ Set-Content -LiteralPath $kept -Value '{"Version":"99.0.0","ControlsOnly":true}'
  & $installer -ControlsOnly
+ Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).Action -eq 'Install') 'Installing after an uninstall is a fresh Install, whatever the kept record says'
  $failed=$false;try{& $installer -CheckOnly}catch{$failed=$_.Exception.Message.Contains('engine changed')};Assert $failed 'Full setup still rejects an incompatible engine'
  function Get-FileHash {param([string]$LiteralPath,$Algorithm)if($LiteralPath -eq (Join-Path $engine 'ConversionWrapper.dll')){return [pscustomobject]@{Hash='0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'}};Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256}
  & $installer

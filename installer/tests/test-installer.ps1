@@ -16,19 +16,25 @@ Assert ((Format-Any2OdysseyVersion ([version]'0.8.6.0')) -eq '0.8.6' -and (Forma
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') $null) -eq 'Install') 'Fresh installation recognized'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.1') ([version]'0.8.0.0')) -eq 'Upgrade') 'Older installation is upgraded in place'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.8.0.0')) -eq 'Repair') 'Same version is a repair'
-$blocked=$false;try{Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0')}catch{$blocked=$true};Assert $blocked 'Downgrade blocked by default'
+$blocked=$false;try{Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0')}catch{$blocked=$_.Exception.Message.Contains('0.9.0 is newer than this package (0.8.0)') -and $_.Exception.Message.Contains('.\Install.cmd -AllowDowngrade')};Assert $blocked 'Downgrade blocked by default, with the command that allows it'
 Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') ([version]'0.9.0') -AllowDowngrade) -eq 'Downgrade') 'Explicit downgrade is supported'
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Empty installation has no version'
 # A truncated record must count as absent rather than throw from ConvertFrom-Json.
 Set-Content -LiteralPath (Join-Path $app 'version.json') -Value '{"Version":"0.8.2",' -NoNewline
 Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '' -NoNewline
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'Damaged version records are treated as absent'
-Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"0.8.1"}'
-Assert ((Get-Any2OdysseyInstalledVersion $app '' $data).Version -eq [version]'0.8.1') 'A damaged version.json falls through to the next readable record'
-Remove-Item -LiteralPath (Join-Path $app 'version.json'),(Join-Path $data 'install-result.json')
+# Uninstall.ps1 keeps install-result.json. Without an executable or a registration it is history,
+# not an installation: a reinstall is an Install and an older release is not a blocked downgrade.
+Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"99.0.0"}'
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app '' $data)) 'A record left by an uninstall is not an installed version'
+Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'A record is not an installed version while the registration key is absent'
+Assert ((Get-Any2OdysseyInstallAction ([version]'0.8.0') (Get-Any2OdysseyInstalledVersion $app $registration $data)) -eq 'Install') 'An older release installs after a newer one was uninstalled'
 # The registration's DisplayVersion is consulted before the records; an unparsable one must count as absent too.
 New-Item -Path $registration -Force | Out-Null
 New-ItemProperty -LiteralPath $registration -Name DisplayVersion -Value 'not a version' -PropertyType String -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $data 'install-result.json') -Value '{"Version":"0.8.1"}'
+Assert ((Get-Any2OdysseyInstalledVersion $app $registration $data).Version -eq [version]'0.8.1') 'While registered, a damaged version.json falls through to the next readable record'
+Remove-Item -LiteralPath (Join-Path $app 'version.json'),(Join-Path $data 'install-result.json')
 Assert ($null -eq (Get-Any2OdysseyInstalledVersion $app $registration $data)) 'An unparsable registry DisplayVersion is treated as absent'
 Set-ItemProperty -LiteralPath $registration -Name DisplayVersion -Value '0.8.1'
 Assert ((Get-Any2OdysseyInstalledVersion $app $registration $data).Version -eq [version]'0.8.1') 'A valid registry DisplayVersion is read when no executable is installed'

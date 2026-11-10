@@ -20,13 +20,15 @@ function Get-Any2OdysseyInstalledVersion {
   if($recorded){return [pscustomobject]@{Version=$recorded;Source=$record}}
   throw "Cannot read the installed executable version at $path. Repair or inspect that installation before continuing."
  }
- if($Registration -and (Test-Path -LiteralPath $Registration)){
-  # A DisplayVersion edited by hand or by a registry cleaner counts as absent, like a damaged record.
-  $value=(Get-ItemProperty -LiteralPath $Registration -Name DisplayVersion -ErrorAction SilentlyContinue).DisplayVersion
-  $registered=$null
-  if($value){try{$registered=[version]$value}catch{}}
-  if($registered){return [pscustomobject]@{Version=$registered;Source=$Registration}}
- }
+ # Without the executable, only the Installed-apps registration means something is still installed.
+ # The records alone do not: Uninstall.ps1 keeps install-result.json on purpose, and counting it made
+ # a reinstall a "Repair" and blocked going back to an older release after uninstalling a newer one.
+ if(-not $Registration -or -not (Test-Path -LiteralPath $Registration)){return $null}
+ # A DisplayVersion edited by hand or by a registry cleaner counts as absent, like a damaged record.
+ $value=(Get-ItemProperty -LiteralPath $Registration -Name DisplayVersion -ErrorAction SilentlyContinue).DisplayVersion
+ $registered=$null
+ if($value){try{$registered=[version]$value}catch{}}
+ if($registered){return [pscustomobject]@{Version=$registered;Source=$Registration}}
  foreach($path in @((Join-Path $AppPath 'version.json'),(Join-Path $DataPath 'install-result.json'))){
   $recorded=Get-Any2OdysseyRecordedVersion -Path $path
   if($recorded){return [pscustomobject]@{Version=$recorded;Source=$path}}
@@ -59,7 +61,7 @@ function Get-Any2OdysseyInstallAction {
  $installed=ConvertTo-Any2OdysseyFourPartVersion $InstalledVersion
  if($package -gt $installed){return 'Upgrade'}
  if($package -eq $installed){return 'Repair'}
- if(-not $AllowDowngrade){throw "Installed version $installed is newer than package $package. Downgrade blocked. Use -AllowDowngrade only if you intend to install this older version."}
+ if(-not $AllowDowngrade){throw "Installed version $(Format-Any2OdysseyVersion $installed) is newer than this package ($(Format-Any2OdysseyVersion $package)). Downgrade blocked; nothing was changed. To install this older version on purpose, open a terminal in the extracted folder and run .\Install.cmd -AllowDowngrade (or .\Install-GUI.cmd -AllowDowngrade for the controls only)."}
  return 'Downgrade'
 }
 function Invoke-Any2OdysseyFileTransaction {

@@ -82,7 +82,7 @@ On a PC without Odyssey Hub or the Samsung display, double-click **Install-GUI.c
 
 ### Upgrading and migrating from Any2Odd
 
-Extract the new ZIP into a new folder and run `Install.cmd`; the installer reports install, upgrade or same-version repair and preserves preferences and logs. It refuses to replace a newer version unless you pass `-AllowDowngrade`.
+Extract the new ZIP into a new folder and run `Install.cmd`; the installer reports install, upgrade or same-version repair and preserves preferences and logs. It refuses to replace a newer installed version. To go back to an older release on purpose, open a terminal in that release's extracted folder and run `.\Install.cmd -AllowDowngrade` (`.\Install-GUI.cmd -AllowDowngrade` for a controls-only installation); or uninstall first, after which any release installs as a fresh installation.
 
 Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LOCALAPPDATA%\Any2Odyssey`), worker name, registry key and IPC names. Whenever its own `%LOCALAPPDATA%\Any2Odyssey\settings.json` is absent, including on first launch, it imports Any2Odd's conversion preferences if that file exists and can be read (an unreadable Any2Odd file is noted in `companion.log` and skipped, and the controls start with defaults); deleting `%LOCALAPPDATA%\Any2Odyssey` for a complete reset therefore re-imports them rather than giving defaults, so also delete or rename Any2Odd's `%LOCALAPPDATA%\Odyssey3DCompanion\settings.json` for true defaults. Both can stay installed, but run only one at a time because both drive the same Samsung engine.
 

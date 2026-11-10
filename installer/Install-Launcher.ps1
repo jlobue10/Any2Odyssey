@@ -1,8 +1,10 @@
 [CmdletBinding()]
-param([switch]$ControlsOnly,[switch]$RunInstall,[string]$ResultFile,[string]$ExpectedUserSid)
+param([switch]$ControlsOnly,[switch]$AllowDowngrade,[switch]$RunInstall,[string]$ResultFile,[string]$ExpectedUserSid)
 $ErrorActionPreference='Stop'
 $installer=Join-Path $PSScriptRoot 'install.ps1'
 $options=@{ControlsOnly=[bool]$ControlsOnly}
+# Passed on only when asked for: to the preflight, to a direct installation and to the elevated one.
+if($AllowDowngrade){$options.AllowDowngrade=$true}
 $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 
 if($RunInstall){
@@ -26,7 +28,7 @@ try{
   & $installer @options
  }else{
   $report=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-setup-'+[Guid]::NewGuid().ToString('N')+'.json')
-  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -RunInstall -ResultFile "'+$report+'" -ExpectedUserSid "'+$identity.User.Value+'"'
+  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -RunInstall -ResultFile "'+$report+'" -ExpectedUserSid "'+$identity.User.Value+'"'+$(if($AllowDowngrade){' -AllowDowngrade'}else{''})
   try{$process=Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru}
   catch [InvalidOperationException]{
    # A declined UAC prompt surfaces as InvalidOperationException wrapping Win32Exception 1223
