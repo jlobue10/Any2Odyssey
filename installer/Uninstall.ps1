@@ -1,8 +1,10 @@
 param([switch]$Pause)
 $ErrorActionPreference='Stop'
 # Installed apps launches this script in a console that closes with it, so with -Pause (the
-# registered UninstallString) a failure stays on screen until a key is pressed. Callers that
-# capture the error (the README command, the tests) omit the switch and get the throw as before.
+# registered UninstallString) a failure, or a notice about something left in place, stays on
+# screen until a key is pressed. Callers that capture the error (the README command, the tests)
+# omit the switch and get the throw as before.
+$notices=0
 try{
 $app=Join-Path $env:LOCALAPPDATA 'Programs\Any2Odyssey'
 $controlsOnly=$false
@@ -11,7 +13,7 @@ if(Test-Path -LiteralPath $versionFile){
  try{$record=Get-Content -LiteralPath $versionFile -Raw | ConvertFrom-Json;$controlsOnly=$record.ControlsOnly -eq $true}
  catch{
   # A truncated or damaged record must not block the uninstall; the files decide instead.
-  $controlsOnly=$false
+  $controlsOnly=$false;$notices++
   Write-Host 'The installation record (version.json) is unreadable; whether the conversion worker or its helper exists decides what is removed.'
  }
 }
@@ -55,7 +57,7 @@ $ownerSid=''
 if($helperPresent -and (Test-Path -LiteralPath $ownerFile -PathType Leaf)){$ownerSid=([string](Get-Content -LiteralPath $ownerFile -Raw)).Trim()}
 $helperIsForeign=$helperPresent -and $ownerSid -ne '' -and $ownerSid -ne $identity.User.Value
 $needsHelper=(-not $controlsOnly) -and ((Test-Path -LiteralPath $worker) -or $helperPresent) -and -not $helperIsForeign
-if($helperPresent -and ($controlsOnly -or $helperIsForeign)){Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
+if($helperPresent -and ($controlsOnly -or $helperIsForeign)){$notices++;Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
 if($needsHelper){
  if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
@@ -103,6 +105,10 @@ if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}
 # The program folder held only the files above; it stays if anything else was placed in it.
 if((Test-Path -LiteralPath $app -PathType Container) -and -not (Get-ChildItem -LiteralPath $app -Force | Select-Object -First 1)){Remove-Item -LiteralPath $app -ErrorAction SilentlyContinue}
 Write-Host 'Any2Odyssey removed. Samsung software, your settings and logs were retained. No reboot is needed.'
+if($Pause -and $notices){
+ Write-Host 'Read the notice above, then press any key to close this window.'
+ try{[void][Console]::ReadKey($true)}catch{}
+}
 }catch{
  if($Pause){
   Write-Host ('Uninstall did not complete: '+$_.Exception.Message) -ForegroundColor Red
