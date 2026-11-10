@@ -5,11 +5,13 @@
 use std::sync::{Arc, Mutex};
 
 use any2odyssey_core::log::Logger;
+use any2odyssey_core::prefs::CaptureMode;
 use any2odyssey_core::supervisor::Supervisor;
 use any2odyssey_core::theme::Palette;
 use egui::{pos2, vec2, Rect};
 
 use super::*;
+use crate::core::WindowChoice;
 
 /// The default window and the smallest one the viewport allows.
 const SIZES: [(f32, f32); 2] = [(980.0, 780.0), (700.0, 580.0)];
@@ -102,6 +104,19 @@ impl Harness {
             painted = self.run(Vec::new());
         }
         painted
+    }
+
+    fn click(&mut self, at: egui::Pos2) -> Vec<Painted> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        self.run(vec![egui::Event::PointerMoved(at)]);
+        self.run(vec![button(true)]);
+        self.run(vec![button(false)]);
+        self.settle()
     }
 }
 
@@ -214,6 +229,101 @@ fn every_page_stays_inside_the_window_at_both_sizes() {
             if page != Page::About {
                 assert_inside_window(&painted, size.0, &format!("{name} {}x{}", size.0, size.1));
             }
+        }
+    }
+}
+
+const LONG_TITLES: [&str; 3] = [
+    "crates/app/src/ui/controls.rs - any2odyssey - Visual Studio Code",
+    "How to use 3D on the Odyssey 3D gaming monitor | Samsung UK - Support - Displays and more words in this tab title - Mozilla Firefox",
+    "A third window whose title is also much longer than the box that has to show it - Some Application",
+];
+
+/// Selected-window mode with `titles` listed and the first one chosen.
+fn with_windows(size: (f32, f32), titles: &[&str]) -> Harness {
+    let h = Harness::new(size, Page::Controls);
+    {
+        let mut core = h.core();
+        core.prefs.mode = CaptureMode::Window;
+        core.windows = titles
+            .iter()
+            .enumerate()
+            .map(|(i, title)| WindowChoice {
+                handle: i as isize + 1,
+                title: (*title).to_owned(),
+            })
+            .collect();
+        core.selected_window = Some(1);
+    }
+    h
+}
+
+#[test]
+fn a_long_source_title_is_elided_and_refresh_keeps_its_place() {
+    for size in SIZES {
+        let reference = with_windows(size, &["Notepad"]).settle();
+        for title in LONG_TITLES {
+            let mut h = with_windows(size, &[title]);
+            let painted = h.settle();
+            let context = format!("{}x{} with {} characters", size.0, size.1, title.len());
+            assert_inside_window(&painted, size.0, &context);
+            let shown = find(&painted, &title[..20]);
+            let refresh = find(&painted, "Refresh");
+            assert!(
+                shown.rect.right() < refresh.rect.left(),
+                "{context}: the title runs under Refresh"
+            );
+            assert_eq!(
+                refresh.rect.left(),
+                find(&reference, "Refresh").rect.left(),
+                "{context}: the title moved Refresh"
+            );
+            // 0.8.6: with a 64-character title Refresh sat under "Apply
+            // settings / restart conversion", and a click on it applied.
+            if let Some(apply) = try_find(&painted, "Apply settings") {
+                assert!(
+                    !refresh.rect.expand(8.0).intersects(apply.rect.expand(8.0)),
+                    "{context}: Refresh overlaps Apply"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn clicking_refresh_refreshes_and_does_not_apply() {
+    for size in SIZES {
+        for title in LONG_TITLES {
+            let mut h = with_windows(size, &[title]);
+            let painted = h.settle();
+            let refresh = find(&painted, "Refresh").rect.center();
+            h.click(refresh);
+            let core = h.core();
+            assert_ne!(core.status, "Preferences saved.", "the click reached Apply");
+            assert_eq!(core.status, "Ready");
+            // Handle 1 is no real window, so a refresh clears the choice.
+            assert_eq!(core.selected_window, None, "the list was not refreshed");
+        }
+    }
+}
+
+#[test]
+fn the_source_list_is_bounded_and_inside_the_window() {
+    for size in SIZES {
+        let mut h = with_windows(size, &LONG_TITLES);
+        let painted = h.settle();
+        let shown = find(&painted, &LONG_TITLES[0][..20]).rect;
+        let painted = h.click(shown.center());
+        assert_inside_window(&painted, size.0, &format!("list at {}x{}", size.0, size.1));
+        // The other two titles appear only in the open list.
+        for title in &LONG_TITLES[1..] {
+            let item = find(&painted, &title[..20]);
+            assert!(item.rect.top() > shown.bottom(), "{title}: not in the list");
+            assert!(
+                item.rect.width() <= 360.0_f32.max(shown.width() + 60.0),
+                "{title}: {} wide",
+                item.rect.width()
+            );
         }
     }
 }

@@ -10,6 +10,11 @@ use super::theme::color;
 use super::widgets::{banner, gold_button, row, section};
 use crate::core::{Core, MenuCommand, UiRequest};
 
+/// Width kept for the Refresh button beside the source box.
+const REFRESH_WIDTH: f32 = 90.0;
+/// The source list may be wider than its box, up to this.
+const SOURCE_POPUP_WIDTH: f32 = 360.0;
+
 pub struct ControlsState {
     pub depth_pos: i32,
     pub pop_pos: i32,
@@ -114,14 +119,51 @@ impl ControlsState {
                 row(ui, "Source window", |ui| {
                     let enabled = core.prefs.mode != CaptureMode::Desktop;
                     ui.add_enabled_ui(enabled, |ui| {
-                        let selected_title = core.selected_window.and_then(|h| core.windows.iter().find(|w| w.handle == h)).map(|w| w.title.clone()).unwrap_or_else(|| "Choose a window".into());
-                        let refresh_width = 90.0;
-                        egui::ComboBox::from_id_salt("source-window").width((ui.available_width() - refresh_width).max(80.0)).selected_text(selected_title).show_ui(ui, |ui| {
-                            let windows = core.windows.clone();
-                            for w in windows {
-                                ui.selectable_value(&mut core.selected_window, Some(w.handle), &w.title);
-                            }
-                        });
+                        let selected = core
+                            .selected_window
+                            .and_then(|h| core.windows.iter().find(|w| w.handle == h))
+                            .map(|w| w.title.clone());
+                        // The box gets a fixed share of the row and elides a
+                        // long title. Left to itself it grows with the text
+                        // (a row never wraps), which slid Refresh under the
+                        // Apply button of the neighbouring card.
+                        let combo_width = (ui.available_width() - REFRESH_WIDTH).max(80.0);
+                        let popup_width = combo_width.max(SOURCE_POPUP_WIDTH);
+                        let combo = ui
+                            .allocate_ui_with_layout(
+                                egui::vec2(combo_width, 26.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_max_width(combo_width);
+                                    egui::ComboBox::from_id_salt("source-window")
+                                        .width(combo_width)
+                                        .truncate()
+                                        .selected_text(
+                                            selected.as_deref().unwrap_or("Choose a window"),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            // The list is bounded too; the
+                                            // full title is in the hover text.
+                                            ui.set_max_width(popup_width);
+                                            ui.style_mut().wrap_mode =
+                                                Some(egui::TextWrapMode::Truncate);
+                                            let windows = core.windows.clone();
+                                            for w in windows {
+                                                ui.selectable_value(
+                                                    &mut core.selected_window,
+                                                    Some(w.handle),
+                                                    &w.title,
+                                                )
+                                                .on_hover_text(&w.title);
+                                            }
+                                        })
+                                        .response
+                                },
+                            )
+                            .inner;
+                        if let Some(title) = selected {
+                            combo.on_hover_text(title);
+                        }
                         if gold_button(ui, "Refresh", false, p).clicked() {
                             core.refresh_windows();
                         }
