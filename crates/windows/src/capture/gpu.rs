@@ -244,6 +244,14 @@ impl GpuDesktopCapture {
         // normal recovery path recreates it with the new display settings.
         if self.color_checked.elapsed() >= Duration::from_secs(1) {
             self.color_checked = Instant::now();
+            // A removed or reset device delivers no more frames, and every
+            // other call that could report it (the frame's texture, Present,
+            // Map) runs only once a frame has arrived. Ask the device itself,
+            // or the last image would stay on screen with nothing failing.
+            // SAFETY: a plain query on the device this capture owns.
+            unsafe { self.device.GetDeviceRemovedReason() }.map_err(|e| {
+                format!("Direct3D device was removed or reset ({e}). Restart conversion.")
+            })?;
             self.color
                 .observe(display_color::capture_color(&self.device_name))
                 .map_err(str::to_owned)?;
