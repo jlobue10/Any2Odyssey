@@ -10,6 +10,8 @@ $registration='HKCU:\Software\Any2OdysseyInstallerTests\'+[Guid]::NewGuid().ToSt
 $app=Join-Path $local 'Programs\Any2Odyssey';$data=Join-Path $local 'Any2Odyssey'
 $exe=Join-Path $app 'Any2Odyssey.exe';$worker=Join-Path $engine 'Any2OdysseyWorker.exe';$helper=Join-Path $programFiles 'Any2Odyssey\UninstallWorker.ps1'
 $ownerFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.owner'
+# Where the real helper leaves the reason for a failure, for the uninstaller to relay.
+$resultFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.result'
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $ownedNames=@('Any2Odyssey.exe','Any2Odyssey.ico','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','USER-GUIDE.html')
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
@@ -25,6 +27,7 @@ function New-Fixture {
  Set-Content -LiteralPath (Join-Path $engine 'ConversionWrapper.dll') -Value 'Samsung file; never loaded'
  Copy-Item -LiteralPath (Join-Path $installerDir 'UninstallWorker.ps1') -Destination $helper
  if(Test-Path -LiteralPath $ownerFile){Remove-Item -LiteralPath $ownerFile}
+ if(Test-Path -LiteralPath $resultFile){Remove-Item -LiteralPath $resultFile}
  if($HelperOwner){[IO.File]::WriteAllText($ownerFile,$HelperOwner,[Text.UTF8Encoding]::new($false))}
  $shell=New-Object -ComObject WScript.Shell
  foreach($folder in @($desktop,$programs)){$link=$shell.CreateShortcut((Join-Path $folder 'Any2Odyssey.lnk'));$link.TargetPath=$exe;$link.Save()}
@@ -40,10 +43,12 @@ function New-Fixture {
  if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole')){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath (Join-Path $app 'Uninstall.ps1') -Value $script -Encoding UTF8
 }
-# The stubs find $launches, $helperExitCode, $worker and $helper through the caller chain
-# (the uninstaller is invoked from this script), so no $script: or $global: state is needed.
+# The stubs find $launches, $helperExitCode, $helperReason, $worker and $helper through the caller
+# chain (the uninstaller is invoked from this script), so no $script: or $global: state is needed.
 $launches=New-Object 'System.Collections.Generic.List[object]'
 $helperExitCode=0
+# What a failing helper leaves in UninstallWorker.result; '' leaves no note.
+$helperReason=''
 # '' (helper runs), 'declined' (UAC prompt cancelled: Win32 error 1223) or 'other' (any other launch failure).
 $launchFailure=''
 # Notes the uninstaller prints are recorded here: capturing the information stream with 6>&1
@@ -66,7 +71,8 @@ function Start-Process {
   # Stand in for UninstallWorker.ps1: it removes the fixed worker path, itself and its owner marker.
   Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
   if(Test-Path -LiteralPath $ownerFile){Remove-Item -LiteralPath $ownerFile}
- }
+  if(Test-Path -LiteralPath $resultFile){Remove-Item -LiteralPath $resultFile}
+ }elseif($helperReason){[IO.File]::WriteAllText($resultFile,$helperReason,[Text.UTF8Encoding]::new($false))}
  return [pscustomobject]@{ExitCode=$helperExitCode}
 }
 $passed=$false
@@ -94,9 +100,25 @@ try{
  $launches.Clear()
  $helperExitCode=1
  New-Fixture -Elevated $false
- $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('Worker removal did not complete')}
+ $failed=$false;try{& (Join-Path $app 'Uninstall.ps1')}catch{$failed=$_.Exception.Message.Contains('Worker removal did not complete and its helper gave no reason (exit code 1)')}
  Assert $failed 'Helper failure stops the uninstall with its own message'
  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and (Test-Path -LiteralPath $worker)) 'Helper failure leaves per-user files, shortcuts, registration and worker in place'
+
+ # The helper's window closes with it; the reason it leaves beside itself reaches the user here.
+ $launches.Clear()
+ $helperReason='Any2Odyssey is still running on this PC (Windows session 3)'
+ New-Fixture -Elevated $false
+ $message='';try{& (Join-Path $app 'Uninstall.ps1')}catch{$message=$_.Exception.Message}
+ Assert ($message -eq 'Worker removal did not complete: Any2Odyssey is still running on this PC (Windows session 3). No per-user installation files were removed.') 'The reason the helper leaves is relayed to the user'
+ Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration) -and (Test-Path -LiteralPath $worker)) 'A relayed helper failure leaves everything in place'
+ # A note from an earlier run must not be reported for a helper that failed without writing one.
+ $launches.Clear()
+ $helperReason=''
+ New-Fixture -Elevated $false
+ [IO.File]::WriteAllText($resultFile,'Reason of an earlier run',[Text.UTF8Encoding]::new($false))
+ (Get-Item -LiteralPath $resultFile).LastWriteTimeUtc=[DateTime]::UtcNow.AddHours(-1)
+ $message='';try{& (Join-Path $app 'Uninstall.ps1')}catch{$message=$_.Exception.Message}
+ Assert ($message.Contains('gave no reason') -and -not $message.Contains('earlier run')) 'A note left by an earlier helper run is not reported as the reason'
 
  $launches.Clear()
  $helperExitCode=0;$launchFailure='declined'

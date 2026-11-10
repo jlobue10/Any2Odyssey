@@ -63,6 +63,10 @@ if($needsHelper){
  # The helper itself checks the approving account, its own Program Files path and the fixed worker path.
  $launch=@{FilePath=$powershell;ArgumentList=$arguments;Wait=$true;PassThru=$true}
  if(-not $alreadyElevated){$launch.Verb='RunAs'}
+ # The helper's window closes with it. When it fails it leaves the reason beside itself in Program
+ # Files, where only administrators can write; a note older than this launch is from an earlier run.
+ $resultFile=Join-Path (Split-Path -Parent $helper) 'UninstallWorker.result'
+ $launchedUtc=[DateTime]::UtcNow
  try{$removal=Start-Process @launch}
  catch [InvalidOperationException]{
   # A declined UAC prompt surfaces as InvalidOperationException wrapping Win32Exception 1223
@@ -71,7 +75,15 @@ if($needsHelper){
   if($inner -is [ComponentModel.Win32Exception] -and $inner.NativeErrorCode -eq 1223){throw 'Elevation was declined. The conversion worker needs administrator approval to be removed; no files were changed.'}
   throw
  }
- if($removal.ExitCode -ne 0){throw 'Worker removal did not complete. No per-user installation files were removed. Retry using the same Windows account.'}
+ if($removal.ExitCode -ne 0){
+  $reason=''
+  try{
+   if((Test-Path -LiteralPath $resultFile -PathType Leaf) -and (Get-Item -LiteralPath $resultFile).LastWriteTimeUtc -ge $launchedUtc.AddSeconds(-2)){$reason=([string][IO.File]::ReadAllText($resultFile,[Text.Encoding]::UTF8)).Trim()}
+  }catch{}
+  if($reason -and $reason -notmatch '[.!?]$'){$reason+='.'}
+  if($reason){throw "Worker removal did not complete: $reason No per-user installation files were removed."}
+  throw "Worker removal did not complete and its helper gave no reason (exit code $($removal.ExitCode)). No per-user installation files were removed. Retry; if it fails again, check whether security software or a policy stops Windows PowerShell from running $helper"
+ }
 }
 $shell=New-Object -ComObject WScript.Shell
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){

@@ -6,7 +6,7 @@ $ErrorActionPreference='Stop'
 # executable launches, registry cleanup or caller-selected deletion paths.
 function Assert-Any2OdysseyUninstallContext {
  param([string]$ExpectedSid,[string]$ActualSid,[bool]$IsAdmin,[string]$ScriptPath,[string]$InstalledPath)
- if(-not $ExpectedSid -or $ExpectedSid -ne $ActualSid){throw 'Elevation used a different Windows account. Uninstall using the same account as the installation.'}
+ if(-not $ExpectedSid -or $ExpectedSid -ne $ActualSid){throw 'Elevation used a different Windows account than the one that started the uninstall. Approve the prompt with the account that installed Any2Odyssey; it has to be an administrator account.'}
  if(-not $IsAdmin){throw 'Worker removal requires administrator access.'}
  if(-not [string]::Equals([IO.Path]::GetFullPath($ScriptPath),[IO.Path]::GetFullPath($InstalledPath),[StringComparison]::OrdinalIgnoreCase)){throw 'Run only the installed worker-removal helper from Program Files.'}
 }
@@ -20,17 +20,32 @@ function Remove-Any2OdysseyInstalledWorker {
  if(Test-Path -LiteralPath $worker){Remove-Item -LiteralPath $worker}
  Remove-Item -LiteralPath $HelperPath
  $folder=Split-Path -Parent $HelperPath
- # The installer's ownership marker (installing account SID) lives beside the helper.
- $owner=Join-Path $folder 'UninstallWorker.owner'
- if(Test-Path -LiteralPath $owner -PathType Leaf){Remove-Item -LiteralPath $owner}
+ # Beside the helper live the installer's ownership marker (the installing account's SID) and,
+ # after a run that failed, the note that told the uninstaller why.
+ foreach($name in @('UninstallWorker.owner','UninstallWorker.result')){
+  $leftover=Join-Path $folder $name
+  if(Test-Path -LiteralPath $leftover -PathType Leaf){Remove-Item -LiteralPath $leftover}
+ }
  if((Split-Path -Leaf $folder) -eq 'Any2Odyssey' -and -not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)){Remove-Item -LiteralPath $folder}
 }
 
 # Dot sourcing is used only by isolated tests to load the pure checks.
 if($MyInvocation.InvocationName -ne '.'){
- $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
- $principal=New-Object Security.Principal.WindowsPrincipal($identity)
  $installed=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'
- Assert-Any2OdysseyUninstallContext -ExpectedSid $ExpectedUserSid -ActualSid $identity.User.Value -IsAdmin $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -ScriptPath $PSCommandPath -InstalledPath $installed
- Remove-Any2OdysseyInstalledWorker -HelperPath $PSCommandPath
+ # This window closes with the script, so the reason for a failure is left beside the installed
+ # helper for the unelevated uninstaller to show. The path is fixed and under Program Files, where
+ # only administrators can write; nothing is read from it here, and no path chosen by the caller
+ # is ever written.
+ $resultFile=Join-Path (Split-Path -Parent $installed) 'UninstallWorker.result'
+ try{
+  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal=New-Object Security.Principal.WindowsPrincipal($identity)
+  Assert-Any2OdysseyUninstallContext -ExpectedSid $ExpectedUserSid -ActualSid $identity.User.Value -IsAdmin $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) -ScriptPath $PSCommandPath -InstalledPath $installed
+  Remove-Any2OdysseyInstalledWorker -HelperPath $PSCommandPath
+ }catch{
+  $reason=$_.Exception.Message
+  try{[IO.File]::WriteAllText($resultFile,$reason,[Text.UTF8Encoding]::new($false))}catch{}
+  Write-Host $reason
+  exit 1
+ }
 }
