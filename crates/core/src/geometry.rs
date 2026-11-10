@@ -34,8 +34,15 @@ impl Rect {
             height,
         }
     }
+    /// Edges that are further apart than `i32::MAX` give the largest size
+    /// that can be represented instead of wrapping to a negative one.
     pub fn from_ltrb(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
-        Rect::new(left, top, right - left, bottom - top)
+        Rect::new(
+            left,
+            top,
+            right.saturating_sub(left),
+            bottom.saturating_sub(top),
+        )
     }
     pub fn left(&self) -> i32 {
         self.x
@@ -43,11 +50,15 @@ impl Rect {
     pub fn top(&self) -> i32 {
         self.y
     }
+    /// Saturating, like [`bottom`](Self::bottom): a rectangle read from a
+    /// file or reported by a driver near the end of the coordinate space
+    /// must not panic a debug build or wrap to the far side in a release
+    /// one, where it would then "intersect" rectangles it is nowhere near.
     pub fn right(&self) -> i32 {
-        self.x + self.width
+        self.x.saturating_add(self.width)
     }
     pub fn bottom(&self) -> i32 {
-        self.y + self.height
+        self.y.saturating_add(self.height)
     }
     pub fn size(&self) -> Size {
         Size {
@@ -114,14 +125,29 @@ pub fn fit(source: Rect, target: Rect) -> Rect {
     Rect::new((target.width - w) / 2, (target.height - h) / 2, w, h)
 }
 
+/// Gap between the rightmost monitor edge and the offscreen surface.
+pub const OFFSCREEN_GAP: i32 = 64;
+
 /// Place a surface of `size` to the right of every monitor, aligned with the
-/// topmost monitor edge, with a 64 px gap. The result never overlaps a monitor
-/// and is therefore never visible, yet remains part of the desktop so DWM
-/// keeps compositing it.
+/// topmost monitor edge, with a gap of [`OFFSCREEN_GAP`]. The result never
+/// overlaps any of `monitors` and is therefore never visible, yet remains
+/// part of the desktop so DWM keeps compositing it.
+///
+/// That guarantee is about the rectangles passed in. With an empty list
+/// there is nothing to be outside of and the result is `(64, 0)`, which is
+/// on a primary display at the origin; a monitor missing from the list is
+/// not avoided either. A caller whose enumeration can fail must check the
+/// placed surface against the live monitors, as the worker does before
+/// every capture.
 pub fn offscreen_bounds(size: Size, monitors: &[Rect]) -> Rect {
     let right = monitors.iter().map(Rect::right).max().unwrap_or(0);
     let top = monitors.iter().map(Rect::top).min().unwrap_or(0);
-    Rect::new(right + 64, top, size.width, size.height)
+    Rect::new(
+        right.saturating_add(OFFSCREEN_GAP),
+        top,
+        size.width,
+        size.height,
+    )
 }
 
 #[cfg(test)]
@@ -227,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn offscreen_surface_never_overlaps_any_monitor_arrangement() {
+    fn offscreen_surface_clears_the_reference_arrangements() {
         let arrangements: [&[Rect]; 2] = [
             &[
                 Rect::new(0, 0, 3840, 2160),
@@ -259,6 +285,85 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn offscreen_surface_clears_seeded_random_arrangements() {
+        // xorshift64 with a fixed seed: the same 20,000 layouts on every run,
+        // with negative origins and empty or inverted monitors among them.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |modulus: u64, offset: i32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % modulus) as i32 + offset
+        };
+        for _ in 0..20_000 {
+            let count = next(6, 0);
+            let monitors: Vec<Rect> = (0..count)
+                .map(|_| {
+                    Rect::new(
+                        next(65_536, -32_768),
+                        next(65_536, -32_768),
+                        next(9_000, -500),
+                        next(9_000, -500),
+                    )
+                })
+                .collect();
+            let size = Size {
+                width: next(8_000, 1),
+                height: next(8_000, 1),
+            };
+            let off = offscreen_bounds(size, &monitors);
+            assert_eq!(off.size(), size);
+            assert!(
+                monitors.iter().all(|m| !m.intersects(&off)),
+                "{off:?} overlaps {monitors:?}"
+            );
+            if let Some(rightmost) = monitors.iter().map(Rect::right).max() {
+                assert_eq!(off.left(), rightmost + OFFSCREEN_GAP);
+            }
+        }
+    }
+
+    #[test]
+    fn offscreen_placement_without_monitors_is_the_documented_fallback() {
+        let size = Size {
+            width: 3840,
+            height: 2160,
+        };
+        assert_eq!(offscreen_bounds(size, &[]), Rect::new(64, 0, 3840, 2160));
+    }
+
+    #[test]
+    fn edges_saturate_at_the_end_of_the_coordinate_space() {
+        let far = Rect::new(i32::MAX - 100, i32::MAX - 100, 200, 200);
+        assert_eq!((far.right(), far.bottom()), (i32::MAX, i32::MAX));
+        let near = Rect::new(i32::MIN, 0, 5000, 3000);
+        assert!(!far.intersects(&near), "no wrap to the other side");
+        assert_eq!(
+            Rect::from_ltrb(i32::MIN, i32::MIN, i32::MAX, i32::MAX).size(),
+            Size {
+                width: i32::MAX,
+                height: i32::MAX
+            }
+        );
+        // Placement next to a monitor at the edge stays there and still
+        // clears every monitor, instead of wrapping onto the leftmost one.
+        let monitors = [far, near];
+        let off = offscreen_bounds(
+            Size {
+                width: 3840,
+                height: 2160,
+            },
+            &monitors,
+        );
+        assert_eq!(off.left(), i32::MAX);
+        assert!(monitors.iter().all(|m| !m.intersects(&off)));
+        assert_eq!(
+            far.intersect(&Rect::new(i32::MAX - 50, i32::MAX - 50, 500, 500)),
+            Rect::new(i32::MAX - 50, i32::MAX - 50, 50, 50)
+        );
     }
 
     #[test]
