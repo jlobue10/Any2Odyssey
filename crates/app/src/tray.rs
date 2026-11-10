@@ -65,6 +65,18 @@ pub fn build_menu() -> (Menu, MenuItem, CheckMenuItem) {
 }
 
 impl Tray {
+    /// `Err` means the icon image was rejected or the tray's hidden window
+    /// could not be created; the caller then treats the tray as absent
+    /// (Minimize and Close act normally, a notice says so).
+    ///
+    /// It does not mean "the shell showed no icon". tray-icon 0.21.3 returns
+    /// `Ok` from `build()` even when the shell refuses the registration, for
+    /// instance while Explorer is not running, and registers again when the
+    /// shell broadcasts `TaskbarCreated`. That also covers an Explorer
+    /// restart later on. So with no shell at launch the controls still hide
+    /// to a tray icon that appears only once Explorer does; until then
+    /// Ctrl+Alt+F9, `--show` or launching again brings them back. The crate
+    /// gives no way to ask whether the icon is currently registered.
     pub fn new(icon_rgba: Vec<u8>, width: u32, height: u32) -> Result<Tray, String> {
         let (menu, toggle_item, keep_item) = build_menu();
         let icon = Icon::from_rgba(icon_rgba, width, height).map_err(|e| e.to_string())?;
