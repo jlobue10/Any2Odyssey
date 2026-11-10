@@ -15,22 +15,133 @@ const REFRESH_WIDTH: f32 = 90.0;
 /// The source list may be wider than its box, up to this.
 const SOURCE_POPUP_WIDTH: f32 = 360.0;
 
+/// Shown beside Apply while an edit is pending.
+const UNAPPLIED_LABEL: &str = "Unapplied changes";
+const UNAPPLIED_HINT: &str = "Capture, input, source, depth, pop-out and overlay changes take effect when you click Apply. Turn on 3D, the tray menu and automatic recovery use the applied settings.";
+
+/// The settings that only Apply commits, as the shared state holds them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Applied {
+    mode: CaptureMode,
+    side_by_side: bool,
+    keep_on_top: bool,
+    depth_pos: i32,
+    pop_pos: i32,
+    source: Option<isize>,
+}
+
+impl Applied {
+    fn of(core: &Core) -> Applied {
+        Applied {
+            mode: core.prefs.mode,
+            side_by_side: core.prefs.side_by_side,
+            keep_on_top: core.prefs.keep_overlay_on_top,
+            depth_pos: DEPTH.position(core.prefs.depth),
+            pop_pos: POPOUT.position(core.prefs.popout),
+            source: core.selected_window,
+        }
+    }
+}
+
+/// What the Controls page shows for the settings Apply commits: capture
+/// mode, input format, source window, the overlay's keep-on-top and the two
+/// sliders. They are edited here and reach the shared state only through
+/// [`ControlsState::commit`], which Apply calls. Everything else that saves
+/// preferences or launches a worker (a checkbox, hiding to the tray, Quit,
+/// the tray menu, Turn on 3D, a recovery relaunch) reads the shared state and
+/// therefore uses the applied values, never a half-made edit.
 pub struct ControlsState {
     pub depth_pos: i32,
     pub pop_pos: i32,
+    pub mode: CaptureMode,
+    pub side_by_side: bool,
+    pub keep_on_top: bool,
+    /// The window chosen in the source box. Like the applied choice it is
+    /// never restored from a previous launch.
+    pub source: Option<isize>,
+    /// The applied values when this page last looked, to notice a change
+    /// made elsewhere (a tray command, a refreshed window list).
+    seen: Applied,
 }
 
 impl ControlsState {
     pub fn from_core(core: &Core) -> ControlsState {
+        let seen = Applied::of(core);
         ControlsState {
-            depth_pos: DEPTH.position(core.prefs.depth),
-            pop_pos: POPOUT.position(core.prefs.popout),
+            depth_pos: seen.depth_pos,
+            pop_pos: seen.pop_pos,
+            mode: seen.mode,
+            side_by_side: seen.side_by_side,
+            keep_on_top: seen.keep_on_top,
+            source: seen.source,
+            seen,
         }
     }
 
-    fn push_sliders(&self, core: &mut Core) {
+    fn edited(&self) -> Applied {
+        Applied {
+            mode: self.mode,
+            side_by_side: self.side_by_side,
+            keep_on_top: self.keep_on_top,
+            depth_pos: self.depth_pos,
+            pop_pos: self.pop_pos,
+            source: self.source,
+        }
+    }
+
+    /// An edit on this page has not been applied yet.
+    pub fn dirty(&self, core: &Core) -> bool {
+        self.edited() != Applied::of(core)
+    }
+
+    /// Follow applied values that changed behind this page. A tray command
+    /// ("Side-by-side mode", "Keep overlay above apps", "Always convert
+    /// desktop") is the newer decision about its setting and replaces a
+    /// pending edit of the same setting; the others are left alone. (A
+    /// command that leaves the applied value as it was is not noticed: the
+    /// pending edit stays, and so does the hint beside Apply.) The
+    /// source is different: the applied choice only changes here when its
+    /// window has gone, which says nothing about a different window picked
+    /// in the box, so that pick stays for as long as it is still listed.
+    pub fn sync(&mut self, core: &Core) {
+        let now = Applied::of(core);
+        if now.mode != self.seen.mode {
+            self.mode = now.mode;
+        }
+        if now.side_by_side != self.seen.side_by_side {
+            self.side_by_side = now.side_by_side;
+        }
+        if now.keep_on_top != self.seen.keep_on_top {
+            self.keep_on_top = now.keep_on_top;
+        }
+        if now.depth_pos != self.seen.depth_pos {
+            self.depth_pos = now.depth_pos;
+        }
+        if now.pop_pos != self.seen.pop_pos {
+            self.pop_pos = now.pop_pos;
+        }
+        if now.source != self.seen.source && self.source == self.seen.source {
+            self.source = now.source;
+        }
+        if self
+            .source
+            .is_some_and(|chosen| !core.windows.iter().any(|w| w.handle == chosen))
+        {
+            self.source = None;
+        }
+        self.seen = now;
+    }
+
+    /// Apply: hand every edit to the shared state. The caller saves and
+    /// restarts through `Core::apply`.
+    pub fn commit(&mut self, core: &mut Core) {
+        core.prefs.mode = self.mode;
+        core.prefs.side_by_side = self.side_by_side;
+        core.prefs.keep_overlay_on_top = self.keep_on_top;
         core.prefs.depth = DEPTH.value(self.depth_pos);
         core.prefs.popout = POPOUT.value(self.pop_pos);
+        core.selected_window = self.source;
+        self.seen = Applied::of(core);
     }
 
     pub fn show(
@@ -42,6 +153,7 @@ impl ControlsState {
         tray_available: bool,
         notices: &[&str],
     ) {
+        self.sync(core);
         banner(ui, wordmark, p);
         ui.add_space(4.0);
         // CONVERSION
@@ -96,10 +208,10 @@ impl ControlsState {
         });
         ui.add_space(5.0);
         let two_columns = ui.available_width() >= 860.0;
-        let source_panel = |ui: &mut Ui, core: &mut Core| {
+        let source_panel = |ui: &mut Ui, core: &mut Core, state: &mut ControlsState| {
             section(ui, "SOURCE & INPUT", p, |ui| {
                 row(ui, "Capture", |ui| {
-                    let mut idx = core.prefs.mode.index();
+                    let mut idx = state.mode.index();
                     egui::ComboBox::from_id_salt("capture-mode")
                         .width(ui.available_width())
                         .selected_text(CaptureMode::from_index(idx).label())
@@ -108,10 +220,10 @@ impl ControlsState {
                                 ui.selectable_value(&mut idx, m.index(), m.label());
                             }
                         });
-                    core.prefs.mode = CaptureMode::from_index(idx);
+                    state.mode = CaptureMode::from_index(idx);
                 });
                 row(ui, "Input format", |ui| {
-                    let mut sbs = core.prefs.side_by_side;
+                    let mut sbs = state.side_by_side;
                     let text = if sbs {
                         "Side-by-side input (manual)"
                     } else {
@@ -124,13 +236,13 @@ impl ControlsState {
                             ui.selectable_value(&mut sbs, false, "2D → 3D automatically (AI)");
                             ui.selectable_value(&mut sbs, true, "Side-by-side input (manual)");
                         });
-                    core.prefs.side_by_side = sbs;
+                    state.side_by_side = sbs;
                 });
                 row(ui, "Source window", |ui| {
-                    let enabled = core.prefs.mode != CaptureMode::Desktop;
+                    let enabled = state.mode != CaptureMode::Desktop;
                     ui.add_enabled_ui(enabled, |ui| {
-                        let selected = core
-                            .selected_window
+                        let selected = state
+                            .source
                             .and_then(|h| core.windows.iter().find(|w| w.handle == h))
                             .map(|w| w.title.clone());
                         // The box gets a fixed share of the row and elides a
@@ -160,7 +272,7 @@ impl ControlsState {
                                             let windows = core.windows.clone();
                                             for w in windows {
                                                 ui.selectable_value(
-                                                    &mut core.selected_window,
+                                                    &mut state.source,
                                                     Some(w.handle),
                                                     &w.title,
                                                 )
@@ -176,10 +288,11 @@ impl ControlsState {
                         }
                         if gold_button(ui, "Refresh", false, p).clicked() {
                             core.refresh_windows();
+                            state.sync(core);
                         }
                     });
                 })
-                .on_hover_text("Selected window requires a choice each time this app opens; also seeds Follow active window. Refresh updates the list without choosing a replacement.");
+                .on_hover_text("Selected window requires a choice each time this app opens; also seeds Follow active window. Refresh updates the list without choosing a replacement. Apply to use the choice.");
             });
         };
         let tuning_panel = |ui: &mut Ui, core: &mut Core, state: &mut ControlsState| {
@@ -195,19 +308,31 @@ impl ControlsState {
                 })
                 .on_hover_text("Pop-out: −1.00–1.00. Apply settings to save; active conversion briefly restarts.");
                 ui.add_space(4.0);
-                if gold_button(ui, "Apply settings / restart conversion", false, p).clicked() {
-                    state.push_sliders(core);
-                    core.apply();
-                }
+                ui.horizontal_wrapped(|ui| {
+                    if gold_button(ui, "Apply settings / restart conversion", false, p).clicked() {
+                        state.commit(core);
+                        core.apply();
+                    }
+                    // Turn on 3D, the tray and recovery start with the
+                    // applied values; say so while the page shows others.
+                    if state.dirty(core) {
+                        ui.label(
+                            RichText::new(UNAPPLIED_LABEL)
+                                .color(color(p.accent))
+                                .size(12.0),
+                        )
+                        .on_hover_text(UNAPPLIED_HINT);
+                    }
+                });
             });
         };
         if two_columns {
             ui.columns(2, |cols| {
-                source_panel(&mut cols[0], core);
+                source_panel(&mut cols[0], core, self);
                 tuning_panel(&mut cols[1], core, self);
             });
         } else {
-            source_panel(ui, core);
+            source_panel(ui, core, self);
             ui.add_space(5.0);
             tuning_panel(ui, core, self);
         }
@@ -216,7 +341,7 @@ impl ControlsState {
             let mut auto = core.prefs.auto_convert;
             let mut recover = core.supervisor.recover;
             let mut minimize = core.prefs.minimize_to_tray;
-            let mut keep = core.prefs.keep_overlay_on_top;
+            let mut keep = self.keep_on_top;
             let draw = |ui: &mut Ui,
                         auto: &mut bool,
                         recover: &mut bool,
@@ -266,9 +391,11 @@ impl ControlsState {
                 draw(ui, &mut auto, &mut recover, &mut minimize, &mut keep, 0);
                 draw(ui, &mut auto, &mut recover, &mut minimize, &mut keep, 1);
             }
-            // Only Apply commits the sliders: a depth or pop-out dragged but
-            // not applied is not saved by a checkbox change, exactly as the
-            // tray hide and Quit do not save it either.
+            // Only Apply commits the sliders and the capture, input, source
+            // and overlay choices: these three checkboxes save at once, but
+            // what they save is the applied state, exactly as the tray hide
+            // and Quit do. Keep-on-top is one of the Apply settings and only
+            // becomes a pending edit here.
             if auto != core.prefs.auto_convert {
                 core.prefs.auto_convert = auto;
                 core.save_preferences();
@@ -280,9 +407,7 @@ impl ControlsState {
                 core.prefs.minimize_to_tray = minimize;
                 core.save_preferences();
             }
-            if keep != core.prefs.keep_overlay_on_top {
-                core.prefs.keep_overlay_on_top = keep;
-            }
+            self.keep_on_top = keep;
         });
         ui.add_space(6.0);
         ui.label(
@@ -317,5 +442,171 @@ impl ControlsState {
                 .color(color(p.muted))
                 .size(11.0),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::WindowChoice;
+    use any2odyssey_core::log::Logger;
+
+    fn core() -> (tempfile::TempDir, Core) {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new_preview(Logger::new(dir.path().join("test.log")));
+        (dir, core)
+    }
+
+    fn windows(handles: &[isize]) -> Vec<WindowChoice> {
+        handles
+            .iter()
+            .map(|&handle| WindowChoice {
+                handle,
+                title: format!("Window {handle}"),
+            })
+            .collect()
+    }
+
+    /// Every Apply setting edited away from its default.
+    fn edit_everything(state: &mut ControlsState) {
+        state.mode = CaptureMode::Window;
+        state.side_by_side = true;
+        state.keep_on_top = false;
+        state.depth_pos = 150;
+        state.pop_pos = -25;
+        state.source = Some(20);
+    }
+
+    #[test]
+    fn edits_reach_the_shared_state_only_through_commit() {
+        let (_dir, mut core) = core();
+        core.windows = windows(&[10, 20]);
+        let mut state = ControlsState::from_core(&core);
+        assert!(!state.dirty(&core));
+        let applied = core.prefs.clone();
+        edit_everything(&mut state);
+        assert!(state.dirty(&core));
+        // What a checkbox, the tray hide, a tray command, Turn on 3D, Quit
+        // and a recovery relaunch read: all of it is still the applied state.
+        state.sync(&core);
+        core.save_preferences();
+        core.recover_changed(false);
+        core.menu(MenuCommand::Restart);
+        assert_eq!(
+            core.prefs,
+            any2odyssey_core::prefs::Preferences {
+                recover: false,
+                ..applied.clone()
+            }
+        );
+        assert_eq!(core.selected_window, None);
+        assert!(state.dirty(&core), "the edits are still pending");
+        assert_eq!(state.source, Some(20));
+
+        state.commit(&mut core);
+        assert!(!state.dirty(&core));
+        assert_eq!(core.prefs.mode, CaptureMode::Window);
+        assert!(core.prefs.side_by_side);
+        assert!(!core.prefs.keep_overlay_on_top);
+        assert_eq!(core.prefs.depth, 1.5);
+        assert_eq!(core.prefs.popout, -0.25);
+        assert_eq!(core.selected_window, Some(20));
+        // Committing is not a change "made elsewhere".
+        state.sync(&core);
+        assert_eq!(state.mode, CaptureMode::Window);
+        assert_eq!(state.source, Some(20));
+    }
+
+    #[test]
+    fn a_saved_value_between_slider_steps_is_not_a_pending_edit() {
+        let (_dir, mut core) = core();
+        core.prefs.depth = 0.904;
+        let state = ControlsState::from_core(&core);
+        assert_eq!(state.depth_pos, 90);
+        assert!(!state.dirty(&core));
+    }
+
+    #[test]
+    fn a_tray_command_replaces_only_the_pending_edit_of_its_own_setting() {
+        let (_dir, mut core) = core();
+        core.windows = windows(&[10, 20]);
+        let mut state = ControlsState::from_core(&core);
+        edit_everything(&mut state);
+        // The tray's Keep item toggles the applied value (on by default),
+        // not the unchecked box on the page.
+        let applied_keep = core.prefs.keep_overlay_on_top;
+        assert!(applied_keep);
+        core.menu(MenuCommand::KeepOverlayOnTop(!applied_keep));
+        assert!(!core.prefs.keep_overlay_on_top);
+        state.sync(&core);
+        core.menu(MenuCommand::KeepOverlayOnTop(true));
+        state.sync(&core);
+        assert!(state.keep_on_top, "the tray's choice is the newer one");
+        assert_eq!(state.mode, CaptureMode::Window, "other edits stay pending");
+        assert_eq!(state.depth_pos, 150);
+
+        // "AI conversion mode" while AI is already applied changes nothing
+        // that could be noticed: the pending edit and its hint stay.
+        core.menu(MenuCommand::AiMode);
+        state.sync(&core);
+        assert!(state.side_by_side);
+        assert!(state.dirty(&core));
+        core.menu(MenuCommand::SideBySide);
+        state.sync(&core);
+        core.menu(MenuCommand::AiMode);
+        state.sync(&core);
+        assert!(!state.side_by_side);
+        assert_eq!(state.mode, CaptureMode::Window);
+
+        state.mode = CaptureMode::Active;
+        core.prefs.mode = CaptureMode::Window; // as an Apply elsewhere would
+        state.sync(&core);
+        assert_eq!(state.mode, CaptureMode::Window);
+        assert_eq!(core.prefs.depth, 0.9, "nothing committed the sliders");
+    }
+
+    #[test]
+    fn a_pending_source_lasts_as_long_as_its_window_is_listed() {
+        let (_dir, mut core) = core();
+        core.windows = windows(&[10, 20, 30]);
+        core.selected_window = Some(10);
+        let mut state = ControlsState::from_core(&core);
+        assert_eq!(state.source, Some(10));
+        state.source = Some(20);
+        // Refresh: the applied window is gone and is cleared, as before.
+        // That is no reason to drop a different window picked in the box.
+        core.windows = windows(&[20, 30]);
+        core.selected_window = None;
+        state.sync(&core);
+        assert_eq!(state.source, Some(20));
+        assert!(state.dirty(&core));
+        // The picked window goes too: no substitute, a choice is required.
+        core.windows = windows(&[30]);
+        state.sync(&core);
+        assert_eq!(state.source, None);
+        assert!(!state.dirty(&core));
+        // With no pending pick, the box follows the applied choice.
+        core.windows = windows(&[30, 40]);
+        core.selected_window = Some(40);
+        state.sync(&core);
+        assert_eq!(state.source, Some(40));
+        core.windows = windows(&[30]);
+        core.selected_window = None;
+        state.sync(&core);
+        assert_eq!(state.source, None);
+    }
+
+    #[test]
+    fn a_new_launch_requires_a_source_choice() {
+        let (_dir, mut core) = core();
+        core.prefs.mode = CaptureMode::Window;
+        core.windows = windows(&[10, 20]);
+        let mut state = ControlsState::from_core(&core);
+        state.sync(&core);
+        assert_eq!(
+            state.source, None,
+            "the list is not consent to its first entry"
+        );
+        assert!(!state.dirty(&core));
     }
 }

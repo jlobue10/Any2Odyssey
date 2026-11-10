@@ -376,7 +376,7 @@ impl Core {
         let preferences = self.prefs.clone();
         let source = self.selected_window.unwrap_or(0);
         if self.prefs.mode == CaptureMode::Window && source == 0 {
-            self.status = "Choose a source window first.".into();
+            self.status = "Choose a source window and click Apply first.".into();
             self.supervisor.start_failed();
             return;
         }

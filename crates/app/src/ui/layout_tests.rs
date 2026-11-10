@@ -359,3 +359,40 @@ fn startup_notices_stay_visible_whatever_the_status_says() {
         assert!(try_find(&painted, TRAY_NOTICE).is_none());
     }
 }
+
+#[test]
+fn pending_edits_show_a_hint_and_only_apply_commits_them() {
+    // The narrow window is taller here than its minimum, so the single
+    // column shows Apply without scrolling.
+    for size in [SIZES[0], (SIZES[1].0, 900.0)] {
+        let mut h = Harness::new(size, Page::Controls);
+        let painted = h.settle();
+        assert!(try_find(&painted, "Unapplied changes").is_none());
+
+        h.app.controls.mode = CaptureMode::Active;
+        h.app.controls.side_by_side = true;
+        h.app.controls.keep_on_top = false;
+        h.app.controls.depth_pos = 150;
+        let painted = h.settle();
+        assert_inside_window(&painted, size.0, "hint");
+        find(&painted, "Unapplied changes");
+        find(&painted, "Follow active window");
+        // Frames alone commit nothing, and neither does Turn on 3D: it
+        // starts with the applied settings and the hint stays.
+        let applied = any2odyssey_core::prefs::Preferences::default();
+        assert_eq!(h.core().prefs, applied);
+        let turn_on = find(&painted, "Turn on 3D").rect.center();
+        let painted = h.click(turn_on);
+        assert_eq!(h.core().prefs, applied);
+        find(&painted, "Unapplied changes");
+
+        let apply = find(&painted, "Apply settings").rect.center();
+        let painted = h.click(apply);
+        assert!(try_find(&painted, "Unapplied changes").is_none());
+        let core = h.core();
+        assert_eq!(core.prefs.mode, CaptureMode::Active);
+        assert!(core.prefs.side_by_side);
+        assert!(!core.prefs.keep_overlay_on_top);
+        assert_eq!(core.prefs.depth, 1.5);
+    }
+}
