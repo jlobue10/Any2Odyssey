@@ -46,6 +46,12 @@ if($ControlsOnly){
  if(Test-Path -LiteralPath $existingWorker -PathType Leaf){Assert-Any2OdysseyWorkerNotNewer -PackageVersion $version -WorkerVersion (Get-Any2OdysseyFileVersion -Path $existingWorker) -AllowDowngrade:$AllowDowngrade -OwnerSid $previousOwner -CurrentSid $currentSid}
  if($previousOwner -and $previousOwner -ne $currentSid){Write-Host "Note: the conversion worker and uninstall helper in Program Files were installed by another Windows account ($previousOwner). This installation replaces them and becomes their owner; an uninstall from that account will leave them alone."}
 }
+# Windows reports a known folder that does not exist (a redirected Desktop that was removed, for
+# example) as an empty path. Its shortcut is skipped instead of failing the installation.
+$shortcutFolders=@()
+foreach($place in @(@{Name='Desktop';Path=[Environment]::GetFolderPath('Desktop')},@{Name='Start menu';Path=[Environment]::GetFolderPath('Programs')})){
+ if($place.Path){$shortcutFolders+=$place.Path}else{Write-Host "Note: Windows reports no $($place.Name) folder for this account; no shortcut is placed there."}
+}
 if($CheckOnly){Write-Host "$action preflight passed$(if($ControlsOnly){' for controls only'}else{': package, version and Samsung engine are compatible'}). No changes made.";return}
 $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if(-not $ControlsOnly){
@@ -84,7 +90,7 @@ $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destinatio
 $shell=New-Object -ComObject WScript.Shell
 $shortcutSource=Join-Path $stage 'Any2Odyssey.lnk';$link=$shell.CreateShortcut($shortcutSource)
 $link.TargetPath=Join-Path $app 'Any2Odyssey.exe';$link.WorkingDirectory=$app;$link.IconLocation=(Join-Path $app 'Any2Odyssey.ico')+',0';$link.Description='Any2Odyssey - continuous Odyssey 3D; right-click the tray icon for controls.';$link.Save()
-foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){$operations+=[pscustomobject]@{Source=$shortcutSource;Destination=Join-Path $folder 'Any2Odyssey.lnk'}}
+foreach($folder in $shortcutFolders){$operations+=[pscustomobject]@{Source=$shortcutSource;Destination=Join-Path $folder 'Any2Odyssey.lnk'}}
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}
 # Installed apps resolves a bare powershell.exe through the caller's PATH; name the system one.

@@ -24,6 +24,10 @@ $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+(Joi
 $script=$script.Replace('if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')
 if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath')){throw 'Fixture routing incomplete; refusing to run.'}
 $testInstall=Join-Path $package 'install.ps1';Set-Content -LiteralPath $testInstall -Value $script -Encoding UTF8
+# The same installer for an account whose Desktop folder is gone: Windows reports that as an empty path.
+$noDesktopScript=$script.Replace(("{Name='Desktop';Path='"+$desktop+"'}"),"{Name='Desktop';Path=''}")
+if($noDesktopScript -ceq $script){throw 'Fixture routing incomplete; refusing to run.'}
+$noDesktopInstall=Join-Path $package 'install-no-desktop.ps1';Set-Content -LiteralPath $noDesktopInstall -Value $noDesktopScript -Encoding UTF8
 function Get-Process {param($Name,$ErrorAction) return @()}
 function Get-FileHash {
  param([string]$LiteralPath,$Algorithm)
@@ -78,6 +82,12 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '"*\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile *') 'Installed-apps uninstall names the system PowerShell by full path'
+ # No Desktop folder: the installation completes and places the Start menu shortcut only.
+ Remove-Item -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')
+ $notes.Clear()
+ & $noDesktopInstall
+ Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and (Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk'))) 'An account without a Desktop folder installs with the Start menu shortcut only'
+ Assert (($notes -join [char]10).Contains('no Desktop folder')) 'The skipped Desktop shortcut is explained'
  # Shared PC: another account has installed a newer release since. Its worker is the one worker of
  # this PC, so this older package must refuse to replace it, and say whose it is, in the preflight.
  $workerPath=Join-Path $engine 'Any2OdysseyWorker.exe'

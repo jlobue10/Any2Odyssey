@@ -15,7 +15,8 @@ $ownedNames=@('Any2Odyssey.exe','Any2Odyssey.ico','LICENSE','NOTICE','THIRD-PART
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
 function New-Fixture {
  # $HelperOwner is the SID written beside the helper by the installer; '' leaves no marker (pre-0.8.5 helper).
- param([bool]$Elevated,[string]$Record='{"Version":"0.8.2","ControlsOnly":false}',[string]$HelperOwner=$sid)
+ # $NoDesktop routes the Desktop lookup to the empty path Windows reports for a folder that does not exist.
+ param([bool]$Elevated,[string]$Record='{"Version":"0.8.2","ControlsOnly":false}',[string]$HelperOwner=$sid,[bool]$NoDesktop=$false)
  foreach($folder in @($app,$data,$engine,$desktop,$programs,(Split-Path -Parent $helper))){New-Item -ItemType Directory -Path $folder -Force | Out-Null}
  foreach($name in $ownedNames){Set-Content -LiteralPath (Join-Path $app $name) -Value "installed $name"}
  Set-Content -LiteralPath (Join-Path $app 'version.json') -Value $Record
@@ -31,7 +32,8 @@ function New-Fixture {
  New-ItemProperty -LiteralPath $registration -Name DisplayName -Value 'Any2Odyssey' -PropertyType String -Force | Out-Null
  $script=Get-Content -LiteralPath (Join-Path $installerDir 'Uninstall.ps1') -Raw
  $script=$script.Replace('$env:LOCALAPPDATA',("'"+$local+"'")).Replace('C:\Program Files\Odyssey 3D Hub\Conversion',$engine).Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey',$registration)
- $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktop+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
+ $desktopRoute=if($NoDesktop){''}else{$desktop}
+ $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktopRoute+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
  $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+$programFiles+"'"))
  $token=if($Elevated){'$alreadyElevated=$true'}else{'$alreadyElevated=$false'}
  $script=$script.Replace('$alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',$token)
@@ -146,6 +148,13 @@ try{
  Assert (($notes -join [char]10).Contains('version.json) is unreadable')) 'Damaged installation record is reported'
  Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs') 'Damaged record falls back to the files present and runs the helper'
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $registration)) 'Uninstall completes despite the damaged record'
+
+ # An account whose Desktop folder is gone (Windows reports an empty path) can still uninstall.
+ $launches.Clear()
+ New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}' -NoDesktop $true
+ Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk'))) 'Uninstall completes when Windows reports no Desktop folder'
 
  # A genuine controls-only installation has neither worker nor helper and needs no elevation.
  $launches.Clear()

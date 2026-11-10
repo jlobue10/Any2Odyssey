@@ -70,6 +70,8 @@ if($needsHelper){
 }
 $shell=New-Object -ComObject WScript.Shell
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){
+ # Windows reports a known folder that does not exist as an empty path; there is no shortcut to look for.
+ if(-not $folder){continue}
  $link=Join-Path $folder 'Any2Odyssey.lnk'
  if((Test-Path -LiteralPath $link) -and $shell.CreateShortcut($link).TargetPath -eq $exe){Remove-Item -LiteralPath $link}
 }
