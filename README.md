@@ -28,7 +28,7 @@ Rendered with `Any2Odyssey --screenshot` in an isolated preview (no conversion r
 - GPU capture with a bounded frame queue, exclusion of the output from capture (no feedback trails) and exclusion of the hardware cursor (no delayed duplicate pointer). HDR desktops are normalized to SDR.
 - Depth strength and pop-out controls, automatic start, automatic worker recovery, minimize/close to tray, a themed light/dark controls window with built-in Help (F1), tray and jump-list commands.
 - An About page with the version, build and installation record, and a check of GitHub Releases for a newer version: on request, or once a day when the controls open (switchable). Nothing is downloaded or installed automatically.
-- A single native executable. No .NET runtime, no bundled DLLs.
+- A single native executable. No .NET runtime, no Visual C++ Redistributable, no bundled DLLs.
 
 Automatic side-by-side detection is not implemented. Select side-by-side manually when the source already contains a stereo pair.
 

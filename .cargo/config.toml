@@ -1,0 +1,8 @@
+# Link Microsoft's C runtime statically into the Windows executable. Without this the
+# MSVC target imports VCRUNTIME140.dll at load time, which is part of the Visual C++
+# Redistributable and not of Windows: on a PC that has never had it installed (a clean
+# Windows 11 with a controls-only install is the likely case) the program does not start
+# and Windows reports the missing DLL. The Universal CRT (api-ms-win-crt-*) is part of
+# Windows 10 and later and stays dynamic. CI checks the built executable for the import.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,4 +1,4 @@
-# Inspect the built PE without executing it or loading its imports.
+# Inspect the built PE without executing it or loading its imports: static C runtime, DPI manifest.
 [CmdletBinding()]
 param([string]$Binary=(Join-Path $PSScriptRoot '..\..\target\release\Any2Odyssey.exe'))
 $ErrorActionPreference='Stop'
@@ -21,6 +21,14 @@ public static class Any2OdysseyManifestReader {
 }
 '@
 $path=(Resolve-Path -LiteralPath $Binary).Path
+# The program must start on a PC without the Visual C++ Redistributable: the C runtime is linked
+# statically (.cargo/config.toml), so no import of its DLLs may remain. ISO-8859-1 maps bytes to
+# characters one to one, which makes the import names searchable as text.
+$image=[Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($path))
+foreach($runtime in @('VCRUNTIME140','MSVCP140')){
+ if($image.IndexOf($runtime,[StringComparison]::OrdinalIgnoreCase) -ge 0){throw "Built executable still depends on $runtime*.dll; it would not start without the Visual C++ Redistributable."}
+}
+Write-Host 'Built executable does not import the Visual C++ runtime DLLs.'
 # LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
 $module=[Any2OdysseyManifestReader]::LoadLibraryExW($path,[IntPtr]::Zero,0x22)
 if($module -eq [IntPtr]::Zero){throw 'Could not map executable resources.'}
