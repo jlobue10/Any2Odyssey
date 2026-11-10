@@ -38,6 +38,14 @@ if($PSVersionTable.PSEdition -eq 'Core'){$env:PSModulePath=[Environment]::GetEnv
 try{$output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String}finally{$env:PSModulePath=$savedModulePath}
 Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -Raw).Contains('AllowDowngrade=True')) 'Install-GUI.cmd passes -AllowDowngrade on to the installer'
 Remove-Item -LiteralPath $marker
+# Double-clicked inside the ZIP preview, Windows extracts only the .cmd file to a temporary folder.
+# Nothing is beside it then, so no launcher runs and this is safe for Install.cmd as well.
+$alone=Join-Path $root 'zip-preview';New-Item -ItemType Directory -Path $alone | Out-Null
+foreach($name in @('Install.cmd','Install-GUI.cmd')){
+ Copy-Item -LiteralPath (Join-Path $installerDir $name) -Destination $alone
+ $output='' | & (Join-Path $alone $name) 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Extract the whole ZIP')) "$name run without the rest of the package says to extract the ZIP first"
+}
 # Install.cmd would ask for elevation here, so its command line is compared with the one just exercised.
 $guiLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" *'})
 $fullLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" *'})

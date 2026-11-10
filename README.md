@@ -65,7 +65,7 @@ A different engine stops installation and conversion with a compatibility messag
 ### Full Windows 3D converter
 
 1. Install and configure Samsung Odyssey 3D Hub and verify that its ordinary 3D playback works. Stop Samsung's separate 3D player.
-2. Download `Any2Odyssey-<version>-windows-x64.zip` from [Releases](https://github.com/jlobue10/Any2Odyssey/releases), verify it against the attached `.sha256`, and extract it to a normal folder.
+2. Download `Any2Odyssey-<version>-windows-x64.zip` from [Releases](https://github.com/jlobue10/Any2Odyssey/releases), verify it against the attached `.sha256`, and extract the whole ZIP to a normal folder (`Install.cmd` cannot run from inside the ZIP preview).
 3. Double-click **Install.cmd** and approve the elevation prompt **with the Windows account you are signed in to** (it has to be an administrator account; see below). Alternatively, from 64-bit PowerShell as administrator in the extracted folder:
 
    ```powershell
