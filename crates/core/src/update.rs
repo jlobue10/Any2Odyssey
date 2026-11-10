@@ -316,21 +316,25 @@ pub fn allowed_url(url: &str) -> bool {
 
 /// Reduce release notes to plain text: drop control characters and the
 /// invisible formatting characters listed in [`is_invisible_formatting`],
-/// normalize line endings, collapse blank runs and cap the length. Markdown is
-/// left as-is; it is displayed, not rendered.
+/// turn every kind of line break into `\n`, collapse blank runs and cap the
+/// length. Markdown is left as-is; it is displayed, not rendered.
 pub fn sanitize_notes(text: &str) -> String {
     let mut out = String::with_capacity(text.len().min(MAX_NOTES_CHARS + 1));
     let mut newlines = 0usize;
     let mut chars = 0usize;
     let mut truncated = false;
-    for c in text.chars() {
+    let mut source = text.chars().peekable();
+    while let Some(c) = source.next() {
         let c = match c {
-            '\r' => continue,
+            // CRLF is one break, written by the '\n' that follows.
+            '\r' if source.peek() == Some(&'\n') => continue,
             '\t' => ' ',
-            '\n' => '\n',
-            // Unicode's own line and paragraph separators are visible breaks,
-            // not hidden formatting, and the display only breaks at '\n'.
-            '\u{2028}' | '\u{2029}' => '\n',
+            // Every other character that ends a line somewhere is a break
+            // here too, since the display only breaks at '\n': a lone
+            // carriage return, vertical tab, form feed, next line (NEL) and
+            // Unicode's line and paragraph separators. Dropping them, as the
+            // control-character rule below would, runs two lines together.
+            '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}' => '\n',
             // Narrow no-break space has width (French punctuation, digit
             // grouping); dropping it would run words together.
             '\u{202F}' => ' ',
@@ -362,12 +366,18 @@ pub fn sanitize_notes(text: &str) -> String {
 /// Characters that render as nothing but change how surrounding text is read
 /// or copied: every `Bidi_Control` character (explicit embeddings, overrides
 /// and isolates, the marks, the Arabic letter mark), zero-width space, the
-/// word joiner and invisible operators, soft hyphen, Mongolian vowel
-/// separator, interlinear annotation controls and the tag characters used to
-/// hide text. The zero-width joiner and non-joiner (U+200C, U+200D) are kept:
-/// emoji sequences and Arabic, Persian and Indic shaping depend on them. The
-/// line and paragraph separators and the narrow no-break space are visible
-/// and are mapped in [`sanitize_notes`] rather than listed here.
+/// word joiner and invisible operators, the deprecated format controls
+/// U+206A to U+206F (symmetric swapping, Arabic form shaping, digit shapes),
+/// soft hyphen, Mongolian vowel separator, interlinear annotation controls
+/// and the tag characters used to hide text.
+///
+/// Kept on purpose, although invisible: the zero-width joiner and non-joiner
+/// (U+200C, U+200D), which emoji sequences and Arabic, Persian and Indic
+/// shaping depend on, and the variation selectors (U+FE00 to U+FE0F, U+E0100
+/// to U+E01EF), which choose emoji presentation and the ideograph variants
+/// used in names; they alter one glyph, not how the text around it reads.
+/// The line and paragraph separators and the narrow no-break space are
+/// visible and are mapped in [`sanitize_notes`] rather than listed here.
 fn is_invisible_formatting(c: char) -> bool {
     matches!(
         c,
@@ -380,6 +390,7 @@ fn is_invisible_formatting(c: char) -> bool {
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
+            | '\u{206A}'..='\u{206F}'
             | '\u{FEFF}'
             | '\u{FFF9}'..='\u{FFFB}'
             | '\u{E0000}'..='\u{E007F}'
@@ -771,6 +782,22 @@ mod tests {
             "one\ntwo\nthree four 1 000"
         );
         assert_eq!(sanitize_notes("a\u{2029}\u{2029}\u{2029}b"), "a\n\nb");
+        // So does every other line terminator; CRLF stays a single break.
+        assert_eq!(
+            sanitize_notes("mac\rnel\u{85}vt\u{b}ff\u{c}crlf\r\nend"),
+            "mac\nnel\nvt\nff\ncrlf\nend"
+        );
+        assert_eq!(sanitize_notes("a\r\rb\r\n\r\n\r\nc\r"), "a\n\nb\n\nc");
+        // Deprecated format controls vanish; variation selectors, which only
+        // pick a glyph, stay with the character they follow.
+        assert_eq!(
+            sanitize_notes("x\u{206A}\u{206B}\u{206C}\u{206D}\u{206E}\u{206F}y"),
+            "xy"
+        );
+        assert_eq!(
+            sanitize_notes("\u{2764}\u{FE0F} \u{845B}\u{E0100}"),
+            "\u{2764}\u{FE0F} \u{845B}\u{E0100}"
+        );
         // Joiners stay: emoji sequences and cursive scripts need them.
         assert_eq!(
             sanitize_notes("\u{1F469}\u{200D}\u{1F4BB} \u{0646}\u{200C}\u{0627}"),
