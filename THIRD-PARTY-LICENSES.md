@@ -4,7 +4,7 @@ Any2Odyssey itself is GPL-3.0-only (see `LICENSE` and `NOTICE`). This file lists
 
 ## Rust crates
 
-The 157 crates below are the normal (non-build, non-test) dependencies of the `any2odyssey` binary for the `x86_64-pc-windows-msvc` target, as `Cargo.lock` resolves them. Their licenses are permissive (MIT, Apache-2.0, Zlib, BSD, ISC, BSL-1.0, Unicode-3.0, 0BSD, Unlicense) or file-level copyleft compatible with the GPL (MPL-2.0 for `option-ext`); the `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` entry is `epaint_default_fonts`, whose embedded fonts are listed under "Fonts embedded in the application". The license each crate is used under, its copyright notices and the full license texts are in [License texts and copyright notices for the Rust crates](#license-texts-and-copyright-notices-for-the-rust-crates) below.
+The 161 crates below are the normal (non-build, non-test) dependencies of the `any2odyssey` binary for the `x86_64-pc-windows-msvc` target, as `Cargo.lock` resolves them. Their licenses are permissive (MIT, Apache-2.0, Zlib, BSD, ISC, BSL-1.0, Unicode-3.0, 0BSD, Unlicense) or file-level copyleft compatible with the GPL (MPL-2.0 for `option-ext`); the `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` entry is `epaint_default_fonts`, whose embedded fonts are listed under "Fonts embedded in the application". The license each crate is used under, its copyright notices and the full license texts are in [License texts and copyright notices for the Rust crates](#license-texts-and-copyright-notices-for-the-rust-crates) below.
 
 Regenerate the table after changing dependencies:
 
@@ -48,10 +48,12 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `emath` | 0.33.3 | MIT OR Apache-2.0 |
 | `epaint` | 0.33.3 | MIT OR Apache-2.0 |
 | `epaint_default_fonts` | 0.33.3 | (MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0 |
+| `equivalent` | 1.0.3 | Apache-2.0 OR MIT |
 | `error-code` | 3.4.0 | BSL-1.0 |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT |
 | `fdeflate` | 0.3.7 | MIT OR Apache-2.0 |
 | `flate2` | 1.1.11 | MIT OR Apache-2.0 |
+| `foldhash` | 0.2.0 | Zlib |
 | `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 |
 | `generic-array` | 0.14.7 | MIT |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 |
@@ -61,6 +63,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `glutin-winit` | 0.5.0 | MIT |
 | `glutin_egl_sys` | 0.7.1 | Apache-2.0 |
 | `glutin_wgl_sys` | 0.6.1 | Apache-2.0 |
+| `hashbrown` | 0.17.1 | MIT OR Apache-2.0 |
 | `html-escape` | 0.2.15 | MIT |
 | `icu_collections` | 2.4.0 | Unicode-3.0 |
 | `icu_locale_core` | 2.4.0 | Unicode-3.0 |
@@ -72,6 +75,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `idna` | 1.1.0 | MIT OR Apache-2.0 |
 | `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT |
 | `image` | 0.25.10 | MIT OR Apache-2.0 |
+| `indexmap` | 2.14.2 | Apache-2.0 OR MIT |
 | `itoa` | 1.0.18 | MIT OR Apache-2.0 |
 | `keyboard-types` | 0.7.0 | MIT OR Apache-2.0 |
 | `libloading` | 0.8.9 | ISC |
@@ -174,7 +178,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 
 ## License texts and copyright notices for the Rust crates
 
-Where a crate offers a choice of licenses, Any2Odyssey uses it under the MIT license when that is one of the choices, and under the Apache License 2.0 otherwise (`moxcms` and `pxfm`, offered as BSD-3-Clause OR Apache-2.0). A crate with a single license, or with licenses joined by AND, is used under exactly those. The table gives the result for each crate, and the text of every license that applies as a result follows once: MIT, Apache-2.0, Unicode-3.0, ISC, BSL-1.0 and MPL-2.0. No crate in the list ships an Apache `NOTICE` file.
+Where a crate offers a choice of licenses, Any2Odyssey uses it under the MIT license when that is one of the choices, and under the Apache License 2.0 otherwise (`moxcms` and `pxfm`, offered as BSD-3-Clause OR Apache-2.0). A crate with a single license, or with licenses joined by AND, is used under exactly those. The table gives the result for each crate, and the text of every license that applies as a result follows once: MIT, Apache-2.0, Unicode-3.0, ISC, BSL-1.0, Zlib and MPL-2.0. No crate in the list ships an Apache `NOTICE` file.
 
 The notices are the copyright lines of the license and copyright files in each crate's source package as published on crates.io, in the version listed. Where a package has no such file, or its license file names no holder, the authors field of its manifest is given instead and marked as such. `crossbeam-channel` also carries third-party notices (Go, a Creative Commons licensed example) for code in its `tests/` and `examples/` folders only; that code is not compiled into Any2Odyssey.
 
@@ -214,10 +218,12 @@ The notices are the copyright lines of the license and copyright files in each c
 | `emath` 0.33.3 | MIT | no notice in the package; authors per its manifest: Emil Ernerfeldt |
 | `epaint` 0.33.3 | MIT | no notice in the package; authors per its manifest: Emil Ernerfeldt |
 | `epaint_default_fonts` 0.33.3 | MIT (code); fonts: see the fonts section | no notice in the package; authors per its manifest: Emil Ernerfeldt |
+| `equivalent` 1.0.3 | MIT | `Copyright (c) 2016--2023` (the file names no holder, and the manifest has no authors field) |
 | `error-code` 3.4.0 | BSL-1.0 | no notice in the package; authors per its manifest: Douman |
 | `fastrand` 2.5.0 | MIT | no notice in the package; authors per its manifest: Stjepan Glavina |
 | `fdeflate` 0.3.7 | MIT | no notice in the package; authors per its manifest: The image-rs Developers |
 | `flate2` 1.1.11 | MIT | `Copyright (c) 2014-2026 Alex Crichton` |
+| `foldhash` 0.2.0 | Zlib | `Copyright (c) 2024 Orson Peters` |
 | `form_urlencoded` 1.2.2 | MIT | `Copyright (c) 2013-2016 The rust-url developers` |
 | `generic-array` 0.14.7 | MIT | `Copyright (c) 2015 Bartłomiej Kamiński` |
 | `getrandom` 0.4.3 | MIT | `Copyright (c) 2018-2026 The rust-random Project Developers`; `Copyright (c) 2014 The Rust Project Developers` |
@@ -227,6 +233,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `glutin-winit` 0.5.0 | MIT | `Copyright © 2022 Kirill Chibisov` |
 | `glutin_egl_sys` 0.7.1 | Apache-2.0 | `Copyright 2022 Kirill Chibisov` |
 | `glutin_wgl_sys` 0.6.1 | Apache-2.0 | `Copyright 2022 Kirill Chibisov` |
+| `hashbrown` 0.17.1 | MIT | `Copyright (c) 2016 Amanieu d'Antras` |
 | `html-escape` 0.2.15 | MIT | `Copyright (c) 2020 magiclen.org (Ron Li)` |
 | `icu_collections` 2.4.0 | Unicode-3.0 | `Copyright © 2020-2024 Unicode, Inc.` |
 | `icu_locale_core` 2.4.0 | Unicode-3.0 | `Copyright © 2020-2024 Unicode, Inc.` |
@@ -238,6 +245,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `idna` 1.1.0 | MIT | `Copyright (c) 2013-2025 The rust-url developers` |
 | `idna_adapter` 1.2.2 | MIT | `Copyright (c) The rust-url developers` |
 | `image` 0.25.10 | MIT | no notice in the package; authors per its manifest: The image-rs Developers |
+| `indexmap` 2.14.2 | MIT | `Copyright (c) 2016--2017` (the file names no holder, and the manifest has no authors field) |
 | `itoa` 1.0.18 | MIT | no notice in the package; authors per its manifest: David Tolnay |
 | `keyboard-types` 0.7.0 | MIT | `Copyright (c) 2017 Pyfisch` |
 | `libloading` 0.8.9 | ISC | `Copyright © 2015, Simonas Kazlauskas` |
@@ -736,6 +744,32 @@ SHALL THE COPYRIGHT HOLDERS OR ANYONE DISTRIBUTING THE SOFTWARE BE LIABLE
 FOR ANY DAMAGES OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE,
 ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+### zlib License
+
+Applies to: `foldhash`.
+
+```text
+Copyright (c) 2024 Orson Peters
+
+This software is provided 'as-is', without any express or implied warranty. In
+no event will the authors be held liable for any damages arising from the use of
+this software.
+
+Permission is granted to anyone to use this software for any purpose, including
+commercial applications, and to alter it and redistribute it freely, subject to
+the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+    that you wrote the original software. If you use this software in a product,
+    an acknowledgment in the product documentation would be appreciated but is
+    not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
 ```
 
 ### Mozilla Public License 2.0

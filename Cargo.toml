@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/core", "crates/windows", "crates/app", "tools/iconmaker"]
 
 [workspace.package]
-version = "0.8.6"
+version = "0.8.7"
 edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-only"
@@ -11,8 +11,8 @@ repository = "https://github.com/jlobue10/Any2Odyssey"
 authors = ["Jonathan LoBue <jlobue10@gmail.com>"]
 
 [workspace.dependencies]
-any2odyssey-core = { path = "crates/core", version = "0.8.6" }
-any2odyssey-windows = { path = "crates/windows", version = "0.8.6" }
+any2odyssey-core = { path = "crates/core", version = "0.8.7" }
+any2odyssey-windows = { path = "crates/windows", version = "0.8.7" }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: Samsung's OverlaySettings.json is read, edited and written
 # back, and its keys must come back in the order Samsung wrote them.

@@ -2,6 +2,59 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.8.7 (2026-11-10)
+
+Ninth round: a third full audit by reviewers who had not seen the earlier reports, an inspection of the published 0.8.6 package itself, and a parallel round whose three PRs are folded in (#62 to #64). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.6 ones below.
+
+### Fixed
+
+Build and release:
+
+- **The program no longer needs the Visual C++ Redistributable.** The published 0.8.6 executable imports `VCRUNTIME140.dll` when it loads; that DLL is not part of Windows, so on a PC that never had the redistributable installed the program does not start. A full installation usually escapes because Samsung's software brings the runtime along; a controls-only installation on a clean Windows 11 is the likely failure. The C runtime is now linked statically, and the built-executable check fails if the import returns. (#58)
+- **The release job packaged an executable other than the one it tested.** Its guide check ran `cargo run -p any2odyssey` after the tests, which relinked the executable, so 0.8.6 shipped a binary the manifest check and both installer test passes had never seen. The check runs the built executable now, and packaging refuses one whose hash changed since it was verified. The release builds with a read-only token and publishes from a separate job that runs no repository code; it verifies the expanded ZIP with the installer's preflight and never replaces the assets of an existing release. (#58, #63, #65)
+
+Worker (Windows):
+
+- **A lost capture device or display is detected.** After a graphics-driver reset or a monitor that re-enumerated, nothing reported the broken pipeline: the last image could stay on screen under status "3D active" and recovery never ran. The worker now asks the Direct3D device for its removed reason once a second and listens for the captured display being closed; both go to recovery. A frame whose size differs from the display's is an error instead of black output. (#59)
+- A window close sent to the capture surface (`taskkill` without `/F`) no longer ends the worker as "Renderer stopped cleanly" with a stale status; the surface ignores it, and a message loop that ends without a stop request says so and exits as an error. (#59)
+- **Selected-window and active-window modes say when there is nothing to show.** A closed, minimized or uncapturable source left the fill colour on screen with status "3D active" and nothing in the log. The status now reads "No source window to show … waiting for it", stays up when conversion becomes ready meanwhile, and gives way when a source returns; each transition is logged once with its reason. (#59, #64)
+- The log line for raising the overlay on a foreground change is summarised once a minute instead of written every time; the watchdog names a stop the worker began itself; a process name loses its `.exe` in any letter case; unused code and features are removed. (#59)
+
+Controls:
+
+- **The status line wraps.** A long message ran on one line and pushed Turn on 3D and the Apply card out of the window, including the damaged-settings message that tells you to click Apply. (#61)
+- **Refresh can no longer sit under Apply.** The source-window box grew with the selected title; with a long title a click on Refresh landed on Apply and restarted conversion. Long titles are elided, with the full title on hover. (#61)
+- **Capture mode, input format, source window and Keep 3D above apps wait for Apply**, as the sliders already did. They were written straight into the live settings, so any other save kept them and a recovery relaunch or the tray's Restart used them without a word. Unapplied changes appears beside Apply; Turn on 3D, the tray and recovery use the applied settings. (#61)
+- **The controls refuse to start a worker of another version** and say which is which; the installer refuses to replace a newer worker that another Windows account installed, unless `-AllowDowngrade`. On a shared PC a second account's installation used to swap the worker under the first account's controls. (#61, #65)
+- Shortcut and tray problems are shown in a notice line of their own, which automatic start cannot overwrite; an action's message stays on the status line for a few seconds instead of being replaced within a quarter second; an OS light/dark switch no longer leaves a half-styled page; Show controls keeps a maximized window maximized; starting conversion is refused during a deferred quit. (#61)
+- Custom buttons and Help topics announce a name and role to assistive software, and Help topics can be reached and chosen from the keyboard. Non-Unicode arguments and an option-like `--export-guide` path are usage errors; usage errors print to the terminal in every mode; the About page wraps long paths. (#61)
+
+Core:
+
+- **Automatic recovery counts failures in a row.** The count was cleared only by starting conversion yourself, so three recovered hiccups in one session used recovery up for good; a display colour-mode change restarts the renderer through recovery, so toggling HDR four times turned 3D off. The count starts again once a relaunched worker has run normally for a minute. Unticking *Recover* during a restart you asked for no longer cancels conversion because of an earlier, completed recovery. (#60)
+- A window fitted into the output is no longer one pixel short for about one source size in fourteen (1680×1050 was 3455 wide instead of 3456). Each `companion.log` line is written in one piece, so lines from the controls and the worker no longer interleave. A conversion log trimmed to its tail no longer yields "ready" from the previous session's marker, and a log that cannot be read is reported. Samsung's key order survives the rewrite of `OverlaySettings.json`. (#60)
+
+Installer:
+
+- **Reinstalling an older release after an uninstall works**, and `Install.cmd -AllowDowngrade` exists: the record kept on uninstall counted as an installed version, and `Install.cmd` forwarded no arguments. (#62, #65)
+- **Uninstall completes when Windows reports no Desktop or Start-menu folder**; it used to fail after the worker had already been removed. Shortcuts are written and read through the shell's Unicode interface, so a profile folder outside the ANSI code page gets a correct shortcut. (#62, #65)
+- Failures say what failed: a backup that cannot be deleted after a complete installation is not "Installation did not complete", a file in use is retried and not reported as a rollback problem, and the elevated uninstall helper's reason is shown instead of "retry using the same account". The uninstall window opened from Installed apps stays open when it has something to tell you. Running instances are judged per Windows session; the launchers say to extract the ZIP when started from inside it and no longer inherit PowerShell 7's module path. The full converter's need for an administrator account is stated. (#62, #65)
+- The installer tests no longer signal the real quit event (running them next to a live Any2Odyssey told it to quit), and the elevated uninstall helper's real code runs in a test for the first time. (#65)
+
+Documentation, notices and CI:
+
+- `THIRD-PARTY-LICENSES.md` carries the license texts and per-crate notices instead of a pointer to crates.io, and lists the six embedded typefaces; `installer/README.md` ships in the ZIP where README links to it. `rust-version` is 1.88, what the locked dependencies need. Every push to `main` keeps its CI run (0.8.6 said so; GitHub still cancelled the queued one). (#63, #65)
+
+### Notes on earlier entries
+
+- 0.8.6, worker: "each of the three ways the message loop can end" missed a fourth, the unrequested window close fixed above.
+- 0.8.6, CI: "every push to `main` keeps its artifacts" was not yet true; see above.
+- 0.8.6, package: the published executable differs from the one the release job tested, and needs the Visual C++ Redistributable; both are fixed here. Its contents otherwise match the tagged source (verified file by file) and its checksum verifies.
+
+### Hardware verification
+
+Pending. To check on the G90XF with the 0.8.7 package: a normal whole-desktop start and both capture diagnostics (the new frame-size check must not trip) (#59); disable and re-enable the display adapter while converting, and power-cycle the monitor (#59); `taskkill` the worker without `/F` (#59); Selected-window mode with the source closed, minimized and restored, and started with it minimized (#59, #64); toggle HDR more than three times a minute apart (#60); a long window title in the source box, then click Refresh (#61); maximize, hide to the tray, restore (#61); change the capture mode without Apply, hide to the tray and reopen (#61); copy an older worker over the installed one and press Turn on 3D (#61); uninstall 0.8.7, install 0.8.0, then `Install.cmd -AllowDowngrade` paths (#65); decline and accept the elevation prompt on uninstall (#65); start the controls on a Windows PC or VM without the Visual C++ Redistributable (#58). The first tag is also the first run of the two-job release workflow (#65).
+
 ## 0.8.6 (2026-11-10)
 
 Eighth round: a second full audit of the code, installer and workflows after the sixth and seventh rounds, plus three Codex follow-ups (#49, #55, #56). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.5 ones below.
