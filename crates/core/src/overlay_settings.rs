@@ -1,6 +1,13 @@
 //! Samsung's `OverlaySettings.json` carries the depth/pop-out the engine uses.
 //! The worker writes the chosen values into the section matching the input
 //! format right before starting the engine, after backing up the original once.
+//!
+//! What survives the rewrite: every key and value we do not set, in the
+//! order Samsung wrote them (the workspace builds `serde_json` with
+//! `preserve_order`; without it every object came back sorted
+//! alphabetically). What does not: the file's own whitespace and indentation
+//! (it is written back pretty-printed with two spaces), a byte-order mark,
+//! and the earlier of two duplicate keys, which JSON readers ignore anyway.
 
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -8,7 +15,9 @@ use std::path::Path;
 pub const SECTION_SBS: &str = "SideBySideVideo";
 pub const SECTION_STANDARD: &str = "StandardVideo";
 
-/// Apply depth/pop-out to the in-memory document. Unknown content is preserved.
+/// Apply depth/pop-out to the in-memory document. Unknown content is
+/// preserved and keeps its place; a key we set keeps its position when it
+/// exists and is appended otherwise.
 pub fn apply(doc: &mut Value, side_by_side: bool, depth: f64, popout: f64) {
     if !doc.is_object() {
         *doc = Value::Object(Map::new());
@@ -129,6 +138,53 @@ mod tests {
         apply(&mut doc, true, 1.25, -0.5);
         assert_eq!(doc["SideBySideVideo"]["3D Depth"], "1.250000");
         assert_eq!(doc["SideBySideVideo"]["3D Popout"], "-0.500000");
+    }
+
+    #[test]
+    fn samsungs_key_order_survives_the_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        // Deliberately not alphabetical at any level.
+        std::fs::write(
+            &path,
+            r#"{"Zoom":1,"StandardVideo":{"Overlay Off":false,"3D Popout":"0.100000","Custom":[3,1,2],"3D Depth":"0.500000"},"Alpha":{"b":1,"a":2},"SideBySideVideo":{"3D Depth":"1.000000"}}"#,
+        )
+        .unwrap();
+        update_file(&path, &backup, false, 0.9, 0.25).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let position = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from {text}"))
+        };
+        let order = [
+            "\"Zoom\"",
+            "\"StandardVideo\"",
+            "\"Overlay Off\": true",
+            "\"3D Popout\": \"0.250000\"",
+            "\"Custom\"",
+            "\"3D Depth\": \"0.900000\"",
+            // New in this section, so appended to it.
+            "\"3D Off\": false",
+            "\"Alpha\"",
+            "\"b\": 1",
+            "\"a\": 2",
+            "\"SideBySideVideo\"",
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                position(pair[0]) < position(pair[1]),
+                "{} should come before {} in {text}",
+                pair[0],
+                pair[1]
+            );
+        }
+        // A section that did not exist goes last.
+        std::fs::write(&path, r#"{"Zoom":1,"Alpha":2}"#).unwrap();
+        update_file(&path, &backup, true, 1.0, 0.0).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.find("\"Alpha\"").unwrap() < text.find("\"SideBySideVideo\"").unwrap());
+        assert!(text.find("\"Zoom\"").unwrap() < text.find("\"Alpha\"").unwrap());
     }
 
     #[test]
