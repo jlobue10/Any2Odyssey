@@ -43,9 +43,21 @@ impl ControlsState {
             ui.horizontal(|ui| {
                 let button_width = 190.0;
                 let status_width = (ui.available_width() - button_width - 12.0).max(100.0);
-                ui.allocate_ui(egui::vec2(status_width, 0.0), |ui| {
-                    ui.label(RichText::new(&core.status).color(color(p.text)));
-                });
+                // A vertical child with a width cap: inside the row's own
+                // horizontal layout a label never wraps, so a long status
+                // (every error is one) ran off the window and pushed the
+                // button out with it.
+                ui.allocate_ui_with_layout(
+                    egui::vec2(status_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_max_width(status_width);
+                        ui.add(
+                            egui::Label::new(RichText::new(&core.status).color(color(p.text)))
+                                .wrap(),
+                        );
+                    },
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let label = if core.wanted() {
                         "Turn off 3D"

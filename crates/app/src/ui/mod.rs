@@ -698,6 +698,9 @@ impl eframe::App for App {
 fn _unused(_: Color32) {}
 
 #[cfg(test)]
+mod layout_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use any2odyssey_core::log::Logger;
