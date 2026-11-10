@@ -5,7 +5,7 @@ members = ["crates/core", "crates/windows", "crates/app", "tools/iconmaker"]
 [workspace.package]
 version = "0.8.6"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.85"
 license = "GPL-3.0-only"
 repository = "https://github.com/jlobue10/Any2Odyssey"
 authors = ["Jonathan LoBue <jlobue10@gmail.com>"]
