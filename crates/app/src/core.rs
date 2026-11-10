@@ -299,6 +299,14 @@ impl Core {
     }
 
     pub fn start_conversion(&mut self) {
+        // A deferred quit is waiting for the worker to stop. A start asked
+        // for now (the button, Ctrl+Alt+F10, --toggle, a tray command) could
+        // not launch anything, but it did mark conversion as wanted again,
+        // which flipped the button and tray labels and suppressed the "3D is
+        // off" report while the process was on its way out.
+        if self.exiting {
+            return;
+        }
         self.status_sticky = false;
         if !self.save_preferences() {
             return;
@@ -363,6 +371,9 @@ impl Core {
     }
 
     pub fn restart(&mut self) {
+        if self.exiting {
+            return;
+        }
         self.status_sticky = false;
         if !self.save_preferences() {
             return;
@@ -1423,6 +1434,27 @@ mod tests {
         assert!(core.requests.contains(&UiRequest::ToggleTheme));
         core.poll(Instant::now());
         assert!(core.requests.contains(&UiRequest::Quit));
+    }
+
+    #[test]
+    fn nothing_starts_or_is_wanted_again_during_a_deferred_quit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = isolated(dir.path());
+        core.supervisor.start_requested();
+        // A stop is still in flight when the requests arrive.
+        let (_tx, rx) = mpsc::channel();
+        core.operation = Some(rx);
+        core.quit();
+        assert!(!core.wanted());
+        let status = core.status.clone();
+        core.toggle(); // the button, the hotkey, --toggle
+        core.start_conversion();
+        core.restart();
+        core.menu(MenuCommand::AlwaysConvertDesktop);
+        core.menu(MenuCommand::Restart);
+        assert!(!core.wanted(), "a start was accepted while quitting");
+        assert_eq!(core.status, status);
+        assert!(core.exiting);
     }
 
     #[test]
