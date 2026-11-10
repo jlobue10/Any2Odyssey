@@ -321,8 +321,11 @@ impl Mirror {
         let started = Instant::now();
         let hwnd = self.hwnd;
         let capture = self.desktop.as_mut().expect("desktop mode");
-        capture.present(hwnd)?;
-        self.capture_millis += started.elapsed().as_secs_f64() * 1000.0;
+        // The average is per presented frame; calls that found no new frame
+        // (and the once-a-second display queries they carry) are not frames.
+        if capture.present(hwnd)? {
+            self.capture_millis += started.elapsed().as_secs_f64() * 1000.0;
+        }
         let frames = capture.frames;
         let seconds = self.sampled.elapsed().as_secs_f64();
         if seconds >= 10.0 {
