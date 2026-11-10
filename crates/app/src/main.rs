@@ -10,6 +10,9 @@ mod platform;
 #[cfg(windows)]
 mod tray;
 mod ui;
+// Used by the Windows start path; compiled for tests everywhere.
+#[cfg(any(windows, test))]
+mod worker_version;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

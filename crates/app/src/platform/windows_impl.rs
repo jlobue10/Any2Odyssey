@@ -71,7 +71,25 @@ pub fn single_instance() -> Option<SingleInstance> {
 }
 
 pub fn validate() -> Result<(), String> {
-    engine::validate().map_err(|e| e.to_string())
+    engine::validate().map_err(|e| e.to_string())?;
+    worker_matches_controls()
+}
+
+/// Refuse to start a worker of another version than these controls; see
+/// `worker_version`. A version that cannot be read is logged and allowed.
+fn worker_matches_controls() -> Result<(), String> {
+    use crate::worker_version::{check, Agreement};
+    let installed = any2odyssey_windows::file_version::file_version(&paths::worker_exe());
+    match check(installed, update::Version::current()) {
+        Agreement::Same => Ok(()),
+        Agreement::Unknown => {
+            any2odyssey_core::log::Logger::default_location().log(
+                "The installed conversion worker's version could not be read; starting without the version check.",
+            );
+            Ok(())
+        }
+        Agreement::Mismatch(message) => Err(message),
+    }
 }
 
 pub fn list_windows(worker_pid: Option<u32>) -> Vec<(isize, String)> {

@@ -13,6 +13,7 @@ pub mod devices;
 pub mod diagnostics;
 pub mod display_color;
 pub mod engine;
+pub mod file_version;
 pub mod hotkeys;
 pub mod ipc;
 pub mod mirror;
