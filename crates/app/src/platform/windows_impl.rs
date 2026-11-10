@@ -11,7 +11,8 @@ use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    IsIconic, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+    AllowSetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 pub use any2odyssey_windows::ipc::ControlEvents;
@@ -44,6 +45,19 @@ pub fn test_offscreen() -> i32 {
 }
 
 pub fn signal(name: &str) -> bool {
+    // The running instance answers a show request with SetForegroundWindow,
+    // which Windows honours only for a process that owns the foreground or
+    // has been given the right by one that does. This launch (a shortcut, a
+    // jump-list task, a terminal) was started by the user and has that
+    // right; the instance that has been sitting in the tray does not, and
+    // its window would be restored without the keyboard focus, with a
+    // flashing taskbar button instead. Pass the right on before signalling.
+    // ASFW_ANY because the instance is known here only by its event name;
+    // the grant ends with the next user input. Failure changes nothing: the
+    // window is still shown, as before.
+    if name == ipc::SHOW_EVENT {
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
     any2odyssey_windows::ipc::signal(name)
 }
 
