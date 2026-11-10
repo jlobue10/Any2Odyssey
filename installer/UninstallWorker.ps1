@@ -14,7 +14,7 @@ function Assert-Any2OdysseyUninstallContext {
 function Remove-Any2OdysseyInstalledWorker {
  param([string]$HelperPath)
  $worker='C:\Program Files\Odyssey 3D Hub\Conversion\Any2OdysseyWorker.exe'
- if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Exit Any2Odyssey from its tray before removing the conversion worker.'}
+ if(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue){throw 'Any2Odyssey is still running, in this or another Windows account''s session. Exit it from its tray there before removing the conversion worker.'}
  if(Test-Path -LiteralPath $worker){Remove-Item -LiteralPath $worker}
  Remove-Item -LiteralPath $HelperPath
  $folder=Split-Path -Parent $HelperPath

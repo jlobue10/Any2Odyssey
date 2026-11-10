@@ -48,13 +48,23 @@ if(-not $ControlsOnly){
  if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Run Install.cmd or administrator PowerShell using the same Windows account as the existing installation.'}
  if(Get-Process Odyssey3DPlayer -ErrorAction SilentlyContinue){throw 'Stop conversion in Samsung player before installing.'}
 }
-$running=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue)
+# The worker beside Samsung's engine is one file per PC: a conversion running in another account's
+# session holds it open, and nothing here can ask that session to stop.
+if(-not $ControlsOnly){
+ $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
+ if(@(Get-Process Any2OdysseyWorker -ErrorAction SilentlyContinue | Where-Object {$_.SessionId -ne $session}).Count){throw 'Any2Odyssey is converting in another Windows account''s session. Sign in to that account and quit Any2Odyssey (or sign it out), then retry. No installed files were changed.'}
+}
+$running=Get-Any2OdysseySessionProcess
 if($running.Count){
  Write-Host 'Closing Any2Odyssey and waiting for its renderer to stop cleanly...'
- $signal=Start-Process -FilePath $binary -ArgumentList '--quit' -WindowStyle Hidden -Wait -PassThru
- if($signal.ExitCode){throw 'Could not request a clean shutdown. Quit Any2Odyssey from its tray and retry.'}
+ # Only the controls answer --quit. A worker left without them ends by itself within a second
+ # of noticing; asking would fail with nothing to ask, so just wait for it below.
+ if((Get-Any2OdysseySessionProcess -Name Any2Odyssey).Count){
+  $signal=Start-Process -FilePath $binary -ArgumentList '--quit' -WindowStyle Hidden -Wait -PassThru
+  if($signal.ExitCode){throw 'Could not request a clean shutdown. Quit Any2Odyssey from its tray and retry.'}
+ }
  $deadline=(Get-Date).AddSeconds(15)
- do{$remaining=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue);if(-not $remaining.Count){break};Start-Sleep -Milliseconds 250}while((Get-Date) -lt $deadline)
+ do{$remaining=Get-Any2OdysseySessionProcess;if(-not $remaining.Count){break};Start-Sleep -Milliseconds 250}while((Get-Date) -lt $deadline)
  if($remaining.Count){throw 'Any2Odyssey is still running. Quit it from its tray using its normal Windows account, then retry. No installed files were changed.'}
 }
 $stage=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-install-'+[Guid]::NewGuid().ToString('N'))
@@ -77,9 +87,8 @@ $record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionTex
 $record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8
 $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destination=Join-Path $app 'version.json'}
 $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destination=Join-Path $data 'install-result.json'}
-$shell=New-Object -ComObject WScript.Shell
-$shortcutSource=Join-Path $stage 'Any2Odyssey.lnk';$link=$shell.CreateShortcut($shortcutSource)
-$link.TargetPath=Join-Path $app 'Any2Odyssey.exe';$link.WorkingDirectory=$app;$link.IconLocation=(Join-Path $app 'Any2Odyssey.ico')+',0';$link.Description='Any2Odyssey - continuous Odyssey 3D; right-click the tray icon for controls.';$link.Save()
+$shortcutSource=Join-Path $stage 'Any2Odyssey.lnk'
+New-Any2OdysseyShortcut -Path $shortcutSource -Target (Join-Path $app 'Any2Odyssey.exe') -WorkingDirectory $app -Icon (Join-Path $app 'Any2Odyssey.ico') -Description 'Any2Odyssey - continuous Odyssey 3D; right-click the tray icon for controls.'
 foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){$operations+=[pscustomobject]@{Source=$shortcutSource;Destination=Join-Path $folder 'Any2Odyssey.lnk'}}
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}

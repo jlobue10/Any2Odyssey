@@ -7,7 +7,9 @@ $ErrorActionPreference='Stop'
 $previousSkip=$env:ANY2ODYSSEY_SKIP_OS_CHECK;$env:ANY2ODYSSEY_SKIP_OS_CHECK='1'
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
-$root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-flow-test-'+[Guid]::NewGuid().ToString('N'))
+# The folder name carries Cyrillic, Polish and CJK letters (written as code points to keep this file
+# ASCII): a profile folder outside the ANSI code page broke shortcut creation through WScript.Shell.
+$root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-flow-test-'+[char]0x0416+[char]0x0142+[char]0x4E2D+'-'+[Guid]::NewGuid().ToString('N'))
 $package=Join-Path $root 'package';$local=Join-Path $root 'local';$engine=Join-Path $root 'engine';$desktop=Join-Path $root 'desktop';$programs=Join-Path $root 'programs'
 $registration='HKCU:\Software\Any2OdysseyInstallerTests\'+[Guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Path $package,$local,$engine,$desktop,$programs,(Join-Path $package 'build'),(Join-Path $package 'assets') | Out-Null
@@ -64,9 +66,9 @@ try{
  Assert ((Test-Path -LiteralPath $ownerFile) -and (Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Full install marks the helper with the installing account SID'
  Assert (([IO.File]::ReadAllBytes($ownerFile))[0] -eq [byte][char]'S') 'Owner marker is plain ASCII without a byte-order mark'
  Assert ((Test-Path -LiteralPath (Join-Path $app 'NOTICE')) -and (Test-Path -LiteralPath (Join-Path $app 'THIRD-PARTY-LICENSES.md'))) 'Credit and license files are installed'
- $shell=New-Object -ComObject WScript.Shell
- Assert ($shell.CreateShortcut((Join-Path $desktop 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
- Assert ($shell.CreateShortcut((Join-Path $programs 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
+ . (Join-Path $installerDir 'InstallSupport.ps1')
+ Assert ((Get-Any2OdysseyShortcutTarget -Path (Join-Path $desktop 'Any2Odyssey.lnk')) -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
+ Assert ((Get-Any2OdysseyShortcutTarget -Path (Join-Path $programs 'Any2Odyssey.lnk')) -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
  New-ItemProperty -LiteralPath $registration -Name EstimatedSize -Value 4096 -PropertyType DWord -Force | Out-Null
  # Shared PC: another account ran Install.cmd in between; the repair must say so and take the marker over.
  [IO.File]::WriteAllText($ownerFile,'S-1-5-21-1-2-3-1001',[Text.UTF8Encoding]::new($false))
