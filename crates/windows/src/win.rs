@@ -2,7 +2,7 @@
 
 use any2odyssey_core::geometry::Rect;
 use windows::core::BOOL;
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmQueryThumbnailSourceSize, DwmRegisterThumbnail,
@@ -334,11 +334,6 @@ impl Drop for Thumbnail {
     fn drop(&mut self) {
         let _ = unsafe { DwmUnregisterThumbnail(self.0) };
     }
-}
-
-/// Convenience for APIs that want a mutable UTF-16 buffer.
-pub fn pwstr(buf: &mut [u16]) -> PWSTR {
-    PWSTR(buf.as_mut_ptr())
 }
 
 #[allow(dead_code)]

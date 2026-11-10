@@ -157,7 +157,6 @@ pub struct Mirror {
     hwnd: HWND,
     mode: CaptureMode,
     screen: Rect,
-    device_name: String,
     parent_pid: u32,
     selected: HWND,
     last_active: HWND,
@@ -208,7 +207,6 @@ impl Mirror {
             hwnd,
             mode: prefs.mode,
             screen,
-            device_name: device_name.to_owned(),
             parent_pid,
             selected,
             last_active: HWND::default(),
@@ -250,9 +248,6 @@ impl Mirror {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
-    }
-    pub fn is_desktop(&self) -> bool {
-        self.desktop.is_some()
     }
     pub fn capture(&mut self) -> Option<&mut GpuDesktopCapture> {
         self.desktop.as_mut()
@@ -471,9 +466,6 @@ impl Mirror {
         }
     }
 
-    pub fn device_name(&self) -> &str {
-        &self.device_name
-    }
     pub fn poll_interval() -> Duration {
         Duration::from_millis(500)
     }

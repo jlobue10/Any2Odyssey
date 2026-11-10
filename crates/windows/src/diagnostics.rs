@@ -15,12 +15,11 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyWindow, DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
-    WM_TIMER,
+    DestroyWindow, DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
 };
 
 use crate::capture::{GpuDesktopCapture, GpuSurface};
-use crate::mirror::{create_plain_window, kill_timer, set_timer};
+use crate::mirror::create_plain_window;
 use crate::win;
 
 #[derive(Serialize)]
@@ -407,12 +406,6 @@ pub fn test_offscreen() -> i32 {
         ),
         Err(e) => report(false, e, outside),
     }
-}
-
-/// Keep the unused-import lints quiet for message helpers used only on some paths.
-#[allow(dead_code)]
-fn _unused(_: HWND, _: &MSG) {
-    let _ = (GetMessageW, WM_TIMER, set_timer, kill_timer);
 }
 
 #[cfg(test)]

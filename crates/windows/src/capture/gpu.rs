@@ -220,10 +220,6 @@ impl GpuDesktopCapture {
         })
     }
 
-    pub fn device(&self) -> &ID3D11Device {
-        &self.device
-    }
-
     /// Present the newest frame into `window`'s swap chain. `Ok(false)` when
     /// no new frame was available.
     pub fn present(&mut self, window: HWND) -> Result<bool, String> {
