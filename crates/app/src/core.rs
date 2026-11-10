@@ -742,20 +742,28 @@ impl Core {
                 ));
             }
             (true, None) => {
-                if let Some(worker) = &self.worker {
-                    if let Some(status) = read_status(worker.pid()) {
-                        self.show_worker_state(status, now);
+                let pid = self.worker.as_ref().map(Worker::pid);
+                if let Some(status) = pid.and_then(read_worker_status) {
+                    if status.ready {
+                        // This start, or this recovery attempt, succeeded.
+                        self.supervisor.worker_ready(now);
                     }
+                    self.show_worker_state(status.state, now);
                 }
             }
         }
     }
 }
 
-fn read_status(worker_pid: u32) -> Option<String> {
+/// The status file, when it was written by the worker with this pid.
+fn read_worker_status(worker_pid: u32) -> Option<WorkerStatus> {
     let text = std::fs::read_to_string(paths::worker_status_file()).ok()?;
     let status: WorkerStatus = serde_json::from_str(&text).ok()?;
-    (status.pid == worker_pid).then_some(status.state)
+    (status.pid == worker_pid).then_some(status)
+}
+
+fn read_status(worker_pid: u32) -> Option<String> {
+    read_worker_status(worker_pid).map(|status| status.state)
 }
 
 /// Open a page from an update result in the browser. Only GitHub's own hosts

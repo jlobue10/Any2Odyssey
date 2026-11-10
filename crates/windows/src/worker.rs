@@ -390,16 +390,29 @@ fn run_inner(
                 shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
-            if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
+            if !ready
+                && overlay.attached()
+                && readiness.poll_or_report(|e| {
+                    log(&format!(
+                        "Cannot read Samsung's conversion log: {e}. Readiness cannot be detected until it can be read."
+                    ))
+                })
+            {
                 ready = true;
-                report(&format!(
+                // `ready` in the status file, not the wording of the state,
+                // tells the controls that this start or recovery succeeded.
+                let state = format!(
                     "3D active — click-through overlay; {}",
                     if prefs.keep_overlay_on_top {
                         "stays above apps"
                     } else {
                         "Ctrl+Alt+F8 restores it"
                     }
-                ));
+                );
+                let _ = any2odyssey_core::fsutil::write_json_atomic(
+                    &paths::worker_status_file(),
+                    &WorkerStatus::ready_now(state, current_pid()),
+                );
             }
             if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
                 report("Conversion did not initialize. See conversion log.");
