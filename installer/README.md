@@ -53,7 +53,7 @@ THIRD-PARTY-LICENSES.md
 Install.cmd  Install-GUI.cmd  Install-Launcher.ps1  install.ps1  InstallSupport.ps1  Uninstall.ps1  UninstallWorker.ps1
 ```
 
-`scripts/package.ps1` builds this layout into `dist/Any2Odyssey-<version>-windows-x64.zip`.
+`scripts/package.ps1` builds this layout into `dist/Any2Odyssey-<version>-windows-x64.zip`. The ZIP also carries what the installer does not need: `README.md`, `CHANGELOG.md`, `docs\`, the PNG assets and this file as `installer\README.md`, the path `README.md` links to. The script stops if any relative link in the packaged `README.md` has no target in the package.
 
 ## Differences from the Any2Odd installer
 

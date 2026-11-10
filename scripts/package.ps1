@@ -17,7 +17,7 @@ $dist=Join-Path $repo 'dist'
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 # Fresh staging directory: never pick up logs, diagnostics or Samsung assets.
 $stage=Join-Path $dist ('stage-'+[Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $stage 'build'),(Join-Path $stage 'assets'),(Join-Path $stage 'docs'),(Join-Path $stage 'docs\assets') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $stage 'build'),(Join-Path $stage 'assets'),(Join-Path $stage 'docs'),(Join-Path $stage 'docs\assets'),(Join-Path $stage 'installer') -Force | Out-Null
 Copy-Item -LiteralPath $Binary -Destination (Join-Path $stage 'build\Any2Odyssey.exe')
 foreach($name in @('Any2Odyssey.ico','Any2Odyssey.png','Any2Odyssey-wordmark.png')){Copy-Item -LiteralPath (Join-Path $repo ('assets\'+$name)) -Destination (Join-Path $stage 'assets')}
 foreach($name in @('README.md','CHANGELOG.md','LICENSE','NOTICE','THIRD-PARTY-LICENSES.md','VERSION')){Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $stage}
@@ -27,6 +27,14 @@ Get-ChildItem -LiteralPath (Join-Path $repo 'docs') -Filter '*.md' -File | ForEa
 # README.md links the controls screenshots; ship them so the packaged copy has no broken images.
 Get-ChildItem -LiteralPath (Join-Path $repo 'docs\assets') -Filter '*.png' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage 'docs\assets') }
 foreach($name in @('install.ps1','InstallSupport.ps1','Install-Launcher.ps1','Uninstall.ps1','UninstallWorker.ps1','Install.cmd','Install-GUI.cmd')){Copy-Item -LiteralPath (Join-Path $repo ('installer\'+$name)) -Destination $stage}
+# README.md links to installer/README.md (accounts, trust model, limits); it keeps that path in the package.
+Copy-Item -LiteralPath (Join-Path $repo 'installer\README.md') -Destination (Join-Path $stage 'installer')
+# Every relative link in the packaged README must lead to a file in the package: 0.8.6 shipped one that did not.
+foreach($link in [regex]::Matches((Get-Content -LiteralPath (Join-Path $stage 'README.md') -Raw),'\]\(([^)#\s]+)')){
+ $target=$link.Groups[1].Value
+ if($target -match '^[A-Za-z][A-Za-z0-9+.-]*:'){continue}
+ if(-not (Test-Path -LiteralPath (Join-Path $stage $target))){throw "README.md links to '$target', which is not in the package."}
+}
 $zip=Join-Path $dist ('Any2Odyssey-'+$version+'-windows-x64.zip')
 if(Test-Path -LiteralPath $zip){Remove-Item -LiteralPath $zip}
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
