@@ -390,7 +390,14 @@ fn run_inner(
                 shutdown(&mut surface, &mut started, Some(exit_code::RENDERER_ERROR));
                 continue;
             }
-            if !ready && overlay.attached() && readiness.poll().unwrap_or(false) {
+            if !ready
+                && overlay.attached()
+                && readiness.poll_or_report(|e| {
+                    log(&format!(
+                        "Cannot read Samsung's conversion log: {e}. Readiness cannot be detected until it can be read."
+                    ))
+                })
+            {
                 ready = true;
                 // `ready` in the status file, not the wording of the state,
                 // tells the controls that this start or recovery succeeded.
