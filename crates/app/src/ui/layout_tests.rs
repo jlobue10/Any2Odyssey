@@ -25,6 +25,10 @@ struct Painted {
 }
 
 struct Harness {
+    /// What the last frame reported to assistive output.
+    events: Vec<egui::output::OutputEvent>,
+    /// Outlines the last frame stroked, with their colour.
+    outlines: Vec<(Rect, egui::Color32)>,
     app: App,
     core: Arc<Mutex<Core>>,
     ctx: egui::Context,
@@ -61,6 +65,8 @@ impl Harness {
             screenshot_taken: false,
         };
         Harness {
+            events: Vec::new(),
+            outlines: Vec::new(),
             app,
             core,
             ctx,
@@ -92,9 +98,27 @@ impl Harness {
             .ctx
             .run(input, |ctx| eframe::App::update(app, ctx, &mut frame));
         let mut painted = Vec::new();
+        self.outlines.clear();
         for clipped in &output.shapes {
-            collect(&clipped.shape, &mut painted);
+            collect(&clipped.shape, &mut painted, &mut self.outlines);
         }
+        self.events = output.platform_output.events;
+        painted
+    }
+
+    fn press(&mut self, key: egui::Key) -> Vec<Painted> {
+        let event = |pressed| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        self.run(vec![event(true)]);
+        let mut events = std::mem::take(&mut self.events);
+        let painted = self.run(vec![event(false)]);
+        events.append(&mut self.events);
+        self.events = events;
         painted
     }
 
@@ -121,13 +145,16 @@ impl Harness {
     }
 }
 
-fn collect(shape: &egui::Shape, out: &mut Vec<Painted>) {
+fn collect(shape: &egui::Shape, out: &mut Vec<Painted>, outlines: &mut Vec<(Rect, egui::Color32)>) {
     match shape {
-        egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out)),
+        egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out, outlines)),
         egui::Shape::Text(text) => out.push(Painted {
             text: text.galley.text().to_owned(),
             rect: Rect::from_min_size(text.pos, text.galley.size()),
         }),
+        egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => {
+            outlines.push((rect.rect, rect.stroke.color));
+        }
         _ => {}
     }
 }
@@ -395,4 +422,110 @@ fn pending_edits_show_a_hint_and_only_apply_commits_them() {
         assert!(!core.prefs.keep_overlay_on_top);
         assert_eq!(core.prefs.depth, 1.5);
     }
+}
+
+/// The accessible name a click or a focus change reported, if any.
+fn reported(events: &[egui::output::OutputEvent]) -> Vec<(bool, String, Option<bool>)> {
+    use egui::output::OutputEvent;
+    events
+        .iter()
+        .filter_map(|event| match event {
+            OutputEvent::Clicked(info) => Some((true, info)),
+            OutputEvent::FocusGained(info) => Some((false, info)),
+            _ => None,
+        })
+        .map(|(clicked, info)| {
+            (
+                clicked,
+                info.label.clone().unwrap_or_default(),
+                info.selected,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn custom_buttons_and_help_topics_have_accessible_names() {
+    let mut h = Harness::new(SIZES[0], Page::Controls);
+    let painted = h.settle();
+    // A glyph-faced chrome button reports what it does, not its glyph.
+    let maximize = find(&painted, "□").rect.center();
+    h.run(vec![egui::Event::PointerMoved(maximize)]);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: maximize,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.run(vec![button(true)]);
+    h.run(vec![button(false)]);
+    assert_eq!(
+        reported(&h.events),
+        vec![(true, "Maximize / restore".to_owned(), None)]
+    );
+    // A text button reports its text; this one opens Help.
+    let help = find(&painted, "Help").rect.center();
+    h.run(vec![egui::Event::PointerMoved(help)]);
+    let button = |pressed| egui::Event::PointerButton {
+        pos: help,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: Default::default(),
+    };
+    h.run(vec![button(true)]);
+    h.run(vec![button(false)]);
+    assert_eq!(reported(&h.events), vec![(true, "Help".to_owned(), None)]);
+    assert!(h.app.page == Page::Help);
+
+    // Keyboard: Tab reaches the topic rows, each announces its title and
+    // whether it is the selected one, and the focused row is outlined.
+    let topics = any2odyssey_core::help::topics();
+    let accent = theme::color(h.app.palette.accent);
+    let mut announced = Vec::new();
+    for _ in 0..40 {
+        h.press(egui::Key::Tab);
+        let Some((clicked, label, selected)) = reported(&h.events)
+            .into_iter()
+            .find(|(_, label, _)| topics.iter().any(|t| t.title == *label))
+        else {
+            continue;
+        };
+        assert!(!clicked);
+        let index = topics.iter().position(|t| t.title == label).unwrap();
+        assert_eq!(selected, Some(index == h.app.help.selected), "{label}");
+        let painted = h.run(Vec::new());
+        let row = painted
+            .iter()
+            .filter(|p| p.text == label)
+            .map(|p| p.rect)
+            .find(|r| r.left() < 300.0)
+            .unwrap_or_else(|| panic!("{label} is not in the list"));
+        assert!(
+            h.outlines
+                .iter()
+                .any(|(rect, colour)| *colour == accent && rect.contains_rect(row)),
+            "{label}: the focused topic has no outline"
+        );
+        announced.push(index);
+        if announced.len() >= 2 {
+            break;
+        }
+    }
+    assert!(announced.len() >= 2, "Tab never reached the topics");
+    // Enter selects the focused topic.
+    let focused = *announced.last().unwrap();
+    assert_ne!(h.app.help.selected, focused);
+    h.press(egui::Key::Enter);
+    assert_eq!(h.app.help.selected, focused);
+    // The mouse still selects, and the click is reported with the title.
+    let painted = h.settle();
+    let fourth = &topics[3].title;
+    let row = painted
+        .iter()
+        .find(|p| p.text == *fourth && p.rect.left() < 300.0)
+        .expect("fourth topic is listed")
+        .rect
+        .center();
+    h.click(row);
+    assert_eq!(h.app.help.selected, 3);
 }

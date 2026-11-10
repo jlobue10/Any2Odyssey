@@ -372,9 +372,10 @@ impl App {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         let chrome = |ui: &mut egui::Ui, text: &str, tip: &str| {
-            widgets::gold_button_sized(
+            widgets::gold_button_named(
                 ui,
                 text,
+                tip,
                 false,
                 &p,
                 Some(vec2(34.0, 34.0)),

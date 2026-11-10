@@ -66,7 +66,37 @@ impl HelpState {
                                     ui.set_width(ui.available_width());
                                     ui.label(RichText::new(&t.title).color(color(p.text)));
                                 });
-                            if response.response.interact(egui::Sense::click()).clicked() {
+                            // The row is a painted frame, not an egui widget.
+                            // It gets an id of its own to be clicked and
+                            // focused under: re-using the frame's id did not
+                            // work for the keyboard, because the frame
+                            // registers that id as not focusable every frame
+                            // and egui then takes the focus away again. With
+                            // its own id Tab stays on the row and Enter or
+                            // Space selects it; it is named for assistive
+                            // output and outlined while focused.
+                            let row = ui.interact(
+                                response.response.rect,
+                                ui.id().with(("help-topic", i)),
+                                egui::Sense::click(),
+                            );
+                            row.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::SelectableLabel,
+                                    true,
+                                    selected,
+                                    &t.title,
+                                )
+                            });
+                            if row.has_focus() {
+                                ui.painter().rect_stroke(
+                                    row.rect.shrink(1.0),
+                                    CornerRadius::same(6),
+                                    egui::Stroke::new(1.5_f32, color(p.accent)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            if row.clicked() {
                                 self.selected = i;
                             }
                         }
