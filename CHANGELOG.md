@@ -2,6 +2,18 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+### Added
+
+- **Linux: the stereo viewer.** The Linux build opened the Windows controls, which could only report that conversion needs Windows. Its home page is now a stereo viewer: open a side-by-side PNG, JPEG or BMP (Open… through zenity or kdialog, a typed path, a dropped file, or `any2odyssey FILE`), choose pair or flat input, red/cyan anaglyph or side-by-side output, the half-width stretch and the eye swap, see the preview, show the result in an output window (F11 or double-click for full screen, Esc to leave) and save it as PNG. No AI depth and no calibrated Odyssey output: those need Samsung's Windows engine.
+- **Linux: one instance per user.** A Unix socket in `$XDG_RUNTIME_DIR` is the instance guard; a second launch hands `--show`, `--quit` or its file to the running instance. Global shortcuts, automatic start and the update check are not attempted on Linux.
+- **Arch Linux package.** `packaging/arch/PKGBUILD` builds, tests and packages the Linux edition from the checkout (`makepkg -si`), with a desktop entry and icon. CI builds it in an Arch Linux container. Nothing is published for Linux yet.
+
+### Hardware verification
+
+Pending for Linux. Run so far only on Arch Linux under WSL 2 (X11, virtual display, Openbox, software OpenGL). To check on a physical Arch-based desktop: Wayland and X11 sessions, the Open and Save dialogs with zenity and with kdialog, drag and drop, the output window made full screen on a second display, an image opened from the file manager's "Open with".
+
 ## 0.8.7 (2026-11-10)
 
 Ninth round: a third full audit by reviewers who had not seen the earlier reports, an inspection of the published 0.8.6 package itself, and a parallel round whose three PRs are folded in (#62 to #64). Built and tested in CI; the hardware checks at the end of this entry are still to be run on the G90XF before this version counts as verified, as are the 0.8.1 to 0.8.6 ones below.

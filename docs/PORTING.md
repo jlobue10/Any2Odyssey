@@ -7,10 +7,11 @@ Every upstream source file and where its behaviour lives now. Status: **done**, 
 ```
 crates/core      any2odyssey-core      platform-neutral logic (all OSes)
 crates/windows   any2odyssey-windows   Win32/DWM/WGC/D3D11, Samsung engine worker (Windows only)
-crates/app       any2odyssey           the GUI executable (controls, tray, worker supervision; Linux portable features)
+crates/app       any2odyssey           the GUI executable (controls, tray, worker supervision; the Linux stereo viewer)
 tools/iconmaker  any2odyssey-iconmaker brand asset generator
 installer/       PowerShell installer family
-scripts/         packaging
+scripts/         packaging (Windows ZIP)
+packaging/       Linux desktop entry and the Arch Linux PKGBUILD
 ```
 
 ## C# (Windows application)
@@ -56,7 +57,7 @@ scripts/         packaging
 | Upstream | Any2Odyssey | Status |
 | --- | --- | --- |
 | `portable/stereo.py` | `core::stereo` | done |
-| `portable/app.py` | Linux feature set of `app` | planned (phase 3) |
+| `portable/app.py` | `app::ui::viewer` (image source, input and output formats, half-width, swap, preview, output window, PNG export), `app::platform::unix` (single instance, hand-over, file dialogs) | in progress: the image viewer is done and run under WSL 2; the tray icon and the live screen source are not started |
 | `tests/test_portable.py` (stereo assertions) | `core::stereo` tests | done |
 | `portable/run.sh`, `launch-linux.sh`, `Launch-macOS.command`, `requirements.txt`, `START-HERE.md` | — | dropped (native build replaces the Python bundles) |
 | `tools/package-portable.py` | — | dropped |

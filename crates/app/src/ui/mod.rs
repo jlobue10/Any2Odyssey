@@ -4,6 +4,7 @@ mod about;
 mod controls;
 mod help;
 mod theme;
+mod viewer;
 mod widgets;
 
 use std::sync::{Arc, Mutex};
@@ -22,6 +23,7 @@ use about::AboutState;
 use controls::ControlsState;
 use help::HelpState;
 use theme::color;
+use viewer::ViewerState;
 
 const TITLEBAR_HEIGHT: f32 = 54.0;
 const EDGE: f32 = 9.0;
@@ -29,14 +31,28 @@ const EDGE: f32 = 9.0;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Controls,
+    /// The stereo viewer: the home page where conversion does not exist.
+    Viewer,
     Help,
     About,
+}
+
+/// The page the app opens on and returns to. Conversion needs Samsung's
+/// Windows engine, so everywhere else the controls for it would only ever
+/// report that; the stereo viewer is what those builds can do.
+fn home() -> Page {
+    if cfg!(windows) {
+        Page::Controls
+    } else {
+        Page::Viewer
+    }
 }
 
 pub struct App {
     core: Arc<Mutex<Core>>,
     page: Page,
     controls: ControlsState,
+    viewer: ViewerState,
     help: HelpState,
     about: AboutState,
     palette: Palette,
@@ -75,8 +91,12 @@ pub fn run(core: Arc<Mutex<Core>>) -> anyhow::Result<()> {
         .with_min_inner_size([700.0, 580.0])
         .with_decorations(false)
         .with_transparent(true)
-        .with_resizable(true)
-        .with_always_on_top();
+        .with_resizable(true);
+    // Above the 3D overlay, which is itself topmost. Without an overlay the
+    // controls are an ordinary window and must not cover the output window.
+    if cfg!(windows) {
+        viewport = viewport.with_always_on_top();
+    }
     if let Some(icon) = icon {
         viewport = viewport.with_icon(Arc::new(icon));
     }
@@ -139,14 +159,16 @@ impl App {
         if !preview {
             platform::install_jump_list();
         }
-        let hotkeys = if preview {
+        // The global shortcuts drive conversion; the viewer has a local one.
+        let converts = cfg!(windows);
+        let hotkeys = if preview || !converts {
             None
         } else {
             crate::hotkeys::register()
         };
         {
             let mut c = core.lock().expect("core");
-            c.hotkeys_ok = hotkeys.is_some() || preview;
+            c.hotkeys_ok = hotkeys.is_some() || preview || !converts;
             if preview {
                 c.status = "Ready".into();
             } else {
@@ -160,11 +182,12 @@ impl App {
                 if !c.hotkeys_ok {
                     c.log("Global shortcuts unavailable: not all of Ctrl+Alt+F8/F9/F10 could be registered.");
                 }
-                if c.prefs.auto_convert || c.start_requested {
+                if converts && (c.prefs.auto_convert || c.start_requested) {
                     c.start_conversion();
                 }
             }
             if !preview
+                && converts
                 && c.prefs.check_updates
                 && any2odyssey_core::update::check_due(
                     c.ui.last_update_check,
@@ -186,12 +209,13 @@ impl App {
         {
             Page::Help
         } else {
-            Page::Controls
+            home()
         };
         App {
             core,
             page,
             controls,
+            viewer: ViewerState::default(),
             help: HelpState::default(),
             about: AboutState::new(),
             palette,
@@ -251,7 +275,7 @@ impl App {
 
     fn show_controls(&mut self, ctx: &egui::Context) {
         self.hidden = false;
-        self.page = Page::Controls;
+        self.page = home();
         // `hide_to_tray` hides with a raw ShowWindow(SW_HIDE) that winit does
         // not observe, so its own visibility flag still says "visible" and
         // the Visible(true) command below is a no-op on that path. Un-hide at
@@ -442,6 +466,20 @@ impl App {
                 ui.close();
             }
         };
+        if !cfg!(windows) {
+            // No conversion to steer: the entries that still mean something.
+            item(ui, "Help", MenuCommand::Help);
+            item(ui, "About", MenuCommand::About);
+            item(ui, "Toggle light / dark mode", MenuCommand::ToggleTheme);
+            item(ui, "View logs", MenuCommand::ViewLogs);
+            item(ui, "Minimize", MenuCommand::MinimizeToTray);
+            ui.separator();
+            item(ui, "Quit completely", MenuCommand::Quit);
+            if let Some(cmd) = command.get() {
+                self.core.lock().expect("core").menu(cmd);
+            }
+            return;
+        }
         item(ui, "Show controls", MenuCommand::ShowControls);
         item(
             ui,
@@ -630,6 +668,9 @@ impl eframe::App for App {
             let update = c.update.available().map(|r| r.version.to_string());
             tray.sync(c.wanted(), c.prefs.keep_overlay_on_top, update.as_deref());
         }
+        // The output window is a window of its own: it stays up while the
+        // controls are minimized.
+        self.viewer.show_output(ctx);
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
         if self.hidden || ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
@@ -682,15 +723,25 @@ impl eframe::App for App {
                                 );
                             });
                     }
+                    Page::Viewer => {
+                        egui::ScrollArea::vertical()
+                            .id_salt("viewer-scroll")
+                            .auto_shrink([false, false])
+                            .show(&mut body, |ui| {
+                                ui.set_width((ui.available_width() - 4.0).max(0.0));
+                                let mut c = self.core.lock().expect("core");
+                                self.viewer.show(ui, &mut c, &p, self.wordmark.as_ref());
+                            });
+                    }
                     Page::Help => {
                         if self.help.show(&mut body, &p) {
-                            self.page = Page::Controls;
+                            self.page = home();
                         }
                     }
                     Page::About => {
                         let mut c = self.core.lock().expect("core");
                         if self.about.show(&mut body, &p, &mut c) {
-                            self.page = Page::Controls;
+                            self.page = home();
                         }
                     }
                 }
@@ -732,6 +783,7 @@ mod tests {
             controls: ControlsState::from_core(&core.lock().unwrap()),
             core: core.clone(),
             page: Page::Controls,
+            viewer: ViewerState::default(),
             help: HelpState::default(),
             about: AboutState::new(),
             palette: Palette::for_dark(false),

@@ -11,3 +11,6 @@
 *.cmd text eol=crlf
 *.ico binary
 *.png binary
+PKGBUILD text eol=lf
+*.desktop text eol=lf
+*.sh text eol=lf

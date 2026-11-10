@@ -51,6 +51,7 @@ impl Harness {
             controls,
             core: core.clone(),
             page,
+            viewer: super::viewer::ViewerState::default(),
             help: HelpState::default(),
             about: AboutState::new(),
             palette,
@@ -246,6 +247,7 @@ fn every_page_stays_inside_the_window_at_both_sizes() {
     for size in SIZES {
         for (page, name) in [
             (Page::Controls, "controls"),
+            (Page::Viewer, "viewer"),
             (Page::Help, "help"),
             (Page::About, "about"),
         ] {
@@ -565,7 +567,7 @@ fn long_about_values_wrap_inside_the_window() {
 /// assertion: a panic in debug builds.
 #[test]
 fn no_page_panics_in_a_window_smaller_than_its_margins() {
-    for page in [Page::Controls, Page::Help, Page::About] {
+    for page in [Page::Controls, Page::Viewer, Page::Help, Page::About] {
         for size in [
             (300.0, 200.0),
             (120.0, 90.0),
