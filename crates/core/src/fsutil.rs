@@ -7,8 +7,15 @@ use std::path::Path;
 /// Write `bytes` to `path` atomically: the content goes to a sibling temporary
 /// file first and is renamed into place, so readers never observe a partial
 /// file. Parent directories are created as needed.
+///
+/// The published file is the temporary one, so it has that file's
+/// permissions, not those of a file it replaces: on Unix it is readable and
+/// writable by the owner only (0600). That suits everything kept in the data
+/// folder (preferences, status and diagnostics files, which name window
+/// titles); a file written for other readers goes through
+/// [`write_atomic_document`].
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_atomic_inner(path, bytes, false)
+    write_atomic_inner(path, bytes, false, Audience::Owner)
 }
 
 /// [`write_atomic`] that also flushes the content to disk before the rename,
@@ -16,10 +23,26 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// an empty `settings.json` that the next launch treats as damaged. Status
 /// files are rewritten every second and stay unsynced.
 pub fn write_atomic_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_atomic_inner(path, bytes, true)
+    write_atomic_inner(path, bytes, true, Audience::Owner)
 }
 
-fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
+/// [`write_atomic`] for a document the user asked for at a path of their
+/// choosing (the exported guide). On Unix it gets the permissions any newly
+/// saved file gets, 0666 less the process umask (normally 0644), instead of
+/// 0600: a guide exported into a shared or served folder must be readable
+/// there. Elsewhere the two functions are the same.
+pub fn write_atomic_document(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_inner(path, bytes, false, Audience::Anyone)
+}
+
+/// Who may read the published file, where the platform lets us choose.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Audience {
+    Owner,
+    Anyone,
+}
+
+fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool, audience: Audience) -> io::Result<()> {
     use std::io::Write;
     let parent = path
         .parent()
@@ -28,9 +51,19 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool) -> io::Result<()> {
     fs::create_dir_all(parent)?;
     // Exclusive creation prevents collisions and following a pre-planted
     // sibling symlink. Each writer owns its temporary file until publication.
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".any2odyssey-")
-        .tempfile_in(parent)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".any2odyssey-");
+    // The mode is given to the creating `open`, so the umask applies as it
+    // does to any other new file. Not on Windows: access there is inherited
+    // from the folder either way, and the builder rejects the setting.
+    #[cfg(unix)]
+    if audience == Audience::Anyone {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    #[cfg(not(unix))]
+    let _ = audience;
+    let mut tmp = builder.tempfile_in(parent)?;
     tmp.write_all(bytes)?;
     if sync {
         tmp.as_file().sync_all()?;
@@ -180,6 +213,41 @@ mod tests {
             .file_type()
             .is_symlink());
         assert_eq!(entries(dir.path()), ["settings.json", "unrelated"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn data_files_are_private_and_documents_get_the_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        // Whatever this process's umask is, a plainly created file shows it.
+        let plain = dir.path().join("plain");
+        fs::write(&plain, b"x").unwrap();
+        let settings = dir.path().join("settings.json");
+        write_atomic_durable(&settings, b"{}").unwrap();
+        assert_eq!(mode(&settings), 0o600);
+        let status = dir.path().join("worker-status.json");
+        write_atomic(&status, b"{}").unwrap();
+        assert_eq!(mode(&status), 0o600);
+        let guide = dir.path().join("guide.html");
+        write_atomic_document(&guide, b"<!doctype html>").unwrap();
+        assert_eq!(mode(&guide), mode(&plain));
+        // Replacing keeps the rule, whatever the replaced file had.
+        fs::set_permissions(&guide, fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic_document(&guide, b"again").unwrap();
+        assert_eq!(mode(&guide), mode(&plain));
+        assert_eq!(fs::read(&guide).unwrap(), b"again");
+    }
+
+    #[test]
+    fn a_document_is_published_like_any_other_atomic_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("guide.html");
+        write_atomic_document(&path, b"one").unwrap();
+        write_atomic_document(&path, b"two").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+        assert_eq!(entries(path.parent().unwrap()), ["guide.html"]);
     }
 
     #[test]

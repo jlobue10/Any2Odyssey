@@ -8,6 +8,17 @@ pub struct WorkerStatus {
     pub state: String,
     pub time: String,
     pub pid: u32,
+    /// The engine's output is live. Written only when true, so every other
+    /// status keeps the three fields it always had, and a file from a worker
+    /// that predates the field reads as not ready. The controls take this,
+    /// not the wording of `state`, as the sign that a start or a recovery
+    /// attempt succeeded.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ready: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl WorkerStatus {
@@ -16,6 +27,15 @@ impl WorkerStatus {
             state: state.into(),
             time: crate::log::now_iso(),
             pid,
+            ready: false,
+        }
+    }
+
+    /// [`WorkerStatus::now`] for the state that announces live output.
+    pub fn ready_now(state: impl Into<String>, pid: u32) -> WorkerStatus {
+        WorkerStatus {
+            ready: true,
+            ..WorkerStatus::now(state, pid)
         }
     }
 }
@@ -66,6 +86,7 @@ mod tests {
             state: "Starting conversion".into(),
             time: "t".into(),
             pid: 7,
+            ready: false,
         };
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(
@@ -74,5 +95,19 @@ mod tests {
         );
         let back: WorkerStatus = serde_json::from_value(json).unwrap();
         assert_eq!(back, s);
+    }
+
+    #[test]
+    fn ready_is_written_only_when_true_and_defaults_to_false() {
+        let ready = WorkerStatus::ready_now("3D active", 7);
+        assert!(ready.ready && ready.pid == 7 && ready.state == "3D active");
+        let json = serde_json::to_value(&ready).unwrap();
+        assert_eq!(json["ready"], true);
+        assert_eq!(serde_json::from_value::<WorkerStatus>(json).unwrap(), ready);
+        assert!(!WorkerStatus::now("Starting conversion", 7).ready);
+        // A status file written by a worker from before the field existed.
+        let old: WorkerStatus =
+            serde_json::from_str(r#"{"state":"3D active","time":"t","pid":7}"#).unwrap();
+        assert!(!old.ready);
     }
 }
