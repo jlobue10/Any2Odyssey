@@ -28,7 +28,7 @@ Rendered with `Any2Odyssey --screenshot` in an isolated preview (no conversion r
 - GPU capture with a bounded frame queue, exclusion of the output from capture (no feedback trails) and exclusion of the hardware cursor (no delayed duplicate pointer). HDR desktops are normalized to SDR.
 - Depth strength and pop-out controls, automatic start, automatic worker recovery, minimize/close to tray, a themed light/dark controls window with built-in Help (F1), tray and jump-list commands.
 - An About page with the version, build and installation record, and a check of GitHub Releases for a newer version: on request, or once a day when the controls open (switchable). Nothing is downloaded or installed automatically.
-- A single native executable. No .NET runtime, no bundled DLLs.
+- A single native executable. No .NET runtime, no Visual C++ Redistributable, no bundled DLLs.
 
 Automatic side-by-side detection is not implemented. Select side-by-side manually when the source already contains a stereo pair.
 
@@ -48,7 +48,7 @@ These apply to the full Windows converter. A controls-only installation needs on
 | Connection | DisplayPort and the monitor's USB upstream connection; working `3D Stereo WebCam` |
 | GPU | NVIDIA RTX 5090 (Any2Odyssey 0.8.0, driver 621.14) and RTX 4090 (upstream Any2Odd) confirmed; the engine receives a fixed 16,384-core hint. Other GPUs are unvalidated |
 | Samsung software | Odyssey 3D Hub 1.5.1 and its installed LeiaSR dependencies, in their default `C:\Program Files` locations |
-| Install | 64-bit Windows PowerShell 5.1 for the installer scripts; administrator access only to place the worker beside Samsung's engine |
+| Install | 64-bit Windows PowerShell 5.1 for the installer scripts. For the full converter, a Windows account that is itself an administrator: elevation is used only to place the worker beside Samsung's engine, but it has to be approved by the account that will use Any2Odyssey. A standard account can install the controls only |
 
 **Who supplies what:** Any2Odyssey supplies the desktop controls, capture, click-through/window management and the worker that loads Samsung's engine. Windows supplies Win32/DWM, Windows Graphics Capture and Direct3D/DXGI. Samsung supplies the conversion engine and AI assets; Samsung/Leia components provide tracking, calibration and optical output. No Samsung or Leia binaries, models or calibration files are included or redistributed.
 
@@ -65,8 +65,14 @@ A different engine stops installation and conversion with a compatibility messag
 ### Full Windows 3D converter
 
 1. Install and configure Samsung Odyssey 3D Hub and verify that its ordinary 3D playback works. Stop Samsung's separate 3D player.
-2. Download `Any2Odyssey-<version>-windows-x64.zip` from [Releases](https://github.com/jlobue10/Any2Odyssey/releases), verify it against the attached `.sha256`, and extract it to a normal folder.
-3. Double-click **Install.cmd** and approve elevation **using the same Windows account** as the existing installation. Alternatively, from 64-bit PowerShell as administrator in the extracted folder:
+2. Download `Any2Odyssey-<version>-windows-x64.zip` from [Releases](https://github.com/jlobue10/Any2Odyssey/releases), verify it against the attached `.sha256`, and extract the whole ZIP to a normal folder (`Install.cmd` cannot run from inside the ZIP preview). To verify in PowerShell, from the folder that holds both downloads (prints `True` when the ZIP is intact; on Linux, macOS or Git Bash use `sha256sum -c` with the `.sha256` file):
+
+   ```powershell
+   $zip = (Get-Item .\Any2Odyssey-*-windows-x64.zip).FullName
+   (Get-FileHash $zip -Algorithm SHA256).Hash -eq (Get-Content "$zip.sha256").Split(' ')[0]
+   ```
+
+3. Double-click **Install.cmd** and approve the elevation prompt **with the Windows account you are signed in to** (it has to be an administrator account; see below). Alternatively, from 64-bit PowerShell as administrator in the extracted folder:
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
@@ -74,7 +80,9 @@ A different engine stops installation and conversion with a compatibility messag
 
 4. Open **Any2Odyssey** from its desktop or Start menu shortcut as your normal user. By default, conversion starts when the app opens. It does not register itself to start at Windows sign-in.
 
-Administrator access is needed only to install the worker beside Samsung's engine. The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
+Administrator access is needed only to install the worker beside Samsung's engine, but the account matters: the application, its shortcuts and its settings are per user and are installed for the account that approves elevation. If the prompt asks for an administrator's user name and password, you are signed in to a standard account; entering another account's credentials is detected and refused, and nothing is installed. Do not work around that with **Run as administrator** on `Install.cmd` either: that installs Any2Odyssey for the administrator account (the installer prints which account it is installing for). Sign in to the administrator account that will use Any2Odyssey and run `Install.cmd` there. A standard account can run **Install-GUI.cmd** for the controls only, except on a PC that already has a full installation, where the controls-only installer refuses to install beside the shared worker.
+
+The worker and its uninstall helper in Program Files exist once per PC: running `Install.cmd` from a second Windows account replaces them (the installer says so before asking for elevation) and makes that account their owner for uninstall purposes. Every account's Any2Odyssey has to be the same release as that one worker, so the installer refuses a package that is older than the worker already on the PC (`-AllowDowngrade` overrides this as well): keep the accounts on the same release. No restart is needed. The installer does not patch Samsung's executables or DLLs. For a read-only check run `install.ps1 -CheckOnly`; add `-ControlsOnly` to check a GUI-only installation. See [installer/README.md](installer/README.md).
 
 ### Windows controls without a 3D setup
 
@@ -82,22 +90,22 @@ On a PC without Odyssey Hub or the Samsung display, double-click **Install-GUI.c
 
 ### Upgrading and migrating from Any2Odd
 
-Extract the new ZIP into a new folder and run `Install.cmd`; the installer reports install, upgrade or same-version repair and preserves preferences and logs. It refuses to replace a newer version unless you pass `-AllowDowngrade`.
+Extract the new ZIP into a new folder and run `Install.cmd`; the installer reports install, upgrade or same-version repair and preserves preferences and logs. It refuses to replace a newer installed version. To go back to an older release on purpose, open a terminal in that release's extracted folder and run `.\Install.cmd -AllowDowngrade` (`.\Install-GUI.cmd -AllowDowngrade` for a controls-only installation); or uninstall first, after which any release installs as a fresh installation.
 
-Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LOCALAPPDATA%\Any2Odyssey`), worker name, registry key and IPC names. Whenever its own `%LOCALAPPDATA%\Any2Odyssey\settings.json` is absent, including on first launch, it imports Any2Odd's conversion preferences if that file exists and can be read (an unreadable Any2Odd file is noted in `companion.log` and skipped, and the controls start with defaults); deleting `%LOCALAPPDATA%\Any2Odyssey` for a complete reset therefore re-imports them rather than giving defaults, so also delete or rename Any2Odd's `%LOCALAPPDATA%\Odyssey3DCompanion\settings.json` for true defaults. Both can stay installed, but run only one at a time because both drive the same Samsung engine.
+Any2Odyssey does not replace an installed Any2Odd: it uses its own folders (`%LOCALAPPDATA%\Any2Odyssey`), worker name, registry key and IPC names. Whenever its own `%LOCALAPPDATA%\Any2Odyssey\settings.json` is absent, including on first launch, it imports Any2Odd's conversion preferences if that file exists and can be read (an unreadable Any2Odd file is noted in `companion.log` and skipped; the controls then start with defaults except that automatic conversion and the daily update check are off until you turn them on); deleting `%LOCALAPPDATA%\Any2Odyssey` for a complete reset therefore re-imports them rather than giving defaults, so also delete or rename Any2Odd's `%LOCALAPPDATA%\Odyssey3DCompanion\settings.json` for true defaults. Both can stay installed, but run only one at a time because both drive the same Samsung engine.
 
 ### Uninstall
 
-1. Quit Any2Odyssey from its tray menu (**Quit completely**). The uninstaller asks a running instance to quit and waits up to 12 seconds, but a clean exit first is simplest.
-2. Open Windows **Settings → Apps → Installed apps**, find **Any2Odyssey** (or **Any2Odyssey (controls only)**) and choose **Uninstall**. This runs the `Uninstall.ps1` that the installer placed in `%LOCALAPPDATA%\Programs\Any2Odyssey` (Installed apps adds `-Pause`, which keeps the window open with the reason when something fails). A full installation requests elevation once for a protected worker-removal helper in Program Files; a controls-only installation needs no elevation. Equivalent command from PowerShell:
+1. Quit Any2Odyssey from its tray menu (**Quit completely**). The uninstaller asks a running instance to quit and waits up to 12 seconds, but a clean exit first is simplest. On a shared PC, also quit it in any other signed-in account before a full uninstall or `Install.cmd`: the conversion worker cannot be replaced while another account is converting, nor removed while Any2Odyssey runs in any account, and the message names that Windows session.
+2. Open Windows **Settings → Apps → Installed apps**, find **Any2Odyssey** (or **Any2Odyssey (controls only)**) and choose **Uninstall**. This runs the `Uninstall.ps1` that the installer placed in `%LOCALAPPDATA%\Programs\Any2Odyssey` (Installed apps adds `-Pause`, which keeps the window open until a key is pressed when something fails or when the uninstaller has a notice for you, such as a worker it left in place for another account). A full installation requests elevation once for a protected worker-removal helper in Program Files; a controls-only installation needs no elevation. Equivalent command from PowerShell:
 
    ```powershell
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Any2Odyssey\Uninstall.ps1"
    ```
 
-Run the uninstaller as your normal user and approve the helper using the same account. When UAC is disabled, or you are signed in as the built-in Administrator, there is no prompt to approve: the uninstaller runs the helper directly, and the helper still checks the account and its own path before removing anything. Older installations must be repaired with this release before using the protected helper. On a shared PC the worker and helper in Program Files belong to the account that last ran `Install.cmd` (recorded in `UninstallWorker.owner`): a controls-only uninstall never removes them, and a full uninstall from a different account leaves them alone and says so.
+Run the uninstaller as your normal user and approve the helper using the same account. When UAC is disabled, or you are signed in as the built-in Administrator, there is no prompt to approve: the uninstaller runs the helper directly, and the helper still checks the account and its own path before removing anything. If the helper cannot remove the worker, the uninstaller shows the helper's reason and removes nothing. On a shared PC the worker and helper in Program Files belong to the account that last ran `Install.cmd` (recorded in `UninstallWorker.owner`): a controls-only uninstall never removes them, and a full uninstall from a different account leaves them alone and says so.
 
-What is removed: `Any2Odyssey.exe`, the icon, LICENSE/NOTICE/third-party notices, `USER-GUIDE.html`, `Uninstall.ps1` and `version.json` from `%LOCALAPPDATA%\Programs\Any2Odyssey`; `Any2OdysseyWorker.exe` from `C:\Program Files\Odyssey 3D Hub\Conversion`, and `C:\Program Files\Any2Odyssey\UninstallWorker.ps1` with its `UninstallWorker.owner` marker (full installs only); the desktop and Start menu shortcuts that point at this installation; and the `HKCU\...\Uninstall\Any2Odyssey` registration. The emptied `%LOCALAPPDATA%\Programs\Any2Odyssey` folder is removed too (it stays if you placed other files in it). Nothing else in Samsung's folders is touched, and no reboot is needed.
+What is removed: `Any2Odyssey.exe`, the icon, LICENSE/NOTICE/third-party notices, `USER-GUIDE.html`, `Uninstall.ps1` and `version.json` from `%LOCALAPPDATA%\Programs\Any2Odyssey`; `Any2OdysseyWorker.exe` from `C:\Program Files\Odyssey 3D Hub\Conversion`, and `C:\Program Files\Any2Odyssey\UninstallWorker.ps1` with its `UninstallWorker.owner` marker and, if an earlier attempt failed, its `UninstallWorker.result` note (full installs only); the desktop and Start menu shortcuts that point at this installation; and the `HKCU\...\Uninstall\Any2Odyssey` registration. The emptied `%LOCALAPPDATA%\Programs\Any2Odyssey` folder is removed too (it stays if you placed other files in it). Nothing else in Samsung's folders is touched, and no reboot is needed.
 
 What is kept, on purpose: Samsung's Odyssey 3D Hub and LeiaSR software; your preferences, theme, logs and the installer's `install-result.json` record in `%LOCALAPPDATA%\Any2Odyssey`; and `Samsung-OverlaySettings-before.json` in that folder, the copy of Samsung's overlay settings taken before the first conversion. That copy holds Samsung's untouched values only if `OverlaySettings.json` already existed then; if Samsung's file was absent at the first conversion, Any2Odyssey created it, and the backup taken at the next start holds Any2Odyssey's own values, so there is nothing of Samsung's to restore in that case. Delete `%LOCALAPPDATA%\Any2Odyssey` yourself if you want a complete reset (see the note above about Any2Odd preferences being re-imported). To put Samsung's original depth/pop-out values back, close Odyssey 3D Hub and copy that backup over `%USERPROFILE%\AppData\LocalLow\Samsung\Odyssey3DHubUI\SettingsData\OverlaySettings.json`; the uninstaller does not do this automatically because the file may hold newer Samsung settings of your own.
 

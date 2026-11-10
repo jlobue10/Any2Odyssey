@@ -1,13 +1,15 @@
 # Full-install flow against isolated folders and an isolated registry key. Windows only.
-# Only Samsung compatibility, elevation and running-process discovery are simulated;
-# copy/registration/shortcuts run for real inside the temporary folders.
+# Only Samsung compatibility, elevation, running-process discovery and the quit request to a
+# running instance are simulated; copy/registration/shortcuts run for real inside the temporary folders.
 param([string]$PreviousPackage)
 $ErrorActionPreference='Stop'
 # install.ps1 refuses Windows builds before 24H2; the fixture is about files, not the OS version.
 $previousSkip=$env:ANY2ODYSSEY_SKIP_OS_CHECK;$env:ANY2ODYSSEY_SKIP_OS_CHECK='1'
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
-$root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-flow-test-'+[Guid]::NewGuid().ToString('N'))
+# The folder name carries Cyrillic, Polish and CJK letters (written as code points to keep this file
+# ASCII): a profile folder outside the ANSI code page broke shortcut creation through WScript.Shell.
+$root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-flow-test-'+[char]0x0416+[char]0x0142+[char]0x4E2D+'-'+[Guid]::NewGuid().ToString('N'))
 $package=Join-Path $root 'package';$local=Join-Path $root 'local';$engine=Join-Path $root 'engine';$desktop=Join-Path $root 'desktop';$programs=Join-Path $root 'programs'
 $registration='HKCU:\Software\Any2OdysseyInstallerTests\'+[Guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Path $package,$local,$engine,$desktop,$programs,(Join-Path $package 'build'),(Join-Path $package 'assets') | Out-Null
@@ -22,9 +24,25 @@ $script=$script.Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninsta
 $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktop+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
 $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+(Join-Path $root 'programfiles')+"'"))
 $script=$script.Replace('if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')
-if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath')){throw 'Fixture routing incomplete; refusing to run.'}
+if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole') -or $script.Contains('Any2OdysseyQuit')){throw 'Fixture routing incomplete; refusing to run.'}
 $testInstall=Join-Path $package 'install.ps1';Set-Content -LiteralPath $testInstall -Value $script -Encoding UTF8
-function Get-Process {param($Name,$ErrorAction) return @()}
+# The same installer for an account whose Desktop folder is gone: Windows reports that as an empty path.
+$noDesktopScript=$script.Replace(("{Name='Desktop';Path='"+$desktop+"'}"),"{Name='Desktop';Path=''}")
+if($noDesktopScript -ceq $script){throw 'Fixture routing incomplete; refusing to run.'}
+$noDesktopInstall=Join-Path $package 'install-no-desktop.ps1';Set-Content -LiteralPath $noDesktopInstall -Value $noDesktopScript -Encoding UTF8
+# Running processes are simulated: Get-Process reports what $processes.List holds, so no real
+# instance is consulted. install.ps1 asks an instance to quit by starting the packaged executable
+# with --quit; the Start-Process stub records that request and lets the simulated instance exit.
+$processes=[pscustomobject]@{List=@()}
+$thisSession=[Diagnostics.Process]::GetCurrentProcess().SessionId
+function Get-Process {param($Name,$ErrorAction) return @($processes.List | Where-Object {@($Name) -contains $_.Name})}
+$quitRequests=New-Object 'System.Collections.Generic.List[object]'
+function Start-Process {
+ param($FilePath,$ArgumentList,$WindowStyle,$Verb,[switch]$Wait,[switch]$PassThru)
+ $quitRequests.Add([pscustomobject]@{FilePath=$FilePath;ArgumentList=[string]$ArgumentList})
+ $processes.List=@()
+ return [pscustomobject]@{ExitCode=0}
+}
 function Get-FileHash {
  param([string]$LiteralPath,$Algorithm)
  if($LiteralPath -eq (Join-Path $engine 'ConversionWrapper.dll')){return [pscustomobject]@{Hash='0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'}}
@@ -64,9 +82,9 @@ try{
  Assert ((Test-Path -LiteralPath $ownerFile) -and (Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Full install marks the helper with the installing account SID'
  Assert (([IO.File]::ReadAllBytes($ownerFile))[0] -eq [byte][char]'S') 'Owner marker is plain ASCII without a byte-order mark'
  Assert ((Test-Path -LiteralPath (Join-Path $app 'NOTICE')) -and (Test-Path -LiteralPath (Join-Path $app 'THIRD-PARTY-LICENSES.md'))) 'Credit and license files are installed'
- $shell=New-Object -ComObject WScript.Shell
- Assert ($shell.CreateShortcut((Join-Path $desktop 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
- Assert ($shell.CreateShortcut((Join-Path $programs 'Any2Odyssey.lnk')).TargetPath -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
+ . (Join-Path $installerDir 'InstallSupport.ps1')
+ Assert ((Get-Any2OdysseyShortcutTarget -Path (Join-Path $desktop 'Any2Odyssey.lnk')) -eq (Join-Path $app 'Any2Odyssey.exe')) 'Desktop shortcut targets the installed executable'
+ Assert ((Get-Any2OdysseyShortcutTarget -Path (Join-Path $programs 'Any2Odyssey.lnk')) -eq (Join-Path $app 'Any2Odyssey.exe')) 'Start menu shortcut targets the installed executable'
  New-ItemProperty -LiteralPath $registration -Name EstimatedSize -Value 4096 -PropertyType DWord -Force | Out-Null
  # Shared PC: another account ran Install.cmd in between; the repair must say so and take the marker over.
  [IO.File]::WriteAllText($ownerFile,'S-1-5-21-1-2-3-1001',[Text.UTF8Encoding]::new($false))
@@ -78,6 +96,46 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '*Uninstall.ps1" -Pause') 'Installed-apps uninstall keeps its console open on failure'
  Assert ((Get-ItemProperty -LiteralPath $registration).UninstallString -like '"*\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile *') 'Installed-apps uninstall names the system PowerShell by full path'
+ # An instance in another signed-in session uses the worker a full installation replaces and cannot
+ # be asked to quit from here: refused in the preflight, before any elevation, naming the session.
+ $processes.List=@([pscustomobject]@{Name='Any2OdysseyWorker';SessionId=($thisSession+1)})
+ $refusal='';try{& $testInstall -CheckOnly}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('another signed-in Windows session (session '+($thisSession+1)+')') -and $quitRequests.Count -eq 0) 'An instance in another session stops a full installation in the preflight and is not asked to quit'
+ $processes.List=@([pscustomobject]@{Name='Odyssey3DPlayer';SessionId=$thisSession})
+ $refusal='';try{& $testInstall -CheckOnly}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('Samsung player')) 'Samsung''s running player is reported in the preflight'
+ # An instance in this session is asked to quit, and the installation continues once it has gone.
+ $processes.List=@([pscustomobject]@{Name='Any2Odyssey';SessionId=$thisSession})
+ & $testInstall
+ Assert ($quitRequests.Count -eq 1 -and $quitRequests[0].ArgumentList -eq '--quit' -and $quitRequests[0].FilePath -eq (Join-Path $package 'build\Any2Odyssey.exe')) 'A running instance in this session is asked to quit through the packaged executable'
+ Assert ($processes.List.Count -eq 0 -and (Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'The installation continues after the instance has quit'
+ # No Desktop folder: the installation completes and places the Start menu shortcut only.
+ Remove-Item -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')
+ $notes.Clear()
+ & $noDesktopInstall
+ Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and (Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk'))) 'An account without a Desktop folder installs with the Start menu shortcut only'
+ Assert (($notes -join [char]10).Contains('no Desktop folder')) 'The skipped Desktop shortcut is explained'
+ # Shared PC: another account has installed a newer release since. Its worker is the one worker of
+ # this PC, so this older package must refuse to replace it, and say whose it is, in the preflight.
+ $workerPath=Join-Path $engine 'Any2OdysseyWorker.exe'
+ $packageResource=(Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()+'.0'
+ $newerResource='9'+$packageResource.Substring(1)
+ # The version resource holds its strings as UTF-16, and ISO-8859-1 maps bytes to characters one to
+ # one: the stand-in below is the packaged executable with only those version strings changed.
+ $latin1=[Text.Encoding]::GetEncoding(28591)
+ $image=$latin1.GetString([IO.File]::ReadAllBytes((Join-Path $repo 'build\Any2Odyssey.exe')))
+ $image=$image.Replace($latin1.GetString([Text.Encoding]::Unicode.GetBytes($packageResource)),$latin1.GetString([Text.Encoding]::Unicode.GetBytes($newerResource)))
+ [IO.File]::WriteAllBytes($workerPath,$latin1.GetBytes($image))
+ Assert ([Diagnostics.FileVersionInfo]::GetVersionInfo($workerPath).FileVersion -eq $newerResource) 'Fixture: the stand-in worker reads as a newer release'
+ [IO.File]::WriteAllText($ownerFile,'S-1-5-21-1-2-3-1001',[Text.UTF8Encoding]::new($false))
+ $newerHash=(Get-FileHash -LiteralPath $workerPath).Hash
+ $refusal='';try{& $testInstall -CheckOnly}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('newer than this package') -and $refusal.Contains('another Windows account (S-1-5-21-1-2-3-1001)') -and $refusal.Contains('-AllowDowngrade')) 'The preflight refuses to replace a newer worker and names the account that installed it'
+ $refusal='';try{& $testInstall}catch{$refusal=$_.Exception.Message}
+ Assert ($refusal.Contains('newer than this package') -and (Get-FileHash -LiteralPath $workerPath).Hash -eq $newerHash) 'The installation refuses too and leaves the newer worker in place'
+ & $testInstall -AllowDowngrade
+ Assert ((Get-FileHash -LiteralPath $workerPath).Hash -eq (Get-FileHash -LiteralPath (Join-Path $repo 'build\Any2Odyssey.exe')).Hash) 'AllowDowngrade replaces the newer worker with the packaged one'
+ Assert ((Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'The allowed replacement takes over the owner marker'
  Assert ((& $stagingNames) -eq $stagingBefore) 'Installer removes its staging folder'
  $passed=$true
 }finally{

@@ -35,10 +35,11 @@ Build the release, copy `target\release\Any2Odyssey.exe` to `build\`, then run f
 .\installer\tests\test-install-flow.ps1 [-PreviousPackage <extracted older release>]
 .\installer\tests\test-uninstall-flow.ps1
 .\installer\tests\test-uninstall-helper.ps1
+.\installer\tests\test-uninstall-helper-elevated.ps1   # needs an elevated console; says so and skips otherwise
 .\installer\tests\test-dpi-manifest.ps1   # reads target\release\Any2Odyssey.exe, not build\
 ```
 
-They use temporary folders and an isolated `HKCU:\Software\Any2OdysseyInstallerTests` key, both removed after a passing run; the Samsung engine hash and elevation are simulated, and the tests set `ANY2ODYSSEY_SKIP_OS_CHECK=1` so `install.ps1`'s Windows 11 24H2 gate does not depend on the CI image. No real installation is performed and no Samsung file is read or written. CI runs the same scripts on `windows-latest`.
+They use temporary folders and an isolated `HKCU:\Software\Any2OdysseyInstallerTests` key, both removed after a passing run; the Samsung engine hash and elevation are simulated, and the tests set `ANY2ODYSSEY_SKIP_OS_CHECK=1` so `install.ps1`'s Windows 11 24H2 gate does not depend on the CI image. No real installation is performed and no Samsung file is read or written. They are safe to run on the PC where Any2Odyssey is installed and running: process discovery and the `--quit` launch are stubbed, the uninstaller's quit event is routed to a test-only name, and each fixture refuses to run ("Fixture routing incomplete") if any real path, registry key or event name is left in the script it is about to execute. `test-uninstall-helper-elevated.ps1` is the one test that runs the worker-removal helper as a real administrator process, through the uninstaller's real `Start-Process` launch, against routed copies in a temporary folder; the real `-Verb RunAs` prompt cannot be automated and stays a hardware check. CI runs the same scripts on `windows-latest`, where the runner account is an administrator, under PowerShell 7 and under Windows PowerShell 5.1.
 
 ## Hardware acceptance (target machine)
 

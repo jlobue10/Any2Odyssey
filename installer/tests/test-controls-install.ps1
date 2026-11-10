@@ -1,4 +1,6 @@
 # Controls-only install/repair/uninstall and promotion to a full install, in isolated folders. Windows only.
+# Process discovery and the --quit launch are stubbed and the uninstaller's quit event is routed to a
+# name nothing listens on, so an Any2Odyssey running on this PC is neither consulted nor told to quit.
 $ErrorActionPreference='Stop'
 # install.ps1 refuses Windows builds before 24H2; the fixture is about files, not the OS version.
 $previousSkip=$env:ANY2ODYSSEY_SKIP_OS_CHECK;$env:ANY2ODYSSEY_SKIP_OS_CHECK='1'
@@ -17,13 +19,16 @@ foreach($file in @('install.ps1','Uninstall.ps1')){
  $script=$script.Replace('$env:LOCALAPPDATA',("'"+$local+"'")).Replace('C:\Program Files\Odyssey 3D Hub\Conversion',$engine).Replace('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey',$registration)
  $script=$script.Replace("[Environment]::GetFolderPath('Desktop')",("'"+$desktop+"'")).Replace("[Environment]::GetFolderPath('Programs')",("'"+$programs+"'"))
  $script=$script.Replace("[Environment]::GetFolderPath('ProgramFiles')",("'"+(Join-Path $root 'programfiles')+"'"))
+ $script=$script.Replace('Local\Any2OdysseyQuit',('Local\Any2OdysseyTestQuit-'+[Guid]::NewGuid().ToString('N')))
  if($file -eq 'Uninstall.ps1'){$script=$script.Replace('$alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)','$alreadyElevated=$false')}
  if($file -eq 'install.ps1'){$script=$script.Replace('if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))','if($false)')}
- if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole')){throw 'Fixture routing incomplete; refusing to run.'}
+ if($script.Contains('C:\Program Files\Odyssey 3D Hub') -or $script.Contains('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') -or $script.Contains('$env:LOCALAPPDATA') -or $script.Contains('[Environment]::GetFolderPath') -or $script.Contains('IsInRole') -or $script.Contains('Any2OdysseyQuit')){throw 'Fixture routing incomplete; refusing to run.'}
  Set-Content -LiteralPath (Join-Path $package $file) -Value $script -Encoding UTF8
 }
 function Assert($condition,[string]$message){if(-not $condition){throw $message};Write-Host "PASS: $message"}
-function Get-Process {param($Name,$ErrorAction)return @()}
+# Get-Process reports what $processes.List holds, so no real instance is consulted.
+$processes=[pscustomobject]@{List=@()}
+function Get-Process {param($Name,$ErrorAction)return @($processes.List | Where-Object {@($Name) -contains $_.Name})}
 function Start-Process {param($FilePath,$ArgumentList,$WindowStyle,[switch]$Wait,$Verb,[switch]$PassThru)if($Verb){throw 'Controls-only uninstall must not elevate.'};return [pscustomobject]@{ExitCode=0}}
 $installer=Join-Path $package 'install.ps1';$app=Join-Path $local 'Programs\Any2Odyssey';$data=Join-Path $local 'Any2Odyssey'
 New-Item -ItemType Directory -Path $data -Force | Out-Null
@@ -39,8 +44,12 @@ try{
  Assert ($record.ControlsOnly -eq $true -and $null -eq $record.Worker) 'Controls-only mode records no conversion worker'
  Assert (-not (Test-Path -LiteralPath $engine)) 'Controls-only install does not create or modify the Samsung directory'
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayName -eq 'Any2Odyssey (controls only)') 'Installed apps identifies controls-only mode'
+ # Another signed-in account's Any2Odyssey runs that account's files, not these: it is no reason to
+ # refuse a controls-only installation, and it is not asked to quit.
+ $processes.List=@([pscustomobject]@{Name='Any2Odyssey';SessionId=([Diagnostics.Process]::GetCurrentProcess().SessionId+1)})
  & $installer -ControlsOnly
- Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Controls-only reinstall repairs in place'
+ $processes.List=@()
+ Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Controls-only reinstall repairs in place, also while another session runs Any2Odyssey'
  New-Item -ItemType Directory -Path $engine | Out-Null
  Set-Content -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe') -Value 'Unrelated sentinel created after controls-only install'
  Set-Content -LiteralPath (Join-Path $engine 'ConversionWrapper.dll') -Value 'Simulated Samsung engine; never loaded'
@@ -51,7 +60,13 @@ try{
  Assert ((Test-Path -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')) -and (Get-FileHash -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')).Hash -eq $engineHash) 'Controls-only uninstall leaves all Samsung-directory files untouched'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Uninstall preserves user preferences'
  Remove-Item -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')
+ # The uninstall keeps install-result.json. It must not make this a Repair, nor, when it names a
+ # newer release than the package, a blocked downgrade.
+ $kept=Join-Path $data 'install-result.json'
+ Assert (Test-Path -LiteralPath $kept) 'Uninstall keeps the install-result.json record'
+ Set-Content -LiteralPath $kept -Value '{"Version":"99.0.0","ControlsOnly":true}'
  & $installer -ControlsOnly
+ Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).Action -eq 'Install') 'Installing after an uninstall is a fresh Install, whatever the kept record says'
  $failed=$false;try{& $installer -CheckOnly}catch{$failed=$_.Exception.Message.Contains('engine changed')};Assert $failed 'Full setup still rejects an incompatible engine'
  function Get-FileHash {param([string]$LiteralPath,$Algorithm)if($LiteralPath -eq (Join-Path $engine 'ConversionWrapper.dll')){return [pscustomobject]@{Hash='0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'}};Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256}
  & $installer

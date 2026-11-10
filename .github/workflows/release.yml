@@ -4,21 +4,57 @@ on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
+# No token permissions by default; each job states the ones it needs.
+permissions: {}
+
+# One release run per tag at a time: a second push of the same tag waits for the first.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  windows-release:
-    name: Build and attach Windows x64 package
+  build:
+    name: Build, test and package Windows x64
     runs-on: windows-latest
+    timeout-minutes: 60
+    # Build scripts, tests and third-party actions run in this job. Its token can only read, and
+    # the checkout leaves no credentials in .git/config, so nothing here can push or alter a release.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Left in .git/config, the token is readable by every build script, proc-macro and test
+          # that runs below. This job's token can only read, and the publish job has its own.
+          persist-credentials: false
+      # The publish job refuses this too. Checking first saves a full build on a re-run.
+      - name: Stop early if this tag's release already has assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          lookup_error=$(mktemp)
+          if assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '[.assets[].name] | join(", ")' 2>"$lookup_error"); then
+            if [ -n "$assets" ]; then
+              echo "::error::Release $TAG already has assets ($assets). A release is never replaced by a different build: delete those assets by hand if this run is meant to supply them, or publish the change under a new version."
+              exit 1
+            fi
+            echo "Release $TAG exists without assets; this run will add them."
+          elif grep -q 'HTTP 404' "$lookup_error"; then
+            echo "No release for $TAG yet."
+          else
+            cat "$lookup_error" >&2
+            echo "::error::Could not find out whether release $TAG already exists."
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # No build cache here: a cache saved by a tag run can be restored by no other ref, and the
+      # released binary is built from scratch.
       - name: Verify tag matches VERSION
         shell: pwsh
         env:
@@ -28,14 +64,19 @@ jobs:
           if ($env:TAG -ne "v$version") { throw "Tag $env:TAG does not match VERSION $version" }
           # The release notes link to the changelog entry; refuse to publish a version that has none.
           if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($version)) " -Quiet)) { throw "CHANGELOG.md has no entry for $version" }
+          # README names the current release in its status line; it has been left behind before.
+          if (-not (Select-String -Path README.md -SimpleMatch -Pattern "$version is the current release" -Quiet)) { throw "README.md does not name $version as the current release" }
       # Same checks as ci.yml: a tag can be pushed from a commit whose CI never ran or failed.
       - name: Format check
         run: cargo fmt --all --check
       - name: Build (release)
         run: cargo build --locked --release --workspace
-      - name: Verify worker DPI manifest
+      - name: Verify the built executable (static C runtime, DPI manifest)
         shell: pwsh
-        run: ./installer/tests/test-dpi-manifest.ps1
+        run: |
+          ./installer/tests/test-dpi-manifest.ps1
+          # Remembered so the Package step can refuse an executable that a later step rebuilt.
+          "TESTED_EXE_SHA256=$((Get-FileHash -LiteralPath target/release/Any2Odyssey.exe -Algorithm SHA256).Hash)" >> $env:GITHUB_ENV
       - name: Test
         run: cargo test --locked --workspace
       - name: Clippy
@@ -67,13 +108,82 @@ jobs:
         shell: pwsh
         run: |
           $exported=Join-Path $env:RUNNER_TEMP 'guide.html'
-          cargo run --locked --release -p any2odyssey -- --export-guide $exported
-          if ($LASTEXITCODE -ne 0) { throw "--export-guide exited $LASTEXITCODE" }
+          # Run the executable that was built and tested above. `cargo run -p any2odyssey` resolves
+          # features for one package instead of the workspace and relinks Any2Odyssey.exe, so the
+          # package would carry a binary no check had seen (as 0.8.6 did). It is a GUI-subsystem
+          # program: Start-Process -Wait is what makes PowerShell wait for it and see its exit code.
+          $export=Start-Process -FilePath target/release/Any2Odyssey.exe -ArgumentList '--export-guide',('"'+$exported+'"') -Wait -PassThru
+          if ($export.ExitCode -ne 0) { throw "--export-guide exited $($export.ExitCode)" }
           $normalize={param($path)([IO.File]::ReadAllText($path)).Replace("`r`n","`n")}
-          if ((& $normalize $exported) -ne (& $normalize 'USER-GUIDE.html')) { throw 'USER-GUIDE.html differs from the embedded Help; regenerate it with --export-guide' }
+          # Ordinal: PowerShell's -ne ignores letter case and compares linguistically.
+          if (-not [string]::Equals((& $normalize $exported),(& $normalize 'USER-GUIDE.html'),[StringComparison]::Ordinal)) { throw 'USER-GUIDE.html differs from the embedded Help; regenerate it with --export-guide' }
       - name: Package
         shell: pwsh
-        run: ./scripts/package.ps1
+        run: |
+          $now=(Get-FileHash -LiteralPath target/release/Any2Odyssey.exe -Algorithm SHA256).Hash
+          if ($now -ne $env:TESTED_EXE_SHA256) { throw "Any2Odyssey.exe changed after it was verified and tested ($env:TESTED_EXE_SHA256 -> $now); a later step rebuilt it." }
+          ./scripts/package.ps1
+      # The installer tests assemble their own package folder from the repository, so nothing
+      # else opens the ZIP that is published: a file missing from package.ps1's lists would ship.
+      - name: Verify the packaged ZIP (complete, passes the installer's preflight)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: ./scripts/verify-package.ps1
+      # Handed to the publish job, which is the only one allowed to write to the repository.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Any2Odyssey-release-package
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*.zip
+            dist/*.sha256
+
+  publish:
+    name: Publish the GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job with a write token. It checks out nothing and runs no code from the repository:
+    # it downloads the package the build job made, verifies it and attaches it to the release.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Any2Odyssey-release-package
+          path: dist
+      - name: Verify the package against its SHA-256
+        working-directory: dist
+        run: |
+          ls -l
+          if [ "$(ls -1 ./*.zip | wc -l)" -ne 1 ] || [ "$(ls -1 ./*.sha256 | wc -l)" -ne 1 ]; then
+            echo "::error::Expected exactly one ZIP and one .sha256 file from the build job."
+            exit 1
+          fi
+          sha256sum -c ./*.sha256
+      # softprops/action-gh-release would otherwise replace same-named assets (a re-run, a re-pushed
+      # tag) with a different build of the same version, without a word.
+      - name: Refuse to replace the assets of an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          lookup_error=$(mktemp)
+          if assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '[.assets[].name] | join(", ")' 2>"$lookup_error"); then
+            if [ -n "$assets" ]; then
+              echo "::error::Release $TAG already has assets ($assets). A release is never replaced by a different build: delete those assets by hand if this run is meant to supply them, or publish the change under a new version."
+              exit 1
+            fi
+            echo "Release $TAG exists without assets; this run will add them."
+          elif grep -q 'HTTP 404' "$lookup_error"; then
+            echo "No release for $TAG yet."
+          else
+            cat "$lookup_error" >&2
+            echo "::error::Could not find out whether release $TAG already exists."
+            exit 1
+          fi
       - name: Create GitHub release with the ZIP and its SHA-256
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
@@ -82,5 +192,7 @@ jobs:
             dist/*.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # Second line of defence behind the step above: never overwrite an existing asset.
+          overwrite_files: false
           body: |
             Windows x64 package for Any2Odyssey ${{ github.ref_name }}. Extract the ZIP and run `Install.cmd` (full converter, needs Odyssey 3D Hub 1.5.1) or `Install-GUI.cmd` (controls only). Verify the download against the attached `.sha256`.

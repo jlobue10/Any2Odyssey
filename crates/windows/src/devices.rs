@@ -50,8 +50,10 @@ pub fn find_devices(name: &str) -> windows::core::Result<Vec<DeviceState>> {
                 continue;
             }
             let u16s: Vec<u16> = buf
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .take_while(|&c| c != 0)
                 .collect();
             let value = String::from_utf16_lossy(&u16s);
