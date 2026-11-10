@@ -3,6 +3,8 @@
 //! through the delayed AI pipeline), and the yellow capture border is removed
 //! when Windows grants the per-app Borderless permission.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use any2odyssey_core::status::CaptureBorderStatus;
@@ -26,10 +28,15 @@ use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemIntero
 
 pub struct WgcFrameSource {
     _device: IDirect3DDevice,
+    /// Kept for its `Closed` event, which Windows raises when the captured
+    /// display goes away; nothing else in the pipeline reports that.
+    item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     item_size: SizeInt32,
     token: Option<i64>,
+    closed: Arc<AtomicBool>,
+    closed_token: Option<i64>,
 }
 
 /// A checked-out pool frame. Return its buffer on every path, including errors.
@@ -94,7 +101,8 @@ impl WgcFrameSource {
         };
         // Configure and start in one fallible step so every failure closes
         // the session and pool instead of leaving them to a plain Release.
-        let configured = (|| -> windows::core::Result<(BorderOutcome, i64)> {
+        let closed = Arc::new(AtomicBool::new(false));
+        let configured = (|| -> windows::core::Result<(BorderOutcome, i64, i64)> {
             session.SetIsCursorCaptureEnabled(false)?;
             if session.IsCursorCaptureEnabled()? {
                 return Err(windows::core::Error::new(
@@ -113,13 +121,33 @@ impl WgcFrameSource {
                 Ok(())
             });
             let token = pool.FrameArrived(&handler)?;
+            // The owner polls `take_latest` from its update timer, so the
+            // flag needs no wake of its own.
+            let closed_handler = windows::Foundation::TypedEventHandler::<
+                GraphicsCaptureItem,
+                windows::core::IInspectable,
+            >::new({
+                let closed = closed.clone();
+                move |_, _| {
+                    closed.store(true, Ordering::Release);
+                    Ok(())
+                }
+            });
+            let closed_token = match item.Closed(&closed_handler) {
+                Ok(closed_token) => closed_token,
+                Err(e) => {
+                    let _ = pool.RemoveFrameArrived(token);
+                    return Err(e);
+                }
+            };
             if let Err(e) = session.StartCapture() {
+                let _ = item.RemoveClosed(closed_token);
                 let _ = pool.RemoveFrameArrived(token);
                 return Err(e);
             }
-            Ok((border, token))
+            Ok((border, token, closed_token))
         })();
-        let (border, token) = match configured {
+        let (border, token, closed_token) = match configured {
             Ok(v) => v,
             Err(e) => {
                 let _ = session.Close();
@@ -131,18 +159,30 @@ impl WgcFrameSource {
         Ok((
             WgcFrameSource {
                 _device: wrapped,
+                item,
                 pool,
                 session,
                 item_size,
                 token: Some(token),
+                closed,
+                closed_token: Some(closed_token),
             },
             border,
         ))
     }
 
     /// Drain the pool and return the newest frame, or `None` when nothing new
-    /// arrived. Errors if the monitor size changed (caller restarts).
+    /// arrived. Errors if the monitor size changed or the captured display
+    /// went away (caller restarts).
     pub fn take_latest(&self) -> Result<Option<CapturedFrame>, String> {
+        // A closed item delivers no more frames, and an empty pool is "idle",
+        // not an error: without this the last image would stay up for good.
+        if self.closed.load(Ordering::Acquire) {
+            return Err(
+                "Capture item closed: the display was removed or changed. Restart conversion."
+                    .into(),
+            );
+        }
         let Some(frame) = optional_frame(self.pool.TryGetNextFrame())? else {
             return Ok(None);
         };
@@ -169,8 +209,13 @@ impl WgcFrameSource {
 
 impl Drop for WgcFrameSource {
     fn drop(&mut self) {
+        // Handlers first, so neither callback runs against a session or pool
+        // that is being closed; the item itself is released after both.
         if let Some(token) = self.token.take() {
             let _ = self.pool.RemoveFrameArrived(token);
+        }
+        if let Some(token) = self.closed_token.take() {
+            let _ = self.item.RemoveClosed(token);
         }
         let _ = self.session.Close();
         let _ = self.pool.Close();

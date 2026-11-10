@@ -24,8 +24,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW, GWLP_USERDATA,
-    HWND_BOTTOM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    HWND_BOTTOM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::capture::GpuDesktopCapture;
@@ -69,6 +69,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
+        // These windows are destroyed only by the code that created them. The
+        // default handling would let any process that posts WM_CLOSE (taskkill
+        // without /F, a window-management tool) destroy the capture surface
+        // under a running engine and end the worker's loop through WM_QUIT.
+        WM_CLOSE => LRESULT(0),
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -152,7 +157,6 @@ pub struct Mirror {
     hwnd: HWND,
     mode: CaptureMode,
     screen: Rect,
-    device_name: String,
     parent_pid: u32,
     selected: HWND,
     last_active: HWND,
@@ -163,7 +167,11 @@ pub struct Mirror {
     sampled: Instant,
     sample_frames: u64,
     capture_millis: f64,
-    pub sources: usize,
+    /// Window modes: whether a source is on the surface. `None` until the
+    /// first evaluation, so a start without a source is reported as well.
+    source_shown: Option<bool>,
+    /// The latest change of `source_shown` the owner has not collected yet.
+    source_change: Option<bool>,
     pub update_interval_ms: u32,
     log: Arc<dyn Fn(&str) + Send + Sync>,
 }
@@ -199,7 +207,6 @@ impl Mirror {
             hwnd,
             mode: prefs.mode,
             screen,
-            device_name: device_name.to_owned(),
             parent_pid,
             selected,
             last_active: HWND::default(),
@@ -210,7 +217,8 @@ impl Mirror {
             sampled: Instant::now(),
             sample_frames: 0,
             capture_millis: 0.0,
-            sources: 0,
+            source_shown: None,
+            source_change: None,
             update_interval_ms: if desktop_mode { 100 } else { 250 },
             log,
         };
@@ -240,9 +248,6 @@ impl Mirror {
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
-    }
-    pub fn is_desktop(&self) -> bool {
-        self.desktop.is_some()
     }
     pub fn capture(&mut self) -> Option<&mut GpuDesktopCapture> {
         self.desktop.as_mut()
@@ -311,8 +316,11 @@ impl Mirror {
         let started = Instant::now();
         let hwnd = self.hwnd;
         let capture = self.desktop.as_mut().expect("desktop mode");
-        capture.present(hwnd)?;
-        self.capture_millis += started.elapsed().as_secs_f64() * 1000.0;
+        // The average is per presented frame; calls that found no new frame
+        // (and the once-a-second display queries they carry) are not frames.
+        if capture.present(hwnd)? {
+            self.capture_millis += started.elapsed().as_secs_f64() * 1000.0;
+        }
         let frames = capture.frames;
         let seconds = self.sampled.elapsed().as_secs_f64();
         if seconds >= 10.0 {
@@ -342,7 +350,39 @@ impl Mirror {
         Ok(())
     }
 
+    /// Window modes: re-evaluate the source and note when the surface starts
+    /// or stops showing one. Every way of having nothing to show used to be
+    /// silent, which left a dark 3D screen with no trace of why.
     fn refresh_sources(&mut self) {
+        let missing = self.update_thumbnail();
+        let shown = missing.is_none();
+        if self.source_shown == Some(shown) {
+            return;
+        }
+        self.source_shown = Some(shown);
+        self.source_change = Some(shown);
+        match missing {
+            None => (self.log)("Window capture: the source window is on the 3D surface."),
+            Some(why) => (self.log)(&format!(
+                "Window capture: nothing to show ({why}); waiting for a source window."
+            )),
+        }
+    }
+
+    /// Window modes: a change the last ticks made to whether a source is
+    /// shown (`true`: one is). Each change is handed out once.
+    pub fn take_source_change(&mut self) -> Option<bool> {
+        self.source_change.take()
+    }
+
+    fn drop_thumbnail(&mut self) {
+        self.thumbnail = None;
+        self.thumbnail_size = None;
+    }
+
+    /// Point the thumbnail at the current target. `None` when the surface
+    /// shows a source, otherwise why it does not.
+    fn update_thumbnail(&mut self) -> Option<&'static str> {
         let exclude = [self.parent_pid, current_pid()];
         let mut target = self.selected;
         if self.mode == CaptureMode::Active {
@@ -361,39 +401,40 @@ impl Mirror {
             };
         }
         if !win::is_capture_candidate(target, &exclude) {
-            self.thumbnail = None;
-            self.thumbnail_size = None;
-            self.sources = 0;
-            return;
+            self.drop_thumbnail();
+            return Some(if target == HWND::default() {
+                "no source window yet"
+            } else if !win::is_window(target) {
+                "the source window was closed"
+            } else if win::is_iconic(target) {
+                "the source window is minimized"
+            } else {
+                "the source window is hidden or not eligible"
+            });
         }
         if self
             .thumbnail
             .as_ref()
             .is_none_or(|(source, _)| *source != target)
         {
-            self.thumbnail = None;
-            self.thumbnail_size = None;
-            self.sources = 0;
+            self.drop_thumbnail();
             let Ok(thumb) = win::Thumbnail::register(self.hwnd, target) else {
-                return; // Retry on the next tick, even when the window has not moved.
+                // Retry on the next tick, even when the window has not moved.
+                return Some("Windows refused a thumbnail of the source window");
             };
             self.thumbnail = Some((target, thumb));
         }
         let (_, thumb) = self.thumbnail.as_ref().expect("registered");
         let Ok((w, h)) = thumb.source_size() else {
-            self.thumbnail = None;
-            self.thumbnail_size = None;
-            self.sources = 0;
-            return;
+            self.drop_thumbnail();
+            return Some("the source window's thumbnail was lost");
         };
         if w < 2 || h < 2 {
-            self.thumbnail = None;
-            self.thumbnail_size = None;
-            self.sources = 0;
-            return;
+            self.drop_thumbnail();
+            return Some("the source window has no area");
         }
         if self.thumbnail_size == Some((w, h)) {
-            return;
+            return None;
         }
         let source = Rect::new(0, 0, w, h);
         let dest = fit(
@@ -404,25 +445,27 @@ impl Mirror {
         // thumbnail; only switching sources replaces the registration.
         if thumb.update(dest, source).is_ok() {
             self.thumbnail_size = Some((w, h));
-            self.sources = 1;
+            return None;
+        }
+        // A refused resize leaves the previous layout on the surface; only a
+        // thumbnail that was never laid out shows nothing. Retried next tick.
+        if self.thumbnail_size.is_some() {
+            None
+        } else {
+            Some("Windows refused the thumbnail layout")
         }
     }
 
     /// Stop timers, drop capture and destroy the window (posts WM_QUIT).
     pub fn close(&mut self) {
         kill_timer(self.hwnd, TIMER_UPDATE);
-        self.thumbnail = None;
-        self.thumbnail_size = None;
-        self.sources = 0;
+        self.drop_thumbnail();
         self.desktop = None;
         if win::is_window(self.hwnd) {
             let _ = unsafe { DestroyWindow(self.hwnd) };
         }
     }
 
-    pub fn device_name(&self) -> &str {
-        &self.device_name
-    }
     pub fn poll_interval() -> Duration {
         Duration::from_millis(500)
     }
