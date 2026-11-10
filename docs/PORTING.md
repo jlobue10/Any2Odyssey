@@ -18,7 +18,7 @@ scripts/         packaging
 | Upstream file | Any2Odyssey | Status |
 | --- | --- | --- |
 | `Companion.cs` — `Files` (paths, JSON save/log/tail) | `core::paths`, `core::fsutil`, `core::log` | done |
-| `Companion.cs` — `Preferences` | `core::prefs` (same JSON keys; one-time Any2Odd import) | done |
+| `Companion.cs` — `Preferences` | `core::prefs` (same JSON keys; Any2Odd's preferences are imported whenever Any2Odyssey has no settings file of its own, not just once) | done |
 | `Companion.cs` — `Win` P/Invoke | `windows::win` | done (verified on the G90XF, 0.8.0) |
 | `Companion.cs` — `Mirror` (offscreen capture surface, DWM thumbnails) | `windows::mirror` | done (verified on the G90XF, 0.8.0) |
 | `Companion.cs` — `Engine` (validate, SaveOverlay, worker `Run`) | `core::engine` (hash pin, messages), `core::overlay_settings`, `windows::engine` (LoadLibrary/Start/Stop, worker loop) | done |

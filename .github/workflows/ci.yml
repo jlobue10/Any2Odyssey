@@ -9,11 +9,12 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request supersedes its running checks. Pushes to main keep every
-# run, so each merged commit still produces its artifacts: their group is the commit, because
-# a shared group holds only one waiting run and a third push would cancel the second.
+# A newer push to a pull request supersedes its running checks. Every other run gets a group of
+# its own, so each commit on main still produces its artifacts: within one group GitHub keeps only
+# the newest pending run even with cancel-in-progress off, which is how a per-branch group cancelled
+# the queued run of one merge when the next merge arrived.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -24,8 +25,12 @@ jobs:
   windows:
     name: Windows x64 (build, test, lint, package)
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # No step pushes or fetches again; do not leave the token in .git/config for build scripts.
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
@@ -103,8 +108,11 @@ jobs:
           - os: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.

@@ -40,7 +40,7 @@ pub fn convert(
     if layout == Layout::Flat {
         return Ok(image.clone());
     }
-    if image.width() < 2 || image.width() % 2 != 0 {
+    if image.width() < 2 || !image.width().is_multiple_of(2) {
         return Err(StereoError::OddWidth);
     }
     let eye = image.width() / 2;
