@@ -25,7 +25,9 @@ function Get-Any2OdysseyInstalledVersion {
   $record=Join-Path $AppPath 'version.json'
   $recorded=Get-Any2OdysseyRecordedVersion -Path $record
   if($recorded){return [pscustomobject]@{Version=$recorded;Source=$record}}
-  throw "Cannot read the installed executable version at $path. Repair or inspect that installation before continuing."
+  # An installation interrupted while this file was being copied leaves it truncated, before any
+  # record exists; without a version the downgrade guard cannot judge it, so say what to do.
+  throw "The installed program file has no readable version and there is no installation record beside it: $path. An interrupted installation or a damaged file leaves it like this. Delete that file, then run the installer again."
  }
  # Without the executable, only the Installed-apps registration means something is still installed.
  # The records alone do not: Uninstall.ps1 keeps install-result.json on purpose, and counting it made
@@ -83,6 +85,25 @@ function Assert-Any2OdysseyWorkerNotNewer {
  $whose=if($OwnerSid -and $OwnerSid -ne $CurrentSid){" It was installed by another Windows account ($OwnerSid); replacing it would leave that account's newer Any2Odyssey with an older worker."}else{''}
  throw "The conversion worker on this PC is version $(Format-Any2OdysseyVersion $worker), newer than this package ($(Format-Any2OdysseyVersion $package)).$whose Downgrade blocked; nothing was changed. Install the newer release instead, or to replace the worker with this older one on purpose open a terminal in the extracted folder and run .\Install.cmd -AllowDowngrade."
 }
+function Test-Any2OdysseyFileInUse {
+ param($Exception)
+ # Win32 sharing violation (32) or lock violation (33): another process holds the file.
+ if($Exception -isnot [IO.IOException]){return $false}
+ $code=$Exception.HResult -band 0xFFFF
+ return ($code -eq 32 -or $code -eq 33)
+}
+function Copy-Any2OdysseyFile {
+ param([string]$Source,[string]$Destination)
+ # The program that was asked to quit a moment ago, or a scanner reading a new file, can hold a
+ # file for an instant. A few short retries cover that; any other failure is reported at once.
+ for($attempt=1;$true;$attempt++){
+  try{Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop;return}
+  catch{
+   if($attempt -ge 5 -or -not (Test-Any2OdysseyFileInUse $_.Exception)){throw}
+   Start-Sleep -Milliseconds 400
+  }
+ }
+}
 function Invoke-Any2OdysseyFileTransaction {
  param([object[]]$Operations,[scriptblock]$AfterCopy={},[scriptblock]$RollbackState={})
  $backup=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-backup-'+[Guid]::NewGuid().ToString('N'))
@@ -97,7 +118,7 @@ function Invoke-Any2OdysseyFileTransaction {
    if(-not (Test-Path -LiteralPath $operation.Source -PathType Leaf)){throw "Missing staged file: $($operation.Source)"}
    $existed=Test-Path -LiteralPath $operation.Destination -PathType Leaf
    $saved=Join-Path $backup ([string]$index++)
-   if($existed){Copy-Item -LiteralPath $operation.Destination -Destination $saved -ErrorAction Stop}
+   if($existed){Copy-Any2OdysseyFile -Source $operation.Destination -Destination $saved}
    $snapshots+= [pscustomobject]@{Source=$operation.Source;Destination=$operation.Destination;Existed=$existed;Backup=$saved}
   }
   foreach($snapshot in $snapshots){
@@ -105,18 +126,31 @@ function Invoke-Any2OdysseyFileTransaction {
    while($folder -and -not (Test-Path -LiteralPath $folder)){$missing=@($folder)+$missing;$folder=Split-Path -Parent $folder}
    foreach($new in $missing){if(-not $createdFolders.Contains($new)){$createdFolders.Add($new)}}
    New-Item -ItemType Directory -Path (Split-Path -Parent $snapshot.Destination) -Force -ErrorAction Stop | Out-Null
+   try{Copy-Any2OdysseyFile -Source $snapshot.Source -Destination $snapshot.Destination}
+   catch{
+    # A destination that could not even be opened (in use, or access denied) was not changed:
+    # restoring it would fail the same way and report a rollback problem for an untouched file.
+    # After any other failure it may be partly written, so the rollback puts it back.
+    if(-not (Test-Any2OdysseyFileInUse $_.Exception) -and $_.Exception -isnot [UnauthorizedAccessException]){$written.Add($snapshot)}
+    throw
+   }
    $written.Add($snapshot)
-   Copy-Item -LiteralPath $snapshot.Source -Destination $snapshot.Destination -Force -ErrorAction Stop
   }
   & $AfterCopy
  } catch {
   $failure=$_;$rollbackErrors=@()
-  for($i=$written.Count-1;$i -ge 0;$i--){$snapshot=$written[$i];try{if($snapshot.Existed){Copy-Item -LiteralPath $snapshot.Backup -Destination $snapshot.Destination -Force -ErrorAction Stop}else{if(Test-Path -LiteralPath $snapshot.Destination -PathType Leaf){Remove-Item -LiteralPath $snapshot.Destination -ErrorAction Stop}}}catch{$rollbackErrors+=$_.Exception.Message}}
+  for($i=$written.Count-1;$i -ge 0;$i--){$snapshot=$written[$i];try{if($snapshot.Existed){Copy-Any2OdysseyFile -Source $snapshot.Backup -Destination $snapshot.Destination}else{if(Test-Path -LiteralPath $snapshot.Destination -PathType Leaf){Remove-Item -LiteralPath $snapshot.Destination -ErrorAction Stop}}}catch{$rollbackErrors+=$_.Exception.Message}}
   try{& $RollbackState}catch{$rollbackErrors+=$_.Exception.Message}
   for($i=$createdFolders.Count-1;$i -ge 0;$i--){$folder=$createdFolders[$i];try{if((Test-Path -LiteralPath $folder -PathType Container) -and -not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)){Remove-Item -LiteralPath $folder -ErrorAction Stop}}catch{$rollbackErrors+=$_.Exception.Message}}
-  if($rollbackErrors.Count){throw "Update failed: $($failure.Exception.Message). Rollback needs attention: $($rollbackErrors -join '; '). Backups retained at $backup"}
-  throw "Update failed; previous files and registration restored. $($failure.Exception.Message) Backups: $backup"
+  $reason=([string]$failure.Exception.Message).Trim()
+  if($reason -notmatch '[.!?]$'){$reason+='.'}
+  if(Test-Any2OdysseyFileInUse $failure.Exception){$reason+=' The file is in use: quit Any2Odyssey from its tray menu (Quit completely), close any program that has the file open, then retry.'}
+  if($rollbackErrors.Count){throw "Update failed: $reason Rollback needs attention: $(($rollbackErrors | ForEach-Object {([string]$_).TrimEnd('.')}) -join '; '). Backups retained at $backup"}
+  # Everything is back as it was, so the copies have served their purpose.
+  try{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop}catch{}
+  throw "Update failed; nothing was changed: previous files and registration were restored. $reason"
  }
- foreach($snapshot in $snapshots){if(Test-Path -LiteralPath $snapshot.Backup){Remove-Item -LiteralPath $snapshot.Backup}}
- Remove-Item -LiteralPath $backup
+ # The installation is complete. A copy that cannot be deleted right now (a scanner reading it in
+ # %TEMP%) must not turn that into a reported failure.
+ try{Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction Stop}catch{}
 }
