@@ -40,6 +40,7 @@ impl ControlsState {
         p: &Palette,
         wordmark: Option<&egui::TextureHandle>,
         tray_available: bool,
+        notices: &[&str],
     ) {
         banner(ui, wordmark, p);
         ui.add_space(4.0);
@@ -83,6 +84,15 @@ impl ControlsState {
                     }
                 });
             });
+            // Standing conditions from launch (shortcuts or tray icon
+            // unavailable) stay here, where conversion status cannot
+            // overwrite them.
+            for notice in notices {
+                ui.add(
+                    egui::Label::new(RichText::new(*notice).color(color(p.muted)).size(12.0))
+                        .wrap(),
+                );
+            }
         });
         ui.add_space(5.0);
         let two_columns = ui.available_width() >= 860.0;

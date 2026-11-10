@@ -53,6 +53,7 @@ impl Harness {
             wordmark: None,
             #[cfg(windows)]
             tray: None,
+            tray_failed: false,
             _hotkeys: None,
             hidden: false,
             preview: true,
@@ -325,5 +326,36 @@ fn the_source_list_is_bounded_and_inside_the_window() {
                 item.rect.width()
             );
         }
+    }
+}
+
+#[test]
+fn startup_notices_stay_visible_whatever_the_status_says() {
+    for size in SIZES {
+        let mut h = Harness::new(size, Page::Controls);
+        h.app.tray_failed = true;
+        h.core().hotkeys_ok = false;
+        let painted = h.settle();
+        assert_inside_window(&painted, size.0, "notices");
+        let status = find(&painted, "Ready").rect;
+        for notice in [SHORTCUTS_NOTICE, TRAY_NOTICE] {
+            let line = find(&painted, notice).rect;
+            assert!(line.top() >= status.bottom(), "{notice}: above the status");
+        }
+        // Automatic start, a failure, recovery: the status line moves on,
+        // the notices do not.
+        for status in long_statuses() {
+            h.core().status = status;
+            let painted = h.settle();
+            assert_inside_window(&painted, size.0, "notices under a long status");
+            find(&painted, SHORTCUTS_NOTICE);
+            find(&painted, TRAY_NOTICE);
+        }
+        // Nothing to say, nothing shown.
+        h.app.tray_failed = false;
+        h.core().hotkeys_ok = true;
+        let painted = h.settle();
+        assert!(try_find(&painted, SHORTCUTS_NOTICE).is_none());
+        assert!(try_find(&painted, TRAY_NOTICE).is_none());
     }
 }

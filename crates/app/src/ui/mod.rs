@@ -43,6 +43,9 @@ pub struct App {
     wordmark: Option<egui::TextureHandle>,
     #[cfg(windows)]
     tray: Option<crate::tray::Tray>,
+    /// The notification icon should exist on this build and could not be
+    /// created; see [`startup_notices`]. Never set where there is no tray.
+    tray_failed: bool,
     _hotkeys: Option<global_hotkey::GlobalHotKeyManager>,
     hidden: bool,
     preview: bool,
@@ -115,20 +118,24 @@ impl App {
         // An isolated preview renders and exits; it must not put a live icon
         // in the notification area or register with the shell.
         #[cfg(windows)]
-        let tray = if preview {
-            None
+        let (tray, tray_failed) = if preview {
+            (None, false)
         } else {
             match load_png(include_bytes!("../../../../assets/Any2Odyssey.png"))
                 .ok_or_else(|| "icon".to_owned())
                 .and_then(|(rgba, w, h)| crate::tray::Tray::new(rgba, w, h))
             {
-                Ok(t) => Some(t),
+                Ok(t) => (Some(t), false),
                 Err(e) => {
-                    report_missing_tray(&mut core.lock().expect("core"), &e);
-                    None
+                    core.lock()
+                        .expect("core")
+                        .log(&format!("Tray icon unavailable: {e}"));
+                    (None, true)
                 }
             }
         };
+        #[cfg(not(windows))]
+        let tray_failed = false;
         if !preview {
             platform::install_jump_list();
         }
@@ -146,15 +153,12 @@ impl App {
                 // Shortcuts are a convenience, not a prerequisite: the button,
                 // tray and --toggle start conversion without them, so a
                 // conflict (or a desktop without global shortcuts) is reported
-                // but does not block the automatic start.
+                // but does not block the automatic start. The report is a
+                // notice of its own (`startup_notices`), not the status line:
+                // the automatic start below writes "Starting 3D" there before
+                // the first frame, which is how the message was never seen.
                 if !c.hotkeys_ok {
                     c.log("Global shortcuts unavailable: not all of Ctrl+Alt+F8/F9/F10 could be registered.");
-                    // An unreadable settings.json (or a missing tray icon)
-                    // already owns the status line; that message tells the
-                    // user what to do and must not be replaced.
-                    if c.status == "Ready" {
-                        c.status = "Global shortcuts Ctrl+Alt+F8/F9/F10 are unavailable; another app may hold them. The buttons, menus and tray still work.".into();
-                    }
                 }
                 if c.prefs.auto_convert || c.start_requested {
                     c.start_conversion();
@@ -194,6 +198,7 @@ impl App {
             wordmark,
             #[cfg(windows)]
             tray,
+            tray_failed,
             _hotkeys: hotkeys,
             hidden: false,
             preview,
@@ -546,15 +551,24 @@ fn minimize_label(tray_available: bool) -> &'static str {
     }
 }
 
-/// Without a notification icon the tray preference cannot act. Say so on the
-/// status line unless it already reports something the user must fix first
-/// (unreadable settings); the log keeps the reason either way.
-#[cfg(any(windows, test))]
-fn report_missing_tray(c: &mut Core, error: &str) {
-    c.log(&format!("Tray icon unavailable: {error}"));
-    if c.status == "Ready" {
-        c.status = "The notification icon could not be created; Minimize and Close act normally. See companion.log.".into();
+pub const SHORTCUTS_NOTICE: &str = "Global shortcuts Ctrl+Alt+F8/F9/F10 are unavailable; another app may hold them. The buttons, menus and tray still work.";
+pub const TRAY_NOTICE: &str = "The notification icon could not be created; Minimize and Close act normally. See companion.log.";
+
+/// What went wrong while the controls opened and stays wrong for the session:
+/// shortcuts that could not be registered, a notification icon that could not
+/// be created. Shown under the status line for as long as it is true. The
+/// status line itself belongs to conversion, and with automatic start (the
+/// default) it is rewritten before the first frame, so a message placed there
+/// was never seen; nor can these now displace the settings-recovery text.
+fn startup_notices(hotkeys_ok: bool, tray_failed: bool) -> Vec<&'static str> {
+    let mut notices = Vec::new();
+    if !hotkeys_ok {
+        notices.push(SHORTCUTS_NOTICE);
     }
+    if tray_failed {
+        notices.push(TRAY_NOTICE);
+    }
+    notices
 }
 
 #[cfg(windows)]
@@ -656,12 +670,14 @@ impl eframe::App for App {
                                 ui.set_width(ui.available_width() - 4.0);
                                 let mut c = self.core.lock().expect("core");
                                 let tray_available = self.tray_available();
+                                let notices = startup_notices(c.hotkeys_ok, self.tray_failed);
                                 self.controls.show(
                                     ui,
                                     &mut c,
                                     &p,
                                     self.wordmark.as_ref(),
                                     tray_available,
+                                    &notices,
                                 );
                             });
                     }
@@ -721,6 +737,7 @@ mod tests {
             wordmark: None,
             #[cfg(windows)]
             tray: None, // Tray creation failed, regardless of platform support.
+            tray_failed: true,
             _hotkeys: None, // Global shortcuts may also be unavailable.
             hidden: false,
             preview: false,
@@ -746,20 +763,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_tray_is_reported_unless_a_prerequisite_error_is_showing() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut core = Core::new_preview(Logger::new(dir.path().join("test.log")));
-        assert_eq!(core.status, "Ready");
-        report_missing_tray(&mut core, "shell not running");
-        assert!(core
-            .status
-            .starts_with("The notification icon could not be created"));
-        let settings_error = "Could not load saved settings: damaged".to_owned();
-        core.status = settings_error.clone();
-        report_missing_tray(&mut core, "shell not running");
+    fn startup_notices_follow_state_and_never_touch_the_status_line() {
+        assert!(startup_notices(true, false).is_empty());
+        assert_eq!(startup_notices(false, false), vec![SHORTCUTS_NOTICE]);
+        assert_eq!(startup_notices(true, true), vec![TRAY_NOTICE]);
         assert_eq!(
-            core.status, settings_error,
-            "keep the error the user must fix"
+            startup_notices(false, true),
+            vec![SHORTCUTS_NOTICE, TRAY_NOTICE]
         );
     }
 }
