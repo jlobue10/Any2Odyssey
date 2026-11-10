@@ -92,11 +92,10 @@ fn spawn_watchdog(
             // The wait reports the lowest signalled index, so controls that
             // asked for a stop and then quit would read as "went away". Ask
             // the event itself: a requested stop is the more specific cause.
-            let reason = if stop.is_signaled() {
-                "the stop was requested"
-            } else {
-                "the controls went away"
-            };
+            let reason = engine::stop_cause(
+                stop.is_signaled(),
+                engine::STOP_SELF_INITIATED.load(Ordering::Acquire),
+            );
             std::thread::sleep(WATCHDOG_GRACE);
             if finished.load(Ordering::Acquire) {
                 return;
