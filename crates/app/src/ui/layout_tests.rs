@@ -252,11 +252,7 @@ fn every_page_stays_inside_the_window_at_both_sizes() {
             let mut h = Harness::new(size, page);
             let painted = h.settle();
             assert!(!painted.is_empty());
-            // About is covered by its own test: its rows carry this test
-            // binary's own, very long, path.
-            if page != Page::About {
-                assert_inside_window(&painted, size.0, &format!("{name} {}x{}", size.0, size.1));
-            }
+            assert_inside_window(&painted, size.0, &format!("{name} {}x{}", size.0, size.1));
         }
     }
 }
@@ -528,4 +524,37 @@ fn custom_buttons_and_help_topics_have_accessible_names() {
         .center();
     h.click(row);
     assert_eq!(h.app.help.selected, 3);
+}
+
+#[test]
+fn long_about_values_wrap_inside_the_window() {
+    use any2odyssey_core::about::{AboutInfo, InstallRecord};
+    // No spaces to break at, and several times the width of the window.
+    let folder: String = std::iter::once("C:".to_owned())
+        .chain((0..24).map(|i| format!("\\DeeplyNestedFolder{i:02}")))
+        .collect();
+    let record = InstallRecord {
+        installed: Some("2026-11-08T14:10:33.1234567-05:00".into()),
+        version: Some("0.8.6".into()),
+        action: Some("Upgrade".into()),
+        worker: Some(format!("{folder}\\Any2OdysseyWorker.exe")),
+        ..Default::default()
+    };
+    for size in SIZES {
+        let mut h = Harness::new(size, Page::About);
+        h.app.about = AboutState::with_info(AboutInfo::assemble(
+            "0.8.6",
+            Some("0123456789ab"),
+            Some(std::path::PathBuf::from(&folder)),
+            Ok(Some(record.clone())),
+        ));
+        let painted = h.settle();
+        let context = format!("about {}x{}", size.0, size.1);
+        assert_inside_window(&painted, size.0, &context);
+        let location = find(&painted, "C:\\DeeplyNestedFolder00");
+        assert!(
+            location.rect.height() > 30.0,
+            "{context}: the path is on one line"
+        );
+    }
 }
