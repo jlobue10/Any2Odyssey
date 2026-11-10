@@ -106,8 +106,9 @@ jobs:
     timeout-minutes: 45
     container: archlinux:base-devel
     steps:
-      - name: Packaging tools
-        run: pacman -Syu --noconfirm --needed git rustup desktop-file-utils
+      # makepkg runs as a user without sudo, so the package's own dependencies are installed here.
+      - name: Packaging tools and the package's dependencies
+        run: pacman -Syu --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
