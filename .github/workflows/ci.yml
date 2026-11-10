@@ -56,6 +56,13 @@ jobs:
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
+      # The installer tests assemble their own package folder from the repository, so nothing
+      # else opens the ZIP that is published: a file missing from package.ps1's lists would ship.
+      - name: Verify the packaged ZIP (complete, passes the installer's preflight)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: ./scripts/verify-package.ps1
       - name: Stage the built executable for the installer tests
         shell: pwsh
         run: |

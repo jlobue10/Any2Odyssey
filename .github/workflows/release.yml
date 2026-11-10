@@ -24,6 +24,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # Left in .git/config, the token is readable by every build script, proc-macro and test
+          # that runs below. This job's token can only read, and the publish job has its own.
           persist-credentials: false
       # The publish job refuses this too. Checking first saves a full build on a re-run.
       - name: Stop early if this tag's release already has assets
@@ -62,6 +64,8 @@ jobs:
           if ($env:TAG -ne "v$version") { throw "Tag $env:TAG does not match VERSION $version" }
           # The release notes link to the changelog entry; refuse to publish a version that has none.
           if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($version)) " -Quiet)) { throw "CHANGELOG.md has no entry for $version" }
+          # README names the current release in its status line; it has been left behind before.
+          if (-not (Select-String -Path README.md -SimpleMatch -Pattern "$version is the current release" -Quiet)) { throw "README.md does not name $version as the current release" }
       # Same checks as ci.yml: a tag can be pushed from a commit whose CI never ran or failed.
       - name: Format check
         run: cargo fmt --all --check
@@ -111,13 +115,21 @@ jobs:
           $export=Start-Process -FilePath target/release/Any2Odyssey.exe -ArgumentList '--export-guide',('"'+$exported+'"') -Wait -PassThru
           if ($export.ExitCode -ne 0) { throw "--export-guide exited $($export.ExitCode)" }
           $normalize={param($path)([IO.File]::ReadAllText($path)).Replace("`r`n","`n")}
-          if ((& $normalize $exported) -ne (& $normalize 'USER-GUIDE.html')) { throw 'USER-GUIDE.html differs from the embedded Help; regenerate it with --export-guide' }
+          # Ordinal: PowerShell's -ne ignores letter case and compares linguistically.
+          if (-not [string]::Equals((& $normalize $exported),(& $normalize 'USER-GUIDE.html'),[StringComparison]::Ordinal)) { throw 'USER-GUIDE.html differs from the embedded Help; regenerate it with --export-guide' }
       - name: Package
         shell: pwsh
         run: |
           $now=(Get-FileHash -LiteralPath target/release/Any2Odyssey.exe -Algorithm SHA256).Hash
           if ($now -ne $env:TESTED_EXE_SHA256) { throw "Any2Odyssey.exe changed after it was verified and tested ($env:TESTED_EXE_SHA256 -> $now); a later step rebuilt it." }
           ./scripts/package.ps1
+      # The installer tests assemble their own package folder from the repository, so nothing
+      # else opens the ZIP that is published: a file missing from package.ps1's lists would ship.
+      - name: Verify the packaged ZIP (complete, passes the installer's preflight)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: ./scripts/verify-package.ps1
       # Handed to the publish job, which is the only one allowed to write to the repository.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
