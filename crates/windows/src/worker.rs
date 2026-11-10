@@ -38,6 +38,12 @@ use crate::win;
 /// so a worker alive after it was either orphaned or is stuck.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(7);
 
+/// WM_QUIT ended the loop without any of its own stop paths having run.
+const UNREQUESTED_QUIT_LOG: &str =
+    "The message loop ended without a stop request; stopping the engine.";
+const UNREQUESTED_QUIT_STATUS: &str =
+    "Conversion stopped: the message loop ended without a stop request.";
+
 /// The engine invoked its `closed` callback without being asked: the case
 /// recovery exists for, so it exits with the renderer error code rather than
 /// as a clean stop.
@@ -456,8 +462,21 @@ fn run_inner(
             DispatchMessageW(&msg);
         }
     }
-    if started {
-        library.stop(&stop_event);
+    if !closing.get() {
+        // WM_QUIT reached the loop although nothing here asked for it: the
+        // capture surface was destroyed from outside, or code running on this
+        // thread posted a quit. Not a clean stop, and the status file still
+        // says whatever the last poll wrote; name it before the engine's Stop,
+        // which the watchdog may have to cut short.
+        log(UNREQUESTED_QUIT_LOG);
+        report(UNREQUESTED_QUIT_STATUS);
+        if started {
+            library.stop(&stop_event);
+        }
+        return Err(Exit {
+            code: exit_code::RENDERER_ERROR,
+            message: None,
+        });
     }
     if let Some(code) = failure.get() {
         // The reason is already in worker-status.json and the log; a message

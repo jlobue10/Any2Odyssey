@@ -24,8 +24,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW, GWLP_USERDATA,
-    HWND_BOTTOM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_ERASEBKGND, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    HWND_BOTTOM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::capture::GpuDesktopCapture;
@@ -69,6 +69,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
+        // These windows are destroyed only by the code that created them. The
+        // default handling would let any process that posts WM_CLOSE (taskkill
+        // without /F, a window-management tool) destroy the capture surface
+        // under a running engine and end the worker's loop through WM_QUIT.
+        WM_CLOSE => LRESULT(0),
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
