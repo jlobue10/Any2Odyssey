@@ -11,7 +11,8 @@ use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
-    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+    AllowSetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
 };
 
 pub use any2odyssey_windows::ipc::ControlEvents;
@@ -44,6 +45,19 @@ pub fn test_offscreen() -> i32 {
 }
 
 pub fn signal(name: &str) -> bool {
+    // The running instance answers a show request with SetForegroundWindow,
+    // which Windows honours only for a process that owns the foreground or
+    // has been given the right by one that does. This launch (a shortcut, a
+    // jump-list task, a terminal) was started by the user and has that
+    // right; the instance that has been sitting in the tray does not, and
+    // its window would be restored without the keyboard focus, with a
+    // flashing taskbar button instead. Pass the right on before signalling.
+    // ASFW_ANY because the instance is known here only by its event name;
+    // the grant ends with the next user input. Failure changes nothing: the
+    // window is still shown, as before.
+    if name == ipc::SHOW_EVENT {
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
     any2odyssey_windows::ipc::signal(name)
 }
 
@@ -57,7 +71,25 @@ pub fn single_instance() -> Option<SingleInstance> {
 }
 
 pub fn validate() -> Result<(), String> {
-    engine::validate().map_err(|e| e.to_string())
+    engine::validate().map_err(|e| e.to_string())?;
+    worker_matches_controls()
+}
+
+/// Refuse to start a worker of another version than these controls; see
+/// `worker_version`. A version that cannot be read is logged and allowed.
+fn worker_matches_controls() -> Result<(), String> {
+    use crate::worker_version::{check, Agreement};
+    let installed = any2odyssey_windows::file_version::file_version(&paths::worker_exe());
+    match check(installed, update::Version::current()) {
+        Agreement::Same => Ok(()),
+        Agreement::Unknown => {
+            any2odyssey_core::log::Logger::default_location().log(
+                "The installed conversion worker's version could not be read; starting without the version check.",
+            );
+            Ok(())
+        }
+        Agreement::Mismatch(message) => Err(message),
+    }
 }
 
 pub fn list_windows(worker_pid: Option<u32>) -> Vec<(isize, String)> {
@@ -197,7 +229,16 @@ pub fn show_window(hwnd: isize) {
             win::set_ex_style(h, style & !WS_EX_TOOLWINDOW_BIT);
         }
         let _ = ShowWindow(h, SW_SHOW);
-        let _ = ShowWindow(h, SW_RESTORE);
+        // Restore only a minimized window. `SW_RESTORE` also un-maximizes a
+        // maximized one, so "show controls" on a visible maximized window
+        // shrank it; and because both the poller and the frame call this
+        // for one request, a window hidden while maximized came back
+        // maximized on the first call and was un-maximized by the second.
+        // A window hidden by `hide_window` is minimized, so it is iconic
+        // here and is restored to the state it was hidden in.
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        }
         let _ = SetForegroundWindow(h);
     }
 }

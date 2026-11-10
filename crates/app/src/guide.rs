@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use any2odyssey_core::help::{paragraphs, topics};
-use html_escape::encode_text;
+use html_escape::{encode_double_quoted_attribute, encode_text};
 
 pub fn render() -> String {
     let mut html = String::new();
@@ -15,9 +15,11 @@ pub fn render() -> String {
     html.push_str("<style>body{font-family:Georgia,'Palatino Linotype',serif;background:#EEE8DC;color:#232727;max-width:60em;margin:2em auto;padding:0 1em;line-height:1.5}h1,h2{color:#236F7C}h2{border-bottom:1px solid #967028;padding-bottom:.2em;margin-top:2em}.caps{font-weight:bold;color:#654A19}nav a{margin-right:1em}a{color:#236F7C}@media(prefers-color-scheme:dark){body{background:#111315;color:#F2ECE2}h1,h2{color:#7CC4D3}.caps{color:#D6BA70}a{color:#7CC4D3}}</style></head><body>\n");
     html.push_str(&format!("<h1>Any2Odyssey {} — user guide</h1>\n<p>Rust reimplementation of Any2Odd by Zhandragon (GPL-3.0-only). The same topics are available inside the app with F1.</p>\n<nav>", any2odyssey_core::VERSION));
     for t in topics() {
+        // Attribute values need the quote escaped as well; `encode_text`
+        // only covers what a text node needs.
         html.push_str(&format!(
             "<a href=\"#{}\">{}</a>",
-            encode_text(&t.id),
+            encode_double_quoted_attribute(&t.id),
             encode_text(&t.title)
         ));
     }
@@ -25,7 +27,7 @@ pub fn render() -> String {
     for t in topics() {
         html.push_str(&format!(
             "<h2 id=\"{}\">{}</h2>\n",
-            encode_text(&t.id),
+            encode_double_quoted_attribute(&t.id),
             encode_text(&t.title)
         ));
         for p in paragraphs(&t.body) {
@@ -51,7 +53,7 @@ pub fn render() -> String {
         for l in &t.links {
             html.push_str(&format!(
                 "<p><a href=\"{}\">{}</a></p>\n",
-                encode_text(&l.url),
+                encode_double_quoted_attribute(&l.url),
                 encode_text(&l.label)
             ));
         }
@@ -80,6 +82,22 @@ mod tests {
         assert!(is_caps_heading("2D → 3D AUTOMATICALLY (AI)"));
         assert!(!is_caps_heading("The recommended mode for games."));
         assert!(!is_caps_heading("1."));
+    }
+
+    #[test]
+    fn attribute_values_escape_the_quote_that_text_nodes_keep() {
+        let hostile = r#"x" onmouseover="alert(1)"#;
+        assert_eq!(encode_text(hostile), hostile, "text nodes keep quotes");
+        let attribute = encode_double_quoted_attribute(hostile);
+        assert!(!attribute.contains('"'), "{attribute}");
+        // Today's topics need no escaping at all, so the committed guide is
+        // unchanged by the stricter encoder.
+        for t in topics() {
+            assert_eq!(encode_double_quoted_attribute(&t.id), t.id);
+            for l in &t.links {
+                assert_eq!(encode_double_quoted_attribute(&l.url), l.url);
+            }
+        }
     }
 
     #[test]
