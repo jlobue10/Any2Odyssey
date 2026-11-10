@@ -421,6 +421,9 @@ fn run_inner(
                     &paths::worker_status_file(),
                     &WorkerStatus::ready_now(state, current_pid()),
                 );
+                // A window mode that started without a source has its notice
+                // up; "3D active" over a surface showing nothing would hide it.
+                source_notice.status_written();
             }
             if !ready && begun.elapsed() > Duration::from_secs(ENGINE_READY_TIMEOUT_SECS) {
                 report("Conversion did not initialize. See conversion log.");
