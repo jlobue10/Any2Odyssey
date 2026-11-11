@@ -1,0 +1,43 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# any2odyssey-lens-helper, Wine flavour: the helper Any2Odyssey starts to switch the Odyssey 3D's lens.
+# Makes sure Leia's Windows SR service and session are running in the Wine prefix that setup.sh prepared,
+# then runs the Windows helper there. Contract (docs/LENS-SWITCH.md): prints "on" or "error: <reason>", and
+# switches the lens off and exits when standard input closes.
+# Try it by hand:  sleep 20 | any2odyssey-lens-helper
+T=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+export WINEPREFIX=$T/prefix WINEDLLOVERRIDES="mscoree,mshtml="
+LOGDIR="$WINEPREFIX/drive_c/ProgramData/Simulated Reality/Server/Log"
+BOARD=/dev/odyssey-lens
+STAMP=$T/stack.started
+
+[ -d "$WINEPREFIX" ] || { echo "error: the Wine prefix is missing; run contrib/wine-lens/setup.sh"; exit 1; }
+[ -e "$BOARD" ] || { echo "error: the lens board is not present (is the Odyssey 3D awake?)"; exit 1; }
+
+stack_ok() {
+    pgrep -f 'bin.SRService\.exe' >/dev/null && pgrep -f 'SRSession\.exe' >/dev/null &&
+        [ -e "$STAMP" ] && [ "$(stat -c %Y "$BOARD")" -le "$(stat -c %Y "$STAMP")" ]
+    # (the link itself, not the tty behind it: udev makes it anew when the board returns after a monitor sleep)
+}
+
+# One helper at a time may (re)start the service; the others wait for it.
+exec 9>"$T/stack.lock"
+flock 9
+if ! stack_ok; then
+    [ -f "$T/noxon.pid" ] && kill "$(cat "$T/noxon.pid")" 2>/dev/null
+    setsid "$T/tools/noxon.sh" </dev/null >/dev/null 2>&1 9>&- &
+    echo $! >"$T/noxon.pid"
+    "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- ||
+        { echo "error: could not start Leia's service (see $T/edid.pairs)"; exit 1; }
+    i=0
+    until grep -a -q 'responded to initial disable' "$(ls -t "$LOGDIR"/*.txt 2>/dev/null | head -1)" 2>/dev/null; do
+        i=$((i + 1))
+        [ $i -gt 60 ] && { echo "error: Leia's service did not get the lens board ready (log in $LOGDIR)"; exit 1; }
+        sleep 1
+    done
+    touch "$STAMP"
+fi
+flock -u 9
+exec 9>&-
+
+WINEDEBUG=-all WINEPATH='C:\Program Files\LeiaSR\Platform\bin' exec wine "$T/build/any2odyssey-lens-helper.exe" 2>/dev/null

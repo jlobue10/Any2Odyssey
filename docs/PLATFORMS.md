@@ -6,7 +6,7 @@
 | Tray / menu | Windows notification icon, jump list | No tray icon yet (planned: StatusNotifier where the desktop supports it); Minimize and Close act normally |
 | Ordinary 2D → AI depth | Installed Samsung engine, live on the whole desktop | Still images only: an open model (Depth Anything V2 Small, Apache-2.0) through the system's ONNX Runtime, then left and right views rendered from the depth map; depth strength and pop-out as on Windows. Needs `onnxruntime-cpu` or `onnxruntime-cuda` and `any2odyssey --install-depth-model` |
 | Existing SBS input | Samsung/Leia calibrated output | Stereo viewer: an SBS image as red/cyan anaglyph or SBS, half-width stretch, eye swap, preview, output window with full screen, PNG export |
-| G90XF tracking, calibration and lens output | Samsung/Leia runtime required | Not available |
+| G90XF tracking, calibration and lens output | Samsung/Leia runtime required | Experimental: a two-view lens interleave of our own (`core::weave`) with a calibration pattern and three numbers the user tunes (pitch, slant, offset), full screen only. No eye tracking and no use of Samsung's calibration files. The lens is asked for while that output is full screen, through an optional helper (`docs/LENS-SWITCH.md`): either Leia's SR runtime for Linux (commercial, not public, untested) or the user's own copy of Leia's Windows runtime under Wine (`contrib/wine-lens`, seen working on a G90XF). Without a helper the lens stays off |
 | Whole-desktop source | Windows Graphics Capture | Not yet. Planned: a bounded capture of one screen through the portal/X11, shown on a different display; Wayland stays disabled until source/output exclusion is verified |
 | Selected / follow-active window | DWM thumbnails | Not planned |
 | Click-through output | Win32 layered + transparent styles | No: the output is an ordinary window you place and make full screen |
@@ -35,7 +35,7 @@ The stereo viewer was built and run on Arch Linux under WSL 2 (x86_64) with the 
 
 ## Why Samsung's engine cannot be used on Linux
 
-Conversion is done by Samsung's `ConversionWrapper.dll` (CUDA/ONNX, Windows x64) and the calibrated glasses-free output needs the LeiaSR runtime, eye tracking from the monitor's camera and the lens calibration. None of these exist for Linux. Running them under Wine/Proton is unvalidated and outside this project's scope. Any2Odyssey's Linux edition is therefore the stereo viewer described above, with the capture feature to follow.
+Conversion is done by Samsung's `ConversionWrapper.dll` (CUDA/ONNX, Windows x64) and the calibrated glasses-free output needs the LeiaSR runtime, eye tracking from the monitor's camera and the lens calibration. The conversion engine does not exist for Linux, and Leia's SR runtime for Linux is a commercial package that is not public. Running Samsung's conversion engine under Wine/Proton is unvalidated and outside this project's scope. The one thing asked of Leia's runtime is to switch the lens on, either by its Linux package where that is installed or by its Windows service running under Wine (`docs/LENS-SWITCH.md`); eye tracking and Leia's weaver are not used. Any2Odyssey's Linux edition is therefore the stereo viewer described above, with the capture feature to follow.
 
 ## Development machines
 

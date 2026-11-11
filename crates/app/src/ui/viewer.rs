@@ -3,8 +3,10 @@
 //! or a (swapped) side-by-side pair, preview it, show it in a separate
 //! output window and save it as PNG.
 //!
-//! This is layout conversion only (`core::stereo`): no depth is estimated
-//! and nothing here drives the Odyssey's calibrated glasses-free mode.
+//! Besides layout conversion (`core::stereo`) and AI depth (`core::dibr`)
+//! there is an experimental lens-interleaved output (`core::weave`, `lens`)
+//! tuned by the user's own calibration. Nothing here uses Samsung's engine
+//! or its calibration files.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -16,14 +18,16 @@ use any2odyssey_core::theme::Palette;
 use egui::{pos2, Color32, Key, Rect, RichText, Sense, Ui, ViewportCommand};
 use image::RgbaImage;
 
+use super::lens::{self, LensState};
 use super::theme::color;
 use super::widgets::{banner, gold_button, row, section};
 use crate::core::{Core, MenuCommand, UiRequest};
+use crate::lens_switch::{LensStatus, LensSwitch};
 use crate::platform;
 
 pub const READY: &str =
     "Ready. Open a side-by-side stereo image, or drop one on this window. Output starts only when requested.";
-pub const NOTICE: &str = "This build converts images, not the live desktop, and shows them as anaglyph or side by side. Eye tracking and the Odyssey's calibrated glasses-free output exist only on Windows.";
+pub const NOTICE: &str = "This build converts images, not the live desktop, and shows them as anaglyph, side by side or (experimental) interleaved for the Odyssey's lens. Eye tracking and Samsung's calibrated glasses-free output exist only on Windows.";
 const OUTPUT_HINT: &str =
     "Move this window to the display you want, then double-click or press F11 for full screen. Esc leaves.";
 const LOADED: &str = "Image loaded. Check the input format before starting output.";
@@ -31,6 +35,8 @@ const NO_IMAGE: &str = "Open an image first.";
 const OUTPUT_ON: &str =
     "Output window open. Stop output, Esc in that window, or closing it ends it.";
 const OUTPUT_OFF: &str = "Output stopped.";
+const LENS_WINDOWED: &str =
+    "Lens output is only right full screen on the Odyssey: double-click or press F11. Esc leaves.";
 const ESTIMATING: &str =
     "Estimating depth… The first image also loads the model, which takes a few seconds.";
 const CONVERTED: &str = "Converted to 3D. Adjust depth strength and pop-out to taste.";
@@ -63,14 +69,19 @@ impl Input {
 pub enum Output {
     Anaglyph,
     Sbs,
+    /// The pair interleaved subpixel by subpixel for the Odyssey's lens.
+    /// The document keeps the side-by-side pair; the output window
+    /// interleaves it for the pixels it covers.
+    Lens,
 }
 
 impl Output {
-    const ALL: [Output; 2] = [Output::Anaglyph, Output::Sbs];
+    const ALL: [Output; 3] = [Output::Anaglyph, Output::Sbs, Output::Lens];
     fn label(self) -> &'static str {
         match self {
             Output::Anaglyph => "Red/cyan anaglyph (needs red/cyan glasses)",
             Output::Sbs => "Side-by-side stereo (needs a matching viewer)",
+            Output::Lens => "Odyssey lens interleave (experimental)",
         }
     }
 }
@@ -109,7 +120,22 @@ impl Options {
         match (self.input, self.output) {
             (Input::Flat, _) => Layout::Flat,
             (Input::Pair | Input::Ai, Output::Anaglyph) => Layout::Anaglyph,
-            (Input::Pair | Input::Ai, Output::Sbs) => Layout::Sbs,
+            (Input::Pair | Input::Ai, Output::Sbs | Output::Lens) => Layout::Sbs,
+        }
+    }
+
+    /// Whether the output window interleaves a pair for the lens.
+    pub fn weaves(&self) -> bool {
+        self.output == Output::Lens && self.input != Input::Flat
+    }
+
+    /// How much each eye of the pair is widened before it is shown: a
+    /// half-width pair holds each eye squeezed to half its width.
+    fn eye_stretch(&self) -> f64 {
+        if self.input == Input::Pair && self.half_width {
+            2.0
+        } else {
+            1.0
         }
     }
 
@@ -261,6 +287,20 @@ pub fn with_png_extension(path: PathBuf) -> PathBuf {
     }
 }
 
+/// The panel pixel under the top left corner of the window `ctx` draws,
+/// where the window system tells (X11; Wayland keeps it to itself). It is
+/// right when the Odyssey is the display at the desktop's origin.
+fn window_origin(ctx: &egui::Context, scale: f32) -> (i64, i64) {
+    ctx.input(|i| i.viewport().inner_rect)
+        .map(|rect| {
+            (
+                (rect.min.x * scale).round() as i64,
+                (rect.min.y * scale).round() as i64,
+            )
+        })
+        .unwrap_or((0, 0))
+}
+
 /// The largest rectangle with `image`'s aspect ratio centred in `area`.
 fn fit_centered(area: Rect, image: egui::Vec2) -> Rect {
     if image.x <= 0.0 || image.y <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
@@ -293,6 +333,10 @@ pub struct ViewerState {
     /// retried on every frame. Cleared by a new image or a new choice of
     /// input format.
     depth_failed: Option<u64>,
+    /// The lens numbers and the interleaved picture of the output window.
+    lens: LensState,
+    /// The Odyssey's lens itself: asked for while lens output is full screen.
+    lens_switch: LensSwitch,
 }
 
 impl Default for ViewerState {
@@ -309,11 +353,29 @@ impl Default for ViewerState {
             picking: None,
             estimating: None,
             depth_failed: None,
+            lens: LensState::default(),
+            // No helper is looked for: tests and previews start no program.
+            lens_switch: LensSwitch::with_helper(None),
         }
     }
 }
 
 impl ViewerState {
+    /// The viewer with the user's saved lens numbers; changes are saved
+    /// back. `default()` keeps them in memory only.
+    pub fn with_saved_lens() -> ViewerState {
+        ViewerState {
+            lens: LensState::load(any2odyssey_core::paths::lens_file()),
+            lens_switch: LensSwitch::new(),
+            ..ViewerState::default()
+        }
+    }
+
+    /// The calibration pattern is a picture of its own: it needs no image.
+    fn shows_pattern(&self) -> bool {
+        self.options.output == Output::Lens && self.lens.pattern
+    }
+
     fn open(&mut self, path: &Path) {
         match self.document.open(path, self.options) {
             Ok(()) => {
@@ -402,7 +464,7 @@ impl ViewerState {
     fn toggle_output(&mut self) {
         if self.output_open {
             self.stop_output();
-        } else if self.document.result().is_none() {
+        } else if self.document.result().is_none() && !self.shows_pattern() {
             self.status = NO_IMAGE.into();
         } else {
             self.output_open = true;
@@ -417,6 +479,9 @@ impl ViewerState {
             self.output_fullscreen = false;
             self.status = OUTPUT_OFF.into();
         }
+        self.lens.store();
+        self.lens.release();
+        self.lens_switch.set(false, || {});
     }
 
     /// Run a blocking file dialog off the UI thread; `poll_dialog` collects
@@ -643,7 +708,21 @@ impl ViewerState {
                 } else {
                     ui.checkbox(
                         &mut state.options.half_width,
-                        "Half-width pair: stretch each eye for red/cyan output",
+                        "Half-width pair: stretch each eye back to full width",
+                    )
+                    .on_hover_text("For red/cyan and lens output. Side-by-side output keeps the pair as it is.");
+                }
+                if state.options.output == Output::Lens {
+                    ui.add_space(4.0);
+                    state.lens.controls(ui, p);
+                    state.lens_switch.poll();
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(state.lens_switch.status().describe())
+                                .color(color(p.muted))
+                                .size(12.0),
+                        )
+                        .wrap(),
                     );
                 }
                 ui.add_space(4.0);
@@ -674,6 +753,7 @@ impl ViewerState {
             }
             self.options_changed();
         }
+        self.lens.save_when_settled(&ctx, std::time::Instant::now());
         self.ensure_depth(&ctx);
         self.sync_texture(&ctx);
         ui.add_space(5.0);
@@ -738,12 +818,31 @@ impl ViewerState {
     /// per frame, outside the page's layout.
     pub fn show_output(&mut self, ctx: &egui::Context) {
         if !self.output_open {
+            // Every way the output ends comes through here on the next frame.
+            self.lens_switch.set(false, || {});
             return;
         }
-        let Some(texture) = self.texture.clone() else {
+        let weaving = self.options.weaves() || self.shows_pattern();
+        let plain = self.texture.clone();
+        if plain.is_none() && !self.shows_pattern() {
             self.output_open = false;
+            self.lens.release();
+            self.lens_switch.set(false, || {});
             return;
-        };
+        }
+        // The lens is only right for a picture interleaved for the whole
+        // panel, so it is asked for exactly while that is what is shown.
+        let wake = ctx.clone();
+        self.lens_switch
+            .set(weaving && self.output_fullscreen, move || {
+                wake.request_repaint()
+            });
+        self.lens_switch.poll();
+        let lens_status = self.lens_switch.status();
+        let stretch = self.options.eye_stretch();
+        let generation = self.document.generation;
+        let pair = self.document.result.as_ref();
+        let lens_state = &mut self.lens;
         let id = egui::ViewportId::from_hash_of("any2odyssey-output");
         let builder = egui::ViewportBuilder::default()
             .with_title("Any2Odyssey output")
@@ -757,20 +856,64 @@ impl ViewerState {
                 .frame(egui::Frame::NONE.fill(Color32::BLACK))
                 .show(ctx, |ui| {
                     let area = ui.max_rect();
-                    ui.painter().image(
-                        texture.id(),
-                        fit_centered(area, texture.size_vec2()),
-                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
-                    if !fullscreen {
-                        ui.painter().text(
-                            pos2(area.center().x, area.bottom() - 14.0),
-                            egui::Align2::CENTER_BOTTOM,
-                            OUTPUT_HINT,
-                            egui::FontId::proportional(13.0),
-                            Color32::from_gray(190),
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    let mut hint = (!fullscreen).then_some(OUTPUT_HINT.to_owned());
+                    if weaving {
+                        lens_state.keys(ctx);
+                        // One texel per panel pixel: the picture covers the
+                        // whole window and is made for exactly its pixels.
+                        let scale = ctx.pixels_per_point();
+                        let size = [
+                            (area.width() * scale).round() as u32,
+                            (area.height() * scale).round() as u32,
+                        ];
+                        let origin = if fullscreen {
+                            (0, 0)
+                        } else {
+                            window_origin(ctx, scale)
+                        };
+                        let woven =
+                            lens_state.texture(ctx, pair, generation, stretch, size, origin);
+                        if let Some(woven) = woven {
+                            ui.painter().image(woven.id(), area, uv, Color32::WHITE);
+                        }
+                        hint = match (fullscreen, lens_state.pattern) {
+                            (false, _) => Some(LENS_WINDOWED.to_owned()),
+                            (true, true) => Some(format!(
+                                "{}   ·   {}   ·   {}",
+                                lens_state.readout(),
+                                lens::KEYS_HELP,
+                                lens_status.describe()
+                            )),
+                            // The picture stays clean unless the lens that
+                            // was asked for did not come on.
+                            (true, false) => match &lens_status {
+                                LensStatus::Failed(_) => Some(lens_status.describe()),
+                                _ => None,
+                            },
+                        };
+                    } else if let Some(texture) = &plain {
+                        ui.painter().image(
+                            texture.id(),
+                            fit_centered(area, texture.size_vec2()),
+                            uv,
+                            Color32::WHITE,
                         );
+                    }
+                    if let Some(hint) = hint {
+                        let at = pos2(area.center().x, area.bottom() - 14.0);
+                        let font = egui::FontId::proportional(13.0);
+                        let text = ui
+                            .painter()
+                            .layout_no_wrap(hint, font, Color32::from_gray(210));
+                        let frame = egui::Align2::CENTER_BOTTOM
+                            .anchor_size(at, text.size())
+                            .expand(6.0);
+                        // A dark plate: the pattern behind it may be white.
+                        ui.painter()
+                            .rect_filled(frame, 4.0, Color32::from_black_alpha(200));
+                        ui.painter()
+                            .galley(frame.min + egui::vec2(6.0, 6.0), text, Color32::WHITE);
                     }
                     if ui
                         .interact(area, ui.id().with("output"), Sense::click())
@@ -903,6 +1046,59 @@ mod tests {
             .unwrap_err();
         assert!(missing.starts_with("Could not open "), "{missing}");
         assert!(document.result().is_some(), "the loaded image stays");
+    }
+
+    #[test]
+    fn lens_output_keeps_the_pair_and_interleaves_only_stereo() {
+        let mut options = Options {
+            output: Output::Lens,
+            ..Options::default()
+        };
+        // The document holds the side-by-side pair; the output window makes
+        // the interleaved picture for the pixels it covers.
+        assert_eq!(options.layout(), Layout::Sbs);
+        assert!(options.weaves());
+        assert_eq!(options.eye_stretch(), 2.0, "half-width pair by default");
+        options.half_width = false;
+        assert_eq!(options.eye_stretch(), 1.0);
+        // The AI pair is rendered at full width per eye whatever the box says.
+        options.half_width = true;
+        options.input = Input::Ai;
+        assert_eq!(options.eye_stretch(), 1.0);
+        assert!(options.weaves());
+        // A flat image has no second eye to interleave.
+        options.input = Input::Flat;
+        assert_eq!(options.layout(), Layout::Flat);
+        assert!(!options.weaves());
+
+        let mut document = Document::default();
+        options.input = Input::Pair;
+        document.set_source(pair(), options).unwrap();
+        assert_eq!(document.result().unwrap(), &pair());
+    }
+
+    #[test]
+    fn the_calibration_pattern_opens_the_output_without_an_image() {
+        let mut state = ViewerState::default();
+        state.lens.pattern = true;
+        // The pattern belongs to lens output only.
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, NO_IMAGE);
+
+        state.options.output = Output::Lens;
+        state.toggle_output();
+        assert!(state.output_open);
+        assert_eq!(state.status, OUTPUT_ON);
+        state.toggle_output();
+        assert!(!state.output_open);
+
+        state.lens.pattern = false;
+        state.toggle_output();
+        assert!(
+            !state.output_open,
+            "no pattern and no image: nothing to show"
+        );
     }
 
     #[test]

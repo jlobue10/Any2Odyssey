@@ -49,6 +49,10 @@ pub fn settings_file() -> PathBuf {
 pub fn ui_settings_file() -> PathBuf {
     data_dir().join("ui-settings.json")
 }
+/// The user's own lens numbers for interleaved output (`weave::Lens`).
+pub fn lens_file() -> PathBuf {
+    data_dir().join("lens.json")
+}
 pub fn log_file() -> PathBuf {
     data_dir().join("companion.log")
 }
