@@ -22,6 +22,7 @@ use super::lens::{self, LensState};
 use super::theme::color;
 use super::widgets::{banner, gold_button, row, section};
 use crate::core::{Core, MenuCommand, UiRequest};
+use crate::lens_switch::{LensStatus, LensSwitch};
 use crate::platform;
 
 pub const READY: &str =
@@ -334,6 +335,8 @@ pub struct ViewerState {
     depth_failed: Option<u64>,
     /// The lens numbers and the interleaved picture of the output window.
     lens: LensState,
+    /// The Odyssey's lens itself: asked for while lens output is full screen.
+    lens_switch: LensSwitch,
 }
 
 impl Default for ViewerState {
@@ -351,6 +354,8 @@ impl Default for ViewerState {
             estimating: None,
             depth_failed: None,
             lens: LensState::default(),
+            // No helper is looked for: tests and previews start no program.
+            lens_switch: LensSwitch::with_helper(None),
         }
     }
 }
@@ -361,6 +366,7 @@ impl ViewerState {
     pub fn with_saved_lens() -> ViewerState {
         ViewerState {
             lens: LensState::load(any2odyssey_core::paths::lens_file()),
+            lens_switch: LensSwitch::new(),
             ..ViewerState::default()
         }
     }
@@ -475,6 +481,7 @@ impl ViewerState {
         }
         self.lens.store();
         self.lens.release();
+        self.lens_switch.set(false, || {});
     }
 
     /// Run a blocking file dialog off the UI thread; `poll_dialog` collects
@@ -708,6 +715,15 @@ impl ViewerState {
                 if state.options.output == Output::Lens {
                     ui.add_space(4.0);
                     state.lens.controls(ui, p);
+                    state.lens_switch.poll();
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(state.lens_switch.status().describe())
+                                .color(color(p.muted))
+                                .size(12.0),
+                        )
+                        .wrap(),
+                    );
                 }
                 ui.add_space(4.0);
                 if gold_button(ui, "Save preview PNG…", false, p).clicked() {
@@ -802,6 +818,8 @@ impl ViewerState {
     /// per frame, outside the page's layout.
     pub fn show_output(&mut self, ctx: &egui::Context) {
         if !self.output_open {
+            // Every way the output ends comes through here on the next frame.
+            self.lens_switch.set(false, || {});
             return;
         }
         let weaving = self.options.weaves() || self.shows_pattern();
@@ -809,8 +827,18 @@ impl ViewerState {
         if plain.is_none() && !self.shows_pattern() {
             self.output_open = false;
             self.lens.release();
+            self.lens_switch.set(false, || {});
             return;
         }
+        // The lens is only right for a picture interleaved for the whole
+        // panel, so it is asked for exactly while that is what is shown.
+        let wake = ctx.clone();
+        self.lens_switch
+            .set(weaving && self.output_fullscreen, move || {
+                wake.request_repaint()
+            });
+        self.lens_switch.poll();
+        let lens_status = self.lens_switch.status();
         let stretch = self.options.eye_stretch();
         let generation = self.document.generation;
         let pair = self.document.result.as_ref();
@@ -852,11 +880,17 @@ impl ViewerState {
                         hint = match (fullscreen, lens_state.pattern) {
                             (false, _) => Some(LENS_WINDOWED.to_owned()),
                             (true, true) => Some(format!(
-                                "{}   ·   {}",
+                                "{}   ·   {}   ·   {}",
                                 lens_state.readout(),
-                                lens::KEYS_HELP
+                                lens::KEYS_HELP,
+                                lens_status.describe()
                             )),
-                            (true, false) => None,
+                            // The picture stays clean unless the lens that
+                            // was asked for did not come on.
+                            (true, false) => match &lens_status {
+                                LensStatus::Failed(_) => Some(lens_status.describe()),
+                                _ => None,
+                            },
                         };
                     } else if let Some(texture) = &plain {
                         ui.painter().image(

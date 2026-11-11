@@ -1,0 +1,4 @@
+# Samsung Odyssey 3D (G90XF): the lens switch board is a USB serial device
+# (Dimenco BV "SR Lens Switch Board"). Let the person at the seat open it
+# without joining the serial group, and keep ModemManager from probing it.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="354b", ATTRS{idProduct}=="0116", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", SYMLINK+="odyssey-lens"

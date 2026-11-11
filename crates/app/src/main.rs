@@ -8,6 +8,7 @@ mod core;
 mod depth;
 mod guide;
 mod hotkeys;
+mod lens_switch;
 mod platform;
 #[cfg(windows)]
 mod tray;

@@ -1,0 +1,110 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Prepare the Wine route for switching the Odyssey 3D's lens from Linux: a Wine prefix holding your own copy
+# of Leia's Windows SR runtime, plus the small stand-in libraries Wine needs before that runtime works.
+# Nothing of Leia's is distributed with Any2Odyssey; the runtime is copied from a Windows installation of
+# yours that has the Odyssey 3D Hub (LeiaSR) installed.
+#
+# usage: setup.sh <windows-root>
+#   <windows-root>  a mounted Windows system drive, the folder that contains "Program Files" and "ProgramData"
+#
+# Everything goes under $ANY2ODYSSEY_DATA_DIR (default ~/.local/share/any2odyssey)/wine-lens.
+# Run it again after a Wine upgrade or if the monitor (lens board) is replaced.
+set -eu
+
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+DATA=${ANY2ODYSSEY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/any2odyssey}
+T=$DATA/wine-lens
+BOARD=/dev/odyssey-lens
+CC=x86_64-w64-mingw32-gcc
+
+die() { echo "setup: $*" >&2; exit 1; }
+
+[ $# -eq 1 ] || die "usage: setup.sh <windows-root>"
+WIN=${1%/}
+RUNTIME="$WIN/Program Files/LeiaSR/Platform"
+PROGDATA="$WIN/ProgramData/Simulated Reality"
+[ -f "$RUNTIME/bin/SRService.exe" ] || die "no Leia SR runtime in $RUNTIME (is the Odyssey 3D Hub installed on that Windows?)"
+[ -d "$PROGDATA" ] || die "missing $PROGDATA"
+
+for tool in wine wineserver $CC x86_64-w64-mingw32-objdump python3 xrandr rsync stty flock setsid; do
+    command -v "$tool" >/dev/null || die "'$tool' is needed (Arch: wine mingw-w64-gcc python xorg-xrandr rsync)"
+done
+[ -e "$BOARD" ] || die "$BOARD is missing. Install the udev rule and wake the monitor:
+    sudo cp '$HERE/70-any2odyssey-lens.rules' /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger"
+
+# Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them.
+WINELIB=
+for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
+         /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
+    [ -f "$d/cfgmgr32.dll" ] && WINELIB=$d && break
+done
+[ -n "$WINELIB" ] || die "could not find Wine's x86_64-windows library folder"
+
+export WINEPREFIX=$T/prefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
+SYS=$WINEPREFIX/drive_c/windows/system32
+mkdir -p "$T/build" "$T/tools"
+wineserver -k 2>/dev/null || true
+
+echo "setup: Wine prefix in $WINEPREFIX"
+if [ ! -f "$WINEPREFIX/system.reg" ]; then
+    setsid wineboot -i >/dev/null 2>&1 </dev/null
+    wineserver -w
+fi
+
+echo "setup: copying Leia's runtime from $WIN"
+mkdir -p "$WINEPREFIX/drive_c/Program Files/LeiaSR" "$WINEPREFIX/drive_c/ProgramData"
+rsync -a --delete "$RUNTIME" "$WINEPREFIX/drive_c/Program Files/LeiaSR/"
+rsync -a --exclude 'Log/*' --exclude 'Applications/*' "$PROGDATA" "$WINEPREFIX/drive_c/ProgramData/"
+
+echo "setup: building the stand-ins"
+python3 "$HERE/tools/mkboard.py" "$BOARD" "$T/build/board.h" "$T/build/device.reg"
+
+# A .def that forwards every export of a Wine library to a renamed copy of it, except the named functions,
+# which the stand-in provides as shim_<name>.
+forwarding_def() { # <library> <copy name> <own functions...>
+    lib=$1 copy=$2; shift 2
+    echo "LIBRARY $lib.dll"; echo "EXPORTS"
+    x86_64-w64-mingw32-objdump -p "$WINELIB/$lib.dll" |
+        awk '/Ordinal\/Name Pointer/{p=1;next} /^$/{if(p)exit} p&&$NF!="Name"{print $NF}' |
+        while read -r name; do
+            case " $* " in *" $name "*) echo "    $name = shim_$name" ;; *) echo "    $name = $copy.$name" ;; esac
+        done
+}
+forwarding_def cfgmgr32 cfgmgw CM_Get_Child CM_Get_Child_Ex CM_Get_Parent CM_Get_Parent_Ex \
+    CM_Get_DevNode_Status CM_Get_DevNode_Status_Ex >"$T/build/cfgmgr32.def"
+forwarding_def dxva2 dxva2w GetNumberOfPhysicalMonitorsFromHMONITOR GetPhysicalMonitorsFromHMONITOR \
+    DestroyPhysicalMonitor DestroyPhysicalMonitors >"$T/build/dxva2.def"
+forwarding_def wtsapi32 wtsapiw WTSQuerySessionInformationA WTSQuerySessionInformationW >"$T/build/wtsapi32.def"
+
+S=$HERE/src
+B=$T/build
+$CC -O2 -shared -o "$B/a2otoast.dll" "$S/a2otoast.c" "$S/a2otoast.def" -lole32 -luuid -lruntimeobject
+$CC -O2 -shared -o "$B/cfgmgr32.dll" "$S/cfgshim.c" "$S/powernotify.c" "$B/cfgmgr32.def"
+$CC -O2 -shared -o "$B/dxva2.dll" "$S/dxvashim.c" "$B/dxva2.def"
+$CC -O2 -shared -o "$B/wtsapi32.dll" "$S/wtsshim.c" "$B/wtsapi32.def"
+$CC -O2 -shared -nostdlib -nostartfiles -Wl,--subsystem,native -Wl,--entry,DriverEntry -I"$B" \
+    -o "$B/a2ousb.sys" "$S/a2ousb.c" -L"$WINELIB" -lntoskrnl
+$CC -O2 -o "$B/monprobe.exe" "$S/monprobe.c"
+$CC -O2 -o "$B/any2odyssey-lens-helper.exe" "$S/lens-helper-win.c"
+
+echo "setup: installing them into the prefix"
+cp "$WINELIB/cfgmgr32.dll" "$SYS/cfgmgw.dll"
+cp "$WINELIB/dxva2.dll" "$SYS/dxva2w.dll"
+cp "$WINELIB/wtsapi32.dll" "$SYS/wtsapiw.dll"
+cp "$B/a2otoast.dll" "$B/cfgmgr32.dll" "$B/dxva2.dll" "$B/wtsapi32.dll" "$SYS/"
+cp "$B/a2ousb.sys" "$SYS/drivers/"
+(cd "$B" && setsid timeout 120 wine regedit /S device.reg >/dev/null 2>&1 </dev/null)
+(cd "$WINEPREFIX/drive_c/Program Files/LeiaSR/Platform/bin" && setsid timeout 120 wine SRService.exe -install >/dev/null 2>&1 </dev/null) || true
+timeout 60 wine sc query "SR Service" 2>/dev/null | grep -q "SERVICE_NAME" || die "Leia's service could not be registered in the prefix"
+wineserver -k 2>/dev/null || true
+
+cp "$HERE"/tools/*.sh "$HERE"/tools/mkedid.py "$T/tools/"
+cp "$HERE/any2odyssey-lens-helper" "$T/"
+chmod +x "$T/any2odyssey-lens-helper" "$T"/tools/*
+ln -sf "$T/any2odyssey-lens-helper" "$DATA/any2odyssey-lens-helper"
+rm -f "$T/stack.started"
+
+echo "setup: done. Any2Odyssey finds the helper at $DATA/any2odyssey-lens-helper."
+echo "       Try it by hand (lens on for 20 s; the first start takes about half a minute):"
+echo "           sleep 20 | '$DATA/any2odyssey-lens-helper'"

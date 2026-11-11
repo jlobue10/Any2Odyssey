@@ -4,7 +4,7 @@
 //! window.
 //!
 //! The numbers are the user's own, kept in `lens.json`. Nothing here reads
-//! Samsung's files or switches the panel's lens on.
+//! Samsung's files. Switching the panel's lens on is `crate::lens_switch`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use image::RgbaImage;
 use super::theme::color;
 use super::widgets::{gold_button, row};
 
-pub const LENS_NOTICE: &str = "Experimental. The picture only separates when the Odyssey's lens is switched on, which this build cannot do yet, and only full screen on the Odyssey at its native resolution without display scaling. There is no eye tracking: it is right for one head position.";
+pub const LENS_NOTICE: &str = "Experimental. The picture only separates when the Odyssey's lens is switched on, which needs the optional lens helper (docs/LENS-SWITCH.md), and only full screen on the Odyssey at its native resolution without display scaling. There is no eye tracking: it is right for one head position.";
 pub const PATTERN_HELP: &str = "Pattern: white for the left eye, black for the right. Right eye closed should look evenly bright, left eye closed evenly dark. Bands: change pitch, then slant. Wrong eye bright: move the offset by 0.5.";
 pub const KEYS_HELP: &str =
     "←/→ offset   ↑/↓ pitch   PgUp/PgDn slant   Shift = fine   C pattern   F11 full screen   Esc leave";

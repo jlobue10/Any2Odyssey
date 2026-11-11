@@ -1,0 +1,4 @@
+LIBRARY a2otoast.dll
+EXPORTS
+    DllGetActivationFactory PRIVATE
+    DllCanUnloadNow PRIVATE
