@@ -6,6 +6,7 @@
 
 pub mod about;
 pub mod capture_color;
+pub mod dibr;
 pub mod engine;
 pub mod frame_wake;
 pub mod fsutil;

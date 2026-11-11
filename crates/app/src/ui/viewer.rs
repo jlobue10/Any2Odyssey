@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
+use any2odyssey_core::dibr::{self, DepthMap};
+use any2odyssey_core::slider::{DEPTH, POPOUT};
 use any2odyssey_core::stereo::{self, Layout};
 use any2odyssey_core::theme::Palette;
 use egui::{pos2, Color32, Key, Rect, RichText, Sense, Ui, ViewportCommand};
@@ -21,7 +23,7 @@ use crate::platform;
 
 pub const READY: &str =
     "Ready. Open a side-by-side stereo image, or drop one on this window. Output starts only when requested.";
-pub const NOTICE: &str = "This build is the stereo viewer. Samsung's AI depth, eye tracking and the Odyssey's calibrated glasses-free output exist only on Windows.";
+pub const NOTICE: &str = "This build converts images, not the live desktop, and shows them as anaglyph or side by side. Eye tracking and the Odyssey's calibrated glasses-free output exist only on Windows.";
 const OUTPUT_HINT: &str =
     "Move this window to the display you want, then double-click or press F11 for full screen. Esc leaves.";
 const LOADED: &str = "Image loaded. Check the input format before starting output.";
@@ -29,6 +31,9 @@ const NO_IMAGE: &str = "Open an image first.";
 const OUTPUT_ON: &str =
     "Output window open. Stop output, Esc in that window, or closing it ends it.";
 const OUTPUT_OFF: &str = "Output stopped.";
+const ESTIMATING: &str =
+    "Estimating depth… The first image also loads the model, which takes a few seconds.";
+const CONVERTED: &str = "Converted to 3D. Adjust depth strength and pop-out to taste.";
 const DEFAULT_EXPORT_NAME: &str = "Any2Odyssey-preview.png";
 
 /// What the source image contains.
@@ -38,13 +43,16 @@ pub enum Input {
     Pair,
     /// An ordinary 2D image, shown unchanged.
     Flat,
+    /// An ordinary 2D image given depth by the model and rendered as a pair.
+    Ai,
 }
 
 impl Input {
-    const ALL: [Input; 2] = [Input::Pair, Input::Flat];
+    const ALL: [Input; 3] = [Input::Pair, Input::Ai, Input::Flat];
     fn label(self) -> &'static str {
         match self {
             Input::Pair => "Side-by-side stereo pair",
+            Input::Ai => "2D image → 3D (AI depth)",
             Input::Flat => "2D image (flat, no depth)",
         }
     }
@@ -76,15 +84,22 @@ pub struct Options {
     /// full width.
     pub half_width: bool,
     pub swap: bool,
+    /// AI depth only: slider positions of depth strength and pop-out, on the
+    /// same scales as the Windows controls.
+    pub depth_pos: i32,
+    pub pop_pos: i32,
 }
 
 impl Default for Options {
     fn default() -> Options {
+        let defaults = dibr::Params::default();
         Options {
             input: Input::Pair,
             output: Output::Anaglyph,
             half_width: true,
             swap: false,
+            depth_pos: DEPTH.position(defaults.strength),
+            pop_pos: POPOUT.position(defaults.popout),
         }
     }
 }
@@ -93,8 +108,15 @@ impl Options {
     pub fn layout(&self) -> Layout {
         match (self.input, self.output) {
             (Input::Flat, _) => Layout::Flat,
-            (Input::Pair, Output::Anaglyph) => Layout::Anaglyph,
-            (Input::Pair, Output::Sbs) => Layout::Sbs,
+            (Input::Pair | Input::Ai, Output::Anaglyph) => Layout::Anaglyph,
+            (Input::Pair | Input::Ai, Output::Sbs) => Layout::Sbs,
+        }
+    }
+
+    fn params(&self) -> dibr::Params {
+        dibr::Params {
+            strength: DEPTH.value(self.depth_pos),
+            popout: POPOUT.value(self.pop_pos),
         }
     }
 }
@@ -104,9 +126,14 @@ impl Options {
 #[derive(Default)]
 pub struct Document {
     source: Option<RgbaImage>,
+    /// The model's depth map of `source`, once it has been estimated.
+    depth: Option<DepthMap>,
     result: Option<RgbaImage>,
     /// Bumped whenever `result` changes, so the page knows to upload it.
     generation: u64,
+    /// Bumped whenever `source` changes, so a depth map that arrives for an
+    /// image that has since been replaced is recognized and dropped.
+    source_id: u64,
 }
 
 impl Document {
@@ -124,11 +151,46 @@ impl Document {
     }
 
     pub fn set_source(&mut self, image: RgbaImage, options: Options) -> Result<(), String> {
-        let converted = convert(&image, options)?;
+        // AI depth has nothing to show until the model has run: the image is
+        // taken as it is and the result follows with `set_depth`.
+        let converted = if options.input == Input::Ai {
+            None
+        } else {
+            Some(convert(&image, None, options)?)
+        };
         self.source = Some(image);
-        self.result = Some(converted);
+        self.depth = None;
+        self.result = converted;
         self.generation += 1;
+        self.source_id += 1;
         Ok(())
+    }
+
+    /// The image the model should look at, with the id to hand back to
+    /// [`Document::set_depth`], when the options need a depth map that has
+    /// not been estimated yet.
+    pub fn depth_request(&self, options: Options) -> Option<(u64, RgbaImage)> {
+        if options.input != Input::Ai || self.depth.is_some() {
+            return None;
+        }
+        self.source
+            .as_ref()
+            .map(|image| (self.source_id, image.clone()))
+    }
+
+    /// Take the depth map estimated for source `id`. False when the source
+    /// has changed since and the map was dropped.
+    pub fn set_depth(
+        &mut self,
+        id: u64,
+        depth: DepthMap,
+        options: Options,
+    ) -> Result<bool, String> {
+        if id != self.source_id || self.source.is_none() {
+            return Ok(false);
+        }
+        self.depth = Some(depth);
+        self.reconvert(options).map(|()| true)
     }
 
     /// Convert the loaded image again after an option changed. A source the
@@ -138,8 +200,13 @@ impl Document {
         let Some(source) = &self.source else {
             return Ok(());
         };
-        let converted = convert(source, options);
         self.generation += 1;
+        if options.input == Input::Ai && self.depth.is_none() {
+            // Waiting for the model; nothing of another mode stays up.
+            self.result = None;
+            return Ok(());
+        }
+        let converted = convert(source, self.depth.as_ref(), options);
         match converted {
             Ok(image) => {
                 self.result = Some(image);
@@ -163,7 +230,18 @@ impl Document {
     }
 }
 
-fn convert(image: &RgbaImage, options: Options) -> Result<RgbaImage, String> {
+fn convert(
+    image: &RgbaImage,
+    depth: Option<&DepthMap>,
+    options: Options,
+) -> Result<RgbaImage, String> {
+    if options.input == Input::Ai {
+        let depth = depth.ok_or("The depth map is not ready.")?;
+        // The rendered pair is full width per eye: no half-width stretch.
+        let pair = dibr::synthesize(image, depth, options.params()).map_err(|e| e.to_string())?;
+        return stereo::convert(&pair, options.layout(), false, options.swap)
+            .map_err(|e| e.to_string());
+    }
     stereo::convert(image, options.layout(), options.half_width, options.swap)
         .map_err(|e| e.to_string())
 }
@@ -209,6 +287,12 @@ pub struct ViewerState {
     output_fullscreen: bool,
     /// A file dialog running on its own thread.
     picking: Option<Receiver<Picked>>,
+    /// The model running on its own thread, with the source id it was given.
+    estimating: Option<(u64, Receiver<Result<DepthMap, String>>)>,
+    /// The source the model last failed on, so the same failure is not
+    /// retried on every frame. Cleared by a new image or a new choice of
+    /// input format.
+    depth_failed: Option<u64>,
 }
 
 impl Default for ViewerState {
@@ -223,6 +307,8 @@ impl Default for ViewerState {
             output_open: false,
             output_fullscreen: false,
             picking: None,
+            estimating: None,
+            depth_failed: None,
         }
     }
 }
@@ -232,9 +318,75 @@ impl ViewerState {
         match self.document.open(path, self.options) {
             Ok(()) => {
                 self.path_text = path.display().to_string();
-                self.status = LOADED.into();
+                self.depth_failed = None;
+                // With AI depth the status follows from the estimate.
+                if self.options.input != Input::Ai {
+                    self.status = LOADED.into();
+                }
             }
             Err(e) => self.status = e,
+        }
+    }
+
+    /// Start the model when the options need a depth map there is none of
+    /// yet. One estimate at a time; the next starts when it has returned.
+    fn ensure_depth(&mut self, ctx: &egui::Context) {
+        if self.estimating.is_some() {
+            return;
+        }
+        let Some((id, image)) = self.document.depth_request(self.options) else {
+            return;
+        };
+        if self.depth_failed == Some(id) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("depth".into())
+            .spawn(move || {
+                let _ = tx.send(platform::estimate_depth(&image));
+                ctx.request_repaint();
+            });
+        match spawned {
+            Ok(_) => {
+                self.estimating = Some((id, rx));
+                self.status = ESTIMATING.into();
+            }
+            Err(e) => {
+                self.depth_failed = Some(id);
+                self.status = format!("Could not start the depth model: {e}");
+            }
+        }
+    }
+
+    fn poll_depth(&mut self) {
+        let Some((id, rx)) = &self.estimating else {
+            return;
+        };
+        let id = *id;
+        let estimated = match rx.try_recv() {
+            Ok(estimated) => estimated,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("The depth model stopped unexpectedly.".into()),
+        };
+        self.estimating = None;
+        match estimated.and_then(|depth| self.document.set_depth(id, depth, self.options)) {
+            Ok(true) => {
+                self.status = if self.output_open {
+                    OUTPUT_ON
+                } else {
+                    CONVERTED
+                }
+                .into();
+            }
+            // For an image that has been replaced; its own estimate follows.
+            Ok(false) => {}
+            Err(e) => {
+                self.depth_failed = Some(id);
+                self.output_open = false;
+                self.status = e;
+            }
         }
     }
 
@@ -363,6 +515,7 @@ impl ViewerState {
             self.open(&path);
         }
         self.poll_dialog();
+        self.poll_depth();
         if ctx.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(Key::F10)) {
             self.toggle_output();
         }
@@ -468,10 +621,31 @@ impl ViewerState {
                             }
                         });
                 });
-                ui.checkbox(
-                    &mut state.options.half_width,
-                    "Half-width pair: stretch each eye for red/cyan output",
-                );
+                if state.options.input == Input::Ai {
+                    row(ui, "Depth strength", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut state.options.depth_pos, DEPTH.min..=DEPTH.max)
+                                .show_value(false)
+                                .step_by(1.0),
+                        );
+                        ui.label(RichText::new(DEPTH.readout(state.options.depth_pos)).monospace());
+                    })
+                    .on_hover_text("How far apart near and far are pushed: 0.00–2.00.");
+                    row(ui, "Pop-out", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut state.options.pop_pos, POPOUT.min..=POPOUT.max)
+                                .show_value(false)
+                                .step_by(1.0),
+                        );
+                        ui.label(RichText::new(POPOUT.readout(state.options.pop_pos)).monospace());
+                    })
+                    .on_hover_text("Where the screen plane sits: −1.00 keeps everything behind the screen, 1.00 brings everything forward.");
+                } else {
+                    ui.checkbox(
+                        &mut state.options.half_width,
+                        "Half-width pair: stretch each eye for red/cyan output",
+                    );
+                }
                 ui.add_space(4.0);
                 if gold_button(ui, "Save preview PNG…", false, p).clicked() {
                     if state.document.result().is_none() {
@@ -493,8 +667,14 @@ impl ViewerState {
             output_panel(ui, self);
         }
         if self.options != before {
+            if self.options.input != before.input {
+                // A fresh choice of input format is a reason to try the
+                // model again after a failure.
+                self.depth_failed = None;
+            }
             self.options_changed();
         }
+        self.ensure_depth(&ctx);
         self.sync_texture(&ctx);
         ui.add_space(5.0);
         section(ui, "PREVIEW", p, |ui| {

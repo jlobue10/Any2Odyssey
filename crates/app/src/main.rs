@@ -4,6 +4,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod core;
+#[cfg(not(windows))]
+mod depth;
 mod guide;
 mod hotkeys;
 mod platform;
@@ -27,8 +29,8 @@ fn usage() -> String {
         any2odyssey_core::VERSION
     );
     if cfg!(not(windows)) {
-        text.push_str("
-  Any2Odyssey [--open] FILE         open an image in the stereo viewer (in the running instance when there is one)");
+        text.push_str("\n  Any2Odyssey [--open] FILE         open an image in the stereo viewer (in the running instance when there is one)");
+        text.push_str("\n  Any2Odyssey --install-depth-model  download the AI depth model for 2D → 3D (about 95 MB, needs curl)");
     }
     text
 }
@@ -297,6 +299,17 @@ fn main() {
         // opened in this one. The viewer is the Linux build's home page.
         #[cfg(not(windows))]
         [flag, path] if flag == "--open" && !option_like(path) => open_image(path, logger),
+        #[cfg(not(windows))]
+        [flag] if flag == "--install-depth-model" => match depth::install_model() {
+            Ok(path) => {
+                println!("Depth model installed: {}", path.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
         // What a desktop entry's `%f` and "Open with" pass: the bare path.
         #[cfg(not(windows))]
         [path] if !path.starts_with('-') => open_image(path, logger),

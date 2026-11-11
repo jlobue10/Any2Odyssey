@@ -57,6 +57,7 @@ packaging/       Linux desktop entry and the Arch Linux PKGBUILD
 | Upstream | Any2Odyssey | Status |
 | --- | --- | --- |
 | `portable/stereo.py` | `core::stereo` | done |
+| — (new; upstream's portable edition has no depth) | `core::dibr` (stereo pair from an image and its depth map), `app::depth` (Depth Anything V2 Small through ONNX Runtime) | in progress: still images, run on the CPU under WSL 2 |
 | `portable/app.py` | `app::ui::viewer` (image source, input and output formats, half-width, swap, preview, output window, PNG export), `app::platform::unix` (single instance, hand-over, file dialogs) | in progress: the image viewer is done and run under WSL 2; the tray icon and the live screen source are not started |
 | `tests/test_portable.py` (stereo assertions) | `core::stereo` tests | done |
 | `portable/run.sh`, `launch-linux.sh`, `Launch-macOS.command`, `requirements.txt`, `START-HERE.md` | — | dropped (native build replaces the Python bundles) |

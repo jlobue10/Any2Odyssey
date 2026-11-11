@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | Light/dark controls, Help | Native, custom chrome (egui) | Same chrome and Help; the home page is the stereo viewer |
 | Tray / menu | Windows notification icon, jump list | No tray icon yet (planned: StatusNotifier where the desktop supports it); Minimize and Close act normally |
-| Ordinary 2D → AI depth | Installed Samsung engine | Unavailable; 2D stays flat |
+| Ordinary 2D → AI depth | Installed Samsung engine, live on the whole desktop | Still images only: an open model (Depth Anything V2 Small, Apache-2.0) through the system's ONNX Runtime, then left and right views rendered from the depth map; depth strength and pop-out as on Windows. Needs `onnxruntime-cpu` or `onnxruntime-cuda` and `any2odyssey --install-depth-model` |
 | Existing SBS input | Samsung/Leia calibrated output | Stereo viewer: an SBS image as red/cyan anaglyph or SBS, half-width stretch, eye swap, preview, output window with full screen, PNG export |
 | G90XF tracking, calibration and lens output | Samsung/Leia runtime required | Not available |
 | Whole-desktop source | Windows Graphics Capture | Not yet. Planned: a bounded capture of one screen through the portal/X11, shown on a different display; Wayland stays disabled until source/output exclusion is verified |
@@ -31,7 +31,7 @@
 
 ## What has been run on Linux
 
-The stereo viewer was built and run on Arch Linux under WSL 2 (x86_64) with the package above: X11 under a virtual display with the Openbox window manager, software OpenGL. Checked there: opening an image by argument and by hand-over from a second launch, the anaglyph preview, the refusal of an odd-width pair, the output window, full screen and Esc, `--show` and `--quit`. **Not yet run:** a physical Linux desktop, a Wayland session, a GPU driver, the zenity/kdialog dialogs, drag and drop, more than one display, and aarch64 beyond CI's build and tests.
+The stereo viewer was built and run on Arch Linux under WSL 2 (x86_64) with the package above: X11 under a virtual display with the Openbox window manager, software OpenGL. Checked there: opening an image by argument and by hand-over from a second launch, the anaglyph preview, the refusal of an odd-width pair, the output window, full screen and Esc, `--show` and `--quit`. The 2D → 3D mode was run there too, on the CPU provider of `onnxruntime-cpu` 1.29 with the downloaded model: a photograph converted to an anaglyph with the expected parallax, and the missing-model message without it. **Not yet run:** the CUDA provider (`onnxruntime-cuda`), a physical Linux desktop, a Wayland session, a GPU driver, the zenity/kdialog dialogs, drag and drop, more than one display, and aarch64 beyond CI's build and tests.
 
 ## Why Samsung's engine cannot be used on Linux
 

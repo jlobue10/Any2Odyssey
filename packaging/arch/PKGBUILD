@@ -16,7 +16,10 @@ url="https://github.com/jlobue10/Any2Odyssey"
 license=('GPL-3.0-only')
 depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libglvnd' 'hicolor-icon-theme')
 makedepends=('cargo')
-optdepends=('zenity: Open and Save dialogs'
+optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
+            'onnxruntime-cuda: AI depth on an NVIDIA GPU'
+            'curl: any2odyssey --install-depth-model'
+            'zenity: Open and Save dialogs'
             'kdialog: Open and Save dialogs on KDE Plasma'
             'wayland: run in a Wayland session'
             'libx11: run in an X11 session'
