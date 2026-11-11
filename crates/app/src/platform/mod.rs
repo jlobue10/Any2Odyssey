@@ -6,6 +6,6 @@ mod windows_impl;
 pub use windows_impl::*;
 
 #[cfg(not(windows))]
-mod stub;
+mod unix;
 #[cfg(not(windows))]
-pub use stub::*;
+pub use unix::*;

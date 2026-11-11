@@ -1,0 +1,64 @@
+# Maintainer: Jonathan LoBue <https://github.com/jlobue10>
+#
+# Builds the Linux edition of Any2Odyssey from the checkout this file is in:
+#
+#   cd packaging/arch && makepkg -si
+#
+# The Linux edition is the stereo viewer (side-by-side images to red/cyan
+# anaglyph or side by side). Samsung's conversion engine exists only on
+# Windows; see docs/PLATFORMS.md.
+pkgname=any2odyssey
+pkgver=0.8.7
+pkgrel=1
+pkgdesc="Stereo viewer for side-by-side 3D images (Linux edition of Any2Odyssey)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/jlobue10/Any2Odyssey"
+license=('GPL-3.0-only')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libglvnd' 'hicolor-icon-theme')
+makedepends=('cargo')
+optdepends=('zenity: Open and Save dialogs'
+            'kdialog: Open and Save dialogs on KDE Plasma'
+            'wayland: run in a Wayland session'
+            'libx11: run in an X11 session'
+            'libxcursor: pointer shapes in an X11 session'
+            'libxi: input in an X11 session'
+            'xdg-utils: View logs and Help links')
+# The release profile already strips debug information; there is nothing for a -debug package.
+options=('!debug')
+# The checkout is the source; nothing is downloaded. (namcap reports the $startdir
+# references below; they are how an in-tree PKGBUILD finds its tree.)
+source=()
+sha256sums=()
+
+_repo() {
+  cd "$startdir/../.." && pwd
+}
+
+pkgver() {
+  tr -d '[:space:]' < "$(_repo)/VERSION"
+}
+
+build() {
+  cd "$(_repo)"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --locked --release -p any2odyssey
+}
+
+check() {
+  cd "$(_repo)"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --locked --release -p any2odyssey-core -p any2odyssey
+}
+
+package() {
+  local repo
+  repo="$(_repo)"
+  install -Dm755 "$srcdir/target/release/Any2Odyssey" "$pkgdir/usr/bin/any2odyssey"
+  install -Dm644 "$repo/packaging/linux/any2odyssey.desktop" "$pkgdir/usr/share/applications/any2odyssey.desktop"
+  install -Dm644 "$repo/assets/Any2Odyssey.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/any2odyssey.png"
+  install -Dm644 "$repo/USER-GUIDE.html" "$pkgdir/usr/share/doc/any2odyssey/USER-GUIDE.html"
+  install -Dm644 "$repo/README.md" "$pkgdir/usr/share/doc/any2odyssey/README.md"
+  for file in LICENSE NOTICE THIRD-PARTY-LICENSES.md; do
+    install -Dm644 "$repo/$file" "$pkgdir/usr/share/licenses/any2odyssey/$file"
+  done
+}

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Any2Odyssey
+GenericName=Stereo Image Viewer
+Comment=View side-by-side 3D images as red/cyan anaglyph or side by side
+Exec=any2odyssey %f
+Icon=any2odyssey
+Terminal=false
+Categories=Graphics;Viewer;
+MimeType=image/png;image/jpeg;image/bmp;
+StartupWMClass=any2odyssey
+StartupNotify=true

@@ -22,10 +22,15 @@ use any2odyssey_core::log::Logger;
 use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
-    format!(
+    let mut text = format!(
         "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
         any2odyssey_core::VERSION
-    )
+    );
+    if cfg!(not(windows)) {
+        text.push_str("
+  Any2Odyssey [--open] FILE         open an image in the stereo viewer (in the running instance when there is one)");
+    }
+    text
 }
 
 fn self_test(logger: &Logger) -> i32 {
@@ -288,6 +293,13 @@ fn main() {
             Some(request) => run_gui(false, logger, Some(request)),
             None => usage_error(),
         },
+        // An image for the stereo viewer: handed to the running instance, or
+        // opened in this one. The viewer is the Linux build's home page.
+        #[cfg(not(windows))]
+        [flag, path] if flag == "--open" && !option_like(path) => open_image(path, logger),
+        // What a desktop entry's `%f` and "Open with" pass: the bare path.
+        #[cfg(not(windows))]
+        [path] if !path.starts_with('-') => open_image(path, logger),
         [] => run_gui(false, logger, None),
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{}", usage());
@@ -296,6 +308,19 @@ fn main() {
         _ => usage_error(),
     };
     std::process::exit(code);
+}
+
+/// Open `path` in the stereo viewer: in the running instance when there is
+/// one, otherwise in this launch.
+#[cfg(not(windows))]
+fn open_image(path: &str, logger: Logger) -> i32 {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.into());
+    if platform::signal_open(&path) {
+        0
+    } else {
+        platform::queue_open(path);
+        run_gui(false, logger, None)
+    }
 }
 
 fn run_gui(

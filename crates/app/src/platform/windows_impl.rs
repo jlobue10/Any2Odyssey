@@ -270,6 +270,19 @@ pub fn open_path(path: &Path) {
     });
 }
 
+/// The stereo viewer page is the home page only where Samsung's engine does
+/// not exist; on Windows it is not reachable, and these keep it compiling.
+pub fn pick_image() -> Result<Option<std::path::PathBuf>, String> {
+    Err(NO_VIEWER.into())
+}
+pub fn pick_save_png(_: &str) -> Result<Option<std::path::PathBuf>, String> {
+    Err(NO_VIEWER.into())
+}
+pub fn take_open_requests() -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+const NO_VIEWER: &str = "The stereo viewer is part of the Linux build.";
+
 pub fn install_jump_list() {
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
