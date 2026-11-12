@@ -71,7 +71,7 @@ static int64_t monotonic_ms(void)
 
 static int cam = -1, conn = -1, gone;
 static struct { void *start; size_t length; } bufs[NBUF];
-static int nbufs, streaming;
+static int nbufs, streaming, have_buffers;
 
 static int xioctl(int fd, unsigned long req, void *arg)
 {
@@ -158,7 +158,9 @@ static void stop(void)
     if (streaming) xioctl(cam, VIDIOC_STREAMOFF, &type);
     streaming = 0;
     for (int i = 0; i < nbufs; i++) munmap(bufs[i].start, bufs[i].length);
-    if (nbufs) xioctl(cam, VIDIOC_REQBUFS, &req); /* count 0 frees them */
+    /* Driver buffers exist before the first successful mmap, and even when fewer than two were given. */
+    if (have_buffers) xioctl(cam, VIDIOC_REQBUFS, &req); /* count 0 frees them */
+    have_buffers = 0;
     nbufs = 0;
 }
 
@@ -179,7 +181,9 @@ static const char *start(const char *fourcc, unsigned width, unsigned height, un
     parm.parm.capture.timeperframe.numerator = 1;
     parm.parm.capture.timeperframe.denominator = fps ? fps : 30;
     xioctl(cam, VIDIOC_S_PARM, &parm); /* best effort */
-    if (xioctl(cam, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) return "no capture buffers";
+    if (xioctl(cam, VIDIOC_REQBUFS, &req) < 0) return "no capture buffers";
+    have_buffers = req.count > 0;
+    if (req.count < 2) return "no capture buffers";
     for (unsigned i = 0; i < req.count && i < NBUF; i++) {
         struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
         if (xioctl(cam, VIDIOC_QUERYBUF, &b) < 0) return "cannot query a capture buffer";

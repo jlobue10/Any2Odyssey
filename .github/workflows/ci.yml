@@ -190,6 +190,11 @@ jobs:
         run: cargo test --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
       - name: Camera bridge authentication tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-camera-bridge.py
+      - name: Camera buffer cleanup tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            contrib/wine-lens/tests/test-camera-buffers.c -o /tmp/test-camera-buffers
+          ASAN_OPTIONS=detect_leaks=0 /tmp/test-camera-buffers
       - name: UDP shim lifetime tests (no hardware)
         run: |
           cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
