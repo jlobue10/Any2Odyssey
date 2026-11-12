@@ -1,0 +1,55 @@
+REGEDIT4
+
+; SPDX-License-Identifier: MIT
+; The Odyssey 3D's eye-tracking webcam ("3D Stereo WebCam", USB 04e8:20d7), described the way Windows lists
+; it: a composite USB device whose first function is a camera with a video-capture interface. Leia's eye
+; tracker looks the camera up here before it opens it through Media Foundation (a2ocam.c). The instance
+; names are made up; the device classes are listed too because Wine reports an error for a device whose
+; class has no entry (the all-zero one covers devices of the host that have no class at all).
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Enum\USB\VID_04E8&PID_20D7\01.00.00]
+"DeviceDesc"="USB Composite Device"
+"Service"="usbccgp"
+"Class"="USB"
+"ClassGUID"="{36fc9e60-c465-11cf-8056-444553540000}"
+"Capabilities"=dword:00000014
+"ConfigFlags"=dword:00000000
+"ParentIdPrefix"="8&2939e249&0"
+"HardwareID"=hex(7):55,53,42,5c,56,49,44,5f,30,34,45,38,26,50,49,44,5f,32,30,44,37,00,00
+"ParentDevice"="USB\\ROOT_HUB30\\4&a2f0e15&0&0"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Enum\USB\VID_04E8&PID_20D7&MI_00\8&2939e249&0&0000]
+"DeviceDesc"="3D Stereo WebCam"
+"FriendlyName"="3D Stereo WebCam"
+"Service"="usbvideo"
+"Class"="Camera"
+"ClassGUID"="{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}"
+"Capabilities"=dword:00000000
+"ConfigFlags"=dword:00000000
+"HardwareID"=hex(7):55,53,42,5c,56,49,44,5f,30,34,45,38,26,50,49,44,5f,32,30,44,37,26,4d,49,5f,30,30,00,00
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses\{e5323777-f976-4f5b-9b55-b94699c46e44}\##?#USB#VID_04E8&PID_20D7&MI_00#8&2939e249&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}]
+"DeviceInstance"="USB\\VID_04E8&PID_20D7&MI_00\\8&2939e249&0&0000"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses\{e5323777-f976-4f5b-9b55-b94699c46e44}\##?#USB#VID_04E8&PID_20D7&MI_00#8&2939e249&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\#GLOBAL]
+"SymbolicLink"="\\\\?\\USB#VID_04E8&PID_20D7&MI_00#8&2939e249&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\\GLOBAL"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses\{e5323777-f976-4f5b-9b55-b94699c46e44}\##?#USB#VID_04E8&PID_20D7&MI_00#8&2939e249&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\#GLOBAL\Control]
+"Linked"=dword:00000001
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Class\{36fc9e60-c465-11cf-8056-444553540000}]
+"Class"="USB"
+@="Universal Serial Bus controllers"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Class\{ca3e7ab9-b4c3-4ae6-8251-579ef933890f}]
+"Class"="Camera"
+@="Cameras"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\Class\{00000000-0000-0000-0000-000000000000}]
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Dimenco\Eye Tracker]
+@="C:\\Program Files\\LeiaSR\\Tracker"
+
+[HKEY_CURRENT_USER\Software\Wine\DllOverrides]
+"mf"="native,builtin"
+"mfreadwrite"="native,builtin"

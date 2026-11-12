@@ -2,7 +2,7 @@
 Type=Application
 Name=Any2Odyssey
 GenericName=Stereo Image Viewer
-Comment=View side-by-side 3D images as red/cyan anaglyph or side by side
+Comment=View 3D images as anaglyph or side by side, or glasses-free on an Odyssey 3D
 Exec=any2odyssey %f
 Icon=any2odyssey
 Terminal=false

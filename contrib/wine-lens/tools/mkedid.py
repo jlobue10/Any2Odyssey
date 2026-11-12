@@ -7,7 +7,11 @@ slot with the physical monitor at the same place on the desktop (monprobe.exe ou
 writes, per slot: the EDID on the Default_Monitor entry, a DISPLAY\\<MODEL>\\000N&0000 entry with a monitor
 interface, and Linked=0 on the Default_Monitor interface.
 
-usage: mkedid.py <monprobe output file> <out.reg>
+It also notes where the Odyssey 3D is on Wine's desktop ("x y width height" in <odyssey file>, empty when it
+is not connected), for the program that shows pictures through Leia's weaver.
+
+usage: mkedid.py <monprobe output file> <out.reg> [<odyssey file>]
+       mkedid.py --place <odyssey file>      only note where the Odyssey 3D is now
 """
 import glob, re, subprocess, sys
 
@@ -32,18 +36,35 @@ def wine_monitors(path):
     return res
 
 def edid_of(connector):
-    path = glob.glob(f"/sys/class/drm/card*-{connector}/edid")[0]
-    return open(path, "rb").read()[:256]
+    # Two graphics cards can both have a connector of this name; the monitor is on the one with an EDID.
+    for path in sorted(glob.glob(f"/sys/class/drm/card*-{connector}/edid")):
+        edid = open(path, "rb").read()[:256]
+        if len(edid) >= 128: return edid
+    return bytes(128)
 
 def model_of(edid):
     v = (edid[8] << 8) | edid[9]
     pnp = "".join(chr(64 + ((v >> s) & 31)) for s in (10, 5, 0))
     return "%s%02X%02X" % (pnp, edid[11], edid[10])
 
+def name_of(edid):
+    """The monitor's name from its EDID (the 0xFC descriptor)."""
+    for i in range(54, 126, 18):
+        if edid[i:i + 3] == b"\0\0\0" and edid[i + 3] == 0xFC:
+            return edid[i + 5:i + 18].split(b"\n")[0].decode("ascii", "replace").strip()
+    return ""
+
+def is_odyssey_3d(edid): return "G90XF" in name_of(edid)
+
 def hexlist(b): return ",".join("%02x" % c for c in b)
 
-def main(probe, out):
+def note_place(real, odyssey):
+    places = ["%d %d %d %d" % (x, y, w, h) for name, w, h, x, y in real if is_odyssey_3d(edid_of(name))]
+    open(odyssey, "w").write(places[0] + "\n" if len(places) == 1 else "")
+
+def main(probe, out, odyssey=None):
     real = xrandr_monitors()
+    if odyssey: note_place(real, odyssey)
     pairs = []
     for slot, w, h, x, y in wine_monitors(probe):
         match = [r for r in real if r[1:] == (w, h, x, y)]
@@ -79,4 +100,5 @@ def main(probe, out):
         print(f"slot {slot}: {name} {model}", file=sys.stderr)
     open(out, "w").write("\r\n".join(lines))
 
-main(*sys.argv[1:3])
+if sys.argv[1:2] == ["--place"]: note_place(xrandr_monitors(), sys.argv[2])
+else: main(*sys.argv[1:4])

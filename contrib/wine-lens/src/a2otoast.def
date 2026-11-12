@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: MIT
 LIBRARY a2otoast.dll
 EXPORTS
     DllGetActivationFactory PRIVATE

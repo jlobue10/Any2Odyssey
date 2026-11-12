@@ -1,4 +1,12 @@
+# SPDX-License-Identifier: MIT
 # Samsung Odyssey 3D (G90XF): the lens switch board is a USB serial device
 # (Dimenco BV "SR Lens Switch Board"). Let the person at the seat open it
 # without joining the serial group, and keep ModemManager from probing it.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="354b", ATTRS{idProduct}=="0116", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", SYMLINK+="odyssey-lens"
+
+# The monitor's eye-tracking webcam ("3D Stereo WebCam"). It must never be put into USB power saving: after
+# a suspend it sends empty frames and then stops answering until the monitor is power-cycled.
+# The camera driver (uvcvideo) turns power saving on when it attaches, after the "add" event, so the
+# setting is made again once the driver is bound.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", ATTR{idProduct}=="20d7", TEST=="power/control", ATTR{power/control}="on"
+ACTION=="bind", SUBSYSTEM=="usb", DRIVER=="uvcvideo", ATTRS{idVendor}=="04e8", ATTRS{idProduct}=="20d7", RUN+="/bin/sh -c 'echo on > /sys%p/../power/control'"

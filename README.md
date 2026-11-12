@@ -8,7 +8,7 @@ Any2Odyssey is a tray application that turns capturable on-screen content (wallp
 
 **Credit.** Any2Odyssey is a Rust reimplementation of [Any2Odd](https://zhandragon.itch.io/any2odd) 0.7.3 by **Zhandragon**, released under the GNU GPL-3.0. The architecture, the Samsung engine integration, the capture and overlay design, the behaviour of every control and the written Help all derive from Any2Odd; Any2Odyssey keeps the same license (see [LICENSE](LICENSE) and [NOTICE](NOTICE)). Any2Odd in turn credits Any2C1 (CubeVi) for the continuous-conversion workflow and PortalAI (Zhandragon) for its visual style. Any2Odd's source accompanies its itch.io release; the GitHub repository it names is not public. If this program is useful to you, consider supporting the upstream author through that page.
 
-**Status: 0.8.7 is the current release; 0.8.0 is the last build confirmed on hardware** (the 0.8.1 to 0.8.7 checks are listed in the CHANGELOG). The Rust port runs on a Samsung Odyssey 3D G90XF with an NVIDIA RTX 5090, Odyssey 3D Hub 1.5.1 and Windows 11 (build 26300): install, automatic start, whole-desktop AI conversion and the click-through overlay all behave as described. The hardware record is in the [CHANGELOG](CHANGELOG.md).
+**Status: 0.9.0 is the current release; 0.8.0 is the last Windows build confirmed on hardware** (the 0.8.1 to 0.9.0 checks are listed in the CHANGELOG; 0.9.0 changes the Linux edition only). The Rust port runs on a Samsung Odyssey 3D G90XF with an NVIDIA RTX 5090, Odyssey 3D Hub 1.5.1 and Windows 11 (build 26300): install, automatic start, whole-desktop AI conversion and the click-through overlay all behave as described. The hardware record is in the [CHANGELOG](CHANGELOG.md).
 
 [Documentation](docs/) · [Platform support](docs/PLATFORMS.md) · [Porting map](docs/PORTING.md) · [Testing](docs/TESTING.md) · [Report an issue](https://github.com/jlobue10/Any2Odyssey/issues)
 
@@ -126,7 +126,7 @@ Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice
 
 ## Linux
 
-The Linux build is a stereo viewer, the first part of the scope of Any2Odd's experimental portable edition: it opens a side-by-side image and shows it as red/cyan anaglyph or side by side, in a preview and in an output window you can place on any display and make full screen, and exports PNG. Samsung's engine, LeiaSR eye tracking and the G90XF's calibrated output do not exist on Linux, so nothing of Samsung's runs there: 2D → 3D uses an open depth model, and the experimental lens-interleaved output uses numbers you calibrate yourself. The Odyssey's lens is switched by Leia's SR runtime: the viewer asks for the lens while that output is full screen through an optional helper, and without one the lens stays off. The helper that works today runs your own copy of Leia's Windows runtime under Wine (`contrib/wine-lens`, verified on a G90XF); see [docs/LENS-SWITCH.md](docs/LENS-SWITCH.md). Not there yet: the tray icon and the live capture of one screen onto another display.
+The Linux build is a stereo viewer: it opens a side-by-side image and shows it as red/cyan anaglyph or side by side, in a preview and in an output window you can place on any display and make full screen, and exports PNG. On an Odyssey 3D it can also (experimental) show the picture glasses-free through Leia's own weaver, with the lens on and the picture following your eyes, and show one of your screens live in 3D that way. Samsung's conversion engine does not exist on Linux, so nothing of Samsung's runs there: 2D → 3D uses an open depth model (Depth Anything V2 Small), for images and for the live screen. The lens, the eye tracker and the weaver are Leia's: `contrib/wine-lens/setup.sh` copies your own installation of Leia's Windows SR runtime (it comes with the Odyssey 3D Hub) into a Wine prefix and builds the small stand-ins Wine needs to run it; nothing of Leia's or Samsung's is distributed here. See [docs/LENS-SWITCH.md](docs/LENS-SWITCH.md) for how it works, what it needs and what has been checked. Without that setup the viewer still has its own lens interleave, which uses numbers you calibrate yourself and does not follow your eyes. The live screen can be the Odyssey's own desktop on KDE Plasma 6; on other desktops it has to be another display. Not there yet: the tray icon and global shortcuts.
 
 On Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro), build and install the package from a checkout:
 
@@ -136,12 +136,13 @@ cd Any2Odyssey/packaging/arch
 makepkg -si
 ```
 
-No Linux package is published yet, and the viewer has so far been run only under WSL 2. See [docs/PLATFORMS.md](docs/PLATFORMS.md) for what works, what does not and what has been tested.
+No Linux package is published yet, and the Wine setup for the Odyssey 3D (`contrib/wine-lens`) is run from the checkout. The viewer has been run under WSL 2 and, for the lens, eye tracking and the Odyssey 3D output (a still image and a live screen), on a CachyOS desktop with a G90XF. See [docs/PLATFORMS.md](docs/PLATFORMS.md) for what works, what does not and what has been tested.
 
 ## Building from source
 
 ```sh
 cargo build --release            # on Windows x64: the full converter
+cargo build --release -p any2odyssey   # on Linux: the viewer (needs the PipeWire development files and clang)
 cargo test --workspace
 cargo run -p any2odyssey-iconmaker -- assets   # regenerate icon and wordmark
 ```

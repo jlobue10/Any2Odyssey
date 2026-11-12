@@ -24,10 +24,11 @@ use super::widgets::{banner, gold_button, row, section};
 use crate::core::{Core, MenuCommand, UiRequest};
 use crate::lens_switch::{LensStatus, LensSwitch};
 use crate::platform;
+use crate::weaver::{self, Weaver, WeaverStatus};
 
 pub const READY: &str =
     "Ready. Open a side-by-side stereo image, or drop one on this window. Output starts only when requested.";
-pub const NOTICE: &str = "This build converts images, not the live desktop, and shows them as anaglyph, side by side or (experimental) interleaved for the Odyssey's lens. Eye tracking and Samsung's calibrated glasses-free output exist only on Windows.";
+pub const NOTICE: &str = "Shows images as anaglyph, side by side or on the Odyssey 3D, and (experimental) a live screen in 3D on the Odyssey. The Odyssey 3D output uses Leia's weaver and eye tracker from your own copy of the SR runtime under Wine; Samsung's conversion engine exists only on Windows, so depth comes from an open model.";
 const OUTPUT_HINT: &str =
     "Move this window to the display you want, then double-click or press F11 for full screen. Esc leaves.";
 const LOADED: &str = "Image loaded. Check the input format before starting output.";
@@ -35,12 +36,32 @@ const NO_IMAGE: &str = "Open an image first.";
 const OUTPUT_ON: &str =
     "Output window open. Stop output, Esc in that window, or closing it ends it.";
 const OUTPUT_OFF: &str = "Output stopped.";
+const ODYSSEY_ON: &str =
+    "Output on the Odyssey 3D. Stop output, or Esc with the pointer on the Odyssey, ends it.";
 const LENS_WINDOWED: &str =
     "Lens output is only right full screen on the Odyssey: double-click or press F11. Esc leaves.";
 const ESTIMATING: &str =
     "Estimating depth… The first image also loads the model, which takes a few seconds.";
 const CONVERTED: &str = "Converted to 3D. Adjust depth strength and pop-out to taste.";
 const DEFAULT_EXPORT_NAME: &str = "Any2Odyssey-preview.png";
+/// How large the depth model sees the picture (`depth::DETAIL`): the long
+/// side in pixels, and its name.
+const DEPTH_DETAIL: [(u32, &str); 4] = [
+    (518, "Standard"),
+    (770, "Fine"),
+    (1022, "Finer"),
+    (1274, "Finest (slow without a GPU)"),
+];
+/// The lines-per-view choices of the live screen (`live::LINES`).
+const LIVE_LINES: [(i32, &str); 4] = [
+    (720, "720 lines (fastest)"),
+    (1080, "1080 lines"),
+    (1440, "1440 lines"),
+    (2160, "2160 lines (sharpest, slowest)"),
+];
+const LIVE_NEEDS_ODYSSEY: &str = "A live screen is shown through the Odyssey 3D output only.";
+#[cfg(not(target_os = "linux"))]
+const LIVE_NOT_HERE: &str = "Live capture is not available in this build.";
 
 /// What the source image contains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,15 +72,22 @@ pub enum Input {
     Flat,
     /// An ordinary 2D image given depth by the model and rendered as a pair.
     Ai,
+    /// A screen, captured live and given depth frame by frame (`live`).
+    /// There is no image in the document: the output is fed directly.
+    Desktop,
 }
 
 impl Input {
+    #[cfg(target_os = "linux")]
+    const ALL: [Input; 4] = [Input::Pair, Input::Ai, Input::Flat, Input::Desktop];
+    #[cfg(not(target_os = "linux"))]
     const ALL: [Input; 3] = [Input::Pair, Input::Ai, Input::Flat];
     fn label(self) -> &'static str {
         match self {
             Input::Pair => "Side-by-side stereo pair",
             Input::Ai => "2D image → 3D (AI depth)",
             Input::Flat => "2D image (flat, no depth)",
+            Input::Desktop => "Live screen → 3D (AI depth, experimental)",
         }
     }
 }
@@ -73,15 +101,20 @@ pub enum Output {
     /// The document keeps the side-by-side pair; the output window
     /// interleaves it for the pixels it covers.
     Lens,
+    /// The pair handed to Leia's own weaver (`weaver`): the panel's factory
+    /// calibration and eye tracking, in a full-screen window of the weaver's
+    /// helper on the Odyssey instead of this program's output window.
+    Odyssey,
 }
 
 impl Output {
-    const ALL: [Output; 3] = [Output::Anaglyph, Output::Sbs, Output::Lens];
+    const ALL: [Output; 4] = [Output::Anaglyph, Output::Sbs, Output::Odyssey, Output::Lens];
     fn label(self) -> &'static str {
         match self {
             Output::Anaglyph => "Red/cyan anaglyph (needs red/cyan glasses)",
             Output::Sbs => "Side-by-side stereo (needs a matching viewer)",
-            Output::Lens => "Odyssey lens interleave (experimental)",
+            Output::Odyssey => "Odyssey 3D: Leia's weaver, eye-tracked (experimental)",
+            Output::Lens => "Odyssey lens interleave, own calibration (experimental)",
         }
     }
 }
@@ -99,6 +132,18 @@ pub struct Options {
     /// same scales as the Windows controls.
     pub depth_pos: i32,
     pub pop_pos: i32,
+    /// Live screen only: sharpening (0..=100), how steady depth is kept
+    /// between frames (0..=95) and the lines per view.
+    pub sharp_pos: i32,
+    pub steady_pos: i32,
+    pub lines: i32,
+    /// AI depth: the long side of the picture the model sees
+    /// (`depth::DETAIL`), for images and for a live screen.
+    pub detail: u32,
+    /// Live screen only: draw the pointer into the picture. Wanted for a
+    /// screen shown elsewhere; on the Odyssey's own screen the real pointer
+    /// is there already.
+    pub pointer: bool,
 }
 
 impl Default for Options {
@@ -111,6 +156,11 @@ impl Default for Options {
             swap: false,
             depth_pos: DEPTH.position(defaults.strength),
             pop_pos: POPOUT.position(defaults.popout),
+            sharp_pos: 0,
+            steady_pos: 60,
+            lines: 1080,
+            detail: DEPTH_DETAIL[0].0,
+            pointer: true,
         }
     }
 }
@@ -118,15 +168,20 @@ impl Default for Options {
 impl Options {
     pub fn layout(&self) -> Layout {
         match (self.input, self.output) {
-            (Input::Flat, _) => Layout::Flat,
+            (Input::Flat | Input::Desktop, _) => Layout::Flat,
             (Input::Pair | Input::Ai, Output::Anaglyph) => Layout::Anaglyph,
-            (Input::Pair | Input::Ai, Output::Sbs | Output::Lens) => Layout::Sbs,
+            (Input::Pair | Input::Ai, Output::Sbs | Output::Lens | Output::Odyssey) => Layout::Sbs,
         }
     }
 
     /// Whether the output window interleaves a pair for the lens.
     pub fn weaves(&self) -> bool {
-        self.output == Output::Lens && self.input != Input::Flat
+        self.output == Output::Lens && !matches!(self.input, Input::Flat | Input::Desktop)
+    }
+
+    /// Whether the picture is a live screen rather than the document's.
+    pub fn live(&self) -> bool {
+        self.input == Input::Desktop
     }
 
     /// How much each eye of the pair is widened before it is shown: a
@@ -202,6 +257,14 @@ impl Document {
         self.source
             .as_ref()
             .map(|image| (self.source_id, image.clone()))
+    }
+
+    /// Drop the depth map, so that one is estimated again (the model is to
+    /// see the image at another size). A map still on its way for the old
+    /// request is recognized by its id and dropped too.
+    pub fn forget_depth(&mut self) {
+        self.depth = None;
+        self.source_id += 1;
     }
 
     /// Take the depth map estimated for source `id`. False when the source
@@ -337,6 +400,19 @@ pub struct ViewerState {
     lens: LensState,
     /// The Odyssey's lens itself: asked for while lens output is full screen.
     lens_switch: LensSwitch,
+    /// Output through Leia's weaver, and the picture it was last given.
+    weaver: Weaver,
+    woven: Option<u64>,
+    /// The live screen while it is being shown.
+    #[cfg(target_os = "linux")]
+    live: Option<crate::live::Live>,
+    /// "Choose another screen" was pressed: the running capture's token is
+    /// not kept.
+    #[cfg(target_os = "linux")]
+    forget_screen: bool,
+    /// The capture's token as last written to its file.
+    #[cfg(target_os = "linux")]
+    saved_token: Option<String>,
 }
 
 impl Default for ViewerState {
@@ -356,6 +432,14 @@ impl Default for ViewerState {
             lens: LensState::default(),
             // No helper is looked for: tests and previews start no program.
             lens_switch: LensSwitch::with_helper(None),
+            weaver: Weaver::with_helper(None),
+            woven: None,
+            #[cfg(target_os = "linux")]
+            live: None,
+            #[cfg(target_os = "linux")]
+            forget_screen: false,
+            #[cfg(target_os = "linux")]
+            saved_token: None,
         }
     }
 }
@@ -367,6 +451,7 @@ impl ViewerState {
         ViewerState {
             lens: LensState::load(any2odyssey_core::paths::lens_file()),
             lens_switch: LensSwitch::new(),
+            weaver: Weaver::new(),
             ..ViewerState::default()
         }
     }
@@ -404,10 +489,11 @@ impl ViewerState {
         }
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
+        let detail = self.options.detail;
         let spawned = std::thread::Builder::new()
             .name("depth".into())
             .spawn(move || {
-                let _ = tx.send(platform::estimate_depth(&image));
+                let _ = tx.send(platform::estimate_depth(&image, detail));
                 ctx.request_repaint();
             });
         match spawned {
@@ -464,9 +550,23 @@ impl ViewerState {
     fn toggle_output(&mut self) {
         if self.output_open {
             self.stop_output();
+        } else if self.options.live() {
+            self.weaver.forget_failure();
+            if self.options.output != Output::Odyssey {
+                self.status = LIVE_NEEDS_ODYSSEY.into();
+            } else if !self.weaver.available() {
+                self.status = WeaverStatus::NoHelper.describe();
+            } else {
+                self.output_open = true;
+                self.output_fullscreen = false;
+                self.status = WeaverStatus::Starting.describe();
+            }
         } else if self.document.result().is_none() && !self.shows_pattern() {
             self.status = NO_IMAGE.into();
+        } else if self.options.output == Output::Odyssey && !self.weaver.available() {
+            self.status = WeaverStatus::NoHelper.describe();
         } else {
+            self.weaver.forget_failure();
             self.output_open = true;
             self.output_fullscreen = false;
             self.status = OUTPUT_ON.into();
@@ -482,6 +582,210 @@ impl ViewerState {
         self.lens.store();
         self.lens.release();
         self.lens_switch.set(false, || {});
+        self.weaver.stop();
+        self.woven = None;
+        self.stop_live();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stop_live(&mut self) {
+        // Dropping it stops the capture and its threads. The screen that
+        // was chosen has been noted already (`remember_screen`).
+        self.live = None;
+        self.saved_token = None;
+    }
+
+    /// Keep the portal's token for the screen that was chosen, so that the
+    /// desktop does not ask again. A token is good for one use and each
+    /// capture hands out the next one, so it is written as soon as there is
+    /// one: a program that is quit while the screen shows has it on file.
+    #[cfg(target_os = "linux")]
+    fn remember_screen(&mut self) {
+        let Some(token) = self.live.as_ref().and_then(|live| live.restore_token()) else {
+            return;
+        };
+        if self.forget_screen || self.saved_token.as_deref() == Some(token.as_str()) {
+            return;
+        }
+        let file = any2odyssey_core::paths::capture_token_file();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        use std::io::Write;
+        if options
+            .open(&file)
+            .and_then(|mut f| f.write_all(token.as_bytes()))
+            .is_ok()
+        {
+            self.saved_token = Some(token);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn stop_live(&mut self) {}
+
+    #[cfg(target_os = "linux")]
+    fn live_controls(&self) -> crate::live::Controls {
+        crate::live::Controls {
+            depth_pos: self.options.depth_pos,
+            pop_pos: self.options.pop_pos,
+            sharpness: self.options.sharp_pos,
+            steadiness: self.options.steady_pos,
+            lines: self.options.lines,
+            detail: self.options.detail as i32,
+            swap: self.options.swap,
+        }
+    }
+
+    /// The live screen through the weaver: start the capture once the
+    /// weaver has a picture file, keep its controls current, and say how it
+    /// is going. Returns false when the output is over.
+    #[cfg(target_os = "linux")]
+    fn show_live(&mut self, ctx: &egui::Context, weaver: &WeaverStatus) -> bool {
+        use crate::capture::CaptureState;
+        let controls = self.live_controls();
+        if self.live.is_none() {
+            let token = std::fs::read_to_string(any2odyssey_core::paths::capture_token_file())
+                .ok()
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty());
+            let wake = ctx.clone();
+            self.forget_screen = false;
+            self.live = Some(crate::live::Live::start(
+                token,
+                self.options.pointer,
+                controls,
+                move || wake.request_repaint(),
+            ));
+        }
+        let Some(live) = &mut self.live else {
+            return true;
+        };
+        live.set(controls);
+        self.remember_screen();
+        let Some(live) = &mut self.live else {
+            return true;
+        };
+        // The output comes up once there is a screen to show: before that
+        // its window would only cover the desktop's dialog.
+        if matches!(live.capture_state(), CaptureState::Running { .. }) {
+            if !self.weaver.is_running() {
+                let wake = ctx.clone();
+                self.weaver.start(true, move || wake.request_repaint());
+            }
+            if !live.has_output() {
+                if let Some(sink) = self.weaver.sink() {
+                    live.show_on(sink);
+                }
+            }
+        }
+        let stats = live.stats();
+        match live.capture_state() {
+            CaptureState::Asking => {
+                self.status = "Choose the screen to show in 3D in the desktop's dialog (asked once and remembered). On KDE Plasma 6 it can be the Odyssey itself; on other desktops choose another screen.".into();
+            }
+            CaptureState::Running { width, height } => {
+                let depth = match &stats.depth_error {
+                    Some(e) => format!("no depth: {e}"),
+                    None if stats.depth_rate > 0.0 => {
+                        format!("depth {:.0} times a second", stats.depth_rate)
+                    }
+                    None => "depth starting".into(),
+                };
+                self.status = match &stats.output_error {
+                    Some(e) => format!("The picture cannot be written: {e}"),
+                    None => format!(
+                        "Live: a {width} × {height} screen, {:.0} pictures a second, {depth}. {}{}",
+                        stats.picture_rate,
+                        weaver.describe(),
+                        if self.weaver.excluded_from_capture() == Some(false) {
+                            " This desktop cannot keep the 3D picture out of a capture: do not show the Odyssey's own screen."
+                        } else {
+                            ""
+                        }
+                    ),
+                };
+                // The rates are worth a look now and then while it runs.
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
+            CaptureState::Ended(reason) => {
+                self.stop_output();
+                self.status = match reason {
+                    Some(reason) => format!("Live capture ended: {reason}."),
+                    None => OUTPUT_OFF.into(),
+                };
+                return false;
+            }
+        }
+        true
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn show_live(&mut self, _: &egui::Context, _: &WeaverStatus) -> bool {
+        self.stop_output();
+        self.status = LIVE_NOT_HERE.into();
+        false
+    }
+
+    /// Output through Leia's weaver: the helper has the window, this side
+    /// keeps its picture current. Call once per frame while that output is
+    /// selected and open.
+    fn show_odyssey(&mut self, ctx: &egui::Context) {
+        self.lens.release();
+        self.lens_switch.set(false, || {});
+        if !self.weaver.is_running() {
+            if matches!(self.weaver.status(), WeaverStatus::Failed(_)) {
+                // Started and failed: say why and leave it at that.
+                self.output_open = false;
+                self.stop_live();
+                self.status = self.weaver.status().describe();
+                return;
+            }
+            // A still picture's output starts at once. A live screen's
+            // starts when the capture runs (`show_live`), with a window
+            // that lets the pointer through.
+            if !self.options.live() {
+                let wake = ctx.clone();
+                self.weaver.start(false, move || wake.request_repaint());
+            }
+            self.woven = None;
+        }
+        if self.weaver.poll() {
+            // Esc in the helper's window.
+            self.stop_output();
+            return;
+        }
+        let status = self.weaver.status();
+        if let WeaverStatus::Failed(_) = status {
+            self.output_open = false;
+            self.stop_live();
+            self.status = status.describe();
+            return;
+        }
+        if self.options.live() {
+            self.show_live(ctx, &status);
+            return;
+        }
+        self.stop_live();
+        let generation = self.document.generation;
+        if self.woven != Some(generation) {
+            if let Some(pair) = self.document.result() {
+                let flat = self.options.input == Input::Flat;
+                let picture = weaver::compose_still(pair, flat, self.options.eye_stretch());
+                self.weaver
+                    .show(picture.width(), picture.height(), picture.as_raw());
+                self.woven = Some(generation);
+            }
+        }
+        if self.document.result().is_some() {
+            self.status = match status {
+                WeaverStatus::On { .. } => format!("{ODYSSEY_ON} {}", status.describe()),
+                _ => status.describe(),
+            };
+        }
     }
 
     /// Run a blocking file dialog off the UI thread; `poll_dialog` collects
@@ -686,7 +990,7 @@ impl ViewerState {
                             }
                         });
                 });
-                if state.options.input == Input::Ai {
+                if matches!(state.options.input, Input::Ai | Input::Desktop) {
                     row(ui, "Depth strength", |ui| {
                         ui.add(
                             egui::Slider::new(&mut state.options.depth_pos, DEPTH.min..=DEPTH.max)
@@ -705,12 +1009,90 @@ impl ViewerState {
                         ui.label(RichText::new(POPOUT.readout(state.options.pop_pos)).monospace());
                     })
                     .on_hover_text("Where the screen plane sits: −1.00 keeps everything behind the screen, 1.00 brings everything forward.");
+                    row(ui, "Depth detail", |ui| {
+                        let chosen = DEPTH_DETAIL
+                            .iter()
+                            .find(|(side, _)| *side == state.options.detail)
+                            .map_or("Standard", |(_, name)| name);
+                        egui::ComboBox::from_id_salt("viewer-depth-detail")
+                            .width(ui.available_width())
+                            .selected_text(chosen)
+                            .show_ui(ui, |ui| {
+                                for (side, name) in DEPTH_DETAIL {
+                                    ui.selectable_value(&mut state.options.detail, side, name);
+                                }
+                            });
+                    })
+                    .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
                 } else {
                     ui.checkbox(
                         &mut state.options.half_width,
                         "Half-width pair: stretch each eye back to full width",
                     )
                     .on_hover_text("For red/cyan and lens output. Side-by-side output keeps the pair as it is.");
+                }
+                if state.options.input == Input::Desktop {
+                    row(ui, "Sharpness", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut state.options.sharp_pos, 0..=100)
+                                .show_value(false)
+                                .step_by(1.0),
+                        );
+                        ui.label(
+                            RichText::new(format!("{:3}", state.options.sharp_pos)).monospace(),
+                        );
+                    })
+                    .on_hover_text("Sharpens the two views after they are rendered. 0 is off.");
+                    row(ui, "Depth steadiness", |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut state.options.steady_pos, 0..=95)
+                                .show_value(false)
+                                .step_by(1.0),
+                        );
+                        ui.label(RichText::new(format!("{:3}", state.options.steady_pos)).monospace());
+                    })
+                    .on_hover_text("How much of the previous depth map is kept for each new one. Higher is calmer but slower to follow movement.");
+                    row(ui, "Detail", |ui| {
+                        let chosen = LIVE_LINES
+                            .iter()
+                            .find(|(lines, _)| *lines == state.options.lines)
+                            .map_or("1080 lines", |(_, name)| name);
+                        egui::ComboBox::from_id_salt("viewer-lines")
+                            .width(ui.available_width())
+                            .selected_text(chosen)
+                            .show_ui(ui, |ui| {
+                                for (lines, name) in LIVE_LINES {
+                                    ui.selectable_value(&mut state.options.lines, lines, name);
+                                }
+                            });
+                    })
+                    .on_hover_text("The size of each eye's view. More lines are sharper and cost more processor time per picture.");
+                    ui.checkbox(
+                        &mut state.options.pointer,
+                        "Draw the pointer into the picture",
+                    )
+                    .on_hover_text("For a screen other than the Odyssey. Switch it off when the Odyssey shows its own screen: the real pointer is on top of the picture there. Takes effect at the next start.");
+                    if gold_button(ui, "Choose another screen", false, p)
+                        .on_hover_text("Forgets the screen that was chosen, so the desktop asks again at the next start.")
+                        .clicked()
+                    {
+                        let _ = std::fs::remove_file(any2odyssey_core::paths::capture_token_file());
+                        #[cfg(target_os = "linux")]
+                        {
+                            state.forget_screen = true;
+                        }
+                    }
+                }
+                if state.options.output == Output::Odyssey {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(state.weaver.status().describe())
+                                .color(color(p.muted))
+                                .size(12.0),
+                        )
+                        .wrap(),
+                    )
+                    .on_hover_text("Shown by Leia's own weaver in your copy of the SR runtime under Wine: factory lens calibration and eye tracking. The picture opens full screen on the Odyssey 3D by itself.");
                 }
                 if state.options.output == Output::Lens {
                     ui.add_space(4.0);
@@ -746,6 +1128,14 @@ impl ViewerState {
             output_panel(ui, self);
         }
         if self.options != before {
+            if self.options.live() != before.live() && self.output_open {
+                // A live screen and a still picture use the output differently.
+                self.stop_output();
+            }
+            if self.options.detail != before.detail {
+                self.document.forget_depth();
+                self.depth_failed = None;
+            }
             if self.options.input != before.input {
                 // A fresh choice of input format is a reason to try the
                 // model again after a failure.
@@ -820,8 +1210,18 @@ impl ViewerState {
         if !self.output_open {
             // Every way the output ends comes through here on the next frame.
             self.lens_switch.set(false, || {});
+            self.weaver.stop();
+            self.stop_live();
             return;
         }
+        if self.options.output == Output::Odyssey {
+            self.show_odyssey(ctx);
+            return;
+        }
+        // Another output format: nothing of the Odyssey output stays on.
+        self.weaver.stop();
+        self.stop_live();
+        self.woven = None;
         let weaving = self.options.weaves() || self.shows_pattern();
         let plain = self.texture.clone();
         if plain.is_none() && !self.shows_pattern() {
@@ -945,6 +1345,12 @@ impl ViewerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_depth_detail_choices_are_the_models() {
+        assert_eq!(DEPTH_DETAIL, crate::depth::DETAIL);
+    }
 
     /// A 4x2 pair: the left eye is pure red, the right eye pure blue.
     fn pair() -> RgbaImage {

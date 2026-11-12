@@ -1,0 +1,5 @@
+; SPDX-License-Identifier: MIT
+LIBRARY a2ocam.dll
+EXPORTS
+    A2OEnumDeviceSources
+    A2OCreateSourceReaderFromMediaSource

@@ -108,7 +108,7 @@ jobs:
     steps:
       # makepkg runs as a user without sudo, so the package's own dependencies are installed here.
       - name: Packaging tools and the package's dependencies
-        run: pacman -Syu --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme
+        run: pacman -Syu --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -155,13 +155,13 @@ jobs:
           toolchain: 1.99.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Desktop build dependencies (eframe, tray-icon, global-hotkey)
+      - name: Desktop build dependencies (eframe, tray-icon, global-hotkey; PipeWire for live capture)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxrandr-dev \
-            libxi-dev libgl1-mesa-dev libssl-dev pkg-config
+            libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang
       - name: Format check
         run: cargo fmt --all --check
       - name: Build

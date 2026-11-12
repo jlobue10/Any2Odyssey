@@ -53,6 +53,11 @@ pub fn ui_settings_file() -> PathBuf {
 pub fn lens_file() -> PathBuf {
     data_dir().join("lens.json")
 }
+/// The desktop portal's token for the screen last chosen for live capture
+/// (Linux), so its dialog is not shown at every start.
+pub fn capture_token_file() -> PathBuf {
+    data_dir().join("capture-token")
+}
 pub fn log_file() -> PathBuf {
     data_dir().join("companion.log")
 }

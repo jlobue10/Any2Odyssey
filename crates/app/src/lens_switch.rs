@@ -83,7 +83,7 @@ pub fn locate() -> Option<PathBuf> {
 }
 
 /// A helper's reason, made safe to show: one line, printable, bounded.
-fn tidy(reason: &str) -> String {
+pub(crate) fn tidy(reason: &str) -> String {
     let clean: String = reason
         .chars()
         .filter(|c| !c.is_control())
@@ -97,18 +97,21 @@ fn tidy(reason: &str) -> String {
     }
 }
 
-struct Running {
+/// A helper program that is running: held by its standard input, heard
+/// through its standard output. The weaver output (`weaver`) holds its
+/// helper the same way.
+pub(crate) struct Running {
     child: Child,
     /// Held open while the lens should be on; dropping it is the request to
     /// switch off.
     stdin: Option<ChildStdin>,
-    lines: Receiver<String>,
-    on: bool,
+    pub(crate) lines: Receiver<String>,
+    pub(crate) on: bool,
 }
 
 impl Running {
     /// Ask the helper to leave and make sure it does, without waiting here.
-    fn let_go(mut self) {
+    pub(crate) fn let_go(mut self) {
         self.stdin = None;
         let mut child = self.child;
         let reap = move || {
@@ -174,7 +177,7 @@ impl LensSwitch {
         let Some(helper) = self.helper.clone() else {
             return;
         };
-        match start(&helper, wake) {
+        match start(Command::new(&helper), wake) {
             Ok(running) => self.running = Some(running),
             Err(e) => {
                 self.failed = Some(tidy(&format!("could not start {}: {e}", helper.display())))
@@ -232,8 +235,13 @@ impl Drop for LensSwitch {
     }
 }
 
-fn start(helper: &Path, wake: impl Fn() + Send + 'static) -> std::io::Result<Running> {
-    let mut child = Command::new(helper)
+/// Start a helper with its input held and its output read line by line on
+/// a thread of its own; `wake` runs whenever it has said something.
+pub(crate) fn start(
+    mut command: Command,
+    wake: impl Fn() + Send + 'static,
+) -> std::io::Result<Running> {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

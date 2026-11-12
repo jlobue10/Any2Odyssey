@@ -13,6 +13,7 @@ pub mod fsutil;
 pub mod geometry;
 pub mod help;
 pub mod ipc;
+pub mod live;
 pub mod log;
 pub mod log_readiness;
 pub mod overlay_settings;

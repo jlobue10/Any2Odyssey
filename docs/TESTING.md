@@ -14,6 +14,10 @@ The core tests port Any2Odd's checks: the `--self-test` geometry (fit, offscreen
 
 On Linux the Windows crate is only compile-checked: `cargo check --workspace --target x86_64-pc-windows-msvc`. The pinned toolchain in `rust-toolchain.toml` does not ship that target; add it once with `rustup target add x86_64-pc-windows-msvc --toolchain 1.99.1` before the cross-check or clippy run.
 
+## Linux
+
+Building needs the PipeWire development files and clang beside the desktop libraries (Ubuntu: `libpipewire-0.3-dev libclang-dev clang`; Arch: `libpipewire clang`). `cargo test -p any2odyssey-core -p any2odyssey` runs everywhere and starts no helper, capture or model. Three measurements are kept as ignored tests for a machine with the hardware: `live::bench` (stage timings, needs the depth model), `capture::probe` (what the screen cast of the remembered screen contains) and `live::probe` (the whole live path against the Odyssey; `PROBE_ROUNDS`, `PROBE_LINES`, `PROBE_DETAIL`, `PROBE_SECONDS`). Run one with `cargo test --release -p any2odyssey <name> -- --ignored --nocapture`. What has been checked on a G90XF is recorded in `docs/LENS-SWITCH.md` ("What has been checked") and `docs/PLATFORMS.md`.
+
 ## Windows diagnostics (provided by the Windows crate)
 
 Run these with conversion stopped. They are GUI executables; use `Start-Process -Wait -PassThru` to read the exit code.

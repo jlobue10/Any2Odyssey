@@ -4,18 +4,21 @@
 #
 #   cd packaging/arch && makepkg -si
 #
-# The Linux edition is the stereo viewer (side-by-side images to red/cyan
-# anaglyph or side by side). Samsung's conversion engine exists only on
-# Windows; see docs/PLATFORMS.md.
+# The Linux edition is the stereo viewer (images as red/cyan anaglyph or side
+# by side) with, on an Odyssey 3D, glasses-free output for images and a live
+# screen through the user's own copy of Leia's runtime under Wine, which is
+# set up from the checkout (contrib/wine-lens). Samsung's conversion engine
+# exists only on Windows; see docs/PLATFORMS.md.
 pkgname=any2odyssey
-pkgver=0.8.7
+pkgver=0.9.0
 pkgrel=1
-pkgdesc="Stereo viewer for side-by-side 3D images (Linux edition of Any2Odyssey)"
+pkgdesc="Stereo viewer and Odyssey 3D output for images and a live screen (Linux edition of Any2Odyssey)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/jlobue10/Any2Odyssey"
 license=('GPL-3.0-only')
-depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libglvnd' 'hicolor-icon-theme')
-makedepends=('cargo')
+depends=('gcc-libs' 'glibc' 'libxkbcommon' 'libglvnd' 'hicolor-icon-theme' 'libpipewire')
+# clang: the PipeWire bindings are generated from its headers at build time.
+makedepends=('cargo' 'clang')
 optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
             'onnxruntime-cuda: AI depth on an NVIDIA GPU'
             'curl: any2odyssey --install-depth-model'
@@ -25,7 +28,9 @@ optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
             'libx11: run in an X11 session'
             'libxcursor: pointer shapes in an X11 session'
             'libxi: input in an X11 session'
-            'xdg-utils: View logs and Help links')
+            'xdg-utils: View logs and Help links'
+            'xdg-desktop-portal: live screen capture, with the portal backend of your desktop'
+            'wine: the Odyssey 3D lens, eye tracker and weaver (contrib/wine-lens in the source tree; its setup also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)')
 # The release profile already strips debug information; there is nothing for a -debug package.
 options=('!debug')
 # The checkout is the source; nothing is downloaded. (namcap reports the $startdir
