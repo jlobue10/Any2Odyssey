@@ -16,7 +16,7 @@
  *
  * If C:\a2ocam.log exists, calls are logged to it.
  */
-#ifndef A2O_CAMERA_STREAM_TEST
+#if !defined(A2O_CAMERA_STREAM_TEST) && !defined(A2O_CAMERA_READER_TEST)
 #define COBJMACROS
 #include <winsock2.h>
 #include <windows.h>
@@ -629,7 +629,7 @@ struct reader {
     CRITICAL_SECTION lock;
     HANDLE wake, thread;
     UINT32 current;
-    BOOL streaming, ticked, quit, flush, free_on_quit;
+    BOOL streaming, ticked, quit, flush;
     LONG pending;
     BYTE *frame; /* the newest frame not yet handed on */
     DWORD frame_length, frame_size;
@@ -707,6 +707,9 @@ static IMFSample *reader_take_sample(struct reader *r, LONGLONG *time)
     return sample;
 }
 
+#endif /* production types and sample handling */
+
+#ifndef A2O_CAMERA_STREAM_TEST
 static void reader_free(struct reader *r)
 {
     CloseHandle(r->thread);
@@ -731,9 +734,10 @@ static DWORD WINAPI reader_thread(void *arg)
         WaitForSingleObject(r->wake, INFINITE);
         EnterCriticalSection(&r->lock);
         if (r->quit) {
-            BOOL mine = r->free_on_quit;
             LeaveCriticalSection(&r->lock);
-            if (mine) reader_free(r);
+            /* The thread owns final cleanup: a caller's wait may have timed
+             * out while OnReadSample or OnFlush was still using this reader. */
+            reader_free(r);
             break;
         }
         flushed = r->flush;
@@ -758,9 +762,19 @@ static DWORD WINAPI reader_thread(void *arg)
     return 0;
 }
 
+static HRESULT reader_launch(struct reader *r)
+{
+    r->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!r->wake) return HRESULT_FROM_WIN32(GetLastError());
+    r->thread = CreateThread(NULL, 0, reader_thread, r, 0, NULL);
+    if (!r->thread) return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
 #endif /* !A2O_CAMERA_STREAM_TEST */
 
 /* Also compiled by the native lifecycle tests with a simulated bridge. */
+#ifndef A2O_CAMERA_READER_TEST
 static HRESULT reader_start(struct reader *r)
 {
     const struct format *f = &r->source->formats[r->current];
@@ -789,8 +803,9 @@ static void reader_stop(struct reader *r)
     r->streaming = FALSE;
     say("reader: stopped");
 }
+#endif /* !A2O_CAMERA_READER_TEST */
 
-#ifndef A2O_CAMERA_STREAM_TEST
+#if !defined(A2O_CAMERA_STREAM_TEST) && !defined(A2O_CAMERA_READER_TEST)
 static BOOL is_video_stream(DWORD index)
 {
     return index == 0 || index == (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
@@ -812,31 +827,41 @@ static ULONG WINAPI reader_AddRef(IMFSourceReader *iface)
 {
     return InterlockedIncrement(&reader_from_iface(iface)->refs);
 }
+#endif /* production COM methods */
 
+#ifndef A2O_CAMERA_STREAM_TEST
 static ULONG WINAPI reader_Release(IMFSourceReader *iface)
 {
     struct reader *r = reader_from_iface(iface);
     ULONG refs = InterlockedDecrement(&r->refs);
 
     if (!refs) {
+        HANDLE thread = NULL;
+
         reader_stop(r);
+        /* reader_free closes the original handle on the reader thread. Hold
+         * a separate handle for this wait, and never wait from a callback.
+         * If duplication fails, cleanup can still finish asynchronously. */
+        if (GetCurrentThreadId() != GetThreadId(r->thread) &&
+            !DuplicateHandle(GetCurrentProcess(), r->thread, GetCurrentProcess(), &thread, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS))
+            thread = NULL;
         EnterCriticalSection(&r->lock);
         r->quit = TRUE;
-        LeaveCriticalSection(&r->lock);
-        if (GetCurrentThreadId() == GetThreadId(r->thread)) {
-            /* Let go of from inside a callback: this thread still has the reader in hand, so it frees it
-             * itself once it is back in its loop and sees `quit`. */
-            r->free_on_quit = TRUE;
-            SetEvent(r->wake);
-            return 0;
-        }
+        /* Signal before releasing the lock: the thread may free r as soon
+         * as it sees quit. Nothing below the unlock may access r again. */
         SetEvent(r->wake);
-        WaitForSingleObject(r->thread, 5000);
-        reader_free(r);
+        LeaveCriticalSection(&r->lock);
+        if (thread) {
+            WaitForSingleObject(thread, 5000);
+            CloseHandle(thread);
+        }
     }
     return refs;
 }
+#endif /* !A2O_CAMERA_STREAM_TEST */
 
+#if !defined(A2O_CAMERA_STREAM_TEST) && !defined(A2O_CAMERA_READER_TEST)
 static HRESULT WINAPI reader_GetStreamSelection(IMFSourceReader *iface, DWORD index, BOOL *selected)
 {
     say("reader: GetStreamSelection %#lx", index);
@@ -1002,6 +1027,7 @@ HRESULT WINAPI A2OCreateSourceReaderFromMediaSource(IMFMediaSource *source, IMFA
 {
     IMFMediaSource *ours;
     struct reader *r;
+    HRESULT hr;
 
     if (!source || FAILED(IMFMediaSource_QueryInterface(source, &IID_A2OSource, (void **)&ours))) {
         HMODULE real = LoadLibraryW(L"mfreadww.dll"); /* Wine's own, under the name setup.sh gave it */
@@ -1019,8 +1045,10 @@ HRESULT WINAPI A2OCreateSourceReaderFromMediaSource(IMFMediaSource *source, IMFA
         IMFAttributes_GetUnknown(attributes, &MF_SOURCE_READER_ASYNC_CALLBACK, &IID_IMFSourceReaderCallback,
                                  (void **)&r->callback);
     InitializeCriticalSection(&r->lock);
-    r->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
-    r->thread = CreateThread(NULL, 0, reader_thread, r, 0, NULL);
+    if (FAILED(hr = reader_launch(r))) {
+        reader_free(r); /* No thread started, so this caller still owns cleanup. */
+        return hr;
+    }
     say("reader: created, %s", r->callback ? "asynchronous" : "synchronous");
     *out = &r->IMFSourceReader_iface;
     return S_OK;
@@ -1183,4 +1211,4 @@ HRESULT WINAPI A2OEnumDeviceSources(IMFAttributes *attributes, IMFActivate ***so
     say("enum: one camera, %ls", link);
     return S_OK;
 }
-#endif /* !A2O_CAMERA_STREAM_TEST */
+#endif /* production COM and activation methods */
