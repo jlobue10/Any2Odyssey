@@ -166,7 +166,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxrandr-dev \
-            libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang
+            libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang \
+            desktop-file-utils libglib2.0-bin
+      - name: Release installer and desktop launcher tests
+        run: python3 packaging/linux/tests/test-install.py
       - name: Format check
         run: cargo fmt --all --check
       - name: Build
