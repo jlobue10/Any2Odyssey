@@ -1167,22 +1167,30 @@ mod tests {
         let before = [1.0f32, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
         let map = DepthMap::normalized(4, 2, vec![0.0, 0.25, 0.5, 1.0, 0.0, 0.5, 0.75, 1.0]);
         let map = map.unwrap();
-        {
+        let steps = {
             let mut depth = lock(&shared.depth);
             assert!(depth.smoother.update(4, 2, &before, 0.0));
             assert!(depth.smoother.update(4, 2, map.values(), 0.2));
             assert_ne!(depth.smoother.values(), map.values());
             depth.version += 1;
             depth.latest = Some((1, 518, map.clone()));
-        }
+            // How many steps the easing will take from here.
+            let mut eased = depth.smoother.clone();
+            let mut steps = 1;
+            while !eased.settle(4, 2, map.values(), 0.2) {
+                steps += 1;
+            }
+            steps
+        };
+        assert!(steps >= 3, "{steps}");
         lock(&shared.for_model).busy = false;
         // It is shown and eased in, a picture a step, to the frame's own
         // map exactly; and there it rests.
         eventually("the map is eased in", || lock(&shared.depth).settled);
         assert_eq!(lock(&shared.depth).smoother.values(), map.values());
-        std::thread::sleep(a_while);
-        let eased = pictures();
-        assert!(eased >= 5, "{eased} pictures: the steps were not shown");
+        // The answer as it came, then every step: a picture each.
+        let eased = 2 + 1 + steps;
+        eventually("every step is shown", || pictures() == eased);
         let depth = Depth {
             values: map.values(),
             width: 4,
