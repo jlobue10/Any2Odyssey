@@ -667,6 +667,9 @@ pub struct ViewerState {
     /// Output through Leia's weaver, and the picture it was last given.
     weaver: Weaver,
     woven: Option<Woven>,
+    /// The weaver's line as it was last put into the status for the picture
+    /// that is showing.
+    weaver_said: Option<String>,
     /// The live screen while it is being shown.
     #[cfg(target_os = "linux")]
     live: Option<crate::live::Live>,
@@ -702,6 +705,7 @@ impl Default for ViewerState {
             lens_switch: LensSwitch::with_helper(None),
             weaver: Weaver::with_helper(None),
             woven: None,
+            weaver_said: None,
             #[cfg(target_os = "linux")]
             live: None,
             #[cfg(target_os = "linux")]
@@ -1195,12 +1199,22 @@ impl ViewerState {
             self.weaver
                 .show(picture.width(), picture.height(), picture.as_raw());
             self.woven = Some(wanted);
+            self.weaver_said = None;
         }
         if self.document.result().is_some() {
-            self.status = match status {
+            let line = match status {
                 WeaverStatus::On { .. } => format!("{ODYSSEY_ON} {}", status.describe()),
                 _ => status.describe(),
             };
+            // Said when it changes, with each new picture, and in place of
+            // the output window's line, which is not true of this output.
+            // Not at every frame: what the page said since (a preview that
+            // was saved or could not be, a file that could not be opened)
+            // would never be seen.
+            if self.weaver_said.as_deref() != Some(line.as_str()) || self.status == OUTPUT_ON {
+                self.status.clone_from(&line);
+                self.weaver_said = Some(line);
+            }
         }
     }
 
@@ -2754,6 +2768,42 @@ mod tests {
         assert_eq!(state.status, CONVERTED);
         // Started again by the user, it shows the new picture.
         assert!(state.woven.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_the_page_says_stays_readable_while_the_odyssey_shows_a_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 0);
+        assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        // A preview saved (or not) while the output is on: said by the page
+        // before the output is looked at, on the same frame and on later ones.
+        let target = dir.path().join("preview.png");
+        state.save(&target);
+        let saved = format!("Preview saved to {}.", target.display());
+        assert_eq!(state.status, saved);
+        for _ in 0..3 {
+            state.show_output(&ctx);
+            assert_eq!(state.status, saved);
+        }
+        state.save(dir.path());
+        let refused = state.status.clone();
+        assert!(refused.contains("it is a folder"), "{refused}");
+        state.show_output(&ctx);
+        assert_eq!(state.status, refused);
+
+        // The output window's own line is not true of this output: an
+        // option that leaves the picture as it is puts it there.
+        state.settle(Ok(()));
+        assert_eq!(state.status, OUTPUT_ON);
+        state.show_output(&ctx);
+        assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        // And a new picture is said again.
+        state.document.set_source(pair(), state.options).unwrap();
+        state.status = LOADED.into();
+        state.show_output(&ctx);
+        assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        assert!(state.output_open && state.weaver.is_running());
     }
 
     #[test]
