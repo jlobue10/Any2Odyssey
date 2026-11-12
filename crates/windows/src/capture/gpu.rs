@@ -5,8 +5,9 @@
 //! Each acquired frame is a complete current desktop image. It is never
 //! blended with the previous frame, so vanished menus disappear immediately.
 
-use any2odyssey_core::capture_color::ColorMonitor;
+use any2odyssey_core::capture_color::{CaptureColor, ColorMonitor};
 use any2odyssey_core::geometry::Rect;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use windows::core::{s, Interface, PCSTR};
 use windows::Graphics::DirectX::DirectXPixelFormat;
@@ -47,6 +48,9 @@ pub struct GpuDesktopCapture {
     surface: Option<GpuSurface>,
     color: ColorMonitor,
     color_checked: Instant,
+    /// Asks Windows for the display's colour state off this thread; `None`
+    /// when its thread could not be started, and the query runs here.
+    color_watch: Option<ColorWatch>,
     device_name: String,
     capture: Rect,
     output_bounds: Rect,
@@ -60,6 +64,95 @@ struct HdrConverter {
     target: ID3D11RenderTargetView,
     vs: ID3D11VertexShader,
     ps: ID3D11PixelShader,
+}
+
+/// How often the display's colour state is asked for. Twice per check on
+/// the capture thread (one a second), so a check normally finds an answer
+/// newer than the last one it saw.
+const COLOR_QUERY_PERIOD: Duration = Duration::from_millis(500);
+
+/// The display-colour query on a thread of its own.
+///
+/// The query enumerates the display configuration and asks for three device
+/// properties. It used to run on the capture thread once a second, where
+/// every millisecond it takes (many more while the display topology is
+/// changing) is taken from a frame. This thread repeats it and keeps the
+/// newest answer for the capture thread to collect. It uses no COM and
+/// shares nothing but that slot; dropping the watch tells it to stop, and
+/// it is not joined, so a query that never returns cannot hold up shutdown.
+struct ColorWatch {
+    shared: Arc<ColorWatchShared>,
+}
+
+struct ColorWatchShared {
+    state: Mutex<ColorWatchState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct ColorWatchState {
+    /// The newest answer not yet collected; `Some(None)` is a failed query.
+    latest: Option<Option<CaptureColor>>,
+    stop: bool,
+}
+
+impl ColorWatch {
+    fn start(
+        mut query: impl FnMut() -> Option<CaptureColor> + Send + 'static,
+        period: Duration,
+    ) -> std::io::Result<ColorWatch> {
+        let shared = Arc::new(ColorWatchShared {
+            state: Mutex::new(ColorWatchState::default()),
+            wake: Condvar::new(),
+        });
+        let thread_shared = shared.clone();
+        std::thread::Builder::new()
+            .name("display-color".into())
+            .spawn(move || loop {
+                let state = thread_shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let (state, _) = thread_shared
+                    .wake
+                    .wait_timeout_while(state, period, |state| !state.stop)
+                    .unwrap_or_else(PoisonError::into_inner);
+                if state.stop {
+                    return;
+                }
+                // Not under the lock: the capture thread must never wait
+                // for a query.
+                drop(state);
+                let answer = query();
+                thread_shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .latest = Some(answer);
+            })?;
+        Ok(ColorWatch { shared })
+    }
+
+    /// The newest answer since the last call, if a query finished since.
+    fn take(&self) -> Option<Option<CaptureColor>> {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .latest
+            .take()
+    }
+}
+
+impl Drop for ColorWatch {
+    fn drop(&mut self) {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stop = true;
+        self.shared.wake.notify_all();
+    }
 }
 
 /// Monitor lookup result used before any device is created.
@@ -196,12 +289,32 @@ impl GpuDesktopCapture {
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
         };
-        let (source, border) = WgcFrameSource::new(&device, found.monitor, format, on_frame, log)
-            .map_err(|e| format!("Windows Graphics Capture: {e}"))?;
+        let (source, border) = WgcFrameSource::new(
+            &device,
+            found.monitor,
+            format,
+            display_color::refresh_rate(device_name),
+            on_frame,
+            log,
+        )
+        .map_err(|e| format!("Windows Graphics Capture: {e}"))?;
         log(&format!(
             "GPU desktop capture format: {format:?}; SDR white scale {}",
             color.color().white_scale
         ));
+        let color_watch = {
+            let name = device_name.to_owned();
+            ColorWatch::start(
+                move || display_color::capture_color(&name),
+                COLOR_QUERY_PERIOD,
+            )
+        }
+        .inspect_err(|e| {
+            log(&format!(
+                "Display color watch thread not started ({e}); querying on the capture thread."
+            ))
+        })
+        .ok();
         Ok(GpuDesktopCapture {
             device,
             context,
@@ -213,6 +326,7 @@ impl GpuDesktopCapture {
             surface: None,
             color,
             color_checked: Instant::now(),
+            color_watch,
             device_name: device_name.to_owned(),
             capture: bounds,
             output_bounds: found.bounds,
@@ -248,9 +362,15 @@ impl GpuDesktopCapture {
             unsafe { self.device.GetDeviceRemovedReason() }.map_err(|e| {
                 format!("Direct3D device was removed or reset ({e}). Restart conversion.")
             })?;
-            self.color
-                .observe(display_color::capture_color(&self.device_name))
-                .map_err(str::to_owned)?;
+            // No answer since the last check means the query has been
+            // running for longer than that: counted like a failed query, so
+            // a display state that cannot be read still stops the pipeline
+            // after `MAX_QUERY_FAILURES` checks instead of being trusted.
+            let observed = match &self.color_watch {
+                Some(watch) => watch.take().unwrap_or(None),
+                None => display_color::capture_color(&self.device_name),
+            };
+            self.color.observe(observed).map_err(str::to_owned)?;
         }
         let Some(source) = self.source.as_ref() else {
             return Err("Capture source closed.".into());
@@ -502,4 +622,76 @@ fn compile(source: &str, entry: PCSTR, target: PCSTR) -> windows::core::Result<V
         std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
     }
     .to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const HDR: CaptureColor = CaptureColor {
+        advanced_color: true,
+        white_scale: 2.5,
+    };
+
+    fn wait_for<T>(mut probe: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(found) = probe() {
+                return found;
+            }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn the_color_watch_repeats_its_query_and_stops_when_dropped() {
+        let queries = Arc::new(AtomicU32::new(0));
+        let watch = {
+            let queries = queries.clone();
+            ColorWatch::start(
+                move || {
+                    queries.fetch_add(1, Ordering::SeqCst);
+                    Some(HDR)
+                },
+                Duration::from_millis(5),
+            )
+            .unwrap()
+        };
+        assert_eq!(wait_for(|| watch.take()), Some(HDR));
+        wait_for(|| (queries.load(Ordering::SeqCst) >= 3).then_some(()));
+        drop(watch);
+        // With the watch gone the count settles: the thread has ended.
+        wait_for(|| {
+            let before = queries.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(40));
+            (queries.load(Ordering::SeqCst) == before).then_some(())
+        });
+    }
+
+    #[test]
+    fn a_failed_query_is_an_answer_and_not_the_same_as_none_yet() {
+        let watch = ColorWatch::start(|| None, Duration::from_millis(5)).unwrap();
+        assert_eq!(wait_for(|| watch.take()), None);
+    }
+
+    #[test]
+    fn an_answer_is_collected_once() {
+        let watch = ColorWatch::start(|| Some(HDR), Duration::from_millis(5)).unwrap();
+        wait_for(|| watch.take());
+        // Stop the thread, let any query in flight publish, then drain: the
+        // slot is empty from then on.
+        watch
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stop = true;
+        watch.shared.wake.notify_all();
+        std::thread::sleep(Duration::from_millis(60));
+        let _ = watch.take();
+        assert_eq!(watch.take(), None);
+        assert_eq!(watch.take(), None);
+    }
 }

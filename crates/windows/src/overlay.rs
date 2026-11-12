@@ -75,7 +75,9 @@ impl OverlayController {
             if found.is_none()
                 && win::process_id(h) == self.worker_pid
                 && win::class_name(h) == ipc::ENGINE_OUTPUT_CLASS
-                && ipc::is_output_title(&win::title(h))
+                // Not `win::title`: that would send a message to the engine's
+                // window thread and wait while it is busy loading the model.
+                && ipc::is_output_title(&win::stored_title(h))
             {
                 found = Some(h);
             }
@@ -164,25 +166,53 @@ impl OverlayController {
                     || old & WS_EX_TOPMOST_BIT == 0
                     || due))
         {
-            if win::is_iconic(output) || !win::is_visible(output) {
-                win::show_window(output, win::SW_SHOWNOACTIVATE);
-            }
-            let flags = win::SWP_NOSIZE_NOMOVE_NOACTIVATE | win::SWP_SHOWWINDOW;
-            win::set_window_pos(output, Some(win::hwnd_topmost()), None, flags)
-                .map_err(|e| format!("Could not restore the 3D overlay: {e}"))?;
-            // Keep the controls (parent process) reachable above the output,
-            // without activating them.
+            // The windows of the controls (parent process) that must stay
+            // reachable above the output. Looking them up sends nothing.
             let parent = self.parent_pid;
+            let mut controls = Vec::new();
             win::enum_windows(|h| {
                 if win::process_id(h) == parent && win::is_visible(h) && !win::is_iconic(h) {
-                    let _ = win::set_window_pos(
-                        h,
-                        Some(win::hwnd_topmost()),
-                        None,
-                        win::SWP_NOSIZE_NOMOVE_NOACTIVATE,
-                    );
+                    controls.push(h);
                 }
             });
+            // The output belongs to the engine's thread and the controls to
+            // another process. A plain SetWindowPos or ShowWindow is sent to
+            // the owning thread and waits for it: this runs on the capture
+            // thread at least once a second, so every wait is a late frame,
+            // and a controls window that stopped answering would freeze
+            // capture with the watchdog unarmed.
+            //
+            // With no controls window on screen (hidden in the tray, the
+            // usual state) nothing has to be ordered against the output, so
+            // its raise is posted. With one on screen the order matters:
+            // the output must be raised first and the controls after it,
+            // and two posted requests are processed by two threads in
+            // either order. The output's raise is then sent as before, and
+            // only the controls' raise, which follows it, is posted.
+            let posted = if controls.is_empty() {
+                win::SWP_ASYNCWINDOWPOS
+            } else {
+                0
+            };
+            if win::is_iconic(output) || !win::is_visible(output) {
+                if controls.is_empty() {
+                    win::show_window_async(output, win::SW_SHOWNOACTIVATE);
+                } else {
+                    win::show_window(output, win::SW_SHOWNOACTIVATE);
+                }
+            }
+            let flags = win::SWP_NOSIZE_NOMOVE_NOACTIVATE | win::SWP_SHOWWINDOW | posted;
+            win::set_window_pos(output, Some(win::hwnd_topmost()), None, flags)
+                .map_err(|e| format!("Could not restore the 3D overlay: {e}"))?;
+            // Above the output, without activating them.
+            for h in controls {
+                let _ = win::set_window_pos(
+                    h,
+                    Some(win::hwnd_topmost()),
+                    None,
+                    win::SWP_NOSIZE_NOMOVE_NOACTIVATE | win::SWP_ASYNCWINDOWPOS,
+                );
+            }
             self.last_raise = Some(Instant::now());
             if restore {
                 (self.log)(&format!(

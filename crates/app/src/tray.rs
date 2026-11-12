@@ -7,7 +7,12 @@ use std::sync::{Mutex, OnceLock};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
-use crate::core::{Core, MenuCommand, UiRequest};
+use crate::core::{Core, Forwarded, MenuCommand, UiRequest};
+
+/// Icon and menu events handed over by the libraries' callbacks; see
+/// [`Tray::new`].
+static ICON_EVENTS: Forwarded<TrayIconEvent> = Forwarded::new();
+static MENU_EVENTS: Forwarded<MenuEvent> = Forwarded::new();
 
 pub struct Tray {
     icon: TrayIcon,
@@ -78,6 +83,14 @@ impl Tray {
     /// Ctrl+Alt+F9, `--show` or launching again brings them back. The crate
     /// gives no way to ask whether the icon is currently registered.
     pub fn new(icon_rgba: Vec<u8>, width: u32, height: u32) -> Result<Tray, String> {
+        // Without handlers both libraries queue their events on channels
+        // nothing waits on, and a menu command sat there until the poller's
+        // next tick. The handlers run on the GUI thread; they only store the
+        // event and wake the poller. Should a library ignore its handler
+        // (one was set before), events keep arriving on its channel, which
+        // `drain` still reads.
+        TrayIconEvent::set_event_handler(Some(|event| ICON_EVENTS.push(event)));
+        MenuEvent::set_event_handler(Some(|event| MENU_EVENTS.push(event)));
         let (menu, toggle_item, keep_item) = build_menu();
         let icon = Icon::from_rgba(icon_rgba, width, height).map_err(|e| e.to_string())?;
         let icon = TrayIconBuilder::new()
@@ -124,7 +137,9 @@ impl Tray {
 
 /// Deliver tray and menu events to the core (any thread).
 pub fn drain(core: &mut Core) {
-    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+    let mut icon_events = ICON_EVENTS.take();
+    icon_events.extend(TrayIconEvent::receiver().try_iter());
+    for event in icon_events {
         if let TrayIconEvent::DoubleClick { .. } = event {
             core.request(UiRequest::ShowControls);
         }
@@ -132,7 +147,9 @@ pub fn drain(core: &mut Core) {
     let Some(ids) = IDS.get() else { return };
     let Ok(guard) = ids.lock() else { return };
     let Some(ids) = guard.as_ref() else { return };
-    while let Ok(event) = MenuEvent::receiver().try_recv() {
+    let mut menu_events = MENU_EVENTS.take();
+    menu_events.extend(MenuEvent::receiver().try_iter());
+    for event in menu_events {
         if event.id == ids.keep {
             let value = !core.prefs.keep_overlay_on_top;
             core.menu(MenuCommand::KeepOverlayOnTop(value));

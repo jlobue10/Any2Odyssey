@@ -37,11 +37,12 @@ pub struct InstallRecord {
 impl InstallRecord {
     /// `Ok(None)` when the file is absent: a portable or development run.
     pub fn load_from(path: &Path) -> Result<Option<InstallRecord>, String> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("could not read {}: {e}", path.display())),
-        };
+        let text =
+            match crate::fsutil::read_to_string_limited(path, crate::fsutil::SMALL_FILE_LIMIT) {
+                Ok(text) => text,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+            };
         // Windows PowerShell writes UTF-8 with a byte-order mark.
         let text = text.trim_start_matches('\u{feff}');
         serde_json::from_str(text)
