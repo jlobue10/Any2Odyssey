@@ -200,6 +200,13 @@ jobs:
           cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
             contrib/wine-lens/tests/test-camera-reader.c -o /tmp/test-camera-reader
           ASAN_OPTIONS=detect_leaks=0 timeout 30 /tmp/test-camera-reader
+      - name: Camera bridge client tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
+            contrib/wine-lens/tests/test-camera-client.c -o /tmp/test-camera-client
+          ASAN_OPTIONS=detect_leaks=0 timeout 60 /tmp/test-camera-client
+      - name: Serial port keeper tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-noxon.py
       - name: Third-party list for Linux matches the dependencies
         run: |
           scripts/third-party-linux.py > /tmp/third-party-linux.md
@@ -214,8 +221,15 @@ jobs:
           mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
           check/any2odyssey --help
           test "$(sha256sum < check/any2odyssey)" = "$(sha256sum < ../target/release/Any2Odyssey)"
+          # What ci.yml checks of the archive and its installer.
+          sh -n check/wine-lens/setup.sh
+          test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh
+          test -s check/THIRD-PARTY-LICENSES-LINUX.md -a -s check/wine-lens/LICENSE-MIT
           check/install.sh --prefix "$PWD/prefix" --no-deps --no-udev --no-model --no-odyssey
           prefix/bin/any2odyssey --help
+          test -x prefix/share/any2odyssey/wine-lens/setup.sh
+          prefix/share/any2odyssey/install.sh --prefix "$PWD/prefix" --uninstall < /dev/null
+          test ! -e prefix/bin/any2odyssey -a ! -e prefix/share/any2odyssey
           rm -rf prefix
           rm -rf check
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -264,11 +278,16 @@ jobs:
           ls packaging/arch/any2odyssey-"${TAG#v}"-*-x86_64.pkg.tar.zst
           pacman -U --noconfirm packaging/arch/any2odyssey-*.pkg.tar.zst
           desktop-file-validate /usr/share/applications/any2odyssey.desktop
-          any2odyssey --help
+          test -f /usr/share/icons/hicolor/256x256/apps/any2odyssey.png
           test -x /usr/share/any2odyssey/wine-lens/setup.sh
           test -s /usr/share/licenses/any2odyssey/THIRD-PARTY-LICENSES-LINUX.md
           test -s /usr/lib/udev/rules.d/70-any2odyssey-lens.rules
           any2odyssey-setup --help
+          any2odyssey-setup --dry-run --no-deps --no-odyssey < /dev/null
+          any2odyssey --help
+          # Exit 1, not a hang or a crash, when no instance is running.
+          code=0; any2odyssey --quit || code=$?
+          test "$code" -eq 1
           mkdir dist && cp packaging/arch/any2odyssey-*.pkg.tar.zst dist/
           cd dist && for f in ./*.pkg.tar.zst; do sha256sum "${f#./}" > "${f#./}.sha256"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
