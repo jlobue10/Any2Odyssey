@@ -250,13 +250,11 @@ impl Document {
     /// The image the model should look at, with the id to hand back to
     /// [`Document::set_depth`], when the options need a depth map that has
     /// not been estimated yet.
-    pub fn depth_request(&self, options: Options) -> Option<(u64, RgbaImage)> {
+    pub fn depth_request(&self, options: Options) -> Option<(u64, &RgbaImage)> {
         if options.input != Input::Ai || self.depth.is_some() {
             return None;
         }
-        self.source
-            .as_ref()
-            .map(|image| (self.source_id, image.clone()))
+        self.source.as_ref().map(|image| (self.source_id, image))
     }
 
     /// Drop the depth map, so that one is estimated again (the model is to
@@ -487,6 +485,9 @@ impl ViewerState {
         if self.depth_failed == Some(id) {
             return;
         }
+        // Copy only when an estimate will actually start. A failed request
+        // is checked on every repaint, even for very large source images.
+        let image = image.clone();
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let detail = self.options.detail;
@@ -519,6 +520,12 @@ impl ViewerState {
             Err(TryRecvError::Disconnected) => Err("The depth model stopped unexpectedly.".into()),
         };
         self.estimating = None;
+        // Both errors and successful maps belong to the request that made
+        // them. A late error must not close a newer image's output, and an
+        // estimate is irrelevant after leaving AI mode.
+        if id != self.document.source_id || self.options.input != Input::Ai {
+            return;
+        }
         match estimated.and_then(|depth| self.document.set_depth(id, depth, self.options)) {
             Ok(true) => {
                 self.status = if self.output_open {
@@ -1505,6 +1512,102 @@ mod tests {
             !state.output_open,
             "no pattern and no image: nothing to show"
         );
+    }
+
+    fn queued_depth(state: &mut ViewerState) -> mpsc::Sender<Result<DepthMap, String>> {
+        let (tx, rx) = mpsc::channel();
+        state.estimating = Some((state.document.source_id, rx));
+        tx
+    }
+
+    #[test]
+    fn checking_for_depth_borrows_the_source_until_a_request_is_started() {
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        let (id, requested) = state.document.depth_request(state.options).unwrap();
+        assert_eq!(
+            requested.as_ptr(),
+            state.document.source.as_ref().unwrap().as_ptr(),
+            "checking eligibility must not allocate and copy an image"
+        );
+        state.depth_failed = Some(id);
+        let ctx = egui::Context::default();
+        for _ in 0..10 {
+            state.ensure_depth(&ctx);
+            assert!(
+                state.estimating.is_none(),
+                "failed requests stay suppressed"
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_depth_errors_cannot_close_a_new_image_or_replace_its_status() {
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        let tx = queued_depth(&mut state);
+        state.document.set_source(pair(), state.options).unwrap();
+        state.output_open = true;
+        state.status = "new image".into();
+        tx.send(Err("old model error".into())).unwrap();
+        state.poll_depth();
+        assert!(state.estimating.is_none());
+        assert!(state.output_open);
+        assert_eq!(state.status, "new image");
+        assert_eq!(state.depth_failed, None);
+        assert!(state.document.depth_request(state.options).is_some());
+    }
+
+    #[test]
+    fn depth_results_and_disconnects_are_ignored_after_leaving_ai_mode() {
+        for outcome in [
+            Some(Err("old model error".into())),
+            Some(Ok(DepthMap::normalized(1, 1, vec![1.0]).unwrap())),
+            None,
+        ] {
+            let mut state = ViewerState::default();
+            state.options.input = Input::Ai;
+            state.document.set_source(pair(), state.options).unwrap();
+            let tx = queued_depth(&mut state);
+            state.options.input = Input::Flat;
+            state.options_changed();
+            state.toggle_output();
+            if let Some(outcome) = outcome {
+                tx.send(outcome).unwrap();
+            }
+            drop(tx);
+            let generation = state.document.generation;
+            state.poll_depth();
+            assert!(state.output_open);
+            assert_eq!(state.status, OUTPUT_ON);
+            assert_eq!(state.document.generation, generation);
+            assert!(state.document.depth.is_none());
+            assert_eq!(state.depth_failed, None);
+        }
+    }
+
+    #[test]
+    fn changing_detail_invalidates_old_errors_but_current_errors_are_reported() {
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        let tx = queued_depth(&mut state);
+        state.document.forget_depth();
+        state.status = "finer detail".into();
+        tx.send(Err("old detail error".into())).unwrap();
+        state.poll_depth();
+        assert_eq!(state.status, "finer detail");
+        assert_eq!(state.depth_failed, None);
+
+        let tx = queued_depth(&mut state);
+        state.output_open = true;
+        tx.send(Err("current error".into())).unwrap();
+        state.poll_depth();
+        assert!(!state.output_open);
+        assert_eq!(state.status, "current error");
+        assert_eq!(state.depth_failed, Some(state.document.source_id));
     }
 
     #[test]
