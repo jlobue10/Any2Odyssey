@@ -7,13 +7,13 @@
 //! the guard, and a later launch that finds it answered writes its request
 //! there instead of opening a second window.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use any2odyssey_core::prefs::Preferences;
 use any2odyssey_core::update::Comparison;
@@ -23,6 +23,10 @@ const SOCKET_NAME: &str = "any2odyssey.sock";
 /// A request and its acknowledgement are one short line each; a peer that
 /// stalls must not hold the listener or a launching process for long.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+// Include the newline. Leave ample room for paths, but never accumulate an
+// unbounded request from a local peer (or an acknowledgement from a server).
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_REPLY_BYTES: usize = 16;
 
 /// Where the instance socket lives: the data folder when one was set
 /// explicitly (an isolated run must not find or disturb the real instance),
@@ -149,13 +153,55 @@ impl ControlEvents {
     }
 }
 
+/// Read one bounded, newline-terminated message. The timeout covers the whole
+/// line, including partial reads and interruptions, rather than starting over
+/// whenever the peer sends another byte. `read` applies the remaining timeout
+/// to the next blocking read; keeping it separate also permits socket-free tests.
+fn read_message(
+    limit: usize,
+    timeout: Duration,
+    mut read: impl FnMut(&mut [u8], Duration) -> std::io::Result<usize>,
+) -> Option<String> {
+    let started = Instant::now();
+    let mut line = Vec::new();
+    let mut buffer = [0; 256];
+    while line.len() < limit {
+        let remaining = timeout.checked_sub(started.elapsed())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        let available = buffer.len().min(limit - line.len());
+        let count = match read(&mut buffer[..available], remaining) {
+            Ok(0) => return None,
+            Ok(count) => count,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if started.elapsed() >= timeout {
+            return None;
+        }
+        let bytes = &buffer[..count];
+        if let Some(end) = bytes.iter().position(|&byte| byte == b'\n') {
+            line.extend_from_slice(&bytes[..=end]);
+            return String::from_utf8(line).ok();
+        }
+        line.extend_from_slice(bytes);
+    }
+    None
+}
+
+fn read_socket_line(mut stream: &UnixStream, limit: usize) -> Option<String> {
+    read_message(limit, IO_TIMEOUT, |buffer, remaining| {
+        stream.set_read_timeout(Some(remaining))?;
+        stream.read(buffer)
+    })
+}
+
 /// Read one request and acknowledge it. A connection that sends nothing (the
 /// liveness probe of another launch) is not a request.
 fn serve(stream: UnixStream) -> Option<Request> {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).ok()?;
+    stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
+    let line = read_socket_line(&stream, MAX_REQUEST_BYTES)?;
     let request = Request::parse(&line)?;
     let _ = (&stream).write_all(b"ok\n");
     Some(request)
@@ -163,16 +209,19 @@ fn serve(stream: UnixStream) -> Option<Request> {
 
 /// Send `request` to the running instance; true when it acknowledged.
 fn send(path: &Path, request: &Request) -> bool {
+    let line = request.line();
+    if line.len() > MAX_REQUEST_BYTES {
+        return false;
+    }
     let Ok(stream) = UnixStream::connect(path) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    if (&stream).write_all(request.line().as_bytes()).is_err() {
+    if stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
+        || (&stream).write_all(line.as_bytes()).is_err()
+    {
         return false;
     }
-    let mut reply = String::new();
-    BufReader::new(&stream).read_line(&mut reply).is_ok() && reply.trim_end() == "ok"
+    read_socket_line(&stream, MAX_REPLY_BYTES).is_some_and(|reply| reply.trim_end() == "ok")
 }
 
 /// Deliver one of the control events (named as on Windows) to the running
@@ -431,6 +480,89 @@ pub fn check_updates() -> Result<Comparison, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_reads_are_bounded_and_require_a_complete_utf8_line() {
+        fn message(bytes: &[u8], limit: usize) -> Option<String> {
+            let mut input = std::io::Cursor::new(bytes);
+            read_message(limit, IO_TIMEOUT, |buffer, _| input.read(buffer))
+        }
+        assert_eq!(message(b"ok\n", 3).as_deref(), Some("ok\n"));
+        assert_eq!(message(b"ok\nignored", 16).as_deref(), Some("ok\n"));
+        for bytes in [b"".as_slice(), b"ok", b"ok\n", b"\xff\n"] {
+            assert_eq!(message(bytes, 2), None, "{bytes:?}");
+        }
+        assert_eq!(message(b"ok\n", 0), None);
+
+        for limit in [MAX_REQUEST_BYTES, MAX_REPLY_BYTES] {
+            let mut full = vec![b'x'; limit];
+            full[limit - 1] = b'\n';
+            assert_eq!(message(&full, limit).unwrap().len(), limit);
+            full.insert(0, b'x');
+            assert_eq!(message(&full, limit), None);
+
+            // A peer that never sends a newline cannot cause more than the
+            // limit to be read or retained, even if data is always ready.
+            let mut consumed = 0;
+            assert_eq!(
+                read_message(limit, IO_TIMEOUT, |buffer, _| {
+                    buffer.fill(b'x');
+                    consumed += buffer.len();
+                    Ok(buffer.len())
+                }),
+                None
+            );
+            assert_eq!(consumed, limit);
+        }
+    }
+
+    #[test]
+    fn fragmented_messages_and_interrupted_reads_keep_their_contents() {
+        let expected = "open /tmp/caf\u{e9}.png\n";
+        let mut bytes = expected.as_bytes().iter();
+        let mut interrupted = true;
+        let received = read_message(MAX_REQUEST_BYTES, IO_TIMEOUT, |buffer, _| {
+            interrupted = !interrupted;
+            if interrupted {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let Some(&byte) = bytes.next() else {
+                return Ok(0);
+            };
+            buffer[0] = byte;
+            Ok(1)
+        });
+        assert_eq!(received.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn a_trickled_line_cannot_renew_the_message_deadline() {
+        let budget = Duration::from_millis(40);
+        let mut previous = budget;
+        let mut reads = 0;
+        let line = read_message(MAX_REQUEST_BYTES, budget, |buffer, remaining| {
+            assert!(remaining <= previous);
+            previous = remaining;
+            reads += 1;
+            // Each read makes progress before its own timeout, but the
+            // complete message would take far longer than the total budget.
+            std::thread::sleep(Duration::from_millis(10));
+            buffer[0] = if reads == 20 { b'\n' } else { b'x' };
+            Ok(1)
+        });
+        assert_eq!(line, None);
+        assert!(reads < 20);
+
+        let mut called = false;
+        assert_eq!(
+            read_message(MAX_REPLY_BYTES, Duration::ZERO, |_, _| {
+                called = true;
+                Ok(0)
+            }),
+            None
+        );
+        assert!(!called);
+    }
 
     #[test]
     fn requests_survive_the_wire_and_junk_is_not_a_request() {
