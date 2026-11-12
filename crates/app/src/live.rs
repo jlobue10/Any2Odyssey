@@ -1117,6 +1117,236 @@ mod tests {
         }
     }
 
+    /// Every state `plan` tells apart: two frames, two looks (the second
+    /// with other lines), two details, two depth maps, two outputs.
+    fn every_state() -> Vec<(Option<Shown>, Found)> {
+        let looks = [
+            a_look(),
+            Look {
+                lines: 1440,
+                ..a_look()
+            },
+        ];
+        let mut shown = vec![None];
+        let mut found = Vec::new();
+        for serial in [5, 6] {
+            for look in looks {
+                for depth in [9, 10] {
+                    for output in [0, 1] {
+                        shown.push(Some(Shown {
+                            serial,
+                            look,
+                            depth,
+                            output,
+                        }));
+                        for detail in [518, 770] {
+                            let mapped = [(5, 518), (6, 518), (5, 770), (6, 770)].map(Some);
+                            for mapped in mapped.into_iter().chain([None]) {
+                                for (settled, model_free) in
+                                    [(false, false), (false, true), (true, false), (true, true)]
+                                {
+                                    found.push(Found {
+                                        serial,
+                                        look,
+                                        detail,
+                                        depth,
+                                        mapped,
+                                        settled,
+                                        model_free,
+                                        output,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut states = Vec::new();
+        for shown in &shown {
+            for found in &found {
+                states.push((*shown, *found));
+            }
+        }
+        states
+    }
+
+    fn up_to_date(shown: Option<&Shown>, found: &Found) -> bool {
+        shown
+            == Some(&Shown {
+                serial: found.serial,
+                look: found.look,
+                depth: found.depth,
+                output: found.output,
+            })
+    }
+
+    #[test]
+    fn a_turn_is_idle_only_when_nothing_is_out_of_date_and_nothing_is_left_to_ask_or_ease() {
+        let states = every_state();
+        assert_eq!(states.len(), 17 * 640);
+        let mut idle = 0;
+        for (shown, found) in states {
+            let turn = plan(shown.as_ref(), &found);
+            let state = format!("{shown:?} {found:?}");
+            let current = up_to_date(shown.as_ref(), &found);
+            let mapped = found.mapped == Some((found.serial, found.detail));
+            // A picture is made exactly when the last one is out of date in
+            // any respect, or the depth map takes a step.
+            assert_eq!(turn.render, !current || turn.settle, "{state}");
+            // A step is taken only from a picture that showed the step
+            // before, and never past the end.
+            let eased_from = shown
+                .is_some_and(|shown| (shown.serial, shown.depth) == (found.serial, found.depth));
+            assert_eq!(
+                turn.settle,
+                eased_from && mapped && !found.settled,
+                "{state}"
+            );
+            // The frame is shrunk whenever it or the view's size is new,
+            // and what is shrunk is shown.
+            assert!(!turn.scale || turn.render, "{state}");
+            let same_view = shown.is_some_and(|shown| {
+                (shown.serial, shown.look.lines) == (found.serial, found.look.lines)
+            });
+            assert_eq!(turn.scale, !same_view, "{state}");
+            // The model gets a frame only when it is free and has not
+            // answered for this frame at this detail.
+            assert_eq!(turn.submit, found.model_free && !mapped, "{state}");
+            if turn == IDLE {
+                idle += 1;
+                // Nothing stale is left alone: the picture is the one that
+                // would be made now; the frame's map is there and has
+                // arrived, or the model is at work and its answer (or its
+                // failure) will be another depth map than the one shown.
+                assert!(current, "{state}");
+                let nothing_left = if mapped {
+                    found.settled
+                } else {
+                    !found.model_free
+                };
+                assert!(nothing_left, "{state}");
+            }
+        }
+        assert!(idle > 0);
+    }
+
+    /// A screen that does not change, the model and the loop's turns, with
+    /// the model and the output played by the test.
+    struct Still {
+        shown: Option<Shown>,
+        found: Found,
+        /// The frame and detail the model is at work on, and the turns it
+        /// still takes.
+        in_work: Option<((u64, u32), u32)>,
+        /// The steps until the newest answer has been eased in.
+        to_ease: u32,
+        submitted: Vec<(u64, u32)>,
+    }
+
+    impl Still {
+        /// One turn as `render_loop` takes it, then what the depth thread
+        /// does meanwhile. `eases` is how many steps an answer takes to
+        /// arrive, `written` whether the picture could be written.
+        fn turn(&mut self, model_takes: u32, eases: u32, written: bool) -> Turn {
+            let turn = plan(self.shown.as_ref(), &self.found);
+            if turn.submit {
+                assert!(self.in_work.is_none(), "a frame for a model at work");
+                let frame = (self.found.serial, self.found.detail);
+                self.in_work = Some((frame, model_takes));
+                self.found.model_free = false;
+                self.submitted.push(frame);
+            }
+            if turn.settle {
+                self.to_ease -= 1;
+                self.found.settled = self.to_ease == 0;
+                self.found.depth += 1;
+            }
+            if turn.render {
+                self.shown = written.then_some(Shown {
+                    serial: self.found.serial,
+                    look: self.found.look,
+                    depth: self.found.depth,
+                    output: self.found.output,
+                });
+            }
+            match self.in_work {
+                Some((frame, 0)) => {
+                    self.in_work = None;
+                    self.found.depth += 1;
+                    self.found.mapped = Some(frame);
+                    self.found.settled = false;
+                    self.to_ease = eases;
+                    self.found.model_free = true;
+                }
+                Some((frame, turns)) => self.in_work = Some((frame, turns - 1)),
+                None => {}
+            }
+            turn
+        }
+    }
+
+    #[test]
+    fn a_still_screen_comes_to_rest_from_every_state_with_its_frame_asked_about_once() {
+        let mut rested = 0;
+        for (shown, found) in every_state() {
+            let frame = (found.serial, found.detail);
+            // A model that is not free is at work on this frame or on one
+            // the screen has replaced since.
+            let at_work = if found.model_free {
+                vec![None]
+            } else {
+                vec![Some(frame), Some((4, found.detail))]
+            };
+            for at_work in at_work {
+                for (model_takes, eases, fails) in
+                    [(0, 1, false), (3, 1, true), (0, 4, true), (3, 4, false)]
+                {
+                    let state = format!("{shown:?} {found:?} {at_work:?} {model_takes} {eases}");
+                    let mapped = found.mapped == Some(frame);
+                    let mut still = Still {
+                        shown,
+                        found,
+                        in_work: at_work.map(|frame| (frame, model_takes)),
+                        to_ease: if mapped && !found.settled { eases } else { 0 },
+                        submitted: Vec::new(),
+                    };
+                    // The first picture cannot be written, if `fails`.
+                    let mut written = !fails;
+                    let mut turns = 0;
+                    loop {
+                        turns += 1;
+                        assert!(turns < 100, "never at rest: {state}");
+                        let on_its_way = still.in_work.is_some();
+                        let turn = still.turn(model_takes, eases, written);
+                        written |= turn.render;
+                        // Nothing to do and nothing on its way: from here
+                        // on no turn can find anything else.
+                        if turn == IDLE && !on_its_way {
+                            break;
+                        }
+                    }
+                    assert!(still.in_work.is_none(), "{state}");
+                    // At rest the picture is the frame's, with the frame's
+                    // own depth map, eased in all the way.
+                    assert!(up_to_date(still.shown.as_ref(), &still.found), "{state}");
+                    assert_eq!(still.found.mapped, Some(frame), "{state}");
+                    assert!(still.found.settled && still.found.model_free, "{state}");
+                    // The model was given the frame once, unless it had it
+                    // already or had answered for it.
+                    let asked = match at_work {
+                        Some(at_work) => at_work != frame,
+                        None => !mapped,
+                    };
+                    let expected = if asked { vec![frame] } else { Vec::new() };
+                    assert_eq!(still.submitted, expected, "{state}");
+                    rested += 1;
+                }
+            }
+        }
+        assert!(rested > 17 * 640 * 4);
+    }
+
     #[test]
     fn a_model_that_fails_again_leaves_the_flat_picture_as_it_is() {
         let mut smoother = DepthSmoother::default();
