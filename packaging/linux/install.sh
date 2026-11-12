@@ -25,7 +25,8 @@
 #   --no-model          do not download the depth model
 #   --no-odyssey        do not prepare the Wine side
 #   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files");
-#                       needed when it is on a USB drive or a network share, or when several drives have one
+#                       needed when it is on a USB drive, a memory card or a network share, or when several
+#                       drives have one
 #   --prefix DIR        install under DIR instead of ~/.local
 #   --packaged          the program is installed already (a distribution package): do steps 2 to 5 only
 #   --dry-run           say what would be done and do none of it
