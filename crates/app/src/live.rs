@@ -357,6 +357,12 @@ impl Drop for Live {
                 let _ = thread.join();
             }
         }
+        // The depth thread keeps what is shared for as long as it runs, and
+        // the output's picture file is held open (and kept from being
+        // removed) by whoever has the output: it is let go of here. Left
+        // with the thread, the file would stay until the model had finished,
+        // and for good when the program ends before that.
+        lock(&self.shared.sink).1 = None;
     }
 }
 
@@ -1087,6 +1093,49 @@ mod tests {
             output: found.output,
         };
         assert!(!plan(Some(&shown), &found).submit);
+    }
+
+    #[test]
+    fn the_output_is_let_go_of_with_the_live_screen_whatever_the_model_is_doing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        let files = || std::fs::read_dir(dir.path()).unwrap().count();
+        let fed = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        let (frames, render_state) = (fed.frames(), shared.clone());
+        let render = std::thread::Builder::new()
+            .name("live-render".into())
+            .spawn(move || render_loop(&frames, &render_state))
+            .unwrap();
+        // The depth thread, inside the model for as long as the test says.
+        let (finish, finished) = std::sync::mpsc::channel::<()>();
+        let depth_state = shared.clone();
+        let depth = std::thread::Builder::new()
+            .name("live-depth".into())
+            .spawn(move || {
+                let _ = finished.recv();
+                drop(depth_state);
+            })
+            .unwrap();
+        let mut live = Live {
+            capture: fed.capture(),
+            shared,
+            threads: vec![render],
+        };
+        live.show_on(sink.clone());
+        fed.feed(16, 9, &[90; 16 * 9 * 4]);
+        eventually("a picture", || sink.written().0 == 1);
+        // The output ends (its session lets go of the file), then the live
+        // screen: the file is removed although the model is still at work.
+        // The program may end before the model has finished, and nothing
+        // would remove the file then.
+        drop(sink);
+        assert_eq!(files(), 1);
+        drop(live);
+        assert_eq!(files(), 0, "the picture file outlived the live screen");
+        finish.send(()).unwrap();
+        depth.join().unwrap();
     }
 
     /// Wait until `done` says so, at most ten seconds.
