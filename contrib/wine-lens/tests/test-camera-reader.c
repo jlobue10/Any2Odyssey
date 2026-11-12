@@ -373,6 +373,31 @@ static void camera_lost(BOOL frame_waiting)
     finish(r, &source, &cb, 4);
 }
 
+/* A flush and the request that follows it can reach the thread as one wake-up. The request is still answered
+ * when the camera has gone and no frame will come to wake the thread again. */
+static void request_with_flush_after_loss(void)
+{
+    struct source source = {0};
+    IMFSourceReaderCallback cb = {0};
+    struct reader *r = running_reader(&source, &cb);
+    struct timespec settle = { 0, 50000000 };
+
+    lose_camera(r);
+    reader_request(r);
+    wait_for_calls(&cb, 1);
+    nanosleep(&settle, NULL); /* the thread is waiting again */
+    /* What Flush and then ReadSample leave behind when the thread has not run in between. */
+    EnterCriticalSection(&r->lock);
+    r->pending = 0;
+    r->flush = TRUE;
+    r->pending++;
+    LeaveCriticalSection(&r->lock);
+    SetEvent(r->wake);
+    wait_for_calls(&cb, 3); /* the flush, then the request's error */
+    assert(atomic_load(&cb.flushes) == 1 && atomic_load(&cb.errors) == 2);
+    finish(r, &source, &cb, 3);
+}
+
 /* Requests are counted while the thread hands samples on: every request gets exactly one callback. */
 static void request_counting(void)
 {
@@ -435,6 +460,7 @@ int main(void)
     creation_failure(FALSE);
     camera_lost(FALSE);
     camera_lost(TRUE);
+    request_with_flush_after_loss();
     request_counting();
     for (unsigned i = 0; i < event_count; i++) {
         assert(!pthread_mutex_destroy(&events[i].lock));
