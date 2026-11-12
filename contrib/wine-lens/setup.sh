@@ -64,6 +64,16 @@ SYS=$WINEPREFIX/drive_c/windows/system32
 mkdir -p "$T/build" "$T/tools"
 chmod 700 "$T" # the prefix's registry will hold the camera secret
 wineserver -k 2>/dev/null || true
+# A camera bridge still running from an earlier set-up is the program as it was built then. The camera
+# stand-in built below need not speak its handshake, and tools/tracking.sh neither takes it for the bridge
+# once its file has been replaced nor can start another while it holds the port. It is ended here, if the
+# process of the noted number is that program.
+BRIDGE_PID=$(cat "${XDG_RUNTIME_DIR:-$T}/any2odyssey-camera-bridge.pid" 2>/dev/null) || BRIDGE_PID=
+case $BRIDGE_PID in '' | *[!0-9]*) ;; *)
+    case $(readlink "/proc/$BRIDGE_PID/exe" 2>/dev/null) in
+        "$(readlink -f "$T/build")/any2odyssey-camera-bridge"*) kill "$BRIDGE_PID" 2>/dev/null || true ;;
+    esac ;;
+esac
 
 echo "setup: Wine prefix in $WINEPREFIX"
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
