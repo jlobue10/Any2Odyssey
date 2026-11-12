@@ -7,8 +7,8 @@
 //! token, so the dialog appears once and not at every start.
 //!
 //! One thread owns the portal session and the PipeWire loop. Each frame is
-//! copied as it arrives into a slot that holds only the newest one; the
-//! reader takes it from there at its own pace, so a slow reader costs
+//! copied as it arrives and put into a slot that holds only the newest one;
+//! the reader takes it from there at its own pace, so a slow reader costs
 //! frames, never memory or delay.
 
 use std::os::fd::OwnedFd;
@@ -160,8 +160,8 @@ impl Frames {
     /// or the capture ends) and run `read` on the newest frame, new or not:
     /// a desktop sends frames only when the screen changes, and the reader
     /// may have its own reasons to look at a still screen again. `None`
-    /// before the first frame. Frames keep arriving while `read` runs but
-    /// wait for it to finish, so it should be quick.
+    /// before the first frame. A frame that arrives while `read` runs is
+    /// copied meanwhile and takes the slot when `read` has finished.
     pub fn with_newest<T>(
         &self,
         seen: u64,
@@ -265,6 +265,10 @@ fn run(
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
+    /// Where a frame is copied as it arrives; it then changes places with
+    /// the slot's, so the two buffers serve every frame and the reader is
+    /// kept waiting for the exchange only, not for the copy.
+    spare: Vec<u8>,
 }
 
 fn stream(
@@ -299,6 +303,7 @@ fn stream(
     let data = StreamData {
         format: Default::default(),
         shared: shared.clone(),
+        spare: Vec::new(),
     };
     let _listener = stream
         .add_local_listener_with_user_data(data)
@@ -378,10 +383,11 @@ fn stream(
             if frame.len() < needed {
                 return;
             }
+            data.spare.clear();
+            data.spare.extend_from_slice(&frame[..needed]);
             let first = {
                 let mut slot = lock(&data.shared.slot);
-                slot.bytes.clear();
-                slot.bytes.extend_from_slice(&frame[..needed]);
+                std::mem::swap(&mut slot.bytes, &mut data.spare);
                 slot.width = width;
                 slot.height = height;
                 slot.stride = stride;
