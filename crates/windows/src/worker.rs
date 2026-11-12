@@ -59,6 +59,92 @@ fn report(state: &str) {
     );
 }
 
+/// End this process now, without `ExitProcess`: that runs every DLL's detach
+/// under the loader lock, which the vendor engine and its CUDA/ONNX/LeiaSR
+/// dependencies can block for good (see the two callers' comments). The
+/// kernel destroys the overlay window and releases the renderer mutex with
+/// the process either way.
+fn terminate_self(code: i32) {
+    // SAFETY: terminating our own process with a plain exit code.
+    let _ = unsafe { TerminateProcess(GetCurrentProcess(), code as u32) };
+}
+
+/// Longest panic message copied into the log line. A message is normally one
+/// sentence; one that carries a dumped buffer must not turn into a megabyte
+/// log line written from inside the panic hook.
+const PANIC_MESSAGE_LIMIT: usize = 400;
+
+/// The `companion.log` line and the status-file state for a panic in the
+/// worker. The status stays short and names only the place: it ends up on the
+/// controls' status line; the message itself is in the log.
+fn panic_report(
+    message: Option<&str>,
+    location: Option<(&str, u32)>,
+    thread_id: u32,
+) -> (String, String) {
+    let place = match location {
+        Some((file, line)) => format!("{file}:{line}"),
+        None => "an unknown location".to_owned(),
+    };
+    let message = message.map(str::trim).filter(|m| !m.is_empty());
+    let message = match message {
+        Some(m) if m.len() > PANIC_MESSAGE_LIMIT => {
+            let mut end = PANIC_MESSAGE_LIMIT;
+            while !m.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &m[..end])
+        }
+        Some(m) => m.to_owned(),
+        None => "no message".to_owned(),
+    };
+    (
+        format!("Renderer panicked at {place} (thread {thread_id}): {message}. Ending the worker."),
+        format!("Renderer error: internal fault at {place}. See companion.log."),
+    )
+}
+
+/// A panic must not unwind out of the worker. The release profile unwinds, so
+/// a panic on the message-loop thread would run the runtime's `ExitProcess`,
+/// the loader-lock detach path the clean exit avoids, with the watchdog not
+/// necessarily armed: a blocked detach leaves a frozen topmost click-through
+/// overlay and the renderer mutex held. A panic on any other thread (the
+/// watchdog, a capture callback) would end only that thread and leave the
+/// loop running without it. Either way: say what happened where the controls
+/// and the user will look, then end the process the way a clean stop does.
+///
+/// The hook runs on the panicking thread before any unwinding. It takes no
+/// lock of ours: `Logger` opens, appends and closes on every call, and the
+/// status file is published by rename, so a panic raised while another
+/// thread is logging cannot deadlock here.
+fn install_panic_hook(logger: Arc<Logger>) {
+    static PANICKED: AtomicBool = AtomicBool::new(false);
+    std::panic::set_hook(Box::new(move |info| {
+        if PANICKED.swap(true, Ordering::AcqRel) {
+            // Another thread is already reporting its panic. Give it time to
+            // finish writing, then make sure the process ends regardless.
+            std::thread::sleep(Duration::from_secs(2));
+            terminate_self(exit_code::RENDERER_ERROR);
+            std::process::abort();
+        }
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        let location = info.location().map(|l| (l.file(), l.line()));
+        // SAFETY: no preconditions.
+        let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        let (line, status) = panic_report(message, location, thread_id);
+        logger.log(&line);
+        report(&status);
+        terminate_self(exit_code::RENDERER_ERROR);
+        // Not reached unless TerminateProcess failed; abort also skips the
+        // DLL detach calls.
+        std::process::abort();
+    }));
+}
+
 /// Backstop for a message loop that cannot reach its own stop checks: an
 /// engine `Stop` that never returns, a wndproc blocked inside the engine, or
 /// a loop starved in some way the deadlines do not cover. The loop normally
@@ -109,8 +195,7 @@ fn spawn_watchdog(
             // blocked inside the engine holding exactly what its DllMain
             // needs. TerminateProcess skips all of that; the kernel destroys
             // the overlay window with the process either way.
-            // SAFETY: terminating our own process with a plain exit code.
-            let _ = unsafe { TerminateProcess(GetCurrentProcess(), exit_code::RENDERER_ERROR as u32) };
+            terminate_self(exit_code::RENDERER_ERROR);
         });
     if let Err(e) = spawned {
         log(&format!("Watchdog thread not started: {e}"));
@@ -119,6 +204,7 @@ fn spawn_watchdog(
 
 pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Preferences) -> i32 {
     let logger = Arc::new(Logger::default_location());
+    install_panic_hook(logger.clone());
     let log: Arc<dyn Fn(&str) + Send + Sync> = {
         let l = logger.clone();
         Arc::new(move |m: &str| l.log(m))
@@ -164,8 +250,7 @@ pub fn run(event_name: &str, parent_pid: u32, source_hwnd: isize, prefs: Prefere
     // running". Nothing is lost by skipping it: stdio is null, the status
     // file and log lines above are complete, and the engine is never
     // FreeLibrary'd anyway.
-    // SAFETY: terminating our own process with the exit code computed above.
-    let _ = unsafe { TerminateProcess(GetCurrentProcess(), code as u32) };
+    terminate_self(code);
     code
 }
 
@@ -507,4 +592,52 @@ fn run_inner(
         });
     }
     Ok(ready)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_is_reported_with_its_place_and_a_bounded_message() {
+        let (line, status) = panic_report(
+            Some("index out of bounds"),
+            Some(("crates/windows/src/mirror.rs", 318)),
+            4242,
+        );
+        assert_eq!(
+            line,
+            "Renderer panicked at crates/windows/src/mirror.rs:318 (thread 4242): index out of bounds. Ending the worker."
+        );
+        // The controls quote the status after "Last renderer status:"; the
+        // prefix is the one every other renderer failure uses.
+        assert_eq!(
+            status,
+            "Renderer error: internal fault at crates/windows/src/mirror.rs:318. See companion.log."
+        );
+        // A payload that is neither &str nor String, and no location.
+        let (line, status) = panic_report(None, None, 1);
+        assert!(line.contains("an unknown location") && line.contains("no message"));
+        assert!(status.starts_with("Renderer error: internal fault at an unknown location"));
+        assert!(panic_report(Some("  \n"), None, 1).0.contains("no message"));
+    }
+
+    #[test]
+    fn a_long_panic_message_is_cut_on_a_character_boundary() {
+        // 'é' is two bytes, so the limit falls inside a character for one
+        // of these two lengths.
+        for lead in ["", "x"] {
+            let long = format!("{lead}{}", "é".repeat(PANIC_MESSAGE_LIMIT));
+            let (line, status) = panic_report(Some(&long), Some(("a.rs", 1)), 1);
+            assert!(line.contains('…'), "{line}");
+            assert!(
+                line.len() < PANIC_MESSAGE_LIMIT + 120,
+                "log line not bounded: {} bytes",
+                line.len()
+            );
+            assert!(!status.contains('é'), "the status carries no message");
+        }
+        let exact = "y".repeat(PANIC_MESSAGE_LIMIT);
+        assert!(!panic_report(Some(&exact), None, 1).0.contains('…'));
+    }
 }
