@@ -216,6 +216,8 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-noxon.py
       - name: Monitor registry file tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-mkedid.py
+      - name: Weaver helper leaving tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
