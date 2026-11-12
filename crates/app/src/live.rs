@@ -364,10 +364,18 @@ fn depth_loop(shared: &Shared) {
             }
         };
         // The frame was made at the size the model is to see it at.
-        let estimated = crate::platform::estimate_depth(&frame, frame.width().max(frame.height()));
+        let estimated = crate::depth::estimate_unless_cancelled(
+            &frame,
+            frame.width().max(frame.height()),
+            || shared.stop.load(Ordering::Relaxed),
+        );
         *lock(&shared.for_model) = None;
+        if shared.stop.load(Ordering::Relaxed) {
+            return;
+        }
         match estimated {
-            Ok(map) => {
+            Ok(None) => return,
+            Ok(Some(map)) => {
                 let steadiness = shared.steadiness.load(Ordering::Relaxed).clamp(0, 95);
                 lock(&shared.depth).update(
                     map.width(),

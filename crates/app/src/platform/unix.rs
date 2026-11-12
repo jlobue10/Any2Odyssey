@@ -7,12 +7,14 @@
 //! the guard, and a later launch that finds it answered writes its request
 //! there instead of opening a second window.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use any2odyssey_core::prefs::Preferences;
 use any2odyssey_core::update::Comparison;
@@ -22,6 +24,10 @@ const SOCKET_NAME: &str = "any2odyssey.sock";
 /// A request and its acknowledgement are one short line each; a peer that
 /// stalls must not hold the listener or a launching process for long.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+// Include the newline. Leave ample room for paths, but never accumulate an
+// unbounded request from a local peer (or an acknowledgement from a server).
+const MAX_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_REPLY_BYTES: usize = 16;
 
 /// Where the instance socket lives: the data folder when one was set
 /// explicitly (an isolated run must not find or disturb the real instance),
@@ -54,6 +60,13 @@ enum Request {
 impl Request {
     fn parse(line: &str) -> Option<Request> {
         let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(encoded) = line.strip_prefix("open-bytes ") {
+            let bytes: Vec<u8> = serde_json::from_str(encoded).ok()?;
+            if bytes.is_empty() || bytes.contains(&0) {
+                return None;
+            }
+            return Some(Request::Open(std::ffi::OsString::from_vec(bytes).into()));
+        }
         match line {
             "quit" => Some(Request::Quit),
             "show" => Some(Request::Show),
@@ -70,7 +83,17 @@ impl Request {
             Request::Quit => "quit\n".into(),
             Request::Show => "show\n".into(),
             Request::Toggle => "toggle\n".into(),
-            Request::Open(path) => format!("open {}\n", path.display()),
+            Request::Open(path) => match path.to_str() {
+                // Preserve compatibility for ordinary paths. Names containing
+                // line breaks need framing; non-Unicode names must not go
+                // through Display's lossy conversion either.
+                Some(text) if !text.contains(['\r', '\n']) => format!("open {text}\n"),
+                _ => format!(
+                    "open-bytes {}\n",
+                    serde_json::to_string(path.as_os_str().as_bytes())
+                        .expect("byte slices always serialize")
+                ),
+            },
         }
     }
 }
@@ -148,13 +171,55 @@ impl ControlEvents {
     }
 }
 
+/// Read one bounded, newline-terminated message. The timeout covers the whole
+/// line, including partial reads and interruptions, rather than starting over
+/// whenever the peer sends another byte. `read` applies the remaining timeout
+/// to the next blocking read; keeping it separate also permits socket-free tests.
+fn read_message(
+    limit: usize,
+    timeout: Duration,
+    mut read: impl FnMut(&mut [u8], Duration) -> std::io::Result<usize>,
+) -> Option<String> {
+    let started = Instant::now();
+    let mut line = Vec::new();
+    let mut buffer = [0; 256];
+    while line.len() < limit {
+        let remaining = timeout.checked_sub(started.elapsed())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        let available = buffer.len().min(limit - line.len());
+        let count = match read(&mut buffer[..available], remaining) {
+            Ok(0) => return None,
+            Ok(count) => count,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        };
+        if started.elapsed() >= timeout {
+            return None;
+        }
+        let bytes = &buffer[..count];
+        if let Some(end) = bytes.iter().position(|&byte| byte == b'\n') {
+            line.extend_from_slice(&bytes[..=end]);
+            return String::from_utf8(line).ok();
+        }
+        line.extend_from_slice(bytes);
+    }
+    None
+}
+
+fn read_socket_line(mut stream: &UnixStream, limit: usize) -> Option<String> {
+    read_message(limit, IO_TIMEOUT, |buffer, remaining| {
+        stream.set_read_timeout(Some(remaining))?;
+        stream.read(buffer)
+    })
+}
+
 /// Read one request and acknowledge it. A connection that sends nothing (the
 /// liveness probe of another launch) is not a request.
 fn serve(stream: UnixStream) -> Option<Request> {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line).ok()?;
+    stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
+    let line = read_socket_line(&stream, MAX_REQUEST_BYTES)?;
     let request = Request::parse(&line)?;
     let _ = (&stream).write_all(b"ok\n");
     Some(request)
@@ -162,16 +227,19 @@ fn serve(stream: UnixStream) -> Option<Request> {
 
 /// Send `request` to the running instance; true when it acknowledged.
 fn send(path: &Path, request: &Request) -> bool {
+    let line = request.line();
+    if line.len() > MAX_REQUEST_BYTES {
+        return false;
+    }
     let Ok(stream) = UnixStream::connect(path) else {
         return false;
     };
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    if (&stream).write_all(request.line().as_bytes()).is_err() {
+    if stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
+        || (&stream).write_all(line.as_bytes()).is_err()
+    {
         return false;
     }
-    let mut reply = String::new();
-    BufReader::new(&stream).read_line(&mut reply).is_ok() && reply.trim_end() == "ok"
+    read_socket_line(&stream, MAX_REPLY_BYTES).is_some_and(|reply| reply.trim_end() == "ok")
 }
 
 /// Deliver one of the control events (named as on Windows) to the running
@@ -192,27 +260,56 @@ pub fn signal_open(path: &Path) -> bool {
 }
 
 pub struct SingleInstance {
+    socket: Option<SocketFile>,
+}
+
+/// The directory entry we created or observed, without following symlinks.
+#[derive(PartialEq, Eq)]
+struct SocketFile {
     path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketFile {
+    fn at(path: &Path) -> Option<Self> {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        metadata.file_type().is_socket().then(|| Self {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn remove_if_unchanged(&self) -> bool {
+        Self::at(&self.path).as_ref() == Some(self) && std::fs::remove_file(&self.path).is_ok()
+    }
 }
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if let Some(socket) = &self.socket {
+            socket.remove_if_unchanged();
+        }
     }
 }
 
 /// `None` when another instance of this user already answers the socket.
 pub fn single_instance() -> Option<SingleInstance> {
-    let path = socket_path();
+    single_instance_at(socket_path())
+}
+
+fn single_instance_at(path: PathBuf) -> Option<SingleInstance> {
     match bind_instance(&path) {
         Bound::Listening(listener) => {
+            let socket = SocketFile::at(&path);
             *LISTENER.lock().expect("listener") = Some(listener);
-            Some(SingleInstance { path })
+            Some(SingleInstance { socket })
         }
         Bound::Occupied => None,
         // No socket could be created at all (read-only or missing folder):
         // run without a guard rather than refuse to start.
-        Bound::Unavailable => Some(SingleInstance { path }),
+        Bound::Unavailable => Some(SingleInstance { socket: None }),
     }
 }
 
@@ -230,12 +327,19 @@ fn bind_instance(path: &Path) -> Bound {
         match UnixListener::bind(path) {
             Ok(listener) => return Bound::Listening(listener),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                if UnixStream::connect(path).is_ok() {
-                    return Bound::Occupied;
+                // An unrelated file or symlink is never a stale socket.
+                let Some(socket) = SocketFile::at(path) else {
+                    return Bound::Unavailable;
+                };
+                match UnixStream::connect(path) {
+                    Ok(_) => return Bound::Occupied,
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                    // Permission and other failures do not prove the owner
+                    // has exited, so leave the entry alone.
+                    Err(_) => return Bound::Unavailable,
                 }
-                // A socket file nobody answers was left by an instance that
-                // did not exit cleanly. Remove it and bind once more.
-                if std::fs::remove_file(path).is_err() {
+                // Recheck the entry before reclaiming an abandoned socket.
+                if !socket.remove_if_unchanged() {
                     return Bound::Unavailable;
                 }
             }
@@ -245,7 +349,7 @@ fn bind_instance(path: &Path) -> Bound {
     Bound::Unavailable
 }
 
-/// Run the first of `candidates` that is installed and return its trimmed
+/// Run the first of `candidates` that is installed and return its filename from
 /// standard output. `None` when the dialog was cancelled or none exists.
 fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String> {
     for (program, arguments) in candidates {
@@ -255,12 +359,15 @@ fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String>
             .stderr(std::process::Stdio::null())
             .output()
         {
-            Ok(output) => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let text = text.trim_end_matches(['\r', '\n']);
-                return Ok(
-                    (output.status.success() && !text.is_empty()).then(|| PathBuf::from(text))
-                );
+            Ok(mut output) => {
+                // Zenity and kdialog append one LF after the filename. Any
+                // other line breaks belong to that name, including a CR
+                // immediately before the delimiter. Keep the OS bytes too.
+                if output.stdout.last() == Some(&b'\n') {
+                    output.stdout.pop();
+                }
+                return Ok((output.status.success() && !output.stdout.is_empty())
+                    .then(|| std::ffi::OsString::from_vec(output.stdout).into()));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(format!("{program}: {e}")),
@@ -333,17 +440,10 @@ pub fn estimate_depth(
     image: &image::RgbaImage,
     long_side: u32,
 ) -> Result<any2odyssey_core::dibr::DepthMap, String> {
-    static ESTIMATOR: Mutex<Option<crate::depth::Estimator>> = Mutex::new(None);
-    let mut slot = ESTIMATOR
-        .lock()
-        .map_err(|_| "The depth model is not usable after an earlier failure.")?;
-    if slot.is_none() {
-        let model = crate::depth::locate_model()?;
-        *slot = Some(crate::depth::Estimator::load(&model)?);
-    }
-    slot.as_mut()
-        .expect("loaded above")
-        .estimate(image, long_side)
+    Ok(
+        crate::depth::estimate_unless_cancelled(image, long_side, || false)?
+            .expect("this request cannot be cancelled"),
+    )
 }
 
 pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
@@ -401,6 +501,211 @@ pub fn check_updates() -> Result<Comparison, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_reads_are_bounded_and_require_a_complete_utf8_line() {
+        fn message(bytes: &[u8], limit: usize) -> Option<String> {
+            let mut input = std::io::Cursor::new(bytes);
+            read_message(limit, IO_TIMEOUT, |buffer, _| input.read(buffer))
+        }
+        assert_eq!(message(b"ok\n", 3).as_deref(), Some("ok\n"));
+        assert_eq!(message(b"ok\nignored", 16).as_deref(), Some("ok\n"));
+        for bytes in [b"".as_slice(), b"ok", b"ok\n", b"\xff\n"] {
+            assert_eq!(message(bytes, 2), None, "{bytes:?}");
+        }
+        assert_eq!(message(b"ok\n", 0), None);
+
+        for limit in [MAX_REQUEST_BYTES, MAX_REPLY_BYTES] {
+            let mut full = vec![b'x'; limit];
+            full[limit - 1] = b'\n';
+            assert_eq!(message(&full, limit).unwrap().len(), limit);
+            full.insert(0, b'x');
+            assert_eq!(message(&full, limit), None);
+
+            // A peer that never sends a newline cannot cause more than the
+            // limit to be read or retained, even if data is always ready.
+            let mut consumed = 0;
+            assert_eq!(
+                read_message(limit, IO_TIMEOUT, |buffer, _| {
+                    buffer.fill(b'x');
+                    consumed += buffer.len();
+                    Ok(buffer.len())
+                }),
+                None
+            );
+            assert_eq!(consumed, limit);
+        }
+    }
+
+    #[test]
+    fn fragmented_messages_and_interrupted_reads_keep_their_contents() {
+        let expected = "open /tmp/caf\u{e9}.png\n";
+        let mut bytes = expected.as_bytes().iter();
+        let mut interrupted = true;
+        let received = read_message(MAX_REQUEST_BYTES, IO_TIMEOUT, |buffer, _| {
+            interrupted = !interrupted;
+            if interrupted {
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            let Some(&byte) = bytes.next() else {
+                return Ok(0);
+            };
+            buffer[0] = byte;
+            Ok(1)
+        });
+        assert_eq!(received.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn a_trickled_line_cannot_renew_the_message_deadline() {
+        let budget = Duration::from_millis(40);
+        let mut previous = budget;
+        let mut reads = 0;
+        let line = read_message(MAX_REQUEST_BYTES, budget, |buffer, remaining| {
+            assert!(remaining <= previous);
+            previous = remaining;
+            reads += 1;
+            // Each read makes progress before its own timeout, but the
+            // complete message would take far longer than the total budget.
+            std::thread::sleep(Duration::from_millis(10));
+            buffer[0] = if reads == 20 { b'\n' } else { b'x' };
+            Ok(1)
+        });
+        assert_eq!(line, None);
+        assert!(reads < 20);
+
+        let mut called = false;
+        assert_eq!(
+            read_message(MAX_REPLY_BYTES, Duration::ZERO, |_, _| {
+                called = true;
+                Ok(0)
+            }),
+            None
+        );
+        assert!(!called);
+    }
+
+    #[test]
+    fn image_handoff_preserves_paths_with_line_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let misleading = dir.path().join("pair.png");
+        let wanted = dir.path().join("pair.png\nother.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+            .save(&misleading)
+            .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]))
+            .save(&wanted)
+            .unwrap();
+        for path in [
+            wanted,
+            dir.path().join("trailing.png\n"),
+            dir.path().join("trailing.png\r"),
+            dir.path().join("trailing.png\r\n"),
+        ] {
+            let request = Request::Open(path.clone());
+            let wire = request.line();
+            let mut input = std::io::Cursor::new(wire.as_bytes());
+            let line = read_message(MAX_REQUEST_BYTES, IO_TIMEOUT, |buffer, _| {
+                input.read(buffer)
+            })
+            .expect("complete bounded request");
+            let delivered = Request::parse(&line).expect("valid open request");
+            assert_eq!(delivered, request);
+            assert_eq!(wire.bytes().filter(|&b| b == b'\n').count(), 1);
+            if path.exists() {
+                let Request::Open(delivered_path) = delivered else {
+                    panic!("open request")
+                };
+                assert_eq!(
+                    image::open(delivered_path)
+                        .unwrap()
+                        .to_rgba8()
+                        .get_pixel(0, 0)
+                        .0,
+                    [0, 255, 0, 255]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_image_paths_preserve_bytes_and_reject_invalid_payloads() {
+        let path: PathBuf =
+            std::ffi::OsString::from_vec(b"/tmp/non-unicode-\xff.png".to_vec()).into();
+        let request = Request::Open(path);
+        let wire = request.line();
+        assert!(wire.starts_with("open-bytes "));
+        assert_eq!(Request::parse(&wire), Some(request));
+        for payload in [
+            "",
+            "[]",
+            "[0]",
+            "[47,0,97]",
+            "[256]",
+            "[-1]",
+            "null",
+            "[47] junk",
+        ] {
+            assert_eq!(
+                Request::parse(&format!("open-bytes {payload}\n")),
+                None,
+                "{payload}"
+            );
+        }
+        let ordinary = Request::Open(PathBuf::from("/tmp/caf\u{e9} \"pair\".png"));
+        assert_eq!(ordinary.line(), "open /tmp/caf\u{e9} \"pair\".png\n");
+        assert_eq!(Request::parse(&ordinary.line()), Some(ordinary));
+    }
+
+    #[test]
+    fn dialog_preserves_filename_bytes_and_only_removes_its_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("dialog-output");
+        for bytes in [
+            b"/tmp/ordinary.png".as_slice(),
+            b"/tmp/line\nbreak.png",
+            b"/tmp/trailing.png\n",
+            b"/tmp/trailing.png\r\n",
+            b"/tmp/non-unicode-\xff.png",
+            b"/tmp/trailing space ",
+            b"\n",
+        ] {
+            let mut stdout = bytes.to_vec();
+            stdout.push(b'\n');
+            std::fs::write(&output, stdout).unwrap();
+            let candidates = |status: &str| {
+                vec![(
+                    "/bin/sh",
+                    vec![
+                        "-c".into(),
+                        "cat \"$1\"; exit \"$2\"".into(),
+                        "dialog-fixture".into(),
+                        output.to_str().unwrap().into(),
+                        status.into(),
+                    ],
+                )]
+            };
+            let selected = dialog(&candidates("0")).unwrap().unwrap();
+            assert_eq!(selected.as_os_str().as_bytes(), bytes);
+            assert_eq!(dialog(&candidates("1")).unwrap(), None);
+        }
+        for empty in [b"".as_slice(), b"\n"] {
+            std::fs::write(&output, empty).unwrap();
+            assert_eq!(
+                dialog(&[(
+                    "/bin/sh",
+                    vec![
+                        "-c".into(),
+                        "cat \"$1\"".into(),
+                        "dialog-fixture".into(),
+                        output.to_str().unwrap().into(),
+                    ]
+                )])
+                .unwrap(),
+                None
+            );
+        }
+    }
 
     #[test]
     fn requests_survive_the_wire_and_junk_is_not_a_request() {
@@ -482,5 +787,45 @@ mod tests {
         assert_eq!(server.join().unwrap(), Some(Request::Open(image)));
         // Nobody listens any more: the request is reported as not delivered.
         assert!(!send(&path, &Request::Show));
+    }
+
+    #[test]
+    fn an_unavailable_instance_does_not_delete_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        std::fs::write(&path, b"unrelated data").unwrap();
+        drop(single_instance_at(path.clone()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated data");
+    }
+
+    #[test]
+    fn an_unavailable_instance_does_not_delete_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let target = dir.path().join("missing-target");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        drop(single_instance_at(path.clone()));
+        assert_eq!(std::fs::read_link(path).unwrap(), target);
+    }
+
+    #[test]
+    fn a_guard_removes_its_own_socket_but_preserves_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let _first = UnixListener::bind(&path).unwrap();
+        let first_guard = SingleInstance {
+            socket: Some(SocketFile::at(&path).unwrap()),
+        };
+        // Keep the old inode alive at a different name while a new instance
+        // owns the original path.
+        std::fs::rename(&path, dir.path().join("old.sock")).unwrap();
+        let _second = UnixListener::bind(&path).unwrap();
+        let second_guard = SingleInstance {
+            socket: Some(SocketFile::at(&path).unwrap()),
+        };
+        drop(first_guard);
+        assert!(path.exists());
+        drop(second_guard);
+        assert!(!path.exists());
     }
 }

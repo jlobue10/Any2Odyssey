@@ -6,7 +6,7 @@
 //! a missing one is an ordinary error message with what to install.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use any2odyssey_core::dibr::DepthMap;
 use any2odyssey_core::paths;
@@ -232,6 +232,50 @@ pub struct Estimator {
     input: String,
 }
 
+/// Share one model between still images and live sessions. A stopped live
+/// session must not start expensive work after waiting for another caller.
+/// Cancellation does not interrupt an inference already inside the runtime.
+pub fn estimate_unless_cancelled(
+    image: &RgbaImage,
+    long_side: u32,
+    cancelled: impl Fn() -> bool,
+) -> Result<Option<DepthMap>, String> {
+    static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
+    with_model(
+        &ESTIMATOR,
+        cancelled,
+        || Estimator::load(&locate_model()?),
+        |estimator| estimator.estimate(image, long_side),
+    )
+}
+
+fn with_model<T, R>(
+    model: &Mutex<Option<T>>,
+    cancelled: impl Fn() -> bool,
+    load: impl FnOnce() -> Result<T, String>,
+    run: impl FnOnce(&mut T) -> Result<R, String>,
+) -> Result<Option<R>, String> {
+    if cancelled() {
+        return Ok(None);
+    }
+    let mut slot = model
+        .lock()
+        .map_err(|_| "The depth model is not usable after an earlier failure.")?;
+    // The caller may have stopped while another session held the model.
+    if cancelled() {
+        return Ok(None);
+    }
+    if slot.is_none() {
+        *slot = Some(load()?);
+    }
+    // Initializing the runtime/model can itself take several seconds. Keep
+    // the loaded model for the next caller, but skip this obsolete inference.
+    if cancelled() {
+        return Ok(None);
+    }
+    run(slot.as_mut().expect("loaded above")).map(Some)
+}
+
 impl Estimator {
     pub fn load(model: &Path) -> Result<Estimator, String> {
         let failed = |e: &dyn std::fmt::Display| {
@@ -297,6 +341,89 @@ impl Estimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopped_requests_skip_model_loading_and_inference() {
+        let model = Mutex::new(None::<u32>);
+        let result: Result<Option<u32>, String> = with_model(
+            &model,
+            || true,
+            || panic!("a stopped request must not load the model"),
+            |_| panic!("a stopped request must not infer"),
+        );
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn requests_stopped_while_queued_do_not_run_after_the_current_inference() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        let model = Arc::new(Mutex::new(Some(42u32)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let held = model.lock().unwrap();
+        let (checked, waiting) = mpsc::sync_channel(1);
+        let worker_model = model.clone();
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            let first = AtomicBool::new(true);
+            with_model(
+                &worker_model,
+                || {
+                    let stopped = worker_stop.load(Ordering::SeqCst);
+                    if first.swap(false, Ordering::SeqCst) {
+                        checked.send(()).unwrap();
+                    }
+                    stopped
+                },
+                || Ok(0),
+                |model| Ok(*model),
+            )
+        });
+        // The caller has checked cancellation once while the model is busy.
+        let initial_check = waiting.recv_timeout(std::time::Duration::from_secs(5));
+        stop.store(true, Ordering::SeqCst);
+        drop(held);
+        let result = worker.join().unwrap();
+        assert!(initial_check.is_ok(), "request should check before waiting");
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            with_model(
+                &model,
+                || false,
+                || panic!("already loaded"),
+                |model| Ok(*model + 1)
+            )
+            .unwrap(),
+            Some(43)
+        );
+    }
+
+    #[test]
+    fn cancellation_during_loading_keeps_the_model_but_skips_inference() {
+        use std::cell::Cell;
+        let stop = Cell::new(false);
+        let model = Mutex::new(None);
+        let result = with_model(
+            &model,
+            || stop.get(),
+            || {
+                stop.set(true);
+                Ok(42u32)
+            },
+            |model| Ok(*model),
+        );
+        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            with_model(
+                &model,
+                || false,
+                || panic!("already loaded"),
+                |model| Ok(*model)
+            )
+            .unwrap(),
+            Some(42)
+        );
+    }
 
     #[test]
     fn the_model_size_keeps_the_aspect_ratio_in_whole_patches() {
