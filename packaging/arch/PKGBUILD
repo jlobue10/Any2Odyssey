@@ -6,8 +6,8 @@
 #
 # The Linux edition is the stereo viewer (images as red/cyan anaglyph or side
 # by side) with, on an Odyssey 3D, glasses-free output for images and a live
-# screen through the user's own copy of Leia's runtime under Wine, which is
-# set up from the checkout (contrib/wine-lens). Samsung's conversion engine
+# screen through the user's own copy of Leia's runtime under Wine, set up
+# with /usr/share/any2odyssey/wine-lens/setup.sh. Samsung's conversion engine
 # exists only on Windows; see docs/PLATFORMS.md.
 pkgname=any2odyssey
 pkgver=0.9.0
@@ -30,9 +30,12 @@ optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
             'libxi: input in an X11 session'
             'xdg-utils: View logs and Help links'
             'xdg-desktop-portal: live screen capture, with the portal backend of your desktop'
-            'wine: the Odyssey 3D lens, eye tracker and weaver (contrib/wine-lens in the source tree; its setup also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)')
+            'wine: the Odyssey 3D lens, eye tracker and weaver (/usr/share/any2odyssey/wine-lens/setup.sh, which also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)')
 # The release profile already strips debug information; there is nothing for a -debug package.
-options=('!debug')
+# No LTO flags from makepkg: they reach the C file the PipeWire bindings compile, as compiler-specific
+# bytecode the Rust linker cannot read, and the link then fails over its functions. The Rust code is
+# optimized across crates by the release profile itself.
+options=('!debug' '!lto')
 # The checkout is the source; nothing is downloaded. (namcap reports the $startdir
 # references below; they are how an in-tree PKGBUILD finds its tree.)
 source=()
@@ -66,7 +69,16 @@ package() {
   install -Dm644 "$repo/assets/Any2Odyssey.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/any2odyssey.png"
   install -Dm644 "$repo/USER-GUIDE.html" "$pkgdir/usr/share/doc/any2odyssey/USER-GUIDE.html"
   install -Dm644 "$repo/README.md" "$pkgdir/usr/share/doc/any2odyssey/README.md"
-  for file in LICENSE NOTICE THIRD-PARTY-LICENSES.md; do
+  install -Dm644 "$repo/CHANGELOG.md" "$pkgdir/usr/share/doc/any2odyssey/CHANGELOG.md"
+  install -Dm644 "$repo/docs/LENS-SWITCH.md" "$pkgdir/usr/share/doc/any2odyssey/docs/LENS-SWITCH.md"
+  install -Dm644 "$repo/docs/PLATFORMS.md" "$pkgdir/usr/share/doc/any2odyssey/docs/PLATFORMS.md"
+  for file in LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md; do
     install -Dm644 "$repo/$file" "$pkgdir/usr/share/licenses/any2odyssey/$file"
   done
+  # The setup for the Odyssey 3D's lens, eye tracker and weaver under Wine (MIT). It is run by the user,
+  # from here, and builds into their own data folder.
+  install -d "$pkgdir/usr/share/any2odyssey"
+  cp -R "$repo/contrib/wine-lens" "$pkgdir/usr/share/any2odyssey/wine-lens"
+  chmod -R u=rwX,go=rX "$pkgdir/usr/share/any2odyssey/wine-lens"
+  install -Dm644 "$repo/contrib/LICENSE-MIT" "$pkgdir/usr/share/licenses/any2odyssey/LICENSE-MIT"
 }

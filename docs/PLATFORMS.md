@@ -18,7 +18,7 @@
 ## What is distributed
 
 - Windows x64: `Any2Odyssey-<version>-windows-x64.zip` with the executable and installer (built by CI on `windows-latest`).
-- Linux: nothing is published yet. Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro) build and install a package from a checkout:
+- Linux x86_64, from 0.9.0, two files per release (built by the release workflow, each with a `.sha256`): `any2odyssey-<version>-1-x86_64.pkg.tar.zst` for Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro; `sudo pacman -U <file>`), built in an Arch Linux container, and `Any2Odyssey-<version>-linux-x86_64.tar.gz` for others, built on Ubuntu 24.04 (it needs glibc 2.39 or newer and PipeWire; `INSTALL.txt` inside says the rest). Both carry the Wine setup for the Odyssey 3D (`wine-lens`; in the package under `/usr/share/any2odyssey/`) and the licenses of what they contain (`THIRD-PARTY-LICENSES.md`, `THIRD-PARTY-LICENSES-LINUX.md`). Neither published file has been installed and run by a person yet: what was run on hardware is a build from the same source. The package can also be built from a checkout:
 
   ```sh
   git clone https://github.com/jlobue10/Any2Odyssey.git

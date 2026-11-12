@@ -2,7 +2,7 @@
 
 Any2Odyssey itself is GPL-3.0-only (see `LICENSE` and `NOTICE`). This file lists the other works the Windows package contains: the Rust crates compiled into `Any2Odyssey.exe` and the fonts embedded in it. Samsung's and Leia's software is not included (see below).
 
-No Linux package is published. A Linux build compiles in further crates that the Windows package does not contain (the desktop portal and PipeWire bindings for the live screen, ONNX Runtime's bindings, the Wayland and X11 backends, and what they depend on); all of them are under MIT, Apache-2.0, ISC or Zlib terms. List them with `cargo tree -p any2odyssey --target x86_64-unknown-linux-gnu -e normal --prefix none --format '{p}|{l}' | sort -u`. Whoever distributes a Linux build has to carry their notices as this file does for Windows.
+The Linux packages contain most of the same crates and further ones (the desktop portal and PipeWire bindings for the live screen, ONNX Runtime's bindings, the Wayland and X11 backends, and what they depend on). Those are listed, with their notices, in `THIRD-PARTY-LICENSES-LINUX.md`, which ships beside this file; the license texts they refer to are below.
 
 ## Rust crates
 

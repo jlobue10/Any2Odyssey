@@ -1,0 +1,43 @@
+Any2Odyssey for Linux (x86_64)
+==============================
+
+This archive holds the Linux edition: a stereo viewer that shows side-by-side images as red/cyan anaglyph or
+side by side and, on a Samsung Odyssey 3D (G90XF), glasses-free through Leia's own weaver, for images and for
+a live screen. README.md and USER-GUIDE.html describe it; docs/PLATFORMS.md says what has been tested.
+
+Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro) should prefer the package attached to the same
+release (any2odyssey-<version>-1-x86_64.pkg.tar.zst, installed with `sudo pacman -U <file>`).
+
+Running it
+----------
+
+    ./any2odyssey
+
+It was built on Ubuntu 24.04 and needs a system at least that new (glibc 2.39), with these libraries:
+PipeWire (libpipewire-0.3), libxkbcommon, OpenGL (libglvnd / Mesa or the NVIDIA driver), and Wayland or X11
+client libraries. To install it for your user, copy `any2odyssey` to ~/.local/bin, `any2odyssey.desktop` to
+~/.local/share/applications and `any2odyssey.png` to ~/.local/share/icons/hicolor/256x256/apps.
+
+Optional
+--------
+
+- 2D to 3D (AI depth): your distribution's ONNX Runtime (onnxruntime, with its CUDA provider and cuDNN for an
+  NVIDIA GPU), then `./any2odyssey --install-depth-model` (downloads the open depth model, about 95 MB).
+- Open and Save dialogs: zenity or kdialog.
+- A live screen: a desktop with the screen-cast portal (KDE Plasma and GNOME have it).
+- The Odyssey 3D's lens, eye tracker and weaver: Wine, mingw-w64-gcc, clang, a C compiler, Python 3, xrandr
+  and rsync, and a Windows installation of the Odyssey 3D Hub on a drive you can mount. Then, as
+  docs/LENS-SWITCH.md explains:
+
+      sudo cp wine-lens/70-any2odyssey-lens.rules /etc/udev/rules.d/
+      sudo udevadm control --reload && sudo udevadm trigger
+      wine-lens/setup.sh /path/to/mounted/windows-drive
+
+  Nothing of Leia's or Samsung's is in this archive: the setup copies your own installation.
+
+Licenses
+--------
+
+Any2Odyssey is GPL-3.0-only (LICENSE, NOTICE). The works it contains are listed in THIRD-PARTY-LICENSES.md
+and THIRD-PARTY-LICENSES-LINUX.md. The files under wine-lens are MIT (wine-lens/LICENSE-MIT). The source is
+at https://github.com/jlobue10/Any2Odyssey, tagged with this version.

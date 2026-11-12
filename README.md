@@ -128,7 +128,7 @@ Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice
 
 The Linux build is a stereo viewer: it opens a side-by-side image and shows it as red/cyan anaglyph or side by side, in a preview and in an output window you can place on any display and make full screen, and exports PNG. On an Odyssey 3D it can also (experimental) show the picture glasses-free through Leia's own weaver, with the lens on and the picture following your eyes, and show one of your screens live in 3D that way. Samsung's conversion engine does not exist on Linux, so nothing of Samsung's runs there: 2D → 3D uses an open depth model (Depth Anything V2 Small), for images and for the live screen. The lens, the eye tracker and the weaver are Leia's: `contrib/wine-lens/setup.sh` copies your own installation of Leia's Windows SR runtime (it comes with the Odyssey 3D Hub) into a Wine prefix and builds the small stand-ins Wine needs to run it; nothing of Leia's or Samsung's is distributed here. See [docs/LENS-SWITCH.md](docs/LENS-SWITCH.md) for how it works, what it needs and what has been checked. Without that setup the viewer still has its own lens interleave, which uses numbers you calibrate yourself and does not follow your eyes. The live screen can be the Odyssey's own desktop on KDE Plasma 6; on other desktops it has to be another display. Not there yet: the tray icon and global shortcuts.
 
-On Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro), build and install the package from a checkout:
+From 0.9.0 each [release](https://github.com/jlobue10/Any2Odyssey/releases) has two Linux files (x86_64), each with a `.sha256`: `any2odyssey-<version>-1-x86_64.pkg.tar.zst` for Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro), installed with `sudo pacman -U <file>`, and `Any2Odyssey-<version>-linux-x86_64.tar.gz` for others (built on Ubuntu 24.04; read its `INSTALL.txt`). Both include the Wine setup for the Odyssey 3D: `/usr/share/any2odyssey/wine-lens/setup.sh` in the package, `wine-lens/setup.sh` in the archive. Or build the package from a checkout:
 
 ```sh
 git clone https://github.com/jlobue10/Any2Odyssey.git
@@ -136,7 +136,7 @@ cd Any2Odyssey/packaging/arch
 makepkg -si
 ```
 
-No Linux package is published yet, and the Wine setup for the Odyssey 3D (`contrib/wine-lens`) is run from the checkout. The viewer has been run under WSL 2 and, for the lens, eye tracking and the Odyssey 3D output (a still image and a live screen), on a CachyOS desktop with a G90XF. See [docs/PLATFORMS.md](docs/PLATFORMS.md) for what works, what does not and what has been tested.
+The published Linux files are new in 0.9.0 and have not been installed and run by a person yet; what was run is a build from the same source. The viewer has been run under WSL 2 and, for the lens, eye tracking and the Odyssey 3D output (a still image and a live screen), on a CachyOS desktop with a G90XF. See [docs/PLATFORMS.md](docs/PLATFORMS.md) for what works, what does not and what has been tested.
 
 ## Building from source
 

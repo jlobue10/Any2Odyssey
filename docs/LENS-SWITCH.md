@@ -25,6 +25,8 @@ If the monitor is also used from Windows on the same machine, the Odyssey 3D Hub
 
 What is needed: Wine (11.x was used), `mingw-w64-gcc`, Python 3, `xrandr` (the service runs through XWayland or X11), `rsync`, and the Windows system drive mounted read-only. A native C compiler (`cc`) is needed as well for the eye tracker's camera bridge, and `clang++` for the weaver host; without them only the lens switch is set up. On KDE Plasma, `busctl` (part of systemd) is used to load the script that lets the Odyssey show its own screen live.
 
+The commands below are for a checkout. In the Arch package the same folder is `/usr/share/any2odyssey/wine-lens`, in the Linux archive `wine-lens`.
+
 ```sh
 sudo cp contrib/wine-lens/70-any2odyssey-lens.rules /etc/udev/rules.d/     # the board as /dev/odyssey-lens, usable from the seat
 sudo udevadm control --reload && sudo udevadm trigger

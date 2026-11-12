@@ -123,6 +123,8 @@ jobs:
           pacman -U --noconfirm packaging/arch/any2odyssey-*.pkg.tar.zst
           desktop-file-validate /usr/share/applications/any2odyssey.desktop
           test -f /usr/share/icons/hicolor/256x256/apps/any2odyssey.png
+          test -x /usr/share/any2odyssey/wine-lens/setup.sh
+          test -s /usr/share/licenses/any2odyssey/THIRD-PARTY-LICENSES-LINUX.md
           any2odyssey --help
           # Exit 1, not a hang or a crash, when no instance is running.
           code=0; any2odyssey --quit || code=$?
@@ -181,3 +183,29 @@ jobs:
         run: |
           rustup target add x86_64-pc-windows-msvc
           cargo check --locked --workspace --target x86_64-pc-windows-msvc
+      # The archive release.yml publishes, made the same way, so a change that breaks it shows here.
+      - name: Third-party list for Linux matches the dependencies
+        if: matrix.arch == 'x86_64'
+        run: |
+          scripts/third-party-linux.py > /tmp/third-party-linux.md
+          cmp /tmp/third-party-linux.md THIRD-PARTY-LICENSES-LINUX.md
+      - name: Package the Linux archive
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo build --locked --release -p any2odyssey
+          scripts/package-linux.sh
+          cd dist && sha256sum -c ./*.sha256
+          mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
+          check/any2odyssey --help
+          sh -n check/wine-lens/setup.sh
+          test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh
+          test -s check/THIRD-PARTY-LICENSES-LINUX.md -a -s check/wine-lens/LICENSE-MIT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: matrix.arch == 'x86_64'
+        with:
+          name: Any2Odyssey-linux-x86_64-archive
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
