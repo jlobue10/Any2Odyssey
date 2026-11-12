@@ -8,18 +8,26 @@ a live screen. README.md and USER-GUIDE.html describe it; docs/PLATFORMS.md says
 Arch-based distributions (Arch, CachyOS, EndeavourOS, Manjaro) should prefer the package attached to the same
 release (any2odyssey-<version>-1-x86_64.pkg.tar.zst, installed with `sudo pacman -U <file>`).
 
-Running it
-----------
+Installing it
+-------------
 
-    ./any2odyssey
+    ./install.sh
 
-It was built on Ubuntu 24.04 and needs a system at least that new (glibc 2.39), with these libraries:
-PipeWire (libpipewire-0.3), libxkbcommon, OpenGL (libglvnd / Mesa or the NVIDIA driver), and Wayland or X11
-client libraries. To install it for your user, copy `any2odyssey` to ~/.local/bin, `any2odyssey.desktop` to
-~/.local/share/applications and `any2odyssey.png` to ~/.local/share/icons/hicolor/256x256/apps.
+installs the program for your user (under ~/.local) and then asks about each further step: the packages it
+needs, the udev rules for the Odyssey 3D, the depth model, and the Wine side of the Odyssey 3D (from a mounted
+Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use sudo for that step only.
+`./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
+knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS only.
 
-Optional
---------
+It was built on Ubuntu 24.04 and needs a system at least that new (glibc 2.39). To try it without
+installing, run `./any2odyssey` here.
+
+What the installer sets up, if you would rather do it by hand
+--------------------------------------------------------------
+
+- The program: `any2odyssey` to ~/.local/bin, `any2odyssey.desktop` to ~/.local/share/applications,
+  `any2odyssey.png` to ~/.local/share/icons/hicolor/256x256/apps. It needs PipeWire (libpipewire-0.3),
+  libxkbcommon, OpenGL (libglvnd / Mesa or the NVIDIA driver), and Wayland or X11 client libraries.
 
 - 2D to 3D (AI depth): your distribution's ONNX Runtime (onnxruntime, with its CUDA provider and cuDNN for an
   NVIDIA GPU), then `./any2odyssey --install-depth-model` (downloads the open depth model, about 95 MB).

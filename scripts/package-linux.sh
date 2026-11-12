@@ -5,7 +5,7 @@
 #   cargo build --locked --release -p any2odyssey && scripts/package-linux.sh
 #
 # Writes dist/Any2Odyssey-<version>-linux-<arch>.tar.gz and its .sha256. The archive holds the executable,
-# the documents and licenses, the desktop entry and icon, and contrib/wine-lens (the setup for the Odyssey
+# the installer, the documents and licenses, the desktop entry and icon, and contrib/wine-lens (the setup for the Odyssey
 # 3D's lens, eye tracker and weaver), so nothing else of the source tree is needed to use it.
 set -eu
 
@@ -27,6 +27,7 @@ install -m644 docs/LENS-SWITCH.md docs/PLATFORMS.md "$STAGE/docs/"
 install -m644 packaging/linux/any2odyssey.desktop "$STAGE/any2odyssey.desktop"
 install -m644 assets/Any2Odyssey.png "$STAGE/any2odyssey.png"
 install -m644 packaging/linux/INSTALL.txt "$STAGE/INSTALL.txt"
+install -m755 packaging/linux/install.sh "$STAGE/install.sh"
 # The Wine setup, with its file modes (some of it is scripts).
 cp -R contrib/wine-lens "$STAGE/wine-lens"
 install -m644 contrib/LICENSE-MIT "$STAGE/wine-lens/LICENSE-MIT"

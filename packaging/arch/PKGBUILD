@@ -30,7 +30,7 @@ optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
             'libxi: input in an X11 session'
             'xdg-utils: View logs and Help links'
             'xdg-desktop-portal: live screen capture, with the portal backend of your desktop'
-            'wine: the Odyssey 3D lens, eye tracker and weaver (/usr/share/any2odyssey/wine-lens/setup.sh, which also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)')
+            'wine: the Odyssey 3D lens, eye tracker and weaver (any2odyssey-setup prepares them; also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)')
 # The release profile already strips debug information; there is nothing for a -debug package.
 # No LTO flags from makepkg: they reach the C file the PipeWire bindings compile, as compiler-specific
 # bytecode the Rust linker cannot read, and the link then fails over its functions. The Rust code is
@@ -81,4 +81,13 @@ package() {
   cp -R "$repo/contrib/wine-lens" "$pkgdir/usr/share/any2odyssey/wine-lens"
   chmod -R u=rwX,go=rX "$pkgdir/usr/share/any2odyssey/wine-lens"
   install -Dm644 "$repo/contrib/LICENSE-MIT" "$pkgdir/usr/share/licenses/any2odyssey/LICENSE-MIT"
+  # The udev rules for the Odyssey 3D (lens board for the user at the seat, no USB power saving for its
+  # webcam); pacman's udev hook reloads the rules.
+  install -Dm644 "$repo/contrib/wine-lens/70-any2odyssey-lens.rules" "$pkgdir/usr/lib/udev/rules.d/70-any2odyssey-lens.rules"
+  # any2odyssey-setup: the rest of what the Linux installer does (packages for the chosen features, the
+  # depth model, the Wine side of the Odyssey 3D), for the user to run.
+  install -Dm755 "$repo/packaging/linux/install.sh" "$pkgdir/usr/share/any2odyssey/install.sh"
+  install -d "$pkgdir/usr/bin"
+  printf '#!/bin/sh\nexec /usr/share/any2odyssey/install.sh --packaged "$@"\n' > "$pkgdir/usr/bin/any2odyssey-setup"
+  chmod 755 "$pkgdir/usr/bin/any2odyssey-setup"
 }
