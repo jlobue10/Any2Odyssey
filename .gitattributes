@@ -14,3 +14,14 @@
 PKGBUILD text eol=lf
 *.desktop text eol=lf
 *.sh text eol=lf
+# Run on Linux, also from a Windows checkout (WSL, a shared folder): a carriage return in the first line
+# makes the kernel look for an interpreter of that name.
+*.py text eol=lf
+*.js text eol=lf
+*.rules text eol=lf
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.def text eol=lf
+contrib/wine-lens/any2odyssey-weaver text eol=lf
+contrib/wine-lens/any2odyssey-lens-helper text eol=lf
