@@ -16,7 +16,13 @@
  *
  * If C:\a2ocam.log exists, calls are logged to it.
  */
-#if !defined(A2O_CAMERA_STREAM_TEST) && !defined(A2O_CAMERA_READER_TEST)
+/* The native tests (tests/test-camera-*.c) each compile one part of this file, with stand-ins for Windows
+ * and for the other parts. */
+#if defined(A2O_CAMERA_CLIENT_TEST) || defined(A2O_CAMERA_STREAM_TEST) || defined(A2O_CAMERA_READER_TEST)
+#define A2O_CAMERA_TEST
+#endif
+
+#ifndef A2O_CAMERA_TEST
 #define COBJMACROS
 #include <winsock2.h>
 #include <windows.h>
@@ -70,19 +76,32 @@ static BOOL config_string(const WCHAR *name, WCHAR *value, DWORD bytes)
     return !RegGetValueW(HKEY_LOCAL_MACHINE, CONFIG_KEY, name, RRF_RT_REG_SZ, NULL, value, &bytes);
 }
 
+#endif /* production includes and logging */
+
 /* ---------------------------------------------------------------------------------------------------------
- * The connection to the bridge.
+ * The connection to the bridge. Also compiled by tests/test-camera-client.c, against a simulated bridge.
  */
+#if !defined(A2O_CAMERA_TEST) || defined(A2O_CAMERA_CLIENT_TEST)
 typedef void (*frame_fn)(void *ctx, UINT64 time_us, const BYTE *data, DWORD length);
 
+#ifndef BRIDGE_REPLY_MS
+#define BRIDGE_REPLY_MS 15000 /* how long a command waits for its reply */
+#endif
+
+/* The memory has two holders, whoever opened the bridge and its thread, and the one that lets go last frees
+ * it: bridge_close does not wait for the thread for ever, and the thread must not find its memory gone. */
 struct bridge {
-    SOCKET sock;
+    SOCKET sock; /* never changes; `closed` says whether it is still ours to use */
     HANDLE thread, replied;
     CRITICAL_SECTION command_lock, frame_lock;
+    LONG refs;
+    BOOL closed; /* guarded by command_lock */
+    /* guarded by frame_lock: */
     char reply[8192];
-    frame_fn on_frame; /* guarded by frame_lock */
+    BOOL awaiting; /* a command has been sent and waits for its reply */
+    BOOL dead;     /* nothing more will come, and no command is sent any more */
+    frame_fn on_frame;
     void *frame_ctx;
-    BOOL dead;
 };
 
 static BOOL read_all(SOCKET s, void *buffer, DWORD length)
@@ -95,6 +114,16 @@ static BOOL read_all(SOCKET s, void *buffer, DWORD length)
         length -= n;
     }
     return TRUE;
+}
+
+static void bridge_unref(struct bridge *b)
+{
+    if (InterlockedDecrement(&b->refs)) return;
+    CloseHandle(b->thread);
+    CloseHandle(b->replied);
+    DeleteCriticalSection(&b->command_lock);
+    DeleteCriticalSection(&b->frame_lock);
+    free(b);
 }
 
 static DWORD WINAPI bridge_thread(void *arg)
@@ -116,10 +145,15 @@ static DWORD WINAPI bridge_thread(void *arg)
         }
         if (!read_all(b->sock, data, length)) break;
         if (head[0] == 'R') {
-            DWORD n = length < sizeof b->reply - 1 ? length : sizeof b->reply - 1;
-            memcpy(b->reply, data, n);
-            b->reply[n] = 0;
-            SetEvent(b->replied);
+            EnterCriticalSection(&b->frame_lock);
+            if (b->awaiting) { /* a reply nobody waits for answers nothing */
+                DWORD n = length < sizeof b->reply - 1 ? length : sizeof b->reply - 1;
+                memcpy(b->reply, data, n);
+                b->reply[n] = 0;
+                b->awaiting = FALSE;
+                SetEvent(b->replied);
+            }
+            LeaveCriticalSection(&b->frame_lock);
         } else if (head[0] == 'F') {
             EnterCriticalSection(&b->frame_lock);
             if (b->on_frame) b->on_frame(b->frame_ctx, time_us, data, length);
@@ -127,18 +161,31 @@ static DWORD WINAPI bridge_thread(void *arg)
         }
     }
     free(data);
+    EnterCriticalSection(&b->frame_lock);
     b->dead = TRUE;
     SetEvent(b->replied);
+    LeaveCriticalSection(&b->frame_lock);
     say("bridge: connection closed");
+    bridge_unref(b);
     return 0;
+}
+
+/* Close the connection: the thread's read then fails, and the bridge stops the camera and lets go of it, as
+ * it does whenever its client leaves. Call with command_lock held. */
+static void bridge_drop(struct bridge *b)
+{
+    if (b->closed) return;
+    b->closed = TRUE;
+    shutdown(b->sock, SD_BOTH);
+    closesocket(b->sock);
 }
 
 /* Send one command and wait for its reply. FALSE if the bridge is gone or said no (reply then starts with '!'). */
 static BOOL bridge_command(struct bridge *b, char *reply, DWORD size, const char *fmt, ...)
 {
-    char line[256];
+    char line[256], text[sizeof b->reply];
     va_list ap;
-    BOOL ok = FALSE;
+    BOOL sent, answered = FALSE, ok = FALSE;
     int n;
 
     va_start(ap, fmt);
@@ -148,14 +195,34 @@ static BOOL bridge_command(struct bridge *b, char *reply, DWORD size, const char
     line[n++] = '\n';
 
     EnterCriticalSection(&b->command_lock);
+    EnterCriticalSection(&b->frame_lock);
+    sent = !b->dead;
+    b->awaiting = sent;
     ResetEvent(b->replied);
-    if (!b->dead && send(b->sock, line, n, 0) == n && WaitForSingleObject(b->replied, 15000) == WAIT_OBJECT_0 &&
-        !b->dead) {
-        ok = b->reply[0] != '!';
-        if (reply) snprintf(reply, size, "%s", b->reply);
-        if (!ok) say("bridge: \"%.*s\" -> %s", n - 1, line[0] == 'A' ? "A ..." : line, b->reply);
+    LeaveCriticalSection(&b->frame_lock);
+    if (sent) {
+        if (send(b->sock, line, n, 0) == n) WaitForSingleObject(b->replied, BRIDGE_REPLY_MS);
+        EnterCriticalSection(&b->frame_lock);
+        answered = !b->awaiting; /* the thread takes the mark away when it stores a reply */
+        b->awaiting = FALSE;
+        if (answered) memcpy(text, b->reply, sizeof text);
+        else b->dead = TRUE;
+        LeaveCriticalSection(&b->frame_lock);
+        /* Replies carry no mark of the command they answer. One that came after its command had stopped
+         * waiting would be taken for the next command's, and the command itself may still be carried out
+         * (the camera started, for one) with nobody to stop it again. So a connection that did not answer
+         * in time is closed: nothing more is sent on it, and the bridge stops the camera when it goes. */
+        if (!answered) {
+            say("bridge: no reply to \"%.*s\"; connection closed", n - 1, line[0] == 'A' ? "A ..." : line);
+            bridge_drop(b);
+        }
     }
     LeaveCriticalSection(&b->command_lock);
+    if (answered) {
+        ok = text[0] != '!';
+        if (reply) snprintf(reply, size, "%s", text);
+        if (!ok) say("bridge: \"%.*s\" -> %s", n - 1, line[0] == 'A' ? "A ..." : line, text);
+    }
     return ok;
 }
 
@@ -170,23 +237,59 @@ static void bridge_set_frames(struct bridge *b, frame_fn fn, void *ctx)
 static void bridge_close(struct bridge *b)
 {
     if (!b) return;
-    shutdown(b->sock, SD_BOTH);
-    closesocket(b->sock);
+    EnterCriticalSection(&b->command_lock);
+    bridge_drop(b);
+    LeaveCriticalSection(&b->command_lock);
+    /* The thread leaves when its read fails. One that has not left when this wait ends keeps its own hold
+     * on the memory and frees it when it does. */
     WaitForSingleObject(b->thread, 5000);
-    CloseHandle(b->thread);
-    CloseHandle(b->replied);
-    DeleteCriticalSection(&b->command_lock);
-    DeleteCriticalSection(&b->frame_lock);
-    free(b);
+    bridge_unref(b);
 }
 
+/* Take over a connected socket: read it on a thread of its own, and prove to the bridge that we know the
+ * secret without sending it: the bridge gives a random challenge and gets its HMAC back. Whatever answers
+ * on the port, it does not learn the secret. The socket is closed here if this fails. */
+static struct bridge *bridge_start(SOCKET sock, const char *key)
+{
+    struct bridge *b = calloc(1, sizeof *b);
+    char challenge[64] = "", answer[65] = "";
+
+    if (!b || !(b->replied = CreateEventW(NULL, TRUE, FALSE, NULL))) {
+        closesocket(sock);
+        free(b);
+        return NULL;
+    }
+    b->sock = sock;
+    b->refs = 2;
+    InitializeCriticalSection(&b->command_lock);
+    InitializeCriticalSection(&b->frame_lock);
+    if (!(b->thread = CreateThread(NULL, 0, bridge_thread, b, 0, NULL))) {
+        closesocket(sock);
+        CloseHandle(b->replied);
+        DeleteCriticalSection(&b->command_lock);
+        DeleteCriticalSection(&b->frame_lock);
+        free(b);
+        return NULL;
+    }
+    if (bridge_command(b, challenge, sizeof challenge, "H")) a2o_hmac_hex(key, challenge, answer);
+    if (!answer[0] || !bridge_command(b, NULL, 0, "A %s", answer)) {
+        say("bridge: refused (camera busy or missing, or a wrong secret)");
+        bridge_close(b);
+        return NULL;
+    }
+    return b;
+}
+#endif /* production and the client test */
+
+#ifndef A2O_CAMERA_TEST
 static struct bridge *bridge_open(void)
 {
     struct sockaddr_in addr = { .sin_family = AF_INET };
     WCHAR secret[128];
-    char key[384], challenge[64] = "", answer[65] = "";
+    char key[384];
     DWORD port = 0, bytes = sizeof port;
     struct bridge *b;
+    SOCKET sock;
     WSADATA wsa;
     int one = 1;
 
@@ -196,32 +299,20 @@ static struct bridge *bridge_open(void)
         return NULL;
     }
     WSAStartup(MAKEWORD(2, 2), &wsa);
-    if (!(b = calloc(1, sizeof *b))) return NULL;
-    b->sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     addr.sin_port = htons((u_short)port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (b->sock == INVALID_SOCKET || connect(b->sock, (struct sockaddr *)&addr, sizeof addr)) {
+    if (sock == INVALID_SOCKET || connect(sock, (struct sockaddr *)&addr, sizeof addr)) {
         say("bridge: nothing listens on 127.0.0.1:%lu (error %d)", port, WSAGetLastError());
-        if (b->sock != INVALID_SOCKET) closesocket(b->sock);
-        free(b);
+        if (sock != INVALID_SOCKET) closesocket(sock);
         return NULL;
     }
-    setsockopt(b->sock, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof one);
-    InitializeCriticalSection(&b->command_lock);
-    InitializeCriticalSection(&b->frame_lock);
-    b->replied = CreateEventW(NULL, TRUE, FALSE, NULL);
-    b->thread = CreateThread(NULL, 0, bridge_thread, b, 0, NULL);
-    /* Prove that we know the secret without sending it: the bridge gives a random challenge and gets its
-     * HMAC back. Whatever answers on the port, it does not learn the secret. */
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *)&one, sizeof one);
     WideCharToMultiByte(CP_UTF8, 0, secret, -1, key, sizeof key, NULL, NULL);
     key[sizeof key - 1] = 0;
-    if (bridge_command(b, challenge, sizeof challenge, "H")) a2o_hmac_hex(key, challenge, answer);
+    b = bridge_start(sock, key);
     SecureZeroMemory(key, sizeof key);
-    if (!answer[0] || !bridge_command(b, NULL, 0, "A %s", answer)) {
-        say("bridge: refused (camera busy or missing, or a wrong secret)");
-        bridge_close(b);
-        return NULL;
-    }
+    SecureZeroMemory(secret, sizeof secret);
     return b;
 }
 
@@ -709,7 +800,7 @@ static IMFSample *reader_take_sample(struct reader *r, LONGLONG *time)
 
 #endif /* production types and sample handling */
 
-#ifndef A2O_CAMERA_STREAM_TEST
+#if !defined(A2O_CAMERA_TEST) || defined(A2O_CAMERA_READER_TEST)
 static void reader_free(struct reader *r)
 {
     CloseHandle(r->thread);
@@ -771,10 +862,10 @@ static HRESULT reader_launch(struct reader *r)
     return S_OK;
 }
 
-#endif /* !A2O_CAMERA_STREAM_TEST */
+#endif /* production and the reader test */
 
 /* Also compiled by the native lifecycle tests with a simulated bridge. */
-#ifndef A2O_CAMERA_READER_TEST
+#if !defined(A2O_CAMERA_TEST) || defined(A2O_CAMERA_STREAM_TEST)
 static HRESULT reader_start(struct reader *r)
 {
     const struct format *f = &r->source->formats[r->current];
@@ -803,9 +894,9 @@ static void reader_stop(struct reader *r)
     r->streaming = FALSE;
     say("reader: stopped");
 }
-#endif /* !A2O_CAMERA_READER_TEST */
+#endif /* production and the stream test */
 
-#if !defined(A2O_CAMERA_STREAM_TEST) && !defined(A2O_CAMERA_READER_TEST)
+#ifndef A2O_CAMERA_TEST
 static BOOL is_video_stream(DWORD index)
 {
     return index == 0 || index == (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
@@ -829,7 +920,7 @@ static ULONG WINAPI reader_AddRef(IMFSourceReader *iface)
 }
 #endif /* production COM methods */
 
-#ifndef A2O_CAMERA_STREAM_TEST
+#if !defined(A2O_CAMERA_TEST) || defined(A2O_CAMERA_READER_TEST)
 static ULONG WINAPI reader_Release(IMFSourceReader *iface)
 {
     struct reader *r = reader_from_iface(iface);
@@ -859,9 +950,9 @@ static ULONG WINAPI reader_Release(IMFSourceReader *iface)
     }
     return refs;
 }
-#endif /* !A2O_CAMERA_STREAM_TEST */
+#endif /* production and the reader test */
 
-#if !defined(A2O_CAMERA_STREAM_TEST) && !defined(A2O_CAMERA_READER_TEST)
+#ifndef A2O_CAMERA_TEST
 static HRESULT WINAPI reader_GetStreamSelection(IMFSourceReader *iface, DWORD index, BOOL *selected)
 {
     say("reader: GetStreamSelection %#lx", index);
