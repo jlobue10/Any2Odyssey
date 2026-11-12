@@ -227,6 +227,13 @@ impl Shared {
     /// would go.
     fn find(&self, serial: u64) -> (Found, Option<FrameSink>) {
         let (output, sink) = lock(&self.sink).clone();
+        // The depth thread takes its frame from `for_model` and says when
+        // it is done with it; a frame is made for it only then. This is
+        // looked at before the depth map: the thread publishes its answer
+        // first and frees its place after, so a model seen free here has
+        // its answer in what is read next. Read the other way round, the
+        // answer could come between the two and its frame be sent again.
+        let model_free = !lock(&self.for_model).busy;
         let (depth, mapped, settled) = {
             let depth = lock(&self.depth);
             let mapped = depth.latest.as_ref().map(|(s, d, _)| (*s, *d));
@@ -245,9 +252,7 @@ impl Shared {
             depth,
             mapped,
             settled,
-            // The depth thread takes its frame from `for_model` and says
-            // when it is done with it; a frame is made for it only then.
-            model_free: !lock(&self.for_model).busy,
+            model_free,
             output,
         };
         (found, sink)
@@ -1042,6 +1047,46 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_model_seen_free_has_its_answer_seen_with_it() {
+        // The model is at work on frame 5 of a screen that has stopped
+        // changing; the picture of that frame is up.
+        let shared = Arc::new(Shared::new());
+        {
+            let mut slot = lock(&shared.for_model);
+            (slot.serial, slot.detail, slot.busy) = (5, 518, true);
+        }
+        let turn_state = shared.clone();
+        // A turn looks at what there is while the depth thread is about to
+        // answer: the model's place is kept from it here until the answer
+        // has been published and the place freed, in that order, as the
+        // depth thread does it.
+        let mut place = lock(&shared.for_model);
+        let turn = std::thread::spawn(move || turn_state.find(5).0);
+        std::thread::sleep(Duration::from_millis(100));
+        {
+            let mut depth = lock(&shared.depth);
+            depth.version += 1;
+            depth.latest = Some((5, 518, DepthMap::normalized(1, 1, vec![0.0]).unwrap()));
+        }
+        place.busy = false;
+        drop(place);
+        let found = turn.join().unwrap();
+        // A model seen free has answered, and that answer is what the turn
+        // must go by. With the map looked at first and the place after, the
+        // turn had the map from before the answer and a free model: frame 5
+        // went to the model a second time.
+        assert!(found.model_free);
+        assert_eq!(found.mapped, Some((5, 518)));
+        let shown = Shown {
+            serial: 5,
+            look: found.look,
+            depth: found.depth - 1,
+            output: found.output,
+        };
+        assert!(!plan(Some(&shown), &found).submit);
     }
 
     /// Wait until `done` says so, at most ten seconds.
