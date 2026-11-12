@@ -181,6 +181,11 @@ jobs:
         run: cargo test --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
       - name: Camera bridge authentication tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-camera-bridge.py
+      - name: UDP shim lifetime tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
+            contrib/wine-lens/tests/test-connreset.c -o /tmp/test-connreset
+          ASAN_OPTIONS=detect_leaks=0 /tmp/test-connreset
       - name: Clippy
         run: cargo clippy --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
       - name: Windows cross-check (no linking)
