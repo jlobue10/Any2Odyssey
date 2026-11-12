@@ -69,22 +69,59 @@ class CameraBridgeTests(unittest.TestCase):
         self.assertLessEqual(length, 8192)
         return exact(length)
 
+    def proof(self, label, first, second):
+        return hmac.new(self.key, label + b":" + first + b":" + second, hashlib.sha256).hexdigest().encode()
+
+    def challenge(self, client, nonce):
+        client.sendall(b"H " + nonce + b"\n")
+        challenge = self.packet(client)
+        self.assertRegex(challenge, b"^[0-9a-f]{32}$")
+        return challenge
+
     def test_valid_authentication_and_commands(self):
-        self.client.sendall(b"H\n")
-        challenge = self.packet(self.client)
-        self.assertEqual(len(challenge), 32)
-        answer = hmac.new(self.key, challenge, hashlib.sha256).hexdigest().encode()
-        self.client.sendall(b"A " + answer + b"\n")
-        self.assertEqual(self.packet(self.client), b"ok")
+        nonce = os.urandom(16).hex().encode()
+        challenge = self.challenge(self.client, nonce)
+        self.client.sendall(b"A " + self.proof(b"client", challenge, nonce) + b"\n")
+        # The bridge proves in turn that it knows the secret, over both random numbers.
+        self.assertEqual(self.packet(self.client), b"ok " + self.proof(b"bridge", nonce, challenge))
         # /dev/null opens successfully but exposes no V4L2 formats.
         self.client.sendall(b"L\n")
         self.assertEqual(self.packet(self.client), b"")
 
+    def test_challenges_differ(self):
+        nonce = b"0123456789abcdef" * 2
+        first = self.challenge(self.client, nonce)
+        self.client.close()
+        with self.connect() as again:
+            self.assertNotEqual(self.challenge(again, nonce), first)
+
     def test_wrong_answer_is_rejected(self):
-        self.client.sendall(b"H\n")
-        self.packet(self.client)
+        nonce = os.urandom(16).hex().encode()
+        self.challenge(self.client, nonce)
         self.client.sendall(b"A " + b"0" * 64 + b"\n")
+        # Dropped without a word: in particular without the bridge's own proof.
         self.assertEqual(self.client.recv(1), b"")
+
+    def test_bridge_proof_is_not_accepted_as_the_clients(self):
+        # What the bridge would answer cannot be handed back to it as a client's answer.
+        nonce = os.urandom(16).hex().encode()
+        challenge = self.challenge(self.client, nonce)
+        self.client.sendall(b"A " + self.proof(b"bridge", nonce, challenge) + b"\n")
+        self.assertEqual(self.client.recv(1), b"")
+
+    def test_answer_is_bound_to_the_clients_number(self):
+        nonce = os.urandom(16).hex().encode()
+        challenge = self.challenge(self.client, nonce)
+        self.client.sendall(b"A " + self.proof(b"client", challenge, b"f" * 32) + b"\n")
+        self.assertEqual(self.client.recv(1), b"")
+
+    def test_malformed_greeting_is_rejected(self):
+        self.client.close()  # one client at a time
+        for greeting in [b"H\n", b"H \n", b"H " + b"g" * 32 + b"\n", b"H " + b"0" * 31 + b"\n",
+                         b"H " + b"0" * 33 + b"\n", b"H " + b"A" * 32 + b"\n", b"L\n"]:
+            with self.subTest(greeting=greeting), self.connect() as client:
+                client.sendall(greeting)
+                self.assertEqual(client.recv(1), b"")
 
     def test_silent_client_expires(self):
         self.client.settimeout(7)
@@ -99,7 +136,7 @@ class CameraBridgeTests(unittest.TestCase):
         def trickle():
             # Delay the challenge, then dribble an unfinished answer. Neither
             # stage may extend the five seconds measured from acceptance.
-            for part in [b"H", b"\n", b"A", b" ", b"0", b"0", b"0"]:
+            for part in [b"H " + b"0" * 32, b"\n", b"A", b" ", b"0", b"0", b"0"]:
                 if stopped.wait(1):
                     return
                 try:
@@ -120,8 +157,7 @@ class CameraBridgeTests(unittest.TestCase):
             writer.join(timeout=2)
         # Expiry releases the single-client slot for a fresh handshake.
         with self.connect() as next_client:
-            next_client.sendall(b"H\n")
-            self.assertEqual(len(self.packet(next_client)), 32)
+            self.challenge(next_client, b"0" * 32)
 
 
 if __name__ == "__main__":

@@ -37,6 +37,16 @@ typedef int SOCKET;
 #define BRIDGE_REPLY_MS 1000 /* long enough for a busy machine to answer, short enough to test */
 
 static atomic_int live_locks, live_handles, running_threads, socket_closes;
+static BOOL fail_random;
+
+/* RtlGenRandom. */
+static BOOL SystemFunction036(void *buffer, uint32_t length)
+{
+    FILE *f = fail_random ? NULL : fopen("/dev/urandom", "rb");
+    BOOL ok = f && fread(buffer, 1, length, f) == length;
+    if (f) fclose(f);
+    return ok;
+}
 
 typedef pthread_mutex_t CRITICAL_SECTION;
 static void InitializeCriticalSection(CRITICAL_SECTION *m)
@@ -178,11 +188,14 @@ static int closesocket(SOCKET s)
 
 static const char KEY[] = "client-test-secret-do-not-use";
 
+enum pose { BRIDGE, NO_PROOF, WRONG_PROOF, ECHOED_ANSWER, UNLABELLED_PROOF, ODD_CHALLENGE, FRAME_FIRST };
 struct fake {
     int fd;
     void (*script)(struct fake *);
     pthread_t thread;
     const char *key;
+    enum pose pose;           /* the real bridge, or something else that has taken its port */
+    char nonce[2][33];        /* the client's random number, this time and the time before */
     atomic_bool saw_end;      /* the client closed the connection: the real bridge stops the camera then */
     atomic_int lines_after;   /* command lines that arrived when none should */
 };
@@ -228,15 +241,33 @@ static void fake_until_end(struct fake *f)
     while (fake_line(f, line, sizeof line)) atomic_fetch_add(&f->lines_after, 1);
     atomic_store(&f->saw_end, TRUE);
 }
-/* The bridge's side of the handshake, as camera-bridge.c does it. FALSE if the client was turned away. */
+/* The bridge's side of the handshake, as camera-bridge.c does it, or as something does it that has the port
+ * and not the secret. FALSE if the client was turned away. */
 static BOOL fake_handshake(struct fake *f)
 {
-    char line[256], expected[65];
-    if (!fake_line(f, line, sizeof line) || strcmp(line, "H")) return FALSE;
-    fake_reply(f, "000102030405060708090a0b0c0d0e0f");
-    a2o_hmac_hex(f->key, "000102030405060708090a0b0c0d0e0f", expected);
-    if (!fake_line(f, line, sizeof line) || strncmp(line, "A ", 2) || !a2o_same(line + 2, expected)) return FALSE;
-    fake_reply(f, "ok");
+    static const char challenge[] = "000102030405060708090a0b0c0d0e0f";
+    static char megabyte[1024 * 1024];
+    char line[256], message[128], expected[65], verdict[128];
+
+    if (f->pose == FRAME_FIRST) fake_packet(f, 'F', megabyte, sizeof megabyte);
+    if (!fake_line(f, line, sizeof line) || strncmp(line, "H ", 2) || strlen(line + 2) != 32) return FALSE;
+    memcpy(f->nonce[0], line + 2, 33);
+    fake_reply(f, f->pose == ODD_CHALLENGE ? "000102030405060708090a0b0c0d0e0f:" : challenge);
+    snprintf(message, sizeof message, "client:%s:%s", challenge, f->nonce[0]);
+    a2o_hmac_hex(f->key, message, expected);
+    if (!fake_line(f, line, sizeof line) || strncmp(line, "A ", 2)) return FALSE;
+    if (f->pose == BRIDGE && !a2o_same(line + 2, expected)) return FALSE;
+    snprintf(message, sizeof message, "bridge:%s:%s", f->nonce[0], challenge);
+    a2o_hmac_hex(f->key, message, expected);
+    if (f->pose == NO_PROOF) snprintf(verdict, sizeof verdict, "ok");
+    else if (f->pose == WRONG_PROOF) snprintf(verdict, sizeof verdict, "ok %064d", 0);
+    else if (f->pose == ECHOED_ANSWER) snprintf(verdict, sizeof verdict, "ok %.64s", line + 2);
+    else if (f->pose == UNLABELLED_PROOF) {
+        /* what the handshake before this one would have made of the two numbers */
+        a2o_hmac_hex(f->key, challenge, expected);
+        snprintf(verdict, sizeof verdict, "ok %s", expected);
+    } else snprintf(verdict, sizeof verdict, "ok %s", expected);
+    fake_reply(f, verdict);
     return TRUE;
 }
 static void *fake_main(void *arg)
@@ -247,14 +278,20 @@ static void *fake_main(void *arg)
     return NULL;
 }
 /* Start a simulated bridge and connect the production client to it. */
+static enum pose next_pose;
 static struct bridge *open_bridge(struct fake *f, void (*script)(struct fake *), const char *bridge_key)
 {
     int pair[2];
+    char before[33];
     assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, pair));
+    memcpy(before, f->nonce[0], 33);
     memset(f, 0, sizeof *f);
+    memcpy(f->nonce[1], before, 33);
     f->fd = pair[1];
     f->script = script;
     f->key = bridge_key;
+    f->pose = next_pose;
+    next_pose = BRIDGE;
     atomic_store(&socket_closes, 0);
     assert(!pthread_create(&f->thread, NULL, fake_main, f));
     return bridge_start(pair[0], KEY);
@@ -273,7 +310,7 @@ static void expect_clean(struct fake *f)
 
 static void script_commands(struct fake *f)
 {
-    char line[256], big[9000];
+    char line[256], big[8192]; /* the longest reply the client takes */
     if (!fake_handshake(f)) return;
     while (fake_line(f, line, sizeof line)) {
         if (!strcmp(line, "Q 980900")) fake_reply(f, "-64 64 1 0 7");
@@ -286,7 +323,7 @@ static void script_commands(struct fake *f)
 }
 static void commands_and_close(void)
 {
-    struct fake f;
+    struct fake f = {0};
     char reply[8192] = "";
     struct bridge *b = open_bridge(&f, script_commands, KEY);
 
@@ -303,15 +340,63 @@ static void commands_and_close(void)
     assert(atomic_load(&f.saw_end));
 }
 
+static void script_nobody(struct fake *f)
+{
+    fake_until_end(f);
+}
+
 static void script_turn_away(struct fake *f)
 {
     assert(!fake_handshake(f));
 }
 static void wrong_secret(void)
 {
-    struct fake f;
+    struct fake f = {0};
     assert(!open_bridge(&f, script_turn_away, "another-secret-entirely"));
     expect_clean(&f);
+}
+
+/* Something else has the port (the bridge ended, and a port is any local user's to take). Without the secret
+ * it cannot prove to be the bridge, whatever it sends, and is left before a frame of its is taken. */
+static void script_impostor(struct fake *f)
+{
+    fake_handshake(f);
+    fake_packet(f, 'F', "abc", 3);
+    fake_until_end(f);
+}
+static void impostor(enum pose pose, const char *its_key)
+{
+    struct fake f = {0};
+    uint64_t started = now_ms();
+
+    next_pose = pose;
+    assert(!open_bridge(&f, script_impostor, its_key));
+    assert(now_ms() - started < BRIDGE_REPLY_MS); /* refused on what it sent, not on a timeout */
+    expect_clean(&f);
+    assert(atomic_load(&f.saw_end) && !atomic_load(&f.lines_after));
+}
+
+/* The client's random number is new for every connection, and nothing is sent without one. */
+static void fresh_numbers(void)
+{
+    struct fake f = {0};
+    struct bridge *b = open_bridge(&f, script_commands, KEY);
+
+    assert(b);
+    bridge_close(b);
+    expect_clean(&f);
+    assert(strlen(f.nonce[0]) == 32 && strspn(f.nonce[0], "0123456789abcdef") == 32);
+    b = open_bridge(&f, script_commands, KEY);
+    assert(b);
+    bridge_close(b);
+    expect_clean(&f);
+    assert(strlen(f.nonce[1]) == 32 && strcmp(f.nonce[0], f.nonce[1]));
+
+    fail_random = TRUE;
+    assert(!open_bridge(&f, script_nobody, KEY));
+    fail_random = FALSE;
+    expect_clean(&f);
+    assert(atomic_load(&f.saw_end) && !atomic_load(&f.lines_after));
 }
 
 /* The reply to a command comes after the command has stopped waiting. */
@@ -326,7 +411,7 @@ static void script_late_reply(struct fake *f)
 }
 static void late_reply(void)
 {
-    struct fake f;
+    struct fake f = {0};
     char reply[64] = "untouched";
     struct bridge *b = open_bridge(&f, script_late_reply, KEY);
     uint64_t started = now_ms();
@@ -354,7 +439,7 @@ static void script_leave(struct fake *f)
 }
 static void bridge_gone(void)
 {
-    struct fake f;
+    struct fake f = {0};
     struct bridge *b = open_bridge(&f, script_leave, KEY);
     uint64_t started = now_ms();
 
@@ -395,7 +480,7 @@ static void script_one_frame(struct fake *f)
 }
 static void close_while_thread_is_busy(void)
 {
-    struct fake f;
+    struct fake f = {0};
     struct bridge *b = open_bridge(&f, script_one_frame, KEY);
 
     assert(b);
@@ -444,7 +529,7 @@ static void script_frame_then_leave(struct fake *f)
 }
 static void end_is_announced(BOOL still_listening)
 {
-    struct fake f;
+    struct fake f = {0};
     struct bridge *b = open_bridge(&f, script_frame_then_leave, KEY);
 
     assert(b);
@@ -473,7 +558,7 @@ static void script_silent(struct fake *f)
 }
 static void timeout_is_announced(void)
 {
-    struct fake f;
+    struct fake f = {0};
     struct bridge *b = open_bridge(&f, script_silent, KEY);
 
     assert(b);
@@ -489,13 +574,9 @@ static void timeout_is_announced(void)
 }
 
 /* The event or the thread cannot be made: nothing is left behind, and the socket is closed. */
-static void script_nobody(struct fake *f)
-{
-    fake_until_end(f);
-}
 static void creation_failure(BOOL event_fails)
 {
-    struct fake f;
+    struct fake f = {0};
     fail_event = event_fails;
     fail_thread = !event_fails;
     assert(!open_bridge(&f, script_nobody, KEY));
@@ -509,6 +590,14 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
     commands_and_close();
     wrong_secret();
+    impostor(NO_PROOF, KEY);
+    impostor(WRONG_PROOF, KEY);
+    impostor(ECHOED_ANSWER, KEY);
+    impostor(UNLABELLED_PROOF, KEY);
+    impostor(ODD_CHALLENGE, KEY);
+    impostor(FRAME_FIRST, KEY);
+    impostor(ECHOED_ANSWER, "it-does-not-know-the-secret");
+    fresh_numbers();
     late_reply();
     bridge_gone();
     close_while_thread_is_busy();

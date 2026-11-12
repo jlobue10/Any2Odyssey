@@ -6,8 +6,10 @@
  * (a2ocam.c) therefore connects to this native program on a loopback TCP port:
  *
  *   input, one command per line:
- *     H                       must come first: the reply is a fresh random challenge
- *     A answer                must come second: HMAC-SHA-256 of the challenge under the shared secret (hex)
+ *     H nonce                 must come first: a random number of the client's (32 hex digits); the reply
+ *                             is a fresh random challenge of the same form
+ *     A answer                must come second: HMAC-SHA-256 of "client:<challenge>:<nonce>" under the shared
+ *                             secret (hex); the reply is "ok " and the HMAC of "bridge:<nonce>:<challenge>"
  *     L                       list formats; reply has one "FOURCC width height fps" per line
  *     F FOURCC width height fps   start streaming in that format
  *     S                       stop streaming
@@ -19,7 +21,10 @@
  * One client at a time. The camera is open only while a client is connected. The port listens on 127.0.0.1
  * only, and the secret (a file only its owner can read) keeps other local users from reading the camera: a
  * client has to answer the challenge within a few seconds or is dropped. The secret itself never crosses the
- * connection, so a program that got hold of the port first learns nothing it could use here.
+ * connection, so a program that got hold of the port first learns nothing it could use here; and because the
+ * bridge proves in its "ok" that it knows the secret too, such a program cannot pass for the bridge and feed
+ * the client pictures of its own. The two proofs are made under different labels, so one cannot be handed
+ * back as the other, and the bridge gives its proof only to a client that has given its own.
  *
  * usage: any2odyssey-camera-bridge <vendor:product | /dev/videoN> <port> <secret file>
  */
@@ -257,7 +262,7 @@ static int open_camera(const char *name)
 /* Serve one client until it disconnects. */
 static void serve(const char *camera, const char *secret)
 {
-    char line[256], challenge[33] = "", expected[65];
+    char line[256], nonce[33] = "", challenge[33] = "", message[128], expected[65];
     size_t have = 0;
     int authorised = 0;
     int64_t now = monotonic_ms();
@@ -294,22 +299,27 @@ static void serve(const char *camera, const char *secret)
                 if (!authorised && !challenge[0]) {
                     unsigned char random[16];
                     int source = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-                    if (strcmp(line, "H") || source < 0 || read(source, random, sizeof random) != sizeof random) {
+                    if (strncmp(line, "H ", 2) || strlen(line + 2) != 32 || strspn(line + 2, "0123456789abcdef") != 32 ||
+                        source < 0 || read(source, random, sizeof random) != sizeof random) {
                         if (source >= 0) close(source);
                         return;
                     }
                     close(source);
+                    memcpy(nonce, line + 2, 33);
                     for (int i = 0; i < 16; i++) snprintf(challenge + i * 2, 3, "%02x", random[i]);
                     reply("%s", challenge);
                 } else if (!authorised) {
-                    a2o_hmac_hex(secret, challenge, expected);
+                    snprintf(message, sizeof message, "client:%s:%s", challenge, nonce);
+                    a2o_hmac_hex(secret, message, expected);
                     if (line[0] != 'A' || line[1] != ' ' || !a2o_same(line + 2, expected)) return;
                     if ((cam = open_camera(camera)) < 0) {
                         reply("!cannot open the camera");
                         return;
                     }
                     authorised = 1;
-                    reply("ok");
+                    snprintf(message, sizeof message, "bridge:%s:%s", nonce, challenge);
+                    a2o_hmac_hex(secret, message, expected);
+                    reply("ok %s", expected);
                 } else {
                     command(line);
                 }

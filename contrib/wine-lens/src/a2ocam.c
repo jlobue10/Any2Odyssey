@@ -41,6 +41,9 @@
 #define E_PROP_ID_UNSUPPORTED ((HRESULT)0x80070490)
 #endif
 
+/* The system's random numbers: RtlGenRandom, which advapi32 (Wine's too) exports under this name. */
+BOOLEAN WINAPI SystemFunction036(void *buffer, ULONG length);
+
 /* {6f3a1f0e-93c5-4f0b-9d7e-a2c0ca3e0001}: asks one of our sources for itself. */
 static const GUID IID_A2OSource = { 0x6f3a1f0e, 0x93c5, 0x4f0b, { 0x9d, 0x7e, 0xa2, 0xc0, 0xca, 0x3e, 0x00, 0x01 } };
 
@@ -102,6 +105,7 @@ struct bridge {
     char reply[8192];
     BOOL awaiting; /* a command has been sent and waits for its reply */
     BOOL dead;     /* nothing more will come, and no command is sent any more */
+    BOOL trusted;  /* the other end has proved that it is the bridge */
     /* guarded by frame_lock, which is held while a frame is handed on: */
     frame_fn on_frame;
     void *frame_ctx;
@@ -136,11 +140,17 @@ static DWORD WINAPI bridge_thread(void *arg)
     BYTE head[16], *data = NULL;
     DWORD size = 0, length;
     UINT64 time_us;
+    BOOL trusted;
 
     while (read_all(b->sock, head, 16)) {
         memcpy(&length, head + 4, 4);
         memcpy(&time_us, head + 8, 8);
-        if (length > 64 * 1024 * 1024) break;
+        /* Replies are short. Frames are taken only from an end that has proved to be the bridge: from
+         * anything else on the port they would be megabytes of its choosing for the tracker's decoder. */
+        EnterCriticalSection(&b->reply_lock);
+        trusted = b->trusted;
+        LeaveCriticalSection(&b->reply_lock);
+        if (length > (head[0] == 'F' && trusted ? 64 * 1024 * 1024 : sizeof b->reply)) break;
         if (length + 1 > size) {
             BYTE *bigger = realloc(data, length + 1);
             if (!bigger) break;
@@ -253,13 +263,23 @@ static void bridge_close(struct bridge *b)
     bridge_unref(b);
 }
 
-/* Take over a connected socket: read it on a thread of its own, and prove to the bridge that we know the
- * secret without sending it: the bridge gives a random challenge and gets its HMAC back. Whatever answers
- * on the port, it does not learn the secret. The socket is closed here if this fails. */
+static BOOL is_nonce(const char *text)
+{
+    return strlen(text) == 32 && strspn(text, "0123456789abcdef") == 32;
+}
+
+/* Take over a connected socket: read it on a thread of its own, and let each end prove to the other that it
+ * knows the secret, without sending it. We send a random number of ours and get the bridge's; our answer is
+ * the HMAC of the two under the secret, and the bridge's "ok" carries the HMAC it makes of them under
+ * another label, so neither proof can be handed back as the other. Whatever else has the port (the bridge
+ * may have ended, and the port is any local user's to take) does not learn the secret and cannot give that
+ * proof: it is left before a frame of its is taken. The socket is closed here if this fails. */
 static struct bridge *bridge_start(SOCKET sock, const char *key)
 {
     struct bridge *b = calloc(1, sizeof *b);
-    char challenge[64] = "", answer[65] = "";
+    unsigned char random[16];
+    char nonce[33], challenge[64] = "", message[128], answer[65], proof[65], verdict[128] = "";
+    BOOL ok = FALSE;
 
     if (!b || !(b->replied = CreateEventW(NULL, TRUE, FALSE, NULL))) {
         closesocket(sock);
@@ -280,12 +300,25 @@ static struct bridge *bridge_start(SOCKET sock, const char *key)
         free(b);
         return NULL;
     }
-    if (bridge_command(b, challenge, sizeof challenge, "H")) a2o_hmac_hex(key, challenge, answer);
-    if (!answer[0] || !bridge_command(b, NULL, 0, "A %s", answer)) {
-        say("bridge: refused (camera busy or missing, or a wrong secret)");
+    if (SystemFunction036(random, sizeof random)) {
+        for (int i = 0; i < 16; i++) snprintf(nonce + i * 2, 3, "%02x", random[i]);
+        if (bridge_command(b, challenge, sizeof challenge, "H %s", nonce) && is_nonce(challenge)) {
+            snprintf(message, sizeof message, "client:%s:%s", challenge, nonce);
+            a2o_hmac_hex(key, message, answer);
+            snprintf(message, sizeof message, "bridge:%s:%s", nonce, challenge);
+            a2o_hmac_hex(key, message, proof);
+            ok = bridge_command(b, verdict, sizeof verdict, "A %s", answer) && !strncmp(verdict, "ok ", 3) &&
+                 a2o_same(verdict + 3, proof);
+        }
+    }
+    if (!ok) {
+        say("bridge: refused (camera busy or missing, a wrong secret, or not the bridge on that port)");
         bridge_close(b);
         return NULL;
     }
+    EnterCriticalSection(&b->reply_lock);
+    b->trusted = TRUE;
+    LeaveCriticalSection(&b->reply_lock);
     return b;
 }
 #endif /* production and the client test */
