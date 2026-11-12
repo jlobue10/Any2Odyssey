@@ -1,9 +1,11 @@
 //! Shared application state and the supervisor loop. The GUI thread renders
 //! from it; a poller thread drives worker supervision, named events, tray
 //! menu and hotkey events every 250 ms, so everything keeps working while the
-//! controls window is hidden in the tray.
+//! controls window is hidden in the tray. A hotkey, a tray command or a
+//! finished start or stop wakes the poller at once; the 250 ms tick is what
+//! notices everything else.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use any2odyssey_core::log::Logger;
@@ -16,6 +18,71 @@ use any2odyssey_core::update::{self, Comparison, UpdateState};
 use crate::platform::{self, ControlEvents, Worker};
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Lets another thread end the poller's wait early. A wake-up that arrives
+/// while the poller is busy is kept for its next wait, so none is lost.
+pub struct PollWake {
+    pending: Mutex<bool>,
+    signal: Condvar,
+}
+
+impl PollWake {
+    pub const fn new() -> PollWake {
+        PollWake {
+            pending: Mutex::new(false),
+            signal: Condvar::new(),
+        }
+    }
+
+    pub fn notify(&self) {
+        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.signal.notify_one();
+    }
+
+    /// Wait for a wake-up, at most `timeout`. True when woken early.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut pending, _) = self
+            .signal
+            .wait_timeout_while(pending, timeout, |pending| !*pending)
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *pending)
+    }
+}
+
+static POLL_WAKE: PollWake = PollWake::new();
+
+/// Run the poller's next tick now instead of up to [`POLL_INTERVAL`] from
+/// now. Takes no lock but its own, so it is safe from any thread, including
+/// a window procedure and a thread that holds `Core`.
+pub fn wake_poller() {
+    POLL_WAKE.notify();
+}
+
+/// Events a library hands to a callback on the GUI thread (hotkeys, the tray
+/// icon and its menu), kept until the poller drains them. Pushing one wakes
+/// the poller, so a hotkey acts when it is pressed rather than at the next
+/// tick.
+pub struct Forwarded<T>(Mutex<Vec<T>>);
+
+impl<T> Forwarded<T> {
+    pub const fn new() -> Forwarded<T> {
+        Forwarded(Mutex::new(Vec::new()))
+    }
+
+    pub fn push(&self, event: T) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event);
+        wake_poller();
+    }
+
+    /// Everything pushed since the last call, oldest first.
+    pub fn take(&self) -> Vec<T> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
 
 /// How long the answer to a user action stays on the status line while a
 /// running worker keeps reporting the same state. See `show_worker_state`.
@@ -441,6 +508,7 @@ impl Core {
                 // A closed receiver must never leave a newly spawned worker orphaned.
                 worker.stop();
             }
+            wake_poller();
         });
     }
 
@@ -458,6 +526,8 @@ impl Core {
             }
             std::thread::spawn(move || {
                 let _ = tx.send(WorkerResult::Stopped(worker.stop()));
+                // An Apply or Restart is waiting for this to start again.
+                wake_poller();
             });
         }
     }
@@ -564,6 +634,7 @@ impl Core {
         self.update_task = Some(rx);
         std::thread::spawn(move || {
             let _ = tx.send(platform::check_updates());
+            wake_poller();
         });
     }
 
@@ -870,7 +941,7 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
     std::thread::Builder::new()
         .name("any2odyssey-poller".into())
         .spawn(move || loop {
-            std::thread::sleep(POLL_INTERVAL);
+            POLL_WAKE.wait(POLL_INTERVAL);
             let mut show = false;
             let mut quit = false;
             let repaint;
@@ -1259,6 +1330,45 @@ mod tests {
         assert!(core.save_preferences());
         assert!(Preferences::load_from(&settings).unwrap().side_by_side);
         assert_ne!(std::fs::read(&settings).unwrap(), first);
+    }
+
+    #[test]
+    fn a_wake_up_ends_the_poll_wait_early_and_is_never_lost() {
+        let wake = Arc::new(PollWake::new());
+        // Nothing pending: the wait runs out.
+        assert!(!wake.wait(Duration::from_millis(20)));
+        // Signalled while nobody waits (the poller is busy): the next wait
+        // returns at once, and only once.
+        wake.notify();
+        wake.notify();
+        let started = Instant::now();
+        assert!(wake.wait(Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!wake.wait(Duration::from_millis(20)));
+        // Signalled from another thread during the wait.
+        let waker = {
+            let wake = wake.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                wake.notify();
+            })
+        };
+        let started = Instant::now();
+        assert!(wake.wait(Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        waker.join().unwrap();
+    }
+
+    #[test]
+    fn forwarded_events_come_out_once_in_order() {
+        let queue = Forwarded::new();
+        assert!(queue.take().is_empty());
+        queue.push(1);
+        queue.push(2);
+        assert_eq!(queue.take(), vec![1, 2]);
+        assert!(queue.take().is_empty());
+        queue.push(3);
+        assert_eq!(queue.take(), vec![3]);
     }
 
     fn isolated(dir: &std::path::Path) -> Core {
