@@ -186,7 +186,9 @@ fn usage_error() -> i32 {
 /// The command line as text. Every argument this program takes is an option
 /// word, a number, an event name, JSON or a path it prints back, so one that
 /// is not Unicode is a usage error rather than something to pass on lossily.
-/// `Err` carries the 1-based position of the first such argument.
+/// (The image for the stereo viewer is the exception and is taken out
+/// first: `image_argument`.) `Err` carries the 1-based position of the
+/// first such argument.
 fn unicode_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>, usize> {
     args.enumerate()
         .map(|(index, arg)| arg.into_string().map_err(|_| index + 1))
@@ -197,6 +199,24 @@ fn unicode_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<St
 /// wrote a file named `--dark`.
 fn option_like(path: &str) -> bool {
     path.starts_with("--")
+}
+
+/// The image a launch names for the stereo viewer, `FILE` or `--open FILE`
+/// (what a desktop entry's `%f` and "Open with" pass is the bare path). A
+/// file's name is whatever bytes the file system holds, so this one argument
+/// is taken as it is and never has to be Unicode; the option word does, and
+/// so does every other argument ([`unicode_args`]). As elsewhere, a path
+/// after `--open` may not look like an option, and a bare one may not start
+/// with a dash.
+#[cfg(not(windows))]
+fn image_argument(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
+    let starts_with =
+        |arg: &std::ffi::OsStr, prefix: &str| arg.as_encoded_bytes().starts_with(prefix.as_bytes());
+    match args {
+        [flag, path] if flag == "--open" && !starts_with(path, "--") => Some(path),
+        [path] if !starts_with(path, "-") => Some(path),
+        _ => None,
+    }
 }
 
 /// Modes that talk to a terminal rather than to the running instance.
@@ -223,7 +243,13 @@ fn screenshot_request(path: &str, rest: &[String]) -> Option<core::ScreenshotReq
 
 fn main() {
     // `std::env::args` panics on an argument that is not Unicode.
-    let args = match unicode_args(std::env::args_os().skip(1)) {
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // An image for the stereo viewer is the one argument taken as it is.
+    #[cfg(not(windows))]
+    let image = image_argument(&raw).map(std::path::PathBuf::from);
+    #[cfg(not(windows))]
+    let raw = if image.is_some() { Vec::new() } else { raw };
+    let args = match unicode_args(raw.into_iter()) {
         Ok(args) => args,
         Err(position) => {
             attach_parent_console();
@@ -235,17 +261,19 @@ fn main() {
         attach_parent_console();
     }
     // An isolated preview leaves the real data directory alone, log included.
-    // Its log name carries the process id, so two previews never share a
-    // file and a fixed name in a shared temp folder is never reused.
     let preview = args.first().is_some_and(|a| a == "--screenshot");
     let logger = if preview {
-        Logger::new(
-            std::env::temp_dir().join(format!("any2odyssey-preview-{}.log", std::process::id())),
-        )
+        preview_logger()
     } else {
         let _ = std::fs::create_dir_all(paths::data_dir());
         Logger::default_location()
     };
+    // Handed to the running instance, or opened in this one. The viewer is
+    // the Linux build's home page.
+    #[cfg(not(windows))]
+    if let Some(image) = image {
+        std::process::exit(open_image(&image, logger));
+    }
     let code = match args.as_slice() {
         [flag, event, parent, source, snapshot] if flag == "--worker" => {
             let parent: u32 = parent.parse().unwrap_or(0);
@@ -301,10 +329,6 @@ fn main() {
             Some(request) => run_gui(false, logger, Some(request)),
             None => usage_error(),
         },
-        // An image for the stereo viewer: handed to the running instance, or
-        // opened in this one. The viewer is the Linux build's home page.
-        #[cfg(not(windows))]
-        [flag, path] if flag == "--open" && !option_like(path) => open_image(path, logger),
         #[cfg(not(windows))]
         [flag] if flag == "--install-depth-model" => match depth::install_model() {
             Ok(path) => {
@@ -316,9 +340,6 @@ fn main() {
                 1
             }
         },
-        // What a desktop entry's `%f` and "Open with" pass: the bare path.
-        #[cfg(not(windows))]
-        [path] if !path.starts_with('-') => open_image(path, logger),
         [] => run_gui(false, logger, None),
         [flag] if flag == "--help" || flag == "-h" => {
             println!("{}", usage());
@@ -329,10 +350,32 @@ fn main() {
     std::process::exit(code);
 }
 
+/// The log of an isolated preview (`--screenshot`): one file in a new folder
+/// of its own in the temporary folder. The folder is made for this run and
+/// this user only, so nothing can be waiting there under the log's name (a
+/// link to a file to append to, in a temporary folder everyone shares). It
+/// is left behind for whoever wants to read the log.
+fn preview_logger() -> Logger {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("any2odyssey-preview-");
+    // Asked for: a new folder is otherwise as open as the umask leaves it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let folder = builder.tempdir().map(tempfile::TempDir::keep);
+    match folder {
+        Ok(folder) => Logger::new(folder.join("preview.log")),
+        // No folder, no log: an empty path is one nothing can be written to.
+        Err(_) => Logger::new(std::path::PathBuf::new()),
+    }
+}
+
 /// Open `path` in the stereo viewer: in the running instance when there is
 /// one, otherwise in this launch.
 #[cfg(not(windows))]
-fn open_image(path: &str, logger: Logger) -> i32 {
+fn open_image(path: &std::path::Path, logger: Logger) -> i32 {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.into());
     if platform::signal_open(&path) {
         0
@@ -340,6 +383,19 @@ fn open_image(path: &str, logger: Logger) -> i32 {
         platform::queue_open(path);
         run_gui(false, logger, None)
     }
+}
+
+/// Hand every image in `images` to the instance that owns the controls,
+/// knocking as often as for the other requests. False as soon as one was
+/// not accepted.
+#[cfg(not(windows))]
+fn hand_over_images(
+    images: &[std::path::PathBuf],
+    mut signal: impl FnMut(&std::path::Path) -> bool,
+) -> bool {
+    images
+        .iter()
+        .all(|image| retry(SIGNAL_ATTEMPTS, SIGNAL_RETRY_PAUSE, || signal(image)))
 }
 
 fn run_gui(
@@ -379,6 +435,21 @@ fn run_gui(
     let Some(_guard) = platform::single_instance() else {
         // Another instance owns the controls: hand it the request this launch
         // carried, so `--toggle` losing the race still toggles.
+        #[cfg(not(windows))]
+        {
+            // So does an image: nobody answered when this launch first
+            // asked, and another launch has become the instance since.
+            let images = platform::take_open_requests();
+            if !images.is_empty() {
+                if hand_over_images(&images, platform::signal_open) {
+                    return 0;
+                }
+                logger.log(&format!(
+                    "Another instance owns the controls but did not accept the image to open after {SIGNAL_ATTEMPTS} attempts."
+                ));
+                return 1;
+            }
+        }
         return signal_running_instance(
             if start_requested {
                 ipc::TOGGLE_EVENT
@@ -455,6 +526,122 @@ mod argument_tests {
             unicode_args(vec![OsString::from("--export-guide"), broken].into_iter()),
             Err(2)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_image_to_open_keeps_its_bytes_and_a_broken_option_is_still_an_error() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        let os = |bytes: &[u8]| OsString::from_vec(bytes.to_vec());
+        let name = os(b"/pictures/pair-\xff\xfe.png");
+        // Bare, as a desktop entry's `%f` passes it, and after `--open`.
+        assert_eq!(
+            image_argument(std::slice::from_ref(&name)),
+            Some(name.as_os_str())
+        );
+        assert_eq!(
+            image_argument(&[os(b"--open"), name.clone()]),
+            Some(name.as_os_str())
+        );
+        // The bytes reach the instance socket's request unchanged.
+        let image = std::path::PathBuf::from(image_argument(std::slice::from_ref(&name)).unwrap());
+        assert_eq!(image.as_os_str().as_bytes(), b"/pictures/pair-\xff\xfe.png");
+        // Ordinary names as before, relative ones and single dashes inside.
+        for plain in ["pair.png", "./--dark", "a-b.png", ""] {
+            assert_eq!(
+                image_argument(&[os(plain.as_bytes())]),
+                Some(OsStr::new(plain))
+            );
+        }
+        assert_eq!(
+            image_argument(&[os(b"--open"), os(b"-pair.png")]),
+            Some(OsStr::new("-pair.png")),
+            "a single dash is a file name after --open"
+        );
+
+        // Not an image: options, option-like paths, and anything longer.
+        for other in [
+            &[][..],
+            &[os(b"--show")],
+            &[os(b"-h")],
+            &[os(b"-\xff.png")],
+            &[os(b"--open")],
+            &[os(b"--open"), os(b"--dark")],
+            &[os(b"--open"), os(b"--\xff")],
+            &[os(b"--open"), name.clone(), os(b"extra")],
+            &[os(b"--export-guide"), name.clone()],
+            &[os(b"--op\xffn"), os(b"pair.png")],
+            &[name.clone(), name.clone()],
+        ] {
+            assert_eq!(image_argument(other), None, "{other:?}");
+        }
+        // And those are still refused by position when they are not Unicode.
+        assert_eq!(
+            unicode_args([os(b"--export-guide"), name.clone()].into_iter()),
+            Err(2)
+        );
+        assert_eq!(
+            unicode_args([os(b"--op\xffn"), os(b"pair.png")].into_iter()),
+            Err(1)
+        );
+        assert_eq!(unicode_args([os(b"-\xff.png")].into_iter()), Err(1));
+        assert_eq!(
+            unicode_args([os(b"--open"), os(b"--\xff")].into_iter()),
+            Err(2)
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn images_of_a_launch_that_lost_the_race_are_handed_to_the_winner() {
+        let images = [
+            std::path::PathBuf::from("/a.png"),
+            std::path::PathBuf::from("/b.png"),
+        ];
+        // The winner does not answer at once: knocked again, in order.
+        let mut calls = Vec::new();
+        assert!(hand_over_images(&images, |image| {
+            calls.push(image.to_owned());
+            calls.len() != 1
+        }));
+        assert_eq!(
+            calls,
+            [images[0].clone(), images[0].clone(), images[1].clone()]
+        );
+        // Never accepted: reported, after the usual number of attempts.
+        let mut attempts = 0;
+        assert!(!hand_over_images(&images, |_| {
+            attempts += 1;
+            false
+        }));
+        assert_eq!(attempts, SIGNAL_ATTEMPTS);
+        assert!(hand_over_images(&[], |_| panic!("nothing to hand over")));
+    }
+
+    #[test]
+    fn a_preview_logs_into_a_folder_made_for_it() {
+        let logger = preview_logger();
+        let folder = logger.path().parent().unwrap().to_owned();
+        assert!(folder.starts_with(std::env::temp_dir()));
+        assert_eq!(logger.path().file_name().unwrap(), "preview.log");
+        assert!(folder.is_dir() && !logger.path().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "nobody else can put a name there");
+        }
+        logger.log("preview");
+        assert!(std::fs::read_to_string(logger.path())
+            .unwrap()
+            .ends_with("preview\n"));
+        // Two previews never share a log.
+        let other = preview_logger();
+        assert_ne!(other.path(), logger.path());
+        for made in [folder.as_path(), other.path().parent().unwrap()] {
+            std::fs::remove_dir_all(made).unwrap();
+        }
     }
 
     #[test]

@@ -8,15 +8,17 @@
 //! tuned by the user's own calibration. Nothing here uses Samsung's engine
 //! or its calibration files.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 
 use any2odyssey_core::dibr::{self, DepthMap};
 use any2odyssey_core::slider::{DEPTH, POPOUT};
 use any2odyssey_core::stereo::{self, Layout};
 use any2odyssey_core::theme::Palette;
 use egui::{pos2, Color32, Key, Rect, RichText, Sense, Ui, ViewportCommand};
-use image::RgbaImage;
+use image::{ImageDecoder, RgbaImage};
 
 use super::lens::{self, LensState};
 use super::theme::color;
@@ -44,6 +46,24 @@ const ESTIMATING: &str =
     "Estimating depth… The first image also loads the model, which takes a few seconds.";
 const CONVERTED: &str = "Converted to 3D. Adjust depth strength and pop-out to taste.";
 const DEFAULT_EXPORT_NAME: &str = "Any2Odyssey-preview.png";
+const EXPORT_OUTDATED: &str =
+    "Nothing was saved: the picture changed while the question was open. Save again for the picture that is shown now.";
+/// The largest image the viewer opens: no side longer than this, and no
+/// more pixels than [`MAX_IMAGE_PIXELS`]. A file says in a few bytes how
+/// large its picture is, and the picture is held in memory several times
+/// over (decoded, as a stereo pair, as a texture): a small crafted file
+/// must not be able to ask for gigabytes. The side is also the most Leia's
+/// weaver and a GPU texture take; the pixel count still lets a full
+/// side-by-side pair of 8K views in (15360 × 4320).
+const MAX_IMAGE_SIDE: u32 = 16384;
+const MAX_IMAGE_PIXELS: u64 = 1 << 26;
+/// What the decoder may allocate while reading a file: the picture as the
+/// file holds it (at most eight bytes a pixel) and the decoder's own needs.
+const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+/// The largest file looked at as an image: twice what the largest picture
+/// takes without any compression. One decoder (JPEG) reads the whole file
+/// into memory before it looks at anything.
+const MAX_FILE_BYTES: u64 = 2 * MAX_DECODE_BYTES;
 /// How large the depth model sees the picture (`depth::DETAIL`): the long
 /// side in pixels, and its name.
 const DEPTH_DETAIL: [(u32, &str); 4] = [
@@ -200,16 +220,57 @@ impl Options {
             popout: POPOUT.value(self.pop_pos),
         }
     }
+
+    /// Everything of the options that decides the converted image, and
+    /// nothing else: options with the same conversion make the same result
+    /// of an image, so it is not converted again for a change among the
+    /// rest (the lines of a live screen, an output format with the same
+    /// layout, a setting the current layout does not use).
+    fn conversion(&self) -> Conversion {
+        let layout = self.layout();
+        let ai = self.input == Input::Ai;
+        let params = self.params();
+        Conversion {
+            ai,
+            layout,
+            // A flat picture has no eyes to exchange; only a pair squeezed
+            // into an anaglyph is stretched.
+            swap: self.swap && layout != Layout::Flat,
+            half_width: self.half_width && !ai && layout == Layout::Anaglyph,
+            strength: if ai { params.strength.to_bits() } else { 0 },
+            // Without depth strength there is nothing for pop-out to move.
+            popout: if ai && params.strength != 0.0 {
+                params.popout.to_bits()
+            } else {
+                0
+            },
+        }
+    }
+}
+
+/// See [`Options::conversion`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Conversion {
+    ai: bool,
+    layout: Layout,
+    swap: bool,
+    half_width: bool,
+    strength: u64,
+    popout: u64,
 }
 
 /// The source image and what the current options make of it. No window and
 /// no GPU: this is the part the tests drive.
+///
+/// The images are shared, not copied: where the result is the source
+/// unchanged (a flat picture, a side-by-side pair shown side by side) the
+/// two are one image, and a thread that reads the source holds it too.
 #[derive(Default)]
 pub struct Document {
-    source: Option<RgbaImage>,
+    source: Option<Arc<RgbaImage>>,
     /// The model's depth map of `source`, once it has been estimated.
     depth: Option<DepthMap>,
-    result: Option<RgbaImage>,
+    result: Option<Arc<RgbaImage>>,
     /// Bumped whenever `result` changes, so the page knows to upload it.
     generation: u64,
     /// Bumped whenever `source` changes, so a depth map that arrives for an
@@ -217,40 +278,135 @@ pub struct Document {
     source_id: u64,
 }
 
+/// An image file read and converted, ready to become the document's. Made
+/// off the UI thread ([`load`]): reading a large file takes a while.
+pub struct Loaded {
+    image: Arc<RgbaImage>,
+    /// The options the result was made for.
+    options: Options,
+    /// None for AI depth, whose result follows the model.
+    result: Option<Arc<RgbaImage>>,
+}
+
+/// Read the image in `path`, refusing one larger than the viewer opens
+/// before any of its pixels are decoded.
+fn decode(path: &Path) -> Result<RgbaImage, String> {
+    let failed = |e: &dyn std::fmt::Display| format!("Could not open {}: {e}", path.display());
+    let too_large = |size: &dyn std::fmt::Display| {
+        format!(
+            "Could not open {}: the image is too large{size}. The viewer opens images of up to {MAX_IMAGE_SIDE} pixels a side and {} million pixels.",
+            path.display(),
+            MAX_IMAGE_PIXELS / 1_000_000
+        )
+    };
+    let limited = |e: image::ImageError| match e {
+        image::ImageError::Limits(_) => too_large(&""),
+        e => failed(&e),
+    };
+    // Only a file is read: a pipe would never end, a device might.
+    let file = std::fs::metadata(path).map_err(|e| failed(&e))?;
+    if !file.is_file() {
+        return Err(failed(&"it is not a file."));
+    }
+    if file.len() > MAX_FILE_BYTES {
+        return Err(too_large(&format_args!(
+            " ({} MB on disk)",
+            file.len() / 1_000_000
+        )));
+    }
+    let mut reader = image::ImageReader::open(path).map_err(|e| failed(&e))?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    // The decoder has read the file's header and nothing else yet.
+    let decoder = reader.into_decoder().map_err(limited)?;
+    let (width, height) = decoder.dimensions();
+    if width > MAX_IMAGE_SIDE
+        || height > MAX_IMAGE_SIDE
+        || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
+        || decoder.total_bytes() > MAX_DECODE_BYTES
+    {
+        return Err(too_large(&format_args!(" ({width} × {height} pixels)")));
+    }
+    let image = image::DynamicImage::from_decoder(decoder).map_err(limited)?;
+    Ok(image.into_rgba8())
+}
+
+/// Read `path` and convert it for `options`. Blocks for as long as the file
+/// takes to decode: the page calls it on a thread of its own.
+pub fn load(path: &Path, options: Options) -> Result<Loaded, String> {
+    let image = Arc::new(decode(path)?);
+    // AI depth has nothing to show until the model has run: the image is
+    // taken as it is and the result follows with `set_depth`.
+    let result = if options.input == Input::Ai {
+        None
+    } else {
+        let converted = convert(&image, None, options)
+            .map_err(|e| format!("Could not use {}: {e}", path.display()))?;
+        Some(converted)
+    };
+    Ok(Loaded {
+        image,
+        options,
+        result,
+    })
+}
+
 impl Document {
     pub fn result(&self) -> Option<&RgbaImage> {
-        self.result.as_ref()
+        self.result.as_deref()
     }
 
     /// Decode `path` and convert it. On failure the previous image stays.
+    /// The page does the two halves apart, the first on a thread.
+    #[cfg(test)]
     pub fn open(&mut self, path: &Path, options: Options) -> Result<(), String> {
-        let image = image::open(path)
-            .map_err(|e| format!("Could not open {}: {e}", path.display()))?
-            .into_rgba8();
-        self.set_source(image, options)
+        let loaded = load(path, options)?;
+        self.install(loaded, options)
             .map_err(|e| format!("Could not use {}: {e}", path.display()))
     }
 
+    /// Take an image that was read for `loaded.options` while the options
+    /// are now `options`: converted again only if the two differ in what
+    /// decides the result. On failure the previous image stays.
+    pub fn install(&mut self, loaded: Loaded, options: Options) -> Result<(), String> {
+        let result = if loaded.options.conversion() == options.conversion() {
+            loaded.result
+        } else if options.input == Input::Ai {
+            None
+        } else {
+            Some(convert(&loaded.image, None, options)?)
+        };
+        self.replace(loaded.image, result);
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub fn set_source(&mut self, image: RgbaImage, options: Options) -> Result<(), String> {
-        // AI depth has nothing to show until the model has run: the image is
-        // taken as it is and the result follows with `set_depth`.
+        let image = Arc::new(image);
         let converted = if options.input == Input::Ai {
             None
         } else {
             Some(convert(&image, None, options)?)
         };
+        self.replace(image, converted);
+        Ok(())
+    }
+
+    fn replace(&mut self, image: Arc<RgbaImage>, result: Option<Arc<RgbaImage>>) {
         self.source = Some(image);
         self.depth = None;
-        self.result = converted;
+        self.result = result;
         self.generation += 1;
         self.source_id += 1;
-        Ok(())
     }
 
     /// The image the model should look at, with the id to hand back to
     /// [`Document::set_depth`], when the options need a depth map that has
     /// not been estimated yet.
-    pub fn depth_request(&self, options: Options) -> Option<(u64, &RgbaImage)> {
+    pub fn depth_request(&self, options: Options) -> Option<(u64, &Arc<RgbaImage>)> {
         if options.input != Input::Ai || self.depth.is_some() {
             return None;
         }
@@ -311,7 +467,8 @@ impl Document {
         let Some(result) = &self.result else {
             return Err(NO_IMAGE.into());
         };
-        any2odyssey_core::fsutil::write_atomic_document_with(path, |writer| {
+        let target = export_target(path)?;
+        any2odyssey_core::fsutil::write_atomic_document_with(&target, |writer| {
             result
                 .write_to(writer, image::ImageFormat::Png)
                 .map_err(std::io::Error::other)
@@ -320,20 +477,73 @@ impl Document {
     }
 }
 
+/// The file an export to `path` is written as. The export is published by
+/// renaming a finished file into place, and a rename replaces the name it
+/// is given, whatever that is: a link would be replaced instead of what it
+/// leads to, and a file the user may not write would be replaced all the
+/// same (the folder decides a rename, not the file). So links are followed
+/// here, and only a file that could have been written to is replaced.
+fn export_target(path: &Path) -> Result<PathBuf, String> {
+    let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
+    let mut target = path.to_owned();
+    // As many links as the system itself follows before it gives up.
+    for _ in 0..40 {
+        let metadata = match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => metadata,
+            // A new file (also where a link leads to nothing yet).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+            Err(e) => return Err(failed(&e)),
+        };
+        if metadata.file_type().is_symlink() {
+            let link = std::fs::read_link(&target).map_err(|e| failed(&e))?;
+            // A relative link starts from the folder the link is in.
+            target = match target.parent() {
+                Some(folder) => folder.join(link),
+                None => link,
+            };
+        } else if metadata.is_dir() {
+            return Err(failed(&"it is a folder. Choose a file name."));
+        } else if !metadata.is_file() {
+            return Err(failed(&"it is not an ordinary file."));
+        } else {
+            // Opened as a writer would open it, and closed again unchanged.
+            return match std::fs::OpenOptions::new().write(true).open(&target) {
+                Ok(_) => Ok(target),
+                Err(e) => Err(failed(&format_args!(
+                    "the existing file cannot be written to ({e}). It was left as it is."
+                ))),
+            };
+        }
+    }
+    Err(failed(&"too many links lead from it."))
+}
+
 fn convert(
-    image: &RgbaImage,
+    image: &Arc<RgbaImage>,
     depth: Option<&DepthMap>,
     options: Options,
-) -> Result<RgbaImage, String> {
+) -> Result<Arc<RgbaImage>, String> {
     if options.input == Input::Ai {
         let depth = depth.ok_or("The depth map is not ready.")?;
         // The rendered pair is full width per eye: no half-width stretch.
         let pair = dibr::synthesize(image, depth, options.params()).map_err(|e| e.to_string())?;
-        return stereo::convert(&pair, options.layout(), false, options.swap)
-            .map_err(|e| e.to_string());
+        let converted = stereo::convert_shared(&pair, options.layout(), false, options.swap)
+            .map_err(|e| e.to_string())?;
+        let changed = match converted {
+            Cow::Owned(converted) => Some(converted),
+            Cow::Borrowed(_) => None,
+        };
+        // Side by side and not swapped: the pair as it was rendered.
+        return Ok(Arc::new(changed.unwrap_or(pair)));
     }
-    stereo::convert(image, options.layout(), options.half_width, options.swap)
-        .map_err(|e| e.to_string())
+    let converted =
+        stereo::convert_shared(image, options.layout(), options.half_width, options.swap)
+            .map_err(|e| e.to_string())?;
+    Ok(match converted {
+        Cow::Owned(converted) => Arc::new(converted),
+        // The source unchanged: the same image, not a copy of it.
+        Cow::Borrowed(_) => Arc::clone(image),
+    })
 }
 
 /// `name` with a `.png` extension unless it already has one (any case).
@@ -379,6 +589,32 @@ enum Picked {
     Save(Result<Option<PathBuf>, String>),
 }
 
+/// An image file being read on a thread of its own.
+struct Loading {
+    path: PathBuf,
+    loaded: Receiver<Result<Loaded, String>>,
+}
+
+/// An export that waits for the answer to "Replace existing PNG?".
+#[derive(Debug, PartialEq, Eq)]
+struct PendingSave {
+    path: PathBuf,
+    /// The picture the question is about (`Document::generation`). The page
+    /// goes on taking dropped files and images from other launches while
+    /// the question is up, and an answer must not save another picture.
+    generation: u64,
+}
+
+/// What Leia's weaver was last given: a picture of the document (its
+/// generation) as it is composed for the two views, or black while that
+/// generation has no picture yet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Woven {
+    generation: u64,
+    flat: bool,
+    stretch: f64,
+}
+
 pub struct ViewerState {
     document: Document,
     options: Options,
@@ -389,10 +625,15 @@ pub struct ViewerState {
     uploaded: u64,
     output_open: bool,
     output_fullscreen: bool,
-    /// A file dialog running on its own thread.
-    picking: Option<Receiver<Picked>>,
+    /// An image being read, and the one asked for since: it is read next,
+    /// and the one before it is then not shown at all.
+    loading: Option<Loading>,
+    queued_open: Option<PathBuf>,
+    /// A file dialog running on its own thread, with the image that was
+    /// loaded when it was opened (`Document::source_id`).
+    picking: Option<(Receiver<Picked>, u64)>,
     /// Adding .png selected an existing path the file dialog did not confirm.
-    pending_save: Option<PathBuf>,
+    pending_save: Option<PendingSave>,
     /// The model running on its own thread, with the source id it was given.
     estimating: Option<(u64, Receiver<Result<DepthMap, String>>)>,
     /// The source the model last failed on, so the same failure is not
@@ -405,7 +646,7 @@ pub struct ViewerState {
     lens_switch: LensSwitch,
     /// Output through Leia's weaver, and the picture it was last given.
     weaver: Weaver,
-    woven: Option<u64>,
+    woven: Option<Woven>,
     /// The live screen while it is being shown.
     #[cfg(target_os = "linux")]
     live: Option<crate::live::Live>,
@@ -429,6 +670,8 @@ impl Default for ViewerState {
             uploaded: 0,
             output_open: false,
             output_fullscreen: false,
+            loading: None,
+            queued_open: None,
             picking: None,
             pending_save: None,
             estimating: None,
@@ -471,8 +714,63 @@ impl ViewerState {
         self.options.output == Output::Lens && self.lens.pattern
     }
 
-    fn open(&mut self, path: &Path) {
-        match self.document.open(path, self.options) {
+    /// Read the image in `path` on a thread of its own and show it when it
+    /// is there (`poll_open`): a large file takes seconds to decode, and
+    /// the page and the output must not stand still for them. One file at a
+    /// time. Of those asked for while one is read, the last one is next.
+    fn open(&mut self, ctx: &egui::Context, path: &Path) {
+        if self.loading.is_some() {
+            self.queued_open = Some(path.to_owned());
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let (ctx, file, options) = (ctx.clone(), path.to_owned(), self.options);
+        let spawned = std::thread::Builder::new()
+            .name("image-open".into())
+            .spawn(move || {
+                let _ = tx.send(load(&file, options));
+                ctx.request_repaint();
+            });
+        match spawned {
+            Ok(_) => {
+                self.status = format!("Opening {}…", path.display());
+                self.loading = Some(Loading {
+                    path: path.to_owned(),
+                    loaded: rx,
+                });
+            }
+            Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
+        }
+    }
+
+    /// Take the image a thread has read. On failure the previous image
+    /// stays, as it does for an image that was asked for again meanwhile.
+    fn poll_open(&mut self, ctx: &egui::Context) {
+        let Some(loading) = &self.loading else {
+            return;
+        };
+        let loaded = match loading.loaded.try_recv() {
+            Ok(loaded) => loaded,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err(format!(
+                "Could not open {}: reading it stopped unexpectedly.",
+                loading.path.display()
+            )),
+        };
+        let Some(Loading { path, .. }) = self.loading.take() else {
+            return;
+        };
+        if let Some(next) = self.queued_open.take() {
+            // Another image has been asked for since: that one is shown.
+            self.open(ctx, &next);
+            return;
+        }
+        let installed = loaded.and_then(|loaded| {
+            self.document
+                .install(loaded, self.options)
+                .map_err(|e| format!("Could not use {}: {e}", path.display()))
+        });
+        match installed {
             Ok(()) => {
                 self.path_text = path.display().to_string();
                 self.depth_failed = None;
@@ -483,6 +781,27 @@ impl ViewerState {
             }
             Err(e) => self.status = e,
         }
+    }
+
+    /// Whether the picture is still on its way: the options ask for AI
+    /// depth, and the model has neither given the image's nor failed on it.
+    fn depth_pending(&self) -> bool {
+        self.document
+            .depth_request(self.options)
+            .is_some_and(|(id, _)| self.depth_failed != Some(id))
+    }
+
+    /// With the output open and no picture: see the estimate through from
+    /// here, and tell whether the output should wait for it. The page does
+    /// the same when it is drawn, which it is not while the controls are
+    /// minimized or show another page, and the output is up all the same.
+    fn awaiting_depth(&mut self, ctx: &egui::Context) -> bool {
+        if self.options.live() || self.document.result().is_some() {
+            return false;
+        }
+        self.poll_depth();
+        self.ensure_depth(ctx);
+        self.document.result().is_none() && self.depth_pending()
     }
 
     /// Start the model when the options need a depth map there is none of
@@ -497,9 +816,8 @@ impl ViewerState {
         if self.depth_failed == Some(id) {
             return;
         }
-        // Copy only when an estimate will actually start. A failed request
-        // is checked on every repaint, even for very large source images.
-        let image = image.clone();
+        // The thread reads the document's own image: nothing is copied.
+        let image = Arc::clone(image);
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         let detail = self.options.detail;
@@ -558,7 +876,14 @@ impl ViewerState {
     }
 
     fn options_changed(&mut self) {
-        if let Err(e) = self.document.reconvert(self.options) {
+        let converted = self.document.reconvert(self.options);
+        self.settle(converted);
+    }
+
+    /// After a change of options: close the output and say why if the image
+    /// cannot be converted with them, or say what there is now.
+    fn settle(&mut self, converted: Result<(), String>) {
+        if let Err(e) = converted {
             self.output_open = false;
             self.status = e;
         } else if self.document.result().is_some() {
@@ -750,9 +1075,10 @@ impl ViewerState {
     fn show_odyssey(&mut self, ctx: &egui::Context) {
         self.lens.release();
         self.lens_switch.set(false, || {});
-        if !self.options.live() && self.document.result().is_none() {
-            // AI depth may be pending after changing the image or its options.
-            // Retire the old picture without replacing the estimation status.
+        let awaiting = self.awaiting_depth(ctx);
+        if !self.options.live() && self.document.result().is_none() && !awaiting {
+            // Nothing to show and nothing on its way: there is no image, or
+            // its depth could not be estimated (the status says why).
             self.output_open = false;
             self.weaver.stop();
             self.stop_live();
@@ -792,15 +1118,29 @@ impl ViewerState {
             return;
         }
         self.stop_live();
-        let generation = self.document.generation;
-        if self.woven != Some(generation) {
-            if let Some(pair) = self.document.result() {
-                let flat = self.options.input == Input::Flat;
-                let picture = weaver::compose_still(pair, flat, self.options.eye_stretch());
-                self.weaver
-                    .show(picture.width(), picture.height(), picture.as_raw());
-                self.woven = Some(generation);
-            }
+        let wanted = Woven {
+            generation: self.document.generation,
+            flat: self.options.input == Input::Flat,
+            stretch: self.options.eye_stretch(),
+        };
+        if self.woven != Some(wanted) {
+            let picture = match self.document.result() {
+                Some(pair) => weaver::compose_still(pair, wanted.flat, wanted.stretch),
+                // The image's depth is still being estimated (a new image,
+                // another depth detail, AI depth just chosen). The output
+                // stays as it is, helper, lens and eye tracking included,
+                // and shows black instead of the picture before until the
+                // new one is there: stopping the helper would take the
+                // lens away and half a minute to bring back.
+                None => RgbaImage::from_pixel(
+                    weaver::STILL_VIEW.0 * 2,
+                    weaver::STILL_VIEW.1,
+                    image::Rgba([0, 0, 0, 255]),
+                ),
+            };
+            self.weaver
+                .show(picture.width(), picture.height(), picture.as_raw());
+            self.woven = Some(wanted);
         }
         if self.document.result().is_some() {
             self.status = match status {
@@ -830,13 +1170,16 @@ impl ViewerState {
                 ctx.request_repaint();
             });
         match spawned {
-            Ok(_) => self.picking = Some(rx),
+            Ok(_) => self.picking = Some((rx, self.document.source_id)),
             Err(e) => self.status = format!("Could not open a file dialog: {e}"),
         }
     }
 
-    fn poll_dialog(&mut self) {
-        let Some(rx) = &self.picking else { return };
+    fn poll_dialog(&mut self, ctx: &egui::Context) {
+        let Some((rx, asked_for)) = &self.picking else {
+            return;
+        };
+        let asked_for = *asked_for;
         let picked = match rx.try_recv() {
             Ok(picked) => picked,
             Err(TryRecvError::Empty) => return,
@@ -847,7 +1190,13 @@ impl ViewerState {
         };
         self.picking = None;
         match picked {
-            Picked::Open(Ok(Some(path))) => self.open(&path),
+            Picked::Open(Ok(Some(path))) => self.open(ctx, &path),
+            // The dialog was about the image that was loaded when it was
+            // opened; another one since (dropped, or handed over by another
+            // launch) is not saved under the name chosen for that one.
+            Picked::Save(Ok(Some(_))) if asked_for != self.document.source_id => {
+                self.status = EXPORT_OUTDATED.into();
+            }
             Picked::Save(Ok(Some(path))) => self.save_selected(path),
             Picked::Open(Ok(None)) | Picked::Save(Ok(None)) => {}
             Picked::Open(Err(e)) | Picked::Save(Err(e)) => self.status = e,
@@ -856,13 +1205,24 @@ impl ViewerState {
 
     fn save_selected(&mut self, selected: PathBuf) {
         let destination = with_png_extension(selected.clone());
+        if destination.is_dir() {
+            // Said at once, not after asking whether to replace it.
+            self.status = format!(
+                "Could not save {}: it is a folder. Choose a file name.",
+                destination.display()
+            );
+            return;
+        }
         if destination != selected {
             // The native dialog confirmed only `selected`. Adding the suffix
             // can select a different existing file, including a dangling
-            // symlink that the atomic writer would replace.
+            // symlink whose target the export would create.
             match std::fs::symlink_metadata(&destination) {
                 Ok(_) => {
-                    self.pending_save = Some(destination);
+                    self.pending_save = Some(PendingSave {
+                        path: destination,
+                        generation: self.document.generation,
+                    });
                     return;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -876,20 +1236,29 @@ impl ViewerState {
     }
 
     fn finish_save_confirmation(&mut self, replace: bool) {
-        let Some(path) = self.pending_save.take() else {
+        let Some(pending) = self.pending_save.take() else {
             return;
         };
-        if replace {
-            self.save(&path);
-        } else {
+        if !replace {
             self.status = "Export cancelled.".into();
+        } else if pending.generation != self.document.generation {
+            self.status = EXPORT_OUTDATED.into();
+        } else {
+            self.save(&pending.path);
         }
     }
 
     fn show_save_confirmation(&mut self, ctx: &egui::Context) {
-        let Some(path) = &self.pending_save else {
+        let Some(PendingSave { path, generation }) = &self.pending_save else {
             return;
         };
+        if *generation != self.document.generation {
+            // The question is about a picture that is no longer the one
+            // shown: it is withdrawn rather than left to be answered.
+            self.pending_save = None;
+            self.status = EXPORT_OUTDATED.into();
+            return;
+        }
         let modal = egui::Modal::new(egui::Id::new("viewer-replace-png")).show(ctx, |ui| {
             ui.set_max_width(460.0);
             ui.heading("Replace existing PNG?");
@@ -958,13 +1327,14 @@ impl ViewerState {
     /// local output shortcut.
     fn collect_input(&mut self, ctx: &egui::Context) {
         for path in platform::take_open_requests() {
-            self.open(&path);
+            self.open(ctx, &path);
         }
         let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone()));
         if let Some(path) = dropped {
-            self.open(&path);
+            self.open(ctx, &path);
         }
-        self.poll_dialog();
+        self.poll_dialog(ctx);
+        self.poll_open(ctx);
         self.poll_depth();
         if ctx.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(Key::F10)) {
             self.toggle_output();
@@ -1035,7 +1405,7 @@ impl ViewerState {
                     let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if entered && !state.path_text.trim().is_empty() {
                         let path = PathBuf::from(state.path_text.trim());
-                        state.open(&path);
+                        state.open(ui.ctx(), &path);
                     }
                     if gold_button(ui, "Open…", false, p).clicked() {
                         state.pick(ui.ctx(), false);
@@ -1222,7 +1592,15 @@ impl ViewerState {
                 // model again after a failure.
                 self.depth_failed = None;
             }
-            self.options_changed();
+            // Converting is the expensive part of a change, and a slider
+            // makes one at every step: only what changes the result does it.
+            if self.options.conversion() != before.conversion()
+                || self.options.detail != before.detail
+            {
+                self.options_changed();
+            } else {
+                self.settle(Ok(()));
+            }
         }
         self.lens.save_when_settled(&ctx, std::time::Instant::now());
         self.ensure_depth(&ctx);
@@ -1305,8 +1683,13 @@ impl ViewerState {
         self.stop_live();
         self.woven = None;
         let weaving = self.options.weaves() || self.shows_pattern();
+        // While AI depth is being estimated the window stays, black, and
+        // the picture comes into it by itself. The page uploads the picture
+        // when it is drawn; with the controls minimized this does.
+        let awaiting = self.awaiting_depth(ctx);
+        self.sync_texture(ctx);
         let plain = self.texture.clone();
-        if plain.is_none() && !self.shows_pattern() {
+        if plain.is_none() && !self.shows_pattern() && !awaiting {
             self.output_open = false;
             self.lens.release();
             self.lens_switch.set(false, || {});
@@ -1323,7 +1706,7 @@ impl ViewerState {
         let lens_status = self.lens_switch.status();
         let stretch = self.options.eye_stretch();
         let generation = self.document.generation;
-        let pair = self.document.result.as_ref();
+        let pair = self.document.result.as_deref();
         let lens_state = &mut self.lens;
         let id = egui::ViewportId::from_hash_of("any2odyssey-output");
         let builder = egui::ViewportBuilder::default()
@@ -1516,11 +1899,11 @@ mod tests {
         let mut state = ViewerState::default();
         state.document.set_source(pair(), state.options).unwrap();
         let (tx, rx) = mpsc::channel();
-        state.picking = Some(rx);
+        state.picking = Some((rx, state.document.source_id));
         tx.send(Picked::Save(Ok(Some(chosen.clone())))).unwrap();
-        state.poll_dialog();
+        state.poll_dialog(&egui::Context::default());
         assert_eq!(std::fs::read(&destination).unwrap(), b"existing export");
-        assert_eq!(state.pending_save.as_ref(), Some(&destination));
+        assert_eq!(pending_path(&state), Some(&destination));
         state.finish_save_confirmation(false);
         assert!(state.pending_save.is_none());
         assert_eq!(std::fs::read(&destination).unwrap(), b"existing export");
@@ -1559,15 +1942,194 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chosen = dir.path().join("link");
         let destination = with_png_extension(chosen.clone());
-        let missing = dir.path().join("missing");
+        let missing = dir.path().join("missing-target.png");
         std::os::unix::fs::symlink(&missing, &destination).unwrap();
         let mut state = ViewerState::default();
         state.document.set_source(pair(), state.options).unwrap();
-        state.save_selected(chosen);
-        assert_eq!(state.pending_save.as_ref(), Some(&destination));
+        state.save_selected(chosen.clone());
+        assert_eq!(pending_path(&state), Some(&destination));
         assert_eq!(std::fs::read_link(&destination).unwrap(), missing);
         state.finish_save_confirmation(false);
         assert_eq!(std::fs::read_link(&destination).unwrap(), missing);
+        // Confirmed, the export goes where the link leads, and the link
+        // stays a link.
+        state.save_selected(chosen);
+        state.finish_save_confirmation(true);
+        assert_eq!(std::fs::read_link(&destination).unwrap(), missing);
+        assert_eq!(
+            image::open(&missing).unwrap().to_rgba8(),
+            *state.document.result().unwrap()
+        );
+    }
+
+    fn pending_path(state: &ViewerState) -> Option<&PathBuf> {
+        state.pending_save.as_ref().map(|pending| &pending.path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_follows_links_to_the_file_and_leaves_what_it_may_not_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut document = Document::default();
+        document.set_source(pair(), Options::default()).unwrap();
+        let exported = |path: &Path| image::open(path).unwrap().to_rgba8();
+
+        // A link to a link to a file in another folder, one of them relative.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let file = elsewhere.join("picture.png");
+        std::fs::write(&file, b"old export").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let inner = dir.path().join("inner.png");
+        std::os::unix::fs::symlink("elsewhere/picture.png", &inner).unwrap();
+        let outer = dir.path().join("outer.png");
+        std::os::unix::fs::symlink(&inner, &outer).unwrap();
+        assert_eq!(
+            export_target(&outer).unwrap(),
+            dir.path().join("elsewhere/picture.png")
+        );
+        document.save_png(&outer).unwrap();
+        assert_eq!(exported(&file), *document.result().unwrap());
+        for link in [&inner, &outer] {
+            assert!(link.is_symlink(), "{link:?} is still a link");
+        }
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "the file that was replaced keeps its permissions"
+        );
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 1);
+
+        // Links in a circle lead nowhere.
+        let (a, b) = (dir.path().join("a.png"), dir.path().join("b.png"));
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        let error = document.save_png(&a).unwrap_err();
+        assert!(error.contains("too many links"), "{error}");
+
+        // A folder, and something that is neither file nor folder.
+        let error = document.save_png(&elsewhere).unwrap_err();
+        assert!(error.contains("it is a folder"), "{error}");
+        let socket = dir.path().join("socket.png");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let error = document.save_png(&socket).unwrap_err();
+        assert!(error.contains("not an ordinary file"), "{error}");
+
+        // A file this user may not write is left as it is, directly and
+        // through a link. (Whoever may write everything, root, may.)
+        let locked = dir.path().join("locked.png");
+        std::fs::write(&locked, b"keep me").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let to_locked = dir.path().join("to-locked.png");
+        std::os::unix::fs::symlink(&locked, &to_locked).unwrap();
+        let may_write_anything = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&locked)
+            .is_ok();
+        for path in [&locked, &to_locked] {
+            let saved = document.save_png(path);
+            if may_write_anything {
+                saved.unwrap();
+                assert_eq!(exported(&locked), *document.result().unwrap());
+            } else {
+                let error = saved.unwrap_err();
+                assert!(error.contains("cannot be written to"), "{error}");
+                assert_eq!(std::fs::read(&locked).unwrap(), b"keep me");
+            }
+            assert_eq!(
+                std::fs::metadata(&locked).unwrap().permissions().mode() & 0o777,
+                0o444
+            );
+        }
+    }
+
+    #[test]
+    fn a_folder_is_refused_before_any_question_and_a_new_file_needs_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = ViewerState::default();
+        state.document.set_source(pair(), state.options).unwrap();
+        // "out" becomes "out.png", which is a folder.
+        let folder = dir.path().join("out.png");
+        std::fs::create_dir(&folder).unwrap();
+        for chosen in [dir.path().join("out"), folder.clone()] {
+            state.status.clear();
+            state.save_selected(chosen);
+            assert!(state.pending_save.is_none(), "no question about a folder");
+            assert!(state.status.contains("it is a folder"), "{}", state.status);
+        }
+        assert!(folder.is_dir());
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+        assert_eq!(
+            export_target(&dir.path().join("new.png")).unwrap(),
+            dir.path().join("new.png")
+        );
+    }
+
+    #[test]
+    fn an_answer_about_one_picture_does_not_save_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("out");
+        let destination = dir.path().join("out.png");
+        let other = RgbaImage::from_pixel(6, 2, image::Rgba([9, 8, 7, 255]));
+        let ctx = egui::Context::default();
+
+        // Replace is pressed after another image has arrived.
+        let mut state = ViewerState::default();
+        state.document.set_source(pair(), state.options).unwrap();
+        std::fs::write(&destination, b"existing export").unwrap();
+        state.save_selected(chosen.clone());
+        assert!(state.pending_save.is_some());
+        state
+            .document
+            .set_source(other.clone(), state.options)
+            .unwrap();
+        state.finish_save_confirmation(true);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing export");
+        assert_eq!(state.status, EXPORT_OUTDATED);
+        assert!(state.pending_save.is_none());
+
+        // The question itself goes away when the picture changes under it,
+        // also for a change of the same image (its depth arriving).
+        state.save_selected(chosen.clone());
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            state.show_save_confirmation(ctx)
+        });
+        assert!(
+            state.pending_save.is_some(),
+            "the same picture: still asked"
+        );
+        state.options.swap = true;
+        state.options_changed();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            state.show_save_confirmation(ctx)
+        });
+        assert!(state.pending_save.is_none());
+        assert_eq!(state.status, EXPORT_OUTDATED);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing export");
+
+        // A save dialog that was open while another image was loaded.
+        let (tx, rx) = mpsc::channel();
+        state.picking = Some((rx, state.document.source_id));
+        state.document.set_source(pair(), state.options).unwrap();
+        state.status.clear();
+        tx.send(Picked::Save(Ok(Some(dir.path().join("late.png")))))
+            .unwrap();
+        state.poll_dialog(&ctx);
+        assert_eq!(state.status, EXPORT_OUTDATED);
+        assert!(!dir.path().join("late.png").exists());
+        // The same image with another setting is what the dialog was about.
+        let (tx, rx) = mpsc::channel();
+        state.picking = Some((rx, state.document.source_id));
+        state.options.swap = false;
+        state.options_changed();
+        tx.send(Picked::Save(Ok(Some(dir.path().join("late.png")))))
+            .unwrap();
+        state.poll_dialog(&ctx);
+        assert_eq!(
+            image::open(dir.path().join("late.png")).unwrap().to_rgba8(),
+            *state.document.result().unwrap()
+        );
     }
 
     #[test]
@@ -1576,7 +2138,10 @@ mod tests {
         let path = dir.path().join("existing.png");
         std::fs::write(&path, b"existing export").unwrap();
         let mut state = ViewerState {
-            pending_save: Some(path.clone()),
+            pending_save: Some(PendingSave {
+                path: path.clone(),
+                generation: 0,
+            }),
             ..ViewerState::default()
         };
         let ctx = egui::Context::default();
@@ -1820,12 +2385,13 @@ mod tests {
         state.options.input = Input::Ai;
         state.document.set_source(pair(), state.options).unwrap();
         let (id, requested) = state.document.depth_request(state.options).unwrap();
-        assert_eq!(
-            requested.as_ptr(),
-            state.document.source.as_ref().unwrap().as_ptr(),
+        assert!(
+            Arc::ptr_eq(requested, state.document.source.as_ref().unwrap()),
             "checking eligibility must not allocate and copy an image"
         );
+        assert!(state.depth_pending());
         state.depth_failed = Some(id);
+        assert!(!state.depth_pending());
         let ctx = egui::Context::default();
         for _ in 0..10 {
             state.ensure_depth(&ctx);
@@ -1834,6 +2400,11 @@ mod tests {
                 "failed requests stay suppressed"
             );
         }
+        assert_eq!(
+            Arc::strong_count(state.document.source.as_ref().unwrap()),
+            1,
+            "nobody else holds the image, and nobody has copied it"
+        );
     }
 
     #[test]
@@ -1934,75 +2505,590 @@ mod tests {
         );
     }
 
+    /// A stand-in for the weaver's helper that says where its frame file
+    /// is, reports a picture and stays until it is let go.
     #[cfg(unix)]
-    #[test]
-    fn odyssey_stops_showing_the_previous_still_while_depth_is_pending() {
+    fn odyssey_showing(dir: &Path, transition: usize) -> (ViewerState, PathBuf, egui::Context) {
         use std::os::unix::fs::PermissionsExt;
         use std::time::{Duration, Instant};
-        let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("weaver.sh");
-        std::fs::write(&helper, "#!/bin/sh\nprintf 'on\n'\ncat >/dev/null\n").unwrap();
+        let said = dir.join(format!("frames-{transition}"));
+        let helper = dir.join(format!("weaver-{transition}.sh"));
+        std::fs::write(
+            &helper,
+            // The name is there whole or not at all, and then the word the
+            // real helper prints once a picture is showing.
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > '{0}.tmp' && mv '{0}.tmp' '{0}'\necho on\ncat >/dev/null\n",
+                said.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for transition in 0..3 {
-            let mut state = ViewerState::default();
-            state.options.output = Output::Odyssey;
-            if transition != 0 {
+
+        let mut state = ViewerState::default();
+        state.options.output = Output::Odyssey;
+        if transition != 0 {
+            state.options.input = Input::Ai;
+        }
+        state.document.set_source(pair(), state.options).unwrap();
+        if transition != 0 {
+            state
+                .document
+                .set_depth(state.document.source_id, a_depth_map(), state.options)
+                .unwrap();
+        }
+        assert!(state.document.result().is_some());
+        state.weaver = Weaver::with_helper(Some(helper));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            state.weaver.start(false, || {});
+            if !matches!(state.weaver.status(), WeaverStatus::Failed(ref e) if e.contains("busy")) {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        while !matches!(state.weaver.status(), WeaverStatus::On { .. }) || !said.exists() {
+            assert!(!state.weaver.poll(), "helper stopped");
+            assert!(!matches!(state.weaver.status(), WeaverStatus::Failed(_)));
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let frames = PathBuf::from(std::fs::read_to_string(&said).unwrap());
+        state.output_open = true;
+        let ctx = egui::Context::default();
+        // The picture is on the Odyssey before anything changes.
+        state.show_output(&ctx);
+        assert!(state.output_open && state.weaver.is_running());
+        let (size, black) = picture_in(&frames);
+        assert_eq!(size, (weaver::STILL_VIEW.0 * 2, weaver::STILL_VIEW.1));
+        assert!(!black, "the still picture is showing");
+        (state, frames, ctx)
+    }
+
+    #[cfg(unix)]
+    fn a_depth_map() -> DepthMap {
+        DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap()
+    }
+
+    /// The size of the picture the weaver's frame file holds now, and
+    /// whether it is all black (`weaver`'s module text describes the file).
+    #[cfg(unix)]
+    fn picture_in(frames: &Path) -> ((u32, u32), bool) {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(frames).unwrap();
+        let mut header = [0u8; 28];
+        file.read_exact(&mut header).unwrap();
+        let field = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        let (capacity, sequence, width, height, place) =
+            (field(8), field(12), field(16), field(20), field(24));
+        assert_eq!(sequence % 2, 0, "a finished picture");
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        file.seek(SeekFrom::Start(
+            4096 + u64::from(place) * u64::from(capacity),
+        ))
+        .unwrap();
+        file.read_exact(&mut pixels).unwrap();
+        let black = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [0, 0, 0, 255]);
+        ((width, height), black)
+    }
+
+    /// The three ways a picture that is showing comes to wait for its depth.
+    #[cfg(unix)]
+    fn make_depth_pending(state: &mut ViewerState, transition: usize) {
+        match transition {
+            // AI depth is chosen for the image.
+            0 => {
                 state.options.input = Input::Ai;
+                state.options_changed();
             }
-            state.document.set_source(pair(), state.options).unwrap();
-            if transition != 0 {
-                state
-                    .document
-                    .set_depth(
-                        state.document.source_id,
-                        DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap(),
-                        state.options,
-                    )
-                    .unwrap();
+            // Another depth detail.
+            1 => {
+                state.document.forget_depth();
+                state.options_changed();
             }
-            assert!(state.document.result().is_some());
-            state.weaver = Weaver::with_helper(Some(helper.clone()));
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                state.weaver.start(false, || {});
-                if !matches!(state.weaver.status(), WeaverStatus::Failed(ref e) if e.contains("busy"))
-                {
-                    break;
-                }
-                assert!(Instant::now() < deadline);
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            while !matches!(state.weaver.status(), WeaverStatus::On { .. }) {
-                assert!(!state.weaver.poll(), "helper stopped");
-                assert!(!matches!(state.weaver.status(), WeaverStatus::Failed(_)));
-                assert!(Instant::now() < deadline);
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            // A real frame has been published before conversion becomes pending.
-            state.weaver.show(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]);
-            state.output_open = true;
-            match transition {
-                0 => {
-                    state.options.input = Input::Ai;
-                    state.options_changed();
-                }
-                1 => {
-                    state.document.forget_depth();
-                    state.options_changed();
-                }
-                _ => {
-                    state.document.set_source(pair(), state.options).unwrap();
-                }
-            }
-            assert!(state.document.result().is_none());
+            // Another image.
+            _ => state.document.set_source(pair(), state.options).unwrap(),
+        }
+        assert!(state.document.result().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn odyssey_output_goes_black_while_depth_is_pending_and_resumes_by_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        for transition in 0..3 {
+            let (mut state, frames, ctx) = odyssey_showing(dir.path(), transition);
+            make_depth_pending(&mut state, transition);
+            // The estimate is running (no model is started by this test).
+            let estimate = queued_depth(&mut state);
             state.status = ESTIMATING.into();
-            state.show_output(&egui::Context::default());
+            state.show_output(&ctx);
             assert!(
-                !state.weaver.is_running(),
-                "previous picture survives transition {transition}"
+                state.output_open,
+                "transition {transition} closed the output"
             );
-            assert!(!state.output_open);
+            assert!(state.weaver.is_running(), "the helper stays, lens and all");
             assert_eq!(state.status, ESTIMATING);
+            let (size, black) = picture_in(&frames);
+            assert_eq!(size, (weaver::STILL_VIEW.0 * 2, weaver::STILL_VIEW.1));
+            assert!(black, "the picture before survives transition {transition}");
+            // Waiting writes nothing more.
+            let written = state.woven;
+            state.show_output(&ctx);
+            assert_eq!(state.woven, written);
+            assert!(state.output_open && state.estimating.is_some());
+
+            // The estimate arrives while only the output is being drawn (the
+            // controls are minimized): the picture comes back by itself.
+            estimate.send(Ok(a_depth_map())).unwrap();
+            state.show_output(&ctx);
+            assert!(state.output_open && state.weaver.is_running());
+            assert!(state.document.result().is_some());
+            assert!(!picture_in(&frames).1, "the new picture is showing");
+            assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_estimate_closes_the_waiting_odyssey_output_with_its_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 2);
+        make_depth_pending(&mut state, 2);
+        let estimate = queued_depth(&mut state);
+        state.show_output(&ctx);
+        assert!(state.output_open && state.weaver.is_running());
+        estimate
+            .send(Err("the model is not installed".into()))
+            .unwrap();
+        state.show_output(&ctx);
+        assert!(!state.output_open);
+        assert!(!state.weaver.is_running());
+        assert_eq!(state.status, "the model is not installed");
+        assert_eq!(state.depth_failed, Some(state.document.source_id));
+        // And it stays closed: the failed image is not tried again.
+        state.show_output(&ctx);
+        assert!(!state.output_open && state.estimating.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_the_output_during_the_wait_is_not_undone_by_the_estimate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 1);
+        make_depth_pending(&mut state, 1);
+        let estimate = queued_depth(&mut state);
+        state.show_output(&ctx);
+        assert!(state.output_open);
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, OUTPUT_OFF);
+        state.show_output(&ctx);
+        assert!(!state.weaver.is_running());
+        estimate.send(Ok(a_depth_map())).unwrap();
+        // The page takes the estimate; the output stays off.
+        state.poll_depth();
+        state.show_output(&ctx);
+        assert!(state.document.result().is_some());
+        assert!(!state.output_open && !state.weaver.is_running());
+        assert_eq!(state.status, CONVERTED);
+        // Started again by the user, it shows the new picture.
+        assert!(state.woven.is_none());
+    }
+
+    #[test]
+    fn the_output_window_waits_for_depth_too_and_closes_when_there_is_none_to_come() {
+        let ctx = egui::Context::default();
+        let frame = |state: &mut ViewerState| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| state.show_output(ctx));
+        };
+        let depth = || DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap();
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        state.options.output = Output::Sbs;
+        state.document.set_source(pair(), state.options).unwrap();
+        state
+            .document
+            .set_depth(state.document.source_id, depth(), state.options)
+            .unwrap();
+        state.toggle_output();
+        frame(&mut state);
+        assert!(state.output_open && state.texture.is_some());
+
+        // Another image: its depth is on its way.
+        state.document.set_source(pair(), state.options).unwrap();
+        let estimate = queued_depth(&mut state);
+        frame(&mut state);
+        assert!(state.output_open, "the window waits");
+        assert!(state.texture.is_none(), "black, not the picture before");
+        estimate.send(Ok(depth())).unwrap();
+        frame(&mut state);
+        assert!(state.output_open && state.texture.is_some());
+        assert_eq!(state.status, OUTPUT_ON);
+
+        // Depth that fails closes it, with the reason.
+        state.document.set_source(pair(), state.options).unwrap();
+        let estimate = queued_depth(&mut state);
+        frame(&mut state);
+        assert!(state.output_open);
+        estimate.send(Err("no model".into())).unwrap();
+        frame(&mut state);
+        assert!(!state.output_open);
+        assert_eq!(state.status, "no model");
+
+        // A pair that cannot be shown has nothing coming: closed at once.
+        let mut state = ViewerState::default();
+        state.options.input = Input::Flat;
+        state.document.set_source(pair(), state.options).unwrap();
+        state.toggle_output();
+        state.document = Document::default();
+        frame(&mut state);
+        assert!(!state.output_open);
+    }
+
+    /// A PNG file that says it holds a `width` x `height` greyscale picture
+    /// and holds next to nothing: the header, an empty data chunk, the end.
+    fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &byte in bytes {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+                }
+            }
+            !crc
+        }
+        let mut file = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+            file.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            file.extend_from_slice(&body);
+            file.extend_from_slice(&crc(&body).to_be_bytes());
+        };
+        let mut header = Vec::new();
+        header.extend_from_slice(&width.to_be_bytes());
+        header.extend_from_slice(&height.to_be_bytes());
+        // Eight bits, greyscale, the only compression and filter, no interlace.
+        header.extend_from_slice(&[8, 0, 0, 0, 0]);
+        chunk(b"IHDR", &header);
+        chunk(b"IDAT", &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+        chunk(b"IEND", &[]);
+        file
+    }
+
+    #[test]
+    fn an_image_too_large_to_hold_is_refused_from_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        let mut document = Document::default();
+        document.set_source(pair(), Options::default()).unwrap();
+        let generation = document.generation;
+        for (width, height, says_size) in [
+            // The file of the report: 22 000 pixels a side in a few bytes.
+            (22_000, 22_000, false),
+            (MAX_IMAGE_SIDE + 1, 1, false),
+            (1, MAX_IMAGE_SIDE + 1, false),
+            (0x7fff_ffff, 0x7fff_ffff, false),
+            // Each side is allowed, the picture is not.
+            (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE, true),
+            (MAX_IMAGE_SIDE, 4097, true),
+        ] {
+            let file = png_claiming(width, height);
+            assert!(file.len() < 100);
+            std::fs::write(&path, file).unwrap();
+            for error in [
+                decode(&path).unwrap_err(),
+                load(&path, Options::default()).err().unwrap(),
+                document.open(&path, Options::default()).unwrap_err(),
+            ] {
+                assert!(error.starts_with("Could not open "), "{error}");
+                assert!(error.contains("too large"), "{width}x{height}: {error}");
+                assert!(error.contains("16384 pixels a side"), "{error}");
+                assert_eq!(
+                    error.contains(&format!("({width} × {height} pixels)")),
+                    says_size,
+                    "{error}"
+                );
+            }
+        }
+        assert_eq!(document.generation, generation, "the loaded image stays");
+        // The limit is not in the way of the largest picture it allows: the
+        // header is accepted, and the (missing) pixels are what fails.
+        std::fs::write(&path, png_claiming(MAX_IMAGE_SIDE, 4096)).unwrap();
+        let error = decode(&path).unwrap_err();
+        assert!(!error.contains("too large"), "{error}");
+        // And an ordinary file is an ordinary image.
+        pair().save(&path).unwrap();
+        assert_eq!(decode(&path).unwrap(), pair());
+        // Something that is not a file is not opened at all (a pipe would
+        // keep the reader waiting for good).
+        let error = decode(dir.path()).unwrap_err();
+        assert!(error.ends_with("it is not a file."), "{error}");
+        // Nor is a file no image can be as large as; its size is all that
+        // is looked at (nothing of it is on disk here).
+        let sparse = dir.path().join("sparse.jpg");
+        let file = std::fs::File::create(&sparse).unwrap();
+        if file.set_len(MAX_FILE_BYTES + 1).is_ok() {
+            let error = decode(&sparse).unwrap_err();
+            assert!(error.contains("too large (1073 MB on disk)"), "{error}");
+        }
+    }
+
+    /// Wait for the image being read and take it.
+    fn finish_opening(state: &mut ViewerState, ctx: &egui::Context) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while state.loading.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the image never arrived"
+            );
+            state.poll_open(ctx);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn an_image_is_read_off_the_ui_thread_and_the_last_one_asked_for_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let file = |name: &str, color: u8| {
+            let path = dir.path().join(name);
+            RgbaImage::from_pixel(4, 2, image::Rgba([color, 0, 0, 255]))
+                .save(&path)
+                .unwrap();
+            path
+        };
+        let (first, second, third) = (file("1.png", 10), file("2.png", 20), file("3.png", 30));
+        let red =
+            |state: &ViewerState| state.document.source.as_ref().unwrap().get_pixel(0, 0).0[0];
+
+        let mut state = ViewerState::default();
+        state.open(&ctx, &first);
+        assert!(state.loading.is_some());
+        assert!(
+            state.document.result().is_none(),
+            "nothing is read on this thread"
+        );
+        assert!(state.status.starts_with("Opening "), "{}", state.status);
+        finish_opening(&mut state, &ctx);
+        assert_eq!(red(&state), 10);
+        assert_eq!(state.status, LOADED);
+        assert_eq!(state.path_text, first.display().to_string());
+        assert!(state.document.result().is_some());
+
+        // Three more in a row: one is being read, the last one is next and
+        // the one between is never read. The one being read is not shown.
+        let source_id = state.document.source_id;
+        state.open(&ctx, &second);
+        state.open(&ctx, &first);
+        state.open(&ctx, &third);
+        assert_eq!(state.loading.as_ref().unwrap().path, second);
+        assert_eq!(state.queued_open.as_ref(), Some(&third));
+        finish_opening(&mut state, &ctx);
+        assert_eq!(red(&state), 30);
+        assert_eq!(
+            state.document.source_id,
+            source_id + 1,
+            "one image was shown"
+        );
+        assert_eq!(state.path_text, third.display().to_string());
+
+        // A file that cannot be read leaves the image and says so.
+        state.open(&ctx, &dir.path().join("missing.png"));
+        finish_opening(&mut state, &ctx);
+        assert!(
+            state.status.starts_with("Could not open "),
+            "{}",
+            state.status
+        );
+        assert_eq!(red(&state), 30);
+        // So does one the options cannot take (an odd width as a pair).
+        let odd = dir.path().join("odd.png");
+        RgbaImage::new(3, 2).save(&odd).unwrap();
+        state.open(&ctx, &odd);
+        finish_opening(&mut state, &ctx);
+        assert!(
+            state.status.starts_with("Could not use "),
+            "{}",
+            state.status
+        );
+        assert_eq!(red(&state), 30);
+
+        // Options changed while the file was read: converted for the new
+        // ones, not shown as it was converted for the old.
+        state.open(&ctx, &second);
+        state.options.output = Output::Sbs;
+        state.options.swap = true;
+        finish_opening(&mut state, &ctx);
+        let mut expected = Document::default();
+        expected.open(&second, state.options).unwrap();
+        assert_eq!(state.document.result(), expected.result());
+        // With AI depth the image is taken and the estimate decides.
+        state.options.input = Input::Ai;
+        state.open(&ctx, &first);
+        finish_opening(&mut state, &ctx);
+        assert!(state.document.result().is_none());
+        assert!(state.depth_pending());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_whose_name_is_not_unicode_is_opened_by_its_own_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let name = std::ffi::OsString::from_vec(b"pair-\xff\xfe.png".to_vec());
+        let path = dir.path().join(name);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        pair()
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, bytes.into_inner()).unwrap();
+        // What a launch hands on (`main::image_argument`, the socket's
+        // `open-bytes`) is the path itself; no text stands in for it.
+        let ctx = egui::Context::default();
+        let mut state = ViewerState::default();
+        state.open(&ctx, &path);
+        finish_opening(&mut state, &ctx);
+        assert_eq!(state.status, LOADED);
+        assert_eq!(state.document.source.as_deref(), Some(&pair()));
+    }
+
+    #[test]
+    fn an_unchanged_picture_is_shared_with_its_source_instead_of_copied() {
+        let mut document = Document::default();
+        let mut options = Options {
+            input: Input::Flat,
+            ..Options::default()
+        };
+        document.set_source(pair(), options).unwrap();
+        let shared = |document: &Document| {
+            Arc::ptr_eq(
+                document.source.as_ref().unwrap(),
+                document.result.as_ref().unwrap(),
+            )
+        };
+        assert!(shared(&document), "a flat picture is its source");
+        options.input = Input::Pair;
+        options.output = Output::Sbs;
+        document.reconvert(options).unwrap();
+        assert!(shared(&document), "so is a pair shown side by side");
+        options.swap = true;
+        document.reconvert(options).unwrap();
+        assert!(!shared(&document));
+        assert_eq!(
+            document.source.as_deref(),
+            Some(&pair()),
+            "the source is as it was"
+        );
+        options.output = Output::Anaglyph;
+        document.reconvert(options).unwrap();
+        assert!(!shared(&document));
+    }
+
+    #[test]
+    fn only_options_that_change_the_result_ask_for_a_conversion() {
+        let base = Options::default();
+        let same = |a: Options, b: Options| a.conversion() == b.conversion();
+        let with = |change: fn(&mut Options)| {
+            let mut options = Options::default();
+            change(&mut options);
+            options
+        };
+        // A pair as an anaglyph: both boxes count, the AI sliders do not.
+        assert!(!same(base, with(|o| o.swap = true)));
+        assert!(!same(base, with(|o| o.half_width = false)));
+        assert!(same(base, with(|o| o.depth_pos = 150)));
+        assert!(same(base, with(|o| o.pop_pos = -40)));
+        // Nor does anything of a live screen, or the model's detail (which
+        // asks for another depth map instead, see `forget_depth`).
+        for change in [
+            (|o| o.sharp_pos = 80) as fn(&mut Options),
+            |o| o.steady_pos = 5,
+            |o| o.lines = 2160,
+            |o| o.pointer = false,
+            |o| o.detail = 1274,
+        ] {
+            assert!(same(base, with(change)));
+        }
+        // The three outputs that keep the pair side by side make one result,
+        // and there half-width only changes how it is shown.
+        let sbs = with(|o| o.output = Output::Sbs);
+        assert!(!same(base, sbs));
+        assert!(same(sbs, with(|o| o.output = Output::Lens)));
+        assert!(same(sbs, with(|o| o.output = Output::Odyssey)));
+        let mut narrow = sbs;
+        narrow.half_width = false;
+        assert!(same(sbs, narrow));
+        // A flat picture is one result whatever else is set.
+        let flat = with(|o| o.input = Input::Flat);
+        let mut other = flat;
+        other.swap = true;
+        other.output = Output::Lens;
+        other.half_width = false;
+        assert!(same(flat, other));
+        assert!(same(flat, with(|o| o.input = Input::Desktop)));
+        // AI depth: the sliders count, half-width does not, and pop-out has
+        // nothing to move without depth strength.
+        let ai = with(|o| o.input = Input::Ai);
+        let mut changed = ai;
+        changed.depth_pos += 1;
+        assert!(!same(ai, changed));
+        changed = ai;
+        changed.pop_pos += 1;
+        assert!(!same(ai, changed));
+        changed = ai;
+        changed.half_width = false;
+        assert!(same(ai, changed));
+        let mut still = ai;
+        still.depth_pos = 0;
+        changed = still;
+        changed.pop_pos = 77;
+        assert!(same(still, changed));
+
+        // What the key says is what the conversion does: equal keys, equal
+        // results, for an image that tells every difference apart.
+        let image = RgbaImage::from_fn(6, 3, |x, y| {
+            image::Rgba([(x * 40) as u8, (y * 80) as u8, (x * y * 20) as u8, 255])
+        });
+        let depth = DepthMap::normalized(3, 1, vec![0.0, 0.5, 1.0]).unwrap();
+        let mut seen: Vec<(Conversion, Option<RgbaImage>)> = Vec::new();
+        for input in [Input::Pair, Input::Flat, Input::Ai, Input::Desktop] {
+            for output in Output::ALL {
+                for (half_width, swap) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    for (depth_pos, pop_pos) in [(0, 0), (0, 60), (200, 0), (200, 60)] {
+                        let options = Options {
+                            input,
+                            output,
+                            half_width,
+                            swap,
+                            depth_pos,
+                            pop_pos,
+                            ..Options::default()
+                        };
+                        let mut document = Document::default();
+                        document.set_source(image.clone(), options).unwrap();
+                        if input == Input::Ai {
+                            let id = document.source_id;
+                            document.set_depth(id, depth.clone(), options).unwrap();
+                        }
+                        let result = document.result().cloned();
+                        let key = options.conversion();
+                        match seen.iter().find(|(known, _)| *known == key) {
+                            Some((_, known)) => assert_eq!(*known, result, "{options:?}"),
+                            None => seen.push((key, result)),
+                        }
+                    }
+                }
+            }
         }
     }
 

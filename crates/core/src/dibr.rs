@@ -24,6 +24,8 @@ pub enum DibrError {
     BadDepthMap,
     #[error("The depth map contains values that are not numbers.")]
     NotFinite,
+    #[error("The image is too large to render as a stereo pair.")]
+    TooLarge,
 }
 
 /// Per-pixel nearness: 0 is the farthest point of the scene, 1 the nearest.
@@ -164,11 +166,21 @@ impl Params {
     /// pixels wide. Positive is in front of the screen (the left eye sees the
     /// point further right than the right eye does), negative behind it.
     pub fn disparity(&self, depth: f32, width: u32) -> f32 {
+        let (scale, screen) = self.disparity_terms(width);
+        scale * (depth - screen)
+    }
+
+    /// What [`Params::disparity`] is made of, the same for every pixel of an
+    /// image `width` pixels wide: the disparity per unit of nearness, and
+    /// the nearness that lies on the screen plane. A renderer works them out
+    /// once per picture instead of once per pixel.
+    fn disparity_terms(&self, width: u32) -> (f32, f32) {
         let strength = self.strength.clamp(0.0, 2.0) as f32;
         let popout = self.popout.clamp(-1.0, 1.0) as f32;
-        // Nearness that lies on the screen plane.
-        let screen = 0.5 - popout * 0.5;
-        strength * MAX_DISPARITY_FRACTION * width as f32 * (depth - screen)
+        (
+            strength * MAX_DISPARITY_FRACTION * width as f32,
+            0.5 - popout * 0.5,
+        )
     }
 }
 
@@ -180,50 +192,103 @@ pub fn synthesize(
     params: Params,
 ) -> Result<RgbaImage, DibrError> {
     let (width, height) = image.dimensions();
+    synthesize_on(
+        image,
+        depth,
+        params,
+        threads_for(width as usize, height as usize),
+    )
+}
+
+/// The threads a still picture's rows are spread over: half of the cores,
+/// at most eight, and one for a picture too small to be worth starting any.
+/// The viewer renders again at every step of a slider, so this decides how
+/// closely the picture follows the pointer.
+fn threads_for(width: usize, height: usize) -> usize {
+    if width.saturating_mul(height) < 1 << 16 {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (cores / 2).clamp(1, 8).min(height)
+}
+
+/// [`synthesize`] on `threads` threads. Every row is rendered by itself, so
+/// the picture is the same however the rows are shared out.
+fn synthesize_on(
+    image: &RgbaImage,
+    depth: &DepthMap,
+    params: Params,
+    threads: usize,
+) -> Result<RgbaImage, DibrError> {
+    let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return Err(DibrError::Empty);
     }
-    let mut out = RgbaImage::new(width * 2, height);
+    // Twice the width must still be a width and the pair must fit the
+    // address range: checked here, so nothing below can wrap.
+    let pair_width = width.checked_mul(2).ok_or(DibrError::TooLarge)?;
     let w = width as usize;
+    let row_bytes = w.checked_mul(8).ok_or(DibrError::TooLarge)?;
+    let bytes = row_bytes
+        .checked_mul(height as usize)
+        .filter(|&bytes| bytes <= isize::MAX as usize)
+        .ok_or(DibrError::TooLarge)?;
     let native_depth = (depth.width, depth.height) == (width, height);
     let columns = if native_depth {
         Vec::new()
     } else {
         depth.resized_columns(width)
     };
-    let mut resized_row = Vec::with_capacity(if native_depth { 0 } else { w });
-    let mut colors = vec![[0u8; 4]; w];
-    let mut nearness = vec![f32::NEG_INFINITY; w];
-    for y in 0..height {
-        let row = if native_depth {
-            let start = y as usize * w;
-            &depth.values[start..start + w]
-        } else {
-            resized_row.clear();
-            depth.append_resized_row(height, y, &columns, &mut resized_row);
-            &resized_row
-        };
-        // Left eye: near points move right. Right eye: near points move left.
-        for (eye, direction) in [(0u32, 0.5f32), (1, -0.5)] {
-            nearness.fill(f32::NEG_INFINITY);
-            for (x, &d) in row.iter().enumerate() {
-                let target = (x as f32 + direction * params.disparity(d, width)).round();
-                if target < 0.0 || target >= width as f32 {
-                    continue;
+    let (scale, screen) = params.disparity_terms(width);
+    let source = image.as_raw();
+    let render = |first_row: usize, band: &mut [u8]| {
+        let mut resized_row = Vec::with_capacity(if native_depth { 0 } else { w });
+        let mut nearness = vec![f32::NEG_INFINITY; w];
+        for (index, line) in band.chunks_exact_mut(row_bytes).enumerate() {
+            let y = first_row + index;
+            let row = if native_depth {
+                &depth.values[y * w..(y + 1) * w]
+            } else {
+                resized_row.clear();
+                depth.append_resized_row(height, y as u32, &columns, &mut resized_row);
+                &resized_row
+            };
+            let pixels = source[y * w * 4..(y + 1) * w * 4].as_chunks::<4>().0;
+            let (left, right) = line.split_at_mut(w * 4);
+            // Left eye: near points move right. Right eye: near points move left.
+            for (view, direction) in [(left, 0.5f32), (right, -0.5f32)] {
+                let view = view.as_chunks_mut::<4>().0;
+                nearness.fill(f32::NEG_INFINITY);
+                for (x, (&d, pixel)) in row.iter().zip(pixels).enumerate() {
+                    let target = (x as f32 + direction * (scale * (d - screen))).round();
+                    if target < 0.0 || target >= width as f32 {
+                        continue;
+                    }
+                    let t = target as usize;
+                    if d > nearness[t] {
+                        nearness[t] = d;
+                        view[t] = *pixel;
+                    }
                 }
-                let t = target as usize;
-                if d > nearness[t] {
-                    nearness[t] = d;
-                    colors[t] = image.get_pixel(x as u32, y).0;
-                }
-            }
-            fill_gaps(&mut colors, &mut nearness);
-            for (x, color) in colors.iter().enumerate() {
-                out.put_pixel(eye * width + x as u32, y, image::Rgba(*color));
+                fill_gaps(view, &mut nearness);
             }
         }
+    };
+    let mut out = vec![0u8; bytes];
+    let rows = height as usize;
+    let threads = threads.clamp(1, rows);
+    if threads == 1 {
+        render(0, &mut out);
+    } else {
+        let band = rows.div_ceil(threads);
+        std::thread::scope(|scope| {
+            for (index, part) in out.chunks_mut(band * row_bytes).enumerate() {
+                let render = &render;
+                scope.spawn(move || render(index * band, part));
+            }
+        });
     }
-    Ok(out)
+    RgbaImage::from_raw(pair_width, height, out).ok_or(DibrError::TooLarge)
 }
 
 /// Fill the pixels nothing was warped onto. A gap opens where a near object
@@ -356,6 +421,119 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The renderer as it was before it worked on rows of bytes in bands:
+    /// one pixel at a time through the image types, on one thread, with the
+    /// disparity formula written out. Kept as the definition of the picture.
+    fn reference(image: &RgbaImage, depth: &DepthMap, params: Params) -> RgbaImage {
+        let (width, height) = image.dimensions();
+        let disparity = |depth: f32| {
+            let strength = params.strength.clamp(0.0, 2.0) as f32;
+            let popout = params.popout.clamp(-1.0, 1.0) as f32;
+            let screen = 0.5 - popout * 0.5;
+            strength * MAX_DISPARITY_FRACTION * width as f32 * (depth - screen)
+        };
+        let full = depth.resized(width, height).unwrap();
+        let mut out = RgbaImage::new(width * 2, height);
+        let w = width as usize;
+        let mut colors = vec![[0u8; 4]; w];
+        let mut nearness = vec![f32::NEG_INFINITY; w];
+        for y in 0..height {
+            for (eye, direction) in [(0u32, 0.5f32), (1, -0.5)] {
+                nearness.fill(f32::NEG_INFINITY);
+                for x in 0..width {
+                    let d = full.get(x, y);
+                    let target = (x as f32 + direction * disparity(d)).round();
+                    if target < 0.0 || target >= width as f32 {
+                        continue;
+                    }
+                    let t = target as usize;
+                    if d > nearness[t] {
+                        nearness[t] = d;
+                        colors[t] = image.get_pixel(x, y).0;
+                    }
+                }
+                fill_gaps(&mut colors, &mut nearness);
+                for (x, color) in colors.iter().enumerate() {
+                    out.put_pixel(eye * width + x as u32, y, image::Rgba(*color));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn rows_of_bytes_in_bands_make_the_picture_the_pixel_renderer_made() {
+        let mut noise = 0x2545_f491u32;
+        let mut next = move || {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            noise
+        };
+        for (width, height) in [(1, 1), (2, 5), (97, 3), (160, 61), (333, 40)] {
+            let image = RgbaImage::from_fn(width, height, |_, _| Rgba(next().to_le_bytes()));
+            for (dw, dh) in [(width, height), (1, 1), (37, 21), (518, 294)] {
+                // Sloping ground with sharp near blocks: gaps, overlaps and
+                // pixels pushed off both edges.
+                let raw = (0..dw * dh)
+                    .map(|i| {
+                        let (x, y) = (i % dw, i / dw);
+                        let block = if (x / 5 + y / 3) % 4 == 0 { 3.0 } else { 0.0 };
+                        x as f32 / dw as f32 + block + (next() % 7) as f32 * 0.01
+                    })
+                    .collect();
+                let map = DepthMap::normalized(dw, dh, raw).unwrap();
+                for (strength, popout) in [
+                    (0.0, 0.3),
+                    (0.9, 0.0),
+                    (2.0, -1.0),
+                    (2.0, 1.0),
+                    (1.37, 0.41),
+                ] {
+                    let params = Params { strength, popout };
+                    let expected = reference(&image, &map, params);
+                    for threads in [1, 2, 3, 7, 64] {
+                        assert!(
+                            synthesize_on(&image, &map, params, threads).unwrap() == expected,
+                            "{width}x{height}, depth {dw}x{dh}, {params:?}, {threads} threads"
+                        );
+                    }
+                    assert!(synthesize(&image, &map, params).unwrap() == expected);
+                    // The per-picture terms are the per-pixel formula.
+                    for near in [0.0f32, 0.25, 0.618_034, 1.0] {
+                        let (scale, screen) = params.disparity_terms(width);
+                        assert_eq!(
+                            params.disparity(near, width).to_bits(),
+                            (scale * (near - screen)).to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_large_enough_for_threads_is_the_same_picture() {
+        // Above the size `threads_for` keeps on one thread, so the public
+        // entry point itself runs in bands where there are cores for it.
+        let (width, height) = (640u32, 360u32);
+        assert_eq!(threads_for(100, 100), 1);
+        assert!((1..=8).contains(&threads_for(width as usize, height as usize)));
+        assert_eq!(threads_for(1 << 20, 1), 1, "never more threads than rows");
+        let image = RgbaImage::from_fn(width, height, |x, y| {
+            Rgba([(x * 3) as u8, (y * 7) as u8, (x ^ y) as u8, 255])
+        });
+        let raw = (0..74u32 * 42)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 20) as f32)
+            .collect();
+        let map = DepthMap::normalized(74, 42, raw).unwrap();
+        let params = Params {
+            strength: 1.6,
+            popout: -0.35,
+        };
+        assert!(synthesize(&image, &map, params).unwrap() == reference(&image, &map, params));
     }
 
     #[test]

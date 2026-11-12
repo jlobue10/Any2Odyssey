@@ -44,6 +44,15 @@ impl Knob {
     }
 }
 
+/// What the fitted eyes were made from. The lens numbers are not among it:
+/// a calibration key changes them at every press, and the eyes stay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fitted {
+    generation: u64,
+    size: [u32; 2],
+    stretch: f64,
+}
+
 /// What the interleaved texture was made from; any difference remakes it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Woven {
@@ -63,12 +72,18 @@ pub struct LensState {
     /// What `file` holds, as far as this process knows.
     saved: Lens,
     pending: Option<(Lens, Instant)>,
+    /// The numbers the file last refused to take. They stay unsaved; they
+    /// are not written again by themselves until they change.
+    failed: Option<Lens>,
     /// Where the numbers are kept. None keeps them in memory only (tests).
     file: Option<PathBuf>,
     /// Why the file could not be read or written, for the page to show.
     pub problem: Option<String>,
     texture: Option<egui::TextureHandle>,
     woven: Option<Woven>,
+    /// The pair's two eyes fitted to the output's area, kept while only the
+    /// lens numbers change: cropping and scaling them is most of the work.
+    fitted: Option<(Fitted, RgbaImage, RgbaImage)>,
     /// The size asked for on the previous frame: a window being dragged to a
     /// new size is not interleaved again until it has stopped changing.
     last_size: [u32; 2],
@@ -132,11 +147,14 @@ impl LensState {
         match written {
             Ok(()) => {
                 self.saved = self.lens;
+                self.failed = None;
                 self.problem = None;
             }
             Err(e) => {
-                // Not retried every frame: the next change tries again.
-                self.saved = self.lens;
+                // The numbers stay unsaved, so that leaving the output or
+                // the program tries again. Not every frame, though: until
+                // then only the next change does (`save_when_settled`).
+                self.failed = Some(self.lens);
                 self.problem = Some(format!("Could not save {}: {e}", file.display()));
             }
         }
@@ -145,7 +163,7 @@ impl LensState {
     /// Save changed numbers once they have been still for [`SAVE_DELAY`].
     /// Call once per frame.
     pub fn save_when_settled(&mut self, ctx: &egui::Context, now: Instant) {
-        if self.lens == self.saved {
+        if self.lens == self.saved || self.failed == Some(self.lens) {
             self.pending = None;
             return;
         }
@@ -298,8 +316,10 @@ impl LensState {
         let limit = ctx.input(|i| i.max_texture_side).max(1) as u32;
         let image = if size[0] == 0 || size[1] == 0 || size[0] > limit || size[1] > limit {
             None
+        } else if self.pattern {
+            weave::weave_pattern(size[0], size[1], &self.lens, origin).ok()
         } else {
-            render(pair, self.pattern, stretch, size, &self.lens, origin)
+            self.weave_fitted(pair, generation, stretch, size, origin)
         };
         self.woven = Some(wanted);
         self.texture = image.map(|image| {
@@ -313,15 +333,48 @@ impl LensState {
         self.texture.clone()
     }
 
+    /// `pair` (generation `generation`) interleaved for the lens as it is
+    /// now, the same picture as [`render`] makes. The eyes are fitted when
+    /// the picture, the area or the stretch changes and only woven again
+    /// when the lens does.
+    fn weave_fitted(
+        &mut self,
+        pair: Option<&RgbaImage>,
+        generation: u64,
+        stretch: f64,
+        size: [u32; 2],
+        origin: (i64, i64),
+    ) -> Option<RgbaImage> {
+        let wanted = Fitted {
+            generation,
+            size,
+            stretch,
+        };
+        if self
+            .fitted
+            .as_ref()
+            .is_none_or(|(made, ..)| *made != wanted)
+        {
+            // The old eyes go before the new ones are made, not after.
+            self.fitted = None;
+            let (left, right) = weave::fit_pair(pair?, size[0], size[1], stretch).ok()?;
+            self.fitted = Some((wanted, left, right));
+        }
+        let (_, left, right) = self.fitted.as_ref()?;
+        weave::weave(left, right, &self.lens, origin).ok()
+    }
+
     /// Drop the interleaved picture (the output window has closed).
     pub fn release(&mut self) {
         self.texture = None;
         self.woven = None;
+        self.fitted = None;
         self.last_size = [0, 0];
     }
 }
 
 /// The interleaved image itself, without a window: what the tests check.
+#[cfg(test)]
 pub fn render(
     pair: Option<&RgbaImage>,
     pattern: bool,
@@ -331,8 +384,7 @@ pub fn render(
     origin: (i64, i64),
 ) -> Option<RgbaImage> {
     if pattern {
-        let (left, right) = weave::calibration_pattern(size[0], size[1]);
-        weave::weave(&left, &right, lens, origin).ok()
+        weave::weave_pattern(size[0], size[1], lens, origin).ok()
     } else {
         weave::weave_pair(pair?, size[0], size[1], stretch, lens, origin).ok()
     }
@@ -478,6 +530,110 @@ mod tests {
         let woven = render(Some(&pair), false, 1.0, [4, 2], &lens, (0, 0)).unwrap();
         assert_eq!(woven.get_pixel(0, 0).0, [9, 9, 9, 255]);
         assert_eq!(woven.get_pixel(1, 0).0, [200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn the_eyes_are_fitted_once_and_woven_again_for_every_lens_number() {
+        let mut noise = 0x0bad_5eedu32;
+        let mut picture = |width, height| {
+            RgbaImage::from_fn(width, height, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                image::Rgba(noise.to_le_bytes())
+            })
+        };
+        let pair = picture(64, 18);
+        let mut state = LensState::default();
+        let origin = (7, 3);
+        let eyes = |state: &LensState| {
+            let (_, left, right) = state.fitted.as_ref().unwrap();
+            (left.as_ptr(), right.as_ptr())
+        };
+        let woven = state.weave_fitted(Some(&pair), 1, 2.0, [40, 30], origin);
+        assert_eq!(
+            woven,
+            render(Some(&pair), false, 2.0, [40, 30], &state.lens, origin)
+        );
+        let fitted = eyes(&state);
+        // Calibration keys: the same eyes, another interleaving, and always
+        // the picture the uncached way makes.
+        for (knob, steps) in [
+            (Knob::Pitch, 3.0),
+            (Knob::Slant, -40.0),
+            (Knob::Offset, 0.5),
+        ] {
+            let before = state.lens;
+            state.nudge(knob, steps);
+            assert_ne!(state.lens, before);
+            let woven = state.weave_fitted(Some(&pair), 1, 2.0, [40, 30], origin);
+            assert_eq!(
+                woven,
+                render(Some(&pair), false, 2.0, [40, 30], &state.lens, origin)
+            );
+            assert_eq!(eyes(&state), fitted, "{knob:?} fitted the eyes again");
+        }
+        // Another picture, area or stretch: fitted again, never stale.
+        let other = picture(64, 18);
+        for (source, generation, stretch, size) in [
+            (&other, 2, 2.0, [40, 30]),
+            (&other, 2, 2.0, [41, 30]),
+            (&other, 2, 1.0, [41, 30]),
+            (&pair, 3, 1.0, [41, 30]),
+        ] {
+            let woven = state.weave_fitted(Some(source), generation, stretch, size, origin);
+            assert_eq!(
+                woven,
+                render(Some(source), false, stretch, size, &state.lens, origin)
+            );
+            let (made, ..) = state.fitted.as_ref().unwrap();
+            assert_eq!(
+                *made,
+                Fitted {
+                    generation,
+                    size,
+                    stretch
+                }
+            );
+        }
+        // No picture: nothing is kept from the one before.
+        assert!(state.weave_fitted(None, 4, 1.0, [41, 30], origin).is_none());
+        assert!(state.fitted.is_none());
+        state.weave_fitted(Some(&pair), 5, 1.0, [8, 8], origin);
+        state.release();
+        assert!(state.fitted.is_none());
+    }
+
+    #[test]
+    fn numbers_the_file_refused_stay_unsaved_and_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lens.json");
+        let ctx = egui::Context::default();
+        let mut state = LensState::load(file.clone());
+        // Nothing can be written over a folder.
+        std::fs::create_dir(&file).unwrap();
+        state.nudge(Knob::Pitch, 2.0);
+        state.store();
+        assert!(state.problem.as_deref().unwrap().contains("Could not save"));
+        assert_ne!(state.lens, state.saved, "a failed write saved nothing");
+        // Not tried again frame after frame while nothing changes...
+        let now = Instant::now();
+        state.save_when_settled(&ctx, now);
+        state.save_when_settled(&ctx, now + SAVE_DELAY * 2);
+        assert!(state.pending.is_none());
+        assert!(state.problem.is_some());
+        // ...but at the next change, and when the output or the program is
+        // left.
+        state.nudge(Knob::Offset, 1.0);
+        state.save_when_settled(&ctx, now + SAVE_DELAY * 3);
+        state.save_when_settled(&ctx, now + SAVE_DELAY * 4);
+        assert!(state.pending.is_none(), "tried, and refused again");
+        assert!(state.problem.is_some() && state.lens != state.saved);
+        std::fs::remove_dir(&file).unwrap();
+        state.store();
+        assert_eq!(read_lens(&file).unwrap(), state.lens);
+        assert!(state.problem.is_none());
+        assert_eq!(state.lens, state.saved);
     }
 
     #[test]
