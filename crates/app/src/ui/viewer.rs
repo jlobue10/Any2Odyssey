@@ -35,6 +35,8 @@ const OUTPUT_HINT: &str =
     "Move this window to the display you want, then double-click or press F11 for full screen. Esc leaves.";
 const LOADED: &str = "Image loaded. Check the input format before starting output.";
 const NO_IMAGE: &str = "Open an image first.";
+const DEPTH_NOT_READY: &str =
+    "The image's depth is still being estimated. Start output when the picture is in the preview.";
 const OUTPUT_ON: &str =
     "Output window open. Stop output, Esc in that window, or closing it ends it.";
 const OUTPUT_OFF: &str = "Output stopped.";
@@ -906,7 +908,15 @@ impl ViewerState {
                 self.status = WeaverStatus::Starting.describe();
             }
         } else if self.document.result().is_none() && !self.shows_pattern() {
-            self.status = NO_IMAGE.into();
+            if self.document.depth_request(self.options).is_some() {
+                // There is an image: what is missing is its depth, which is
+                // on its way, or failed and is tried again for this request
+                // (the model may have been installed since).
+                self.depth_failed = None;
+                self.status = DEPTH_NOT_READY.into();
+            } else {
+                self.status = NO_IMAGE.into();
+            }
         } else if self.options.output == Output::Odyssey && !self.weaver.available() {
             self.status = WeaverStatus::NoHelper.describe();
         } else {
@@ -3123,5 +3133,49 @@ mod tests {
         state.toggle_output();
         assert!(!state.output_open);
         assert_eq!(state.status, OUTPUT_OFF);
+    }
+
+    #[test]
+    fn starting_output_before_the_depth_is_there_says_so_and_tries_a_failed_one_again() {
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        // The estimate is running: there is an image, so "open one" is wrong.
+        let estimate = queued_depth(&mut state);
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, DEPTH_NOT_READY);
+        assert!(state.estimating.is_some(), "the estimate goes on");
+
+        // It failed. Asking for output is asking for the picture again.
+        estimate.send(Err("no model".into())).unwrap();
+        state.poll_depth();
+        assert_eq!(state.status, "no model");
+        assert!(!state.depth_pending());
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, DEPTH_NOT_READY);
+        assert!(state.depth_pending(), "the next frame starts the model");
+
+        // With the picture there, output starts.
+        let estimate = queued_depth(&mut state);
+        estimate
+            .send(Ok(DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap()))
+            .unwrap();
+        state.poll_depth();
+        state.toggle_output();
+        assert!(state.output_open);
+        assert_eq!(state.status, OUTPUT_ON);
+
+        // An image the options cannot take is not waiting for anything.
+        let mut state = ViewerState::default();
+        state.options.input = Input::Flat;
+        let odd = RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]));
+        state.document.set_source(odd, state.options).unwrap();
+        state.options.input = Input::Pair;
+        state.options_changed();
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, NO_IMAGE);
     }
 }
