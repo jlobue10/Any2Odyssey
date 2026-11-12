@@ -18,10 +18,10 @@ use windows::Win32::Graphics::Gdi::{
 const MONITORINFOF_PRIMARY: u32 = 1;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS, SET_WINDOW_POS_FLAGS,
-    SHOW_WINDOW_CMD, WINDOW_EX_STYLE,
+    GetWindowTextW, GetWindowThreadProcessId, InternalGetWindowText, IsIconic, IsWindow,
+    IsWindowVisible, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, SET_WINDOW_POS_FLAGS, SHOW_WINDOW_CMD, WINDOW_EX_STYLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowDisplayAffinity, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
@@ -73,6 +73,16 @@ pub fn title(h: HWND) -> String {
     let mut buf = [0u16; 512];
     let n = unsafe { GetWindowTextW(h, &mut buf) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+/// The title as the window manager stores it, read without sending
+/// `WM_GETTEXT`. `GetWindowTextW` sends that message, and waits for the
+/// answer, when the window belongs to another thread of this process; a
+/// thread that is busy or stuck then holds the caller. For a window whose
+/// class leaves its text to the default window procedure the two agree.
+pub fn stored_title(h: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { InternalGetWindowText(h, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.clamp(0, buf.len() as i32) as usize])
 }
 pub fn class_name(h: HWND) -> String {
     let mut buf = [0u16; 256];
@@ -142,6 +152,12 @@ pub fn set_layer_alpha(h: HWND, alpha: u8) -> windows::core::Result<()> {
 pub fn show_window(h: HWND, cmd: i32) -> bool {
     unsafe { ShowWindow(h, SHOW_WINDOW_CMD(cmd)).as_bool() }
 }
+/// `ShowWindow` posted to the thread that owns `h` instead of sent to it:
+/// the caller does not wait for that thread. False when it could not be
+/// posted.
+pub fn show_window_async(h: HWND, cmd: i32) -> bool {
+    unsafe { ShowWindowAsync(h, SHOW_WINDOW_CMD(cmd)).as_bool() }
+}
 pub fn set_window_pos(
     h: HWND,
     after: Option<HWND>,
@@ -160,6 +176,10 @@ pub const SWP_NOSIZE_NOMOVE_NOACTIVATE: u32 = 0x0001 | 0x0002 | 0x0010;
 pub const SWP_NOZORDER: u32 = 0x0004;
 pub const SWP_SHOWWINDOW: u32 = 0x0040;
 pub const SWP_FRAMECHANGED: u32 = 0x0020;
+/// The request is posted to the thread that owns the window rather than sent
+/// to it, so the caller does not wait for that thread to process it. Only
+/// for a window of another thread; the new position applies a moment later.
+pub const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
 pub const SW_SHOWNOACTIVATE: i32 = 4;
 
 pub fn set_capture_excluded(h: HWND) -> windows::core::Result<()> {
