@@ -1123,7 +1123,10 @@ mod tests {
         let guard = SingleInstance {
             socket: SocketFile::at(&path),
         };
-        let launch = InstanceLock::acquire(&path, Duration::ZERO).expect("the lock is free");
+        // Not at once: `bind_instance` has only just closed its own lock, and
+        // a child that another test's thread forked in that moment keeps a
+        // copy of it open until its exec.
+        let launch = InstanceLock::acquire(&path, LOCK_PATIENCE).expect("the lock is free");
         assert!(
             InstanceLock::acquire(&path, Duration::ZERO).is_none(),
             "one holder at a time"
