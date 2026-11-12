@@ -352,7 +352,8 @@ static void serve(const char *camera, const char *secret)
             }
             if (have) {
                 /* (an empty buffer is what this camera sends after a USB suspend: not a picture) */
-                if (!(b.flags & V4L2_BUF_FLAG_ERROR) && b.index < (unsigned)nbufs && b.bytesused)
+                if (!(b.flags & V4L2_BUF_FLAG_ERROR) && b.index < (unsigned)nbufs && b.bytesused &&
+                    b.bytesused <= bufs[b.index].length)
                     put('F', (uint64_t)b.timestamp.tv_sec * 1000000 + b.timestamp.tv_usec, bufs[b.index].start,
                         b.bytesused);
                 xioctl(cam, VIDIOC_QBUF, &b);
