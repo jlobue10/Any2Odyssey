@@ -67,13 +67,50 @@ impl Default for Controls {
 /// How it is going, for the page.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
-    /// Pictures written to the weaver per second, and depth maps per second.
+    /// Pictures written to the weaver per second, and depth maps per second,
+    /// over the last second in which there were any.
     pub picture_rate: f32,
     pub depth_rate: f32,
+    /// The screen has not changed for a while and its picture is up to
+    /// date, so none is being made: the rates are those of earlier work.
+    pub still: bool,
     /// Why depth is missing, when the model cannot run.
     pub depth_error: Option<String>,
     /// Why no picture can be written, when that fails.
     pub output_error: Option<String>,
+}
+
+impl Stats {
+    /// How the pictures are coming, for the status line (it goes after
+    /// "a ... screen, "): the rates while there is work, and that there is
+    /// none while the screen is still. The rates are not told then, being
+    /// those of the last work, however long ago and however short; only a
+    /// model that has not answered yet, or cannot, is still mentioned.
+    pub fn describe(&self) -> String {
+        let depth = match &self.depth_error {
+            Some(e) => Some(format!("no depth: {e}")),
+            None if self.still && self.depth_rate > 0.0 => None,
+            None if self.depth_rate >= 0.95 => {
+                Some(format!("depth {:.0} times a second", self.depth_rate))
+            }
+            // A slow model (on the processor, at a fine detail) would read
+            // as "0 times a second".
+            None if self.depth_rate > 0.0 => Some(format!(
+                "depth once every {:.1} seconds",
+                1.0 / self.depth_rate
+            )),
+            None => Some("depth starting".into()),
+        };
+        let pictures = if self.still {
+            "not changing, so nothing is redrawn".to_owned()
+        } else {
+            format!("{:.0} pictures a second", self.picture_rate)
+        };
+        match depth {
+            Some(depth) => format!("{pictures}, {depth}"),
+            None => pictures,
+        }
+    }
 }
 
 /// The controls that change the picture by themselves (the others work
@@ -393,6 +430,10 @@ fn layout(screen: (u32, u32), lines: i32) -> ((u32, u32), (u32, u32, u32, u32)) 
 /// How long a rate is measured over before it is told.
 const RATE_TIME: Duration = Duration::from_secs(1);
 
+/// How long there has to be nothing to do before the screen is said to be
+/// still: longer than a blinking cursor or a clock leaves between frames.
+const STILL_TIME: Duration = Duration::from_secs(2);
+
 fn render_loop(frames: &Frames, shared: &Shared) {
     let mut seen = 0u64;
     let (mut picture, mut pair, mut canvas, mut small) =
@@ -401,6 +442,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let mut blank = None;
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
+    // Since when there has been no picture to make, and whether the page
+    // has been told that the screen is still.
+    let (mut resting, mut still) = (None::<Instant>, false);
     let mut started = Instant::now();
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // Sixty pictures a second at most: a faster screen (the Odyssey
@@ -475,7 +519,16 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                 lock(&shared.stats).picture_rate = counted as f32 / since.elapsed().as_secs_f32();
                 (counted, since) = (0, Instant::now());
             }
+            if !still && resting.get_or_insert_with(Instant::now).elapsed() >= STILL_TIME {
+                lock(&shared.stats).still = true;
+                still = true;
+            }
             continue;
+        }
+        resting = None;
+        if still {
+            lock(&shared.stats).still = false;
+            still = false;
         }
         let Some(sink) = sink else {
             // Nowhere to show it yet. It is made when there is: the output
@@ -1182,6 +1235,102 @@ mod tests {
         assert_eq!(files(), 0, "the picture file outlived the live screen");
         finish.send(()).unwrap();
         depth.join().unwrap();
+    }
+
+    #[test]
+    fn the_page_is_told_when_the_screen_is_still_and_when_it_changes_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        let capture = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        *lock(&shared.sink) = (1, Some(sink.clone()));
+        let (frames, worker_state) = (capture.frames(), shared.clone());
+        let worker = std::thread::spawn(move || render_loop(&frames, &worker_state));
+        let still = || lock(&shared.stats).still;
+
+        let first = Instant::now();
+        capture.feed(16, 9, &[90; 16 * 9 * 4]);
+        eventually("the first picture", || sink.written().0 == 1);
+        assert!(!still());
+        // No model here, so the frame waits for one for ever; the picture
+        // is up to date all the same, and nothing is made.
+        eventually("the screen is said to be still", still);
+        assert!(first.elapsed() >= STILL_TIME, "{:?}", first.elapsed());
+        assert_eq!(sink.written().0, 1);
+        // A slider: one picture, and with it the screen is no longer said
+        // to be still (the page is told before the picture is written).
+        shared.depth_pos.store(3, Ordering::Relaxed);
+        eventually("the picture with the control", || sink.written().0 == 2);
+        assert!(!still());
+
+        shared.stop.store(true, Ordering::Relaxed);
+        drop(capture);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn the_status_tells_the_rates_of_work_and_says_when_there_is_none() {
+        let working = Stats {
+            picture_rate: 59.6,
+            depth_rate: 29.6,
+            ..Stats::default()
+        };
+        assert_eq!(
+            working.describe(),
+            "60 pictures a second, depth 30 times a second"
+        );
+        // Before the model's first answer, and when it cannot answer.
+        let starting = Stats {
+            depth_rate: 0.0,
+            ..working.clone()
+        };
+        assert_eq!(starting.describe(), "60 pictures a second, depth starting");
+        let failing = Stats {
+            depth_rate: 0.0,
+            depth_error: Some("no model".into()),
+            ..working.clone()
+        };
+        assert_eq!(
+            failing.describe(),
+            "60 pictures a second, no depth: no model"
+        );
+        // A model slower than once a second is not "0 times a second".
+        let slow = Stats {
+            depth_rate: 0.25,
+            ..working
+        };
+        assert_eq!(
+            slow.describe(),
+            "60 pictures a second, depth once every 4.0 seconds"
+        );
+        // A still screen: the rates are those of the last work (here one
+        // picture and a first depth map that took three seconds), and are
+        // not told as if they were going on.
+        let still = Stats {
+            picture_rate: 1.0,
+            depth_rate: 0.33,
+            still: true,
+            ..Stats::default()
+        };
+        assert_eq!(still.describe(), "not changing, so nothing is redrawn");
+        // What the model has not done yet or cannot do is still said.
+        let waiting = Stats {
+            depth_rate: 0.0,
+            ..still.clone()
+        };
+        assert_eq!(
+            waiting.describe(),
+            "not changing, so nothing is redrawn, depth starting"
+        );
+        let flat = Stats {
+            depth_error: Some("no model".into()),
+            ..still
+        };
+        assert_eq!(
+            flat.describe(),
+            "not changing, so nothing is redrawn, no depth: no model"
+        );
     }
 
     /// Wait until `done` says so, at most ten seconds.

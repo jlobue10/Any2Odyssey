@@ -1027,18 +1027,11 @@ impl ViewerState {
                 self.status = "Choose the screen to show in 3D in the desktop's dialog (asked once and remembered). On KDE Plasma 6 it can be the Odyssey itself; on other desktops choose another screen.".into();
             }
             CaptureState::Running { width, height } => {
-                let depth = match &stats.depth_error {
-                    Some(e) => format!("no depth: {e}"),
-                    None if stats.depth_rate > 0.0 => {
-                        format!("depth {:.0} times a second", stats.depth_rate)
-                    }
-                    None => "depth starting".into(),
-                };
                 self.status = match &stats.output_error {
                     Some(e) => format!("The picture cannot be written: {e}"),
                     None => format!(
-                        "Live: a {width} × {height} screen, {:.0} pictures a second, {depth}. {}{}",
-                        stats.picture_rate,
+                        "Live: a {width} × {height} screen, {}. {}{}",
+                        stats.describe(),
                         weaver.describe(),
                         if self.weaver.excluded_from_capture() == Some(false) {
                             " This desktop cannot keep the 3D picture out of a capture: do not show the Odyssey's own screen."
