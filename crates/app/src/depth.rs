@@ -25,10 +25,19 @@ const RUNTIME_LIBRARY: &str = "libonnxruntime.so";
 
 /// Where `--install-depth-model` gets the model: the ONNX export of Depth
 /// Anything V2 Small (Apache-2.0) published by the ONNX community on Hugging
-/// Face, and the SHA-256 of that file. A different file is refused.
+/// Face, and the SHA-256 of that file. A different file is refused. The
+/// address names the commit of that repository that holds the file with
+/// this hash, not its newest state, so that a later change there cannot
+/// turn every installation into a failed check.
 pub const MODEL_URL: &str =
-    "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx";
+    "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model.onnx";
 pub const MODEL_SHA256: &str = "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c";
+/// The most `curl` may fetch: the model is 99 MB, and this is well above it.
+const MODEL_MAX_BYTES: u64 = 200 * 1024 * 1024;
+/// Downloads that were given up (a killed installer) are cleared away by a
+/// later one once they are this old: far longer than a download takes, so
+/// one that is still running in another terminal is never touched.
+const STALE_DOWNLOAD: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// The model works on patches of 14 pixels; its training size is 518.
 const PATCH: u32 = 14;
@@ -47,32 +56,99 @@ pub const LONG_SIDE: u32 = DETAIL[0].0;
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
+/// Which of the places a model is looked for a file was found in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// `$ANY2ODYSSEY_DEPTH_MODEL`: a model of the user's own choosing.
+    Override,
+    /// The user's data folder, where `--install-depth-model` puts it.
+    Data,
+    /// A system-wide folder a package installs into.
+    System,
+}
+
 /// Where a model file is looked for, in order: the override, the user's data
 /// folder, then the system-wide folders a package installs into.
-pub fn model_candidates() -> Vec<PathBuf> {
+fn model_candidates() -> Vec<(PathBuf, Origin)> {
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os(MODEL_ENV).filter(|p| !p.is_empty()) {
-        candidates.push(PathBuf::from(path));
+        candidates.push((PathBuf::from(path), Origin::Override));
     }
-    candidates.push(paths::data_dir().join("models").join(MODEL_FILE));
+    candidates.push((
+        paths::data_dir().join("models").join(MODEL_FILE),
+        Origin::Data,
+    ));
     for system in ["/usr/local/share/any2odyssey", "/usr/share/any2odyssey"] {
-        candidates.push(Path::new(system).join("models").join(MODEL_FILE));
+        candidates.push((
+            Path::new(system).join("models").join(MODEL_FILE),
+            Origin::System,
+        ));
     }
     candidates
 }
 
-pub fn locate_model() -> Result<PathBuf, String> {
-    let candidates = model_candidates();
-    candidates
-        .iter()
-        .find(|path| path.is_file())
-        .cloned()
+fn locate_model() -> Result<(PathBuf, Origin), String> {
+    model_candidates()
+        .into_iter()
+        .find(|(path, _)| path.is_file())
         .ok_or_else(|| {
             format!(
                 "The depth model is not installed. Put {MODEL_FILE} in {} (see Help: Windows & Linux).",
                 paths::data_dir().join("models").display()
             )
         })
+}
+
+/// Check the model about to be loaded against [`MODEL_SHA256`], which until
+/// now was only done when it was downloaded: a file that has been cut
+/// short, damaged or exchanged since is refused before the runtime reads it.
+///
+/// Only the copy in the data folder is held to the hash. The override is
+/// there to try a model of one's own, which is by design not the pinned
+/// file. The system folders hold what the system's packager put there, as
+/// trusted as this program itself and free to be another build of the model.
+///
+/// Reading 99 MB takes a moment, so the answer is remembered for as long as
+/// the file keeps its size and time (`VERIFIED`): one reading per run.
+/// Blocks: the caller is the thread that loads the model, never the UI's.
+fn verify_installed(model: &Path, origin: Origin, expected: &str) -> Result<(), String> {
+    static VERIFIED: Mutex<Option<(Identity, String)>> = Mutex::new(None);
+    verify_installed_with(model, origin, expected, &VERIFIED)
+}
+
+/// What a file is recognized by between two looks at it.
+type Identity = (PathBuf, u64, Option<std::time::SystemTime>);
+
+fn verify_installed_with(
+    model: &Path,
+    origin: Origin,
+    expected: &str,
+    verified: &Mutex<Option<(Identity, String)>>,
+) -> Result<(), String> {
+    if origin != Origin::Data {
+        return Ok(());
+    }
+    let unreadable =
+        |e: std::io::Error| format!("Could not read the depth model {}: {e}", model.display());
+    let metadata = std::fs::metadata(model).map_err(unreadable)?;
+    let identity = (model.to_owned(), metadata.len(), metadata.modified().ok());
+    let mut verified = verified.lock().unwrap_or_else(|e| e.into_inner());
+    let actual = match &*verified {
+        Some((known, actual)) if *known == identity => actual.clone(),
+        _ => {
+            let actual = any2odyssey_core::engine::sha256_hex(model).map_err(unreadable)?;
+            *verified = Some((identity, actual.clone()));
+            actual
+        }
+    };
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "The depth model {} is not the expected file (SHA-256 {actual}, expected {expected}): it is damaged or was replaced. Install it again with --install-depth-model. To use a model of your own, name it in ${MODEL_ENV}.",
+            model.display()
+        ))
+    }
 }
 
 /// Download the model into the user's data folder with `curl`, check it
@@ -94,18 +170,24 @@ fn install_model_in(
     std::fs::create_dir_all(folder)
         .map_err(|e| format!("Could not create {}: {e}", folder.display()))?;
     let target = folder.join(MODEL_FILE);
+    remove_stale_downloads(folder, STALE_DOWNLOAD);
     // Exclusive creation keeps simultaneous installers independent and never
     // follows a pre-existing .part symlink. Curl writes through the already
     // open file, not a pathname it would reopen and truncate.
+    //
+    // The file keeps the permissions it is created with, the owner's alone
+    // (0600), when it becomes the model: that is how everything else in the
+    // data folder is kept (`fsutil::write_atomic`), and nobody but this
+    // user's own program reads the model from there.
     let partial = tempfile::Builder::new()
-        .prefix(".depth-download-")
+        .prefix(DOWNLOAD_PREFIX)
         .tempfile_in(folder)
         .map_err(|e| format!("Could not create a model download: {e}"))?;
     let output = partial
         .reopen()
         .map_err(|e| format!("Could not open the model download: {e}"))?;
     let status = command
-        .args(["--fail", "--location", "--proto", "=https", "--output", "-"])
+        .args(download_arguments())
         .arg(MODEL_URL)
         .stdout(std::process::Stdio::from(output))
         .status()
@@ -118,6 +200,72 @@ fn install_model_in(
         .persist(&target)
         .map_err(|e| format!("Could not move the model into place: {e}"))?;
     Ok(target)
+}
+
+/// How a download in progress is named in the models folder.
+const DOWNLOAD_PREFIX: &str = ".depth-download-";
+
+/// What `curl` is told, before the address.
+fn download_arguments() -> Vec<String> {
+    [
+        // First, or curl has read it already: the user's ~/.curlrc is not
+        // consulted, so nothing there (a proxy, `--insecure`, another
+        // output) changes what this download does.
+        "-q",
+        "--fail",
+        "--location",
+        // HTTPS for the address and for every redirect it leads to.
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
+        // Not more than a model can be, where the server says the size
+        // beforehand (newer curl also stops a longer transfer midway).
+        "--max-filesize",
+        &MODEL_MAX_BYTES.to_string(),
+        // A server that does not answer, or a transfer that has stalled
+        // (under 1 kB a second for a minute), ends instead of hanging.
+        "--connect-timeout",
+        "20",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "60",
+        "--output",
+        "-",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
+/// Clear away downloads that were given up: files in `folder` with the name
+/// of a download in progress (and the `.part` file older versions used)
+/// that have not been written to for `age`. Nothing else is touched, and
+/// nothing that is not a plain file, a link least of all.
+fn remove_stale_downloads(folder: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    let legacy = format!("{MODEL_FILE}.part");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let ours = name
+            .to_str()
+            .is_some_and(|name| name.starts_with(DOWNLOAD_PREFIX) || name == legacy);
+        // `DirEntry::metadata` does not follow a link.
+        let stale = ours
+            && entry.metadata().is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata
+                        .modified()
+                        .ok()
+                        .and_then(|written| written.elapsed().ok())
+                        .is_some_and(|unwritten| unwritten >= age)
+            });
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn verify_download(file: &Path, expected: &str) -> Result<(), String> {
@@ -244,7 +392,11 @@ pub fn estimate_unless_cancelled(
     with_model(
         &ESTIMATOR,
         cancelled,
-        || Estimator::load(&locate_model()?),
+        || {
+            let (model, origin) = locate_model()?;
+            verify_installed(&model, origin, MODEL_SHA256)?;
+            Estimator::load(&model)
+        },
         |estimator| estimator.estimate(image, long_side),
     )
 }
@@ -551,13 +703,176 @@ mod tests {
     fn the_override_is_the_first_place_a_model_is_looked_for() {
         let candidates = model_candidates();
         assert!(candidates.len() >= 3);
-        assert!(candidates.iter().all(|path| path
+        assert!(candidates.iter().all(|(path, _)| path
             .file_name()
             .is_some_and(|name| name == MODEL_FILE)
             || std::env::var_os(MODEL_ENV).is_some()));
-        assert!(candidates
-            .last()
-            .unwrap()
-            .starts_with("/usr/share/any2odyssey"));
+        let (last, origin) = candidates.last().unwrap();
+        assert!(last.starts_with("/usr/share/any2odyssey"));
+        assert_eq!(*origin, Origin::System);
+        // Exactly one place is held to the pinned hash: the data folder.
+        let data: Vec<_> = candidates
+            .iter()
+            .filter(|(_, origin)| *origin == Origin::Data)
+            .collect();
+        assert_eq!(data.len(), 1);
+        assert!(data[0].0.ends_with(Path::new("models").join(MODEL_FILE)));
+        let overrides = candidates
+            .iter()
+            .filter(|(_, origin)| *origin == Origin::Override)
+            .count();
+        assert_eq!(
+            overrides,
+            usize::from(std::env::var_os(MODEL_ENV).is_some_and(|p| !p.is_empty()))
+        );
+    }
+
+    #[test]
+    fn the_installed_model_is_checked_once_before_it_is_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = dir.path().join(MODEL_FILE);
+        std::fs::write(&model, b"the model").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&model).unwrap();
+        let written = std::fs::metadata(&model).unwrap().modified().unwrap();
+        let verified = Mutex::new(None);
+        let check =
+            |origin, expected: &str| verify_installed_with(&model, origin, expected, &verified);
+        assert_eq!(check(Origin::Data, &expected), Ok(()));
+        assert_eq!(check(Origin::Data, &expected.to_uppercase()), Ok(()));
+
+        // Remembered by size and time: the file is not read a second time.
+        // (Same length, and the time put back, to show it.)
+        std::fs::write(&model, b"THE MODEL").unwrap();
+        let file = std::fs::File::options().write(true).open(&model).unwrap();
+        file.set_modified(written).unwrap();
+        drop(file);
+        assert_eq!(check(Origin::Data, &expected), Ok(()));
+
+        // A file that has changed is read again, and refused with what to do.
+        let file = std::fs::File::options().write(true).open(&model).unwrap();
+        file.set_modified(written + std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(file);
+        let error = check(Origin::Data, &expected).unwrap_err();
+        assert!(error.contains("--install-depth-model"), "{error}");
+        assert!(
+            error.contains(MODEL_ENV) && error.contains(&expected),
+            "{error}"
+        );
+        // So is one cut short, and the refusal is remembered like the rest.
+        std::fs::write(&model, b"the mod").unwrap();
+        assert!(check(Origin::Data, &expected).is_err());
+        assert!(check(Origin::Data, &expected).is_err());
+
+        // A model of one's own and a packaged one are not held to the hash,
+        // and not read for it.
+        assert_eq!(check(Origin::Override, &expected), Ok(()));
+        assert_eq!(check(Origin::System, &expected), Ok(()));
+        let missing = dir.path().join("missing.onnx");
+        for origin in [Origin::Override, Origin::System] {
+            assert_eq!(
+                verify_installed_with(&missing, origin, &expected, &verified),
+                Ok(())
+            );
+        }
+        let error =
+            verify_installed_with(&missing, Origin::Data, &expected, &verified).unwrap_err();
+        assert!(
+            error.starts_with("Could not read the depth model"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn curl_ignores_its_configuration_file_and_cannot_stall_or_leave_https() {
+        let arguments = download_arguments();
+        assert_eq!(arguments[0], "-q", "only the first argument is honoured");
+        let value = |option: &str| {
+            let at = arguments.iter().position(|a| a == option);
+            at.map(|at| arguments[at + 1].as_str())
+        };
+        assert_eq!(value("--proto"), Some("=https"));
+        assert_eq!(value("--proto-redir"), Some("=https"));
+        assert_eq!(value("--max-filesize"), Some("209715200"));
+        assert_eq!(value("--connect-timeout"), Some("20"));
+        assert_eq!(value("--speed-limit"), Some("1024"));
+        assert_eq!(value("--speed-time"), Some("60"));
+        assert_eq!(value("--output"), Some("-"));
+        assert!(arguments.contains(&"--fail".to_owned()));
+        assert!(arguments.contains(&"--location".to_owned()));
+        // The address names one commit, not whatever is newest.
+        let revision = MODEL_URL
+            .split_once("/resolve/")
+            .and_then(|(_, rest)| rest.split('/').next())
+            .unwrap();
+        assert_eq!(revision.len(), 40);
+        assert!(revision.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_download_command_gets_the_arguments_before_the_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("arguments");
+        let models = dir.path().join("models");
+        let mut command = download_command("printf '%s\\n' \"$@\" > \"$SEEN\"; printf model");
+        command.env("SEEN", &seen);
+        std::fs::create_dir(&models).unwrap();
+        std::fs::write(models.join(MODEL_FILE), b"model").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&models.join(MODEL_FILE)).unwrap();
+        install_model_in(&models, command, &expected).unwrap();
+        let mut wanted = download_arguments();
+        wanted.push(MODEL_URL.to_owned());
+        let seen = std::fs::read_to_string(seen).unwrap();
+        assert_eq!(seen.lines().collect::<Vec<_>>(), wanted);
+    }
+
+    #[test]
+    fn only_old_downloads_of_ours_are_cleared_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        let old = std::time::SystemTime::now() - day * 3;
+        let aged = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"partial").unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(old).unwrap();
+            path
+        };
+        let stale = [
+            aged(".depth-download-Ab3xQ9"),
+            aged(&format!("{MODEL_FILE}.part")),
+        ];
+        // Another installer's download in progress.
+        let running = dir.path().join(".depth-download-Zz81kL");
+        std::fs::write(&running, b"partial").unwrap();
+        // Old, but not ours to remove.
+        let kept = [
+            aged(MODEL_FILE),
+            aged("notes.txt"),
+            aged("depth-download-visible"),
+            aged(&format!("other-{MODEL_FILE}.part")),
+        ];
+        let folder = dir.path().join(".depth-download-folder");
+        std::fs::create_dir(&folder).unwrap();
+        #[cfg(unix)]
+        let (link, victim) = {
+            let victim = aged("victim");
+            let link = dir.path().join(".depth-download-link");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            (link, victim)
+        };
+        remove_stale_downloads(dir.path(), day);
+        for path in &stale {
+            assert!(!path.exists(), "{path:?}");
+        }
+        assert!(running.exists() && folder.is_dir());
+        for path in &kept {
+            assert!(path.exists(), "{path:?}");
+        }
+        #[cfg(unix)]
+        assert!(link.is_symlink() && victim.exists());
+        // A folder that is not there is nothing to clear.
+        remove_stale_downloads(&dir.path().join("missing"), day);
     }
 }
