@@ -614,22 +614,17 @@ impl ViewerState {
         let Some(token) = self.live.as_ref().and_then(|live| live.restore_token()) else {
             return;
         };
+        self.remember_token(&any2odyssey_core::paths::capture_token_file(), token);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn remember_token(&mut self, file: &Path, token: String) {
         if self.forget_screen || self.saved_token.as_deref() == Some(token.as_str()) {
             return;
         }
-        let file = any2odyssey_core::paths::capture_token_file();
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        use std::io::Write;
-        if options
-            .open(&file)
-            .and_then(|mut f| f.write_all(token.as_bytes()))
-            .is_ok()
-        {
+        // Replace through a private sibling file: mode(0600) on open only
+        // protects newly created files and would follow an existing symlink.
+        if any2odyssey_core::fsutil::write_atomic(file, token.as_bytes()).is_ok() {
             self.saved_token = Some(token);
         }
     }
@@ -1524,6 +1519,59 @@ mod tests {
             2,
             "no abandoned staging files"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saved_capture_tokens_are_private_even_when_replacing_a_public_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture-token");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut viewer = ViewerState::default();
+        viewer.remember_token(&path, "next token".into());
+        assert_eq!(std::fs::read(&path).unwrap(), b"next token");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(viewer.saved_token.as_deref(), Some("next token"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saving_a_capture_token_does_not_follow_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("unrelated");
+        let path = dir.path().join("capture-token");
+        std::fs::write(&target, b"preserve me").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        ViewerState::default().remember_token(&path, "next token".into());
+        assert_eq!(std::fs::read(&target).unwrap(), b"preserve me");
+        assert_eq!(std::fs::read(&path).unwrap(), b"next token");
+        assert!(!std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capture_token_failure_is_retried_and_forgetting_prevents_a_new_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture-token");
+        std::fs::create_dir(&path).unwrap();
+        let mut viewer = ViewerState::default();
+        viewer.remember_token(&path, "next token".into());
+        assert!(viewer.saved_token.is_none());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        std::fs::remove_dir(&path).unwrap();
+        viewer.remember_token(&path, "next token".into());
+        assert_eq!(viewer.saved_token.as_deref(), Some("next token"));
+        viewer.forget_screen = true;
+        viewer.remember_token(&path, "forgotten token".into());
+        assert_eq!(std::fs::read(path).unwrap(), b"next token");
     }
 
     #[test]
