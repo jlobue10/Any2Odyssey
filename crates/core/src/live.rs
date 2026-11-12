@@ -38,11 +38,17 @@ impl Source<'_> {
 }
 
 /// The threads a frame's rows are spread over: a quarter of the cores, at
-/// most six. The work is light and the cores have other things to do while
-/// a picture is live (the depth model, the eye tracker, the desktop).
+/// most six, and two wherever there are two cores at all (a quarter of four
+/// or six cores would be one thread, and the picture late for it). The work
+/// is light and the cores have other things to do while a picture is live
+/// (the depth model, the eye tracker, the desktop).
 fn threads_for(rows: usize) -> usize {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    (cores / 4).clamp(1, 6).min(rows.max(1))
+    threads_on(cores).min(rows.max(1))
+}
+
+fn threads_on(cores: usize) -> usize {
+    (cores / 4).clamp(cores.clamp(1, 2), 6)
 }
 
 /// Run `work(first_row, rows)` over `out` cut into bands of whole rows of
@@ -51,18 +57,31 @@ fn in_bands(out: &mut [u8], row_bytes: usize, work: impl Fn(usize, &mut [u8]) + 
     if row_bytes == 0 || out.is_empty() {
         return;
     }
+    in_bands_on(threads_for(out.len() / row_bytes), out, row_bytes, work);
+}
+
+/// [`in_bands`] over a stated number of threads. The calling thread works
+/// the first band itself: one thread fewer to start for every stage of
+/// every frame, and none at all for a single band.
+fn in_bands_on(
+    threads: usize,
+    out: &mut [u8],
+    row_bytes: usize,
+    work: impl Fn(usize, &mut [u8]) + Sync,
+) {
     let rows = out.len() / row_bytes;
-    let threads = threads_for(rows);
-    if threads <= 1 {
+    if threads <= 1 || rows <= 1 {
         work(0, out);
         return;
     }
     let band = rows.div_ceil(threads);
+    let (first, rest) = out.split_at_mut((band * row_bytes).min(out.len()));
     std::thread::scope(|scope| {
-        for (index, part) in out.chunks_mut(band * row_bytes).enumerate() {
+        for (index, part) in rest.chunks_mut(band * row_bytes).enumerate() {
             let work = &work;
-            scope.spawn(move || work(index * band, part));
+            scope.spawn(move || work((index + 1) * band, part));
         }
+        work(0, first);
     });
 }
 
@@ -132,6 +151,11 @@ pub fn scale_to_rgba(source: Source<'_>, out: &mut [u8], width: u32, height: u32
     true
 }
 
+/// How near to its end a depth map eased towards a still picture's own map
+/// counts as there. At the widest view and the strongest depth this much
+/// nearness moves a pixel by about a tenth of its width.
+pub const SETTLED: f32 = 1.0 / 2048.0;
+
 /// Depth that stays put between frames.
 ///
 /// The model sees every frame afresh: its scale drifts and its surfaces
@@ -196,6 +220,58 @@ impl DepthSmoother {
         true
     }
 
+    /// Take the map of a picture that has not changed once more, in place
+    /// of asking the model about the same pixels again: the same step
+    /// [`DepthSmoother::update`] makes, so depth eases towards the still
+    /// picture's own map as it would have. True once it has arrived and
+    /// further steps would change nothing; the last of the way, too small
+    /// to see ([`SETTLED`]), is taken at once.
+    pub fn settle(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32) -> bool {
+        if !self.update(width, height, raw, steadiness) {
+            // A map that cannot be used never will be.
+            return true;
+        }
+        let Some((low, high)) = self.range else {
+            return true;
+        };
+        let scale = |low: f32, high: f32| {
+            let span = high - low;
+            if span > f32::EPSILON {
+                1.0 / span
+            } else {
+                0.0
+            }
+        };
+        // Where the steps lead: the map normalized with its own range.
+        let (mut end_low, mut end_high) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &v in raw {
+            end_low = end_low.min(v);
+            end_high = end_high.max(v);
+        }
+        let (now, end) = (scale(low, high), scale(end_low, end_high));
+        let at_end = |v: f32| ((v - end_low) * end).clamp(0.0, 1.0);
+        // A flat map has no range to ease to (a range that only narrows
+        // never counts as flat), so its end is taken at once. For any
+        // other, both what is shown and what the next step would blend in
+        // have to be there: the range moves more slowly than the values.
+        if end > 0.0 {
+            let mut off = 0.0f32;
+            for (&value, &v) in self.values.iter().zip(raw) {
+                let target = at_end(v);
+                let next = ((v - low) * now).clamp(0.0, 1.0);
+                off = off.max((value - target).abs()).max((next - target).abs());
+            }
+            if off > SETTLED {
+                return false;
+            }
+        }
+        self.range = Some((end_low, end_high));
+        for (value, &v) in self.values.iter_mut().zip(raw) {
+            *value = at_end(v);
+        }
+        true
+    }
+
     /// Nearness per pixel, 0 (far) to 1 (near), row by row; empty before
     /// the first update.
     pub fn values(&self) -> &[f32] {
@@ -215,6 +291,88 @@ pub struct Depth<'a> {
     pub height: u32,
 }
 
+/// Where the depth map is read for each pixel of a picture: the map
+/// stretched over the picture, blended between its four nearest values.
+struct DepthAt<'a> {
+    depth: Depth<'a>,
+    /// Where each column falls in the map, as index and blend weight.
+    columns: Vec<(usize, usize, f32)>,
+    height: usize,
+}
+
+impl<'a> DepthAt<'a> {
+    /// `None` for a map that does not match its stated size.
+    fn new(depth: Option<Depth<'a>>, width: usize, height: usize) -> Option<DepthAt<'a>> {
+        let depth = depth.filter(|d| {
+            d.width > 0 && d.height > 0 && d.values.len() == d.width as usize * d.height as usize
+        })?;
+        let dw = depth.width as usize;
+        let columns = (0..width)
+            .map(|x| {
+                let at =
+                    ((x as f32 + 0.5) * dw as f32 / width as f32 - 0.5).clamp(0.0, (dw - 1) as f32);
+                let left = at.floor() as usize;
+                (left, (left + 1).min(dw - 1), at - left as f32)
+            })
+            .collect();
+        Some(DepthAt {
+            depth,
+            columns,
+            height,
+        })
+    }
+
+    /// The nearness of every pixel of row `y`.
+    fn row(&self, y: usize, nearness: &mut [f32]) {
+        let (dw, dh) = (self.depth.width as usize, self.depth.height as usize);
+        let at =
+            ((y as f32 + 0.5) * dh as f32 / self.height as f32 - 0.5).clamp(0.0, (dh - 1) as f32);
+        let top = at.floor() as usize;
+        let bottom = (top + 1).min(dh - 1);
+        let blend = at - top as f32;
+        let (upper, lower) = (
+            &self.depth.values[top * dw..],
+            &self.depth.values[bottom * dw..],
+        );
+        for (near, &(l, r, t)) in nearness.iter_mut().zip(&self.columns) {
+            let a = upper[l] + (upper[r] - upper[l]) * t;
+            let b = lower[l] + (lower[r] - lower[l]) * t;
+            *near = a + (b - a) * blend;
+        }
+    }
+}
+
+/// One row of both views: the row's `pixels` moved sideways by their
+/// `nearness`. `placed` is working room, as long as the row.
+fn shift_row(
+    pixels: &[u8],
+    nearness: &[f32],
+    placed: &mut [f32],
+    params: Params,
+    width: u32,
+    left: &mut [u8],
+    right: &mut [u8],
+) {
+    let w = nearness.len();
+    // Left eye: near points move right. Right eye: near points move left.
+    for (view, direction) in [(left, 0.5f32), (right, -0.5f32)] {
+        placed.fill(f32::NEG_INFINITY);
+        for x in 0..w {
+            let near = nearness[x];
+            let target = (x as f32 + direction * params.disparity(near, width)).round();
+            if target < 0.0 || target >= w as f32 {
+                continue;
+            }
+            let t = target as usize;
+            if near > placed[t] {
+                placed[t] = near;
+                view[t * 4..t * 4 + 4].copy_from_slice(&pixels[x * 4..x * 4 + 4]);
+            }
+        }
+        fill_gaps(view, placed);
+    }
+}
+
 /// Render the left and right views of the RGBA image `source` (`width` x
 /// `height`) into `out`, side by side (`2 * width` x `height`, RGBA): the
 /// same picture [`crate::dibr::synthesize`] makes, band by band. Without a
@@ -232,65 +390,121 @@ pub fn render_pair(
     if w == 0 || h == 0 || source.len() != w * h * 4 || out.len() != w * h * 8 {
         return false;
     }
-    let depth = depth.filter(|d| {
-        d.width > 0 && d.height > 0 && d.values.len() == d.width as usize * d.height as usize
-    });
-    let Some(depth) = depth else {
+    let Some(depth) = DepthAt::new(depth, w, h) else {
         for (row, line) in source.chunks_exact(w * 4).zip(out.chunks_exact_mut(w * 8)) {
             line[..w * 4].copy_from_slice(row);
             line[w * 4..].copy_from_slice(row);
         }
         return true;
     };
-    let (dw, dh) = (depth.width as usize, depth.height as usize);
-    // Where each column falls in the depth map, as index and blend weight.
-    let columns: Vec<(usize, usize, f32)> = (0..w)
-        .map(|x| {
-            let at = ((x as f32 + 0.5) * dw as f32 / w as f32 - 0.5).clamp(0.0, (dw - 1) as f32);
-            let left = at.floor() as usize;
-            (left, (left + 1).min(dw - 1), at - left as f32)
-        })
-        .collect();
     in_bands(out, w * 8, |first_row, band| {
         let mut nearness = vec![0.0f32; w];
         let mut placed = vec![f32::NEG_INFINITY; w];
         for (row, line) in band.chunks_exact_mut(w * 8).enumerate() {
             let y = first_row + row;
-            let at = ((y as f32 + 0.5) * dh as f32 / h as f32 - 0.5).clamp(0.0, (dh - 1) as f32);
-            let top = at.floor() as usize;
-            let bottom = (top + 1).min(dh - 1);
-            let blend = at - top as f32;
-            let (upper, lower) = (&depth.values[top * dw..], &depth.values[bottom * dw..]);
-            for (near, &(l, r, t)) in nearness.iter_mut().zip(&columns) {
-                let a = upper[l] + (upper[r] - upper[l]) * t;
-                let b = lower[l] + (lower[r] - lower[l]) * t;
-                *near = a + (b - a) * blend;
-            }
+            depth.row(y, &mut nearness);
             let pixels = &source[y * w * 4..(y + 1) * w * 4];
             let (left, right) = line.split_at_mut(w * 4);
-            // Left eye: near points move right. Right eye: near points move left.
-            for (view, direction) in [(left, 0.5f32), (right, -0.5f32)] {
-                placed.fill(f32::NEG_INFINITY);
-                for x in 0..w {
-                    let near = nearness[x];
-                    let target = (x as f32 + direction * params.disparity(near, width)).round();
-                    if target < 0.0 || target >= w as f32 {
-                        continue;
-                    }
-                    let t = target as usize;
-                    if near > placed[t] {
-                        placed[t] = near;
-                        view[t * 4..t * 4 + 4].copy_from_slice(&pixels[x * 4..x * 4 + 4]);
-                    }
+            shift_row(pixels, &nearness, &mut placed, params, width, left, right);
+        }
+    });
+    true
+}
+
+/// Where a pair of views goes in the picture an output is handed: two
+/// halves of `view` pixels side by side, RGBA, the bottom row first (the
+/// weaver's order), each view with its top-left corner at (`x`, `y`) of its
+/// half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub view: (u32, u32),
+    pub x: u32,
+    pub y: u32,
+    /// The right view goes into the left half and the left into the right.
+    pub swap: bool,
+}
+
+impl Placement {
+    /// Bytes of the whole picture.
+    pub fn bytes(&self) -> usize {
+        self.view.0 as usize * self.view.1 as usize * 8
+    }
+
+    /// The bytes of `canvas` the rows of a `width` x `height` view go to
+    /// (they are next to one another, the view's last row first), or
+    /// `None` when the view or the canvas does not fit.
+    fn rows(&self, width: usize, height: usize, canvas: usize) -> Option<std::ops::Range<usize>> {
+        let (vw, vh) = (self.view.0 as usize, self.view.1 as usize);
+        let (x, y) = (self.x as usize, self.y as usize);
+        if width == 0 || height == 0 || x + width > vw || y + height > vh || canvas != self.bytes()
+        {
+            return None;
+        }
+        let row = vw * 8;
+        Some((vh - y - height) * row..(vh - y) * row)
+    }
+
+    /// Where the left and the right view's pixels go in one row of the
+    /// picture.
+    fn halves<'a>(&self, line: &'a mut [u8], width: usize) -> (&'a mut [u8], &'a mut [u8]) {
+        let (vw, x) = (self.view.0 as usize, self.x as usize);
+        let (first, second) = line.split_at_mut(vw * 4);
+        let first = &mut first[x * 4..(x + width) * 4];
+        let second = &mut second[x * 4..(x + width) * 4];
+        if self.swap {
+            (second, first)
+        } else {
+            (first, second)
+        }
+    }
+}
+
+/// [`render_pair`] straight into the output's picture: the two views of
+/// `source` are rendered where `place` puts them in `canvas`, with no pair
+/// in between to copy from. What `canvas` holds around the views stays.
+/// False (and `canvas` untouched) when the sizes do not fit.
+pub fn render_placed(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    depth: Option<Depth<'_>>,
+    params: Params,
+    place: Placement,
+    canvas: &mut [u8],
+) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    let Some(rows) = place.rows(w, h, canvas.len()) else {
+        return false;
+    };
+    if source.len() != w * h * 4 {
+        return false;
+    }
+    let depth = DepthAt::new(depth, w, h);
+    let row_bytes = place.view.0 as usize * 8;
+    in_bands(&mut canvas[rows], row_bytes, |first_row, band| {
+        let mut nearness = vec![0.0f32; if depth.is_some() { w } else { 0 }];
+        let mut placed = vec![f32::NEG_INFINITY; nearness.len()];
+        for (row, line) in band.chunks_exact_mut(row_bytes).enumerate() {
+            // The picture's rows run upwards, the view's downwards.
+            let y = h - 1 - (first_row + row);
+            let pixels = &source[y * w * 4..(y + 1) * w * 4];
+            let (left, right) = place.halves(line, w);
+            match &depth {
+                Some(depth) => {
+                    depth.row(y, &mut nearness);
+                    shift_row(pixels, &nearness, &mut placed, params, width, left, right);
                 }
-                fill_gaps(view, &mut placed);
+                None => {
+                    left.copy_from_slice(pixels);
+                    right.copy_from_slice(pixels);
+                }
             }
         }
     });
     true
 }
 
-/// Fill the pixels nothing was moved onto, each run from whichever
+// Fill the pixels nothing was moved onto, each run from whichever
 /// neighbour is farther away (a near object uncovers background).
 fn fill_gaps(view: &mut [u8], placed: &mut [f32]) {
     let len = placed.len();
@@ -334,45 +548,69 @@ fn fill_gaps(view: &mut [u8], placed: &mut [f32]) {
     }
 }
 
-/// Sharpen the RGBA picture `image` (`width` pixels wide) in place by
-/// `amount` (0.0 leaves it, 1.0 is strong): each pixel is pushed away from
-/// the mean of its four neighbours. `scratch` is working room the caller
-/// keeps between frames.
-pub fn sharpen(image: &mut [u8], width: u32, amount: f32, scratch: &mut Vec<u8>) {
-    let w = width as usize;
-    if amount <= 0.0 || w < 3 || image.len() < w * 4 * 3 || !image.len().is_multiple_of(w * 4) {
-        return;
+/// Put the views of `pair` (the picture [`render_pair`] makes of a `width`
+/// x `height` source) where `place` puts them in `canvas`, sharpened by
+/// `sharpen` on the way (0.0 leaves them, 1.0 is strong): each pixel is
+/// pushed away from the mean of its four neighbours in its own view; the
+/// outermost pixels of a view stay as they are. Sharpening reads the pair
+/// and writes the picture, so nothing is copied but the picture itself.
+/// What `canvas` holds around the views stays. False (and `canvas`
+/// untouched) when the sizes do not fit.
+pub fn place_pair(
+    pair: &[u8],
+    width: u32,
+    height: u32,
+    sharpen: f32,
+    place: Placement,
+    canvas: &mut [u8],
+) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    let Some(rows) = place.rows(w, h, canvas.len()) else {
+        return false;
+    };
+    if pair.len() != w * h * 8 {
+        return false;
     }
-    scratch.clear();
-    scratch.extend_from_slice(image);
-    let before: &[u8] = scratch;
-    let row = w * 4;
-    let rows = image.len() / row;
+    let sharp = sharpen > 0.0 && w >= 3 && h >= 3;
     // Fixed point: 256 is 1.0.
-    let k = (amount.min(2.0) * 256.0) as i32;
-    in_bands(image, row, |first_row, band| {
-        for (index, line) in band.chunks_exact_mut(row).enumerate() {
-            let y = first_row + index;
-            if y == 0 || y + 1 >= rows {
+    let k = (sharpen.min(2.0) * 256.0) as i32;
+    let row_bytes = place.view.0 as usize * 8;
+    in_bands(&mut canvas[rows], row_bytes, |first_row, band| {
+        for (row, line) in band.chunks_exact_mut(row_bytes).enumerate() {
+            // The picture's rows run upwards, the pair's downwards.
+            let y = h - 1 - (first_row + row);
+            let (here_left, here_right) = pair[y * w * 8..(y + 1) * w * 8].split_at(w * 4);
+            let (left, right) = place.halves(line, w);
+            if !sharp || y == 0 || y + 1 == h {
+                left.copy_from_slice(here_left);
+                right.copy_from_slice(here_right);
                 continue;
             }
-            let (above, here, below) = (
-                &before[(y - 1) * row..y * row],
-                &before[y * row..(y + 1) * row],
-                &before[(y + 1) * row..(y + 2) * row],
-            );
-            for x in 1..w - 1 {
-                for c in 0..3 {
-                    let i = x * 4 + c;
-                    let centre = here[i] as i32;
-                    let around =
-                        above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
-                    let value = centre + (((centre * 4 - around) * k) >> 10);
-                    line[i] = value.clamp(0, 255) as u8;
-                }
-            }
+            let (above_left, above_right) = pair[(y - 1) * w * 8..y * w * 8].split_at(w * 4);
+            let (below_left, below_right) = pair[(y + 1) * w * 8..(y + 2) * w * 8].split_at(w * 4);
+            sharpen_row(above_left, here_left, below_left, k, left);
+            sharpen_row(above_right, here_right, below_right, k, right);
         }
     });
+    true
+}
+
+/// One row of one view, sharpened from the rows around it into `out`; its
+/// first and last pixel are copied.
+fn sharpen_row(above: &[u8], here: &[u8], below: &[u8], k: i32, out: &mut [u8]) {
+    let end = here.len() - 4;
+    out[..4].copy_from_slice(&here[..4]);
+    out[end..].copy_from_slice(&here[end..]);
+    for x in (4..end).step_by(4) {
+        for i in x..x + 3 {
+            let centre = here[i] as i32;
+            let around =
+                above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
+            let value = centre + (((centre * 4 - around) * k) >> 10);
+            out[i] = value.clamp(0, 255) as u8;
+        }
+        out[x + 3] = here[x + 3];
+    }
 }
 
 #[cfg(test)]
@@ -604,26 +842,372 @@ mod tests {
     }
 
     #[test]
-    fn sharpening_raises_contrast_at_an_edge_and_leaves_flat_areas_and_the_border() {
-        // 5x3: a bright column in the middle.
-        let (w, h) = (5usize, 3usize);
-        let mut image = vec![0u8; w * h * 4];
-        for y in 0..h {
-            for x in 0..w {
-                let v = if x == 2 { 200 } else { 100 };
-                image[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&[v, v, v, 255]);
+    fn a_still_pictures_map_is_eased_in_as_before_and_then_stays_put() {
+        let (w, h) = (16u32, 9u32);
+        let before: Vec<f32> = (0..w * h).map(|i| (i % 7) as f32).collect();
+        let still: Vec<f32> = (0..w * h).map(|i| ((i * 5) % 11) as f32 * 0.25).collect();
+        let own = {
+            let mut fresh = DepthSmoother::default();
+            assert!(fresh.update(w, h, &still, 0.0));
+            fresh
+        };
+        for steadiness in [0.0, 0.6, 0.95] {
+            // `again` is asked about the same pixels for ever, as the model
+            // was; `eased` takes the one answer again and again.
+            let mut again = DepthSmoother::default();
+            assert!(again.update(w, h, &before, steadiness));
+            assert!(again.update(w, h, &still, steadiness));
+            let mut eased = again.clone();
+            let mut steps = 0;
+            loop {
+                steps += 1;
+                assert!(steps < 2000, "never settled at {steadiness}");
+                assert!(again.update(w, h, &still, steadiness));
+                if eased.settle(w, h, &still, steadiness) {
+                    break;
+                }
+                assert_eq!(eased.values(), again.values(), "step {steps}");
+            }
+            // It ends on the picture's own map exactly, a step the eye
+            // cannot see away from where asking again had got to.
+            assert_eq!(eased.values(), own.values());
+            for (a, b) in again.values().iter().zip(eased.values()) {
+                assert!((a - b).abs() <= SETTLED, "{a} {b} at {steadiness}");
+            }
+            // More steps change nothing.
+            assert!(eased.settle(w, h, &still, steadiness));
+            assert_eq!(eased.values(), own.values());
+            // Depth that follows the model at once is there after the range
+            // has caught up; steadier depth takes longer.
+            assert!(steadiness > 0.0 || steps < 40, "{steps}");
+        }
+        // A flat picture is flat at once (its range has nowhere to ease
+        // to), and an unusable map ends the easing.
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(2, 1, &[1.0, 3.0], 0.5));
+        assert!(smoother.settle(2, 1, &[4.0, 4.0], 0.5));
+        assert_eq!(smoother.values(), [0.0, 0.0]);
+        assert!(smoother.settle(2, 1, &[f32::NAN, 1.0], 0.5));
+        assert_eq!(smoother.values(), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn two_cores_already_share_the_rows_and_six_threads_are_the_most() {
+        let threads: Vec<usize> = [1, 2, 3, 4, 7, 8, 12, 16, 24, 64]
+            .into_iter()
+            .map(threads_on)
+            .collect();
+        assert_eq!(threads, [1, 2, 2, 2, 2, 2, 3, 4, 6, 6]);
+    }
+
+    #[test]
+    fn bands_cover_every_row_once_whatever_the_number_of_threads() {
+        let row_bytes = 3;
+        for rows in [1usize, 2, 3, 5, 6, 7, 40] {
+            let expected: Vec<u8> = (0..rows)
+                .flat_map(|row| [row as u8 + 1, row as u8 + 2, row as u8 + 3])
+                .collect();
+            for threads in 1..=8 {
+                // Every byte has its row's number added, so a row worked
+                // twice or not at all shows.
+                let mut out = vec![0u8; rows * row_bytes];
+                in_bands_on(threads, &mut out, row_bytes, |first_row, band| {
+                    for (row, line) in band.chunks_exact_mut(row_bytes).enumerate() {
+                        for (i, byte) in line.iter_mut().enumerate() {
+                            *byte += (first_row + row + i) as u8 + 1;
+                        }
+                    }
+                });
+                assert_eq!(out, expected, "{rows} rows on {threads} threads");
             }
         }
-        let before = image.clone();
-        let mut scratch = Vec::new();
-        sharpen(&mut image, w as u32, 0.0, &mut scratch);
-        assert_eq!(image, before, "amount 0 changes nothing");
-        sharpen(&mut image, w as u32, 1.0, &mut scratch);
-        let at = |x: usize, y: usize| image[(y * w + x) * 4];
+    }
+
+    /// The live picture as it was put together before the views were
+    /// rendered and sharpened straight into the output's picture: the pair,
+    /// a copy of it to sharpen from, the two columns at the seam put back,
+    /// then every row copied to its place. Kept to compare with.
+    mod as_before {
+        use super::super::*;
+
+        pub fn sharpen(image: &mut [u8], width: u32, amount: f32, scratch: &mut Vec<u8>) {
+            let w = width as usize;
+            if amount <= 0.0
+                || w < 3
+                || image.len() < w * 4 * 3
+                || !image.len().is_multiple_of(w * 4)
+            {
+                return;
+            }
+            scratch.clear();
+            scratch.extend_from_slice(image);
+            let before: &[u8] = scratch;
+            let row = w * 4;
+            let rows = image.len() / row;
+            let k = (amount.min(2.0) * 256.0) as i32;
+            for (y, line) in image.chunks_exact_mut(row).enumerate() {
+                if y == 0 || y + 1 >= rows {
+                    continue;
+                }
+                let (above, here, below) = (
+                    &before[(y - 1) * row..y * row],
+                    &before[y * row..(y + 1) * row],
+                    &before[(y + 1) * row..(y + 2) * row],
+                );
+                for x in 1..w - 1 {
+                    for c in 0..3 {
+                        let i = x * 4 + c;
+                        let centre = here[i] as i32;
+                        let around = above[i] as i32
+                            + below[i] as i32
+                            + here[i - 4] as i32
+                            + here[i + 4] as i32;
+                        let value = centre + (((centre * 4 - around) * k) >> 10);
+                        line[i] = value.clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+
+        pub fn picture(
+            source: &[u8],
+            (width, height): (u32, u32),
+            depth: Option<Depth<'_>>,
+            params: Params,
+            sharpness: i32,
+            place: Placement,
+            canvas: &mut [u8],
+        ) {
+            let (w, h) = (width as usize, height as usize);
+            let mut pair = vec![0u8; source.len() * 2];
+            assert!(render_pair(source, width, height, depth, params, &mut pair));
+            let mut scratch = Vec::new();
+            if sharpness > 0 {
+                sharpen(&mut pair, width * 2, sharpness as f32 / 100.0, &mut scratch);
+                let (row, seam) = (w * 8, w * 4);
+                if seam >= 4 && scratch.len() == pair.len() {
+                    for (after, before) in pair.chunks_exact_mut(row).zip(scratch.chunks_exact(row))
+                    {
+                        after[seam - 4..seam + 4].copy_from_slice(&before[seam - 4..seam + 4]);
+                    }
+                }
+            }
+            let (vw, vh) = (place.view.0 as usize, place.view.1 as usize);
+            let (x, y) = (place.x as usize, place.y as usize);
+            for row in 0..h {
+                let from = &pair[row * w * 8..(row + 1) * w * 8];
+                let (left, right) = from.split_at(w * 4);
+                let (left, right) = if place.swap {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                let line = (vh - 1 - (y + row)) * vw * 8;
+                canvas[line + x * 4..line + (x + w) * 4].copy_from_slice(left);
+                canvas[line + (vw + x) * 4..line + (vw + x + w) * 4].copy_from_slice(right);
+            }
+        }
+    }
+
+    /// A picture with detail in every direction, and a depth map for it
+    /// with a near block (smaller than the picture, as the model's is).
+    fn a_scene(w: u32, h: u32) -> (Vec<u8>, Vec<f32>, (u32, u32)) {
+        let image = RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([
+                (x * 37 + y * 11) as u8,
+                ((y * 53) ^ (x * 7)) as u8,
+                ((x + y) * 29 % 251) as u8,
+                (200 + (x + y) % 56) as u8,
+            ])
+        });
+        let (dw, dh) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+        let depth = (0..dw * dh)
+            .map(|i| {
+                let (x, y) = (i % dw, i / dw);
+                if x * 3 > dw && x * 3 < dw * 2 && y * 3 > dh {
+                    1.0
+                } else {
+                    x as f32 / dw as f32 * 0.6
+                }
+            })
+            .collect();
+        (image.into_raw(), depth, (dw, dh))
+    }
+
+    #[test]
+    fn the_picture_put_together_in_one_pass_is_the_one_made_in_stages_before() {
+        let params = Params {
+            strength: 1.6,
+            popout: 0.4,
+        };
+        // (picture, view, corner): filling the view, letterboxed,
+        // pillarboxed, off centre, and pictures too small to sharpen.
+        let cases = [
+            ((64u32, 36u32), (64u32, 36u32), (0u32, 0u32)),
+            ((64, 18), (64, 36), (0, 9)),
+            ((40, 36), (64, 36), (12, 0)),
+            ((21, 13), (64, 36), (5, 3)),
+            ((2, 5), (8, 6), (3, 0)),
+            ((5, 2), (8, 6), (1, 2)),
+            ((1, 1), (2, 2), (1, 1)),
+        ];
+        let mut compared = 0;
+        for ((w, h), view, (x, y)) in cases {
+            let (source, values, (dw, dh)) = a_scene(w, h);
+            let map = Depth {
+                values: &values,
+                width: dw,
+                height: dh,
+            };
+            for depth in [Some(map), None] {
+                for swap in [false, true] {
+                    for sharpness in [0, 1, 35, 100] {
+                        let place = Placement { view, x, y, swap };
+                        // What is around the views must stay: a pattern
+                        // there shows any byte written out of place.
+                        let around: Vec<u8> = (0..place.bytes()).map(|i| (i % 253) as u8).collect();
+                        let mut before = around.clone();
+                        as_before::picture(
+                            &source,
+                            (w, h),
+                            depth,
+                            params,
+                            sharpness,
+                            place,
+                            &mut before,
+                        );
+                        let mut now = around.clone();
+                        if sharpness > 0 {
+                            let mut pair = vec![0u8; source.len() * 2];
+                            assert!(render_pair(&source, w, h, depth, params, &mut pair));
+                            assert!(place_pair(
+                                &pair,
+                                w,
+                                h,
+                                sharpness as f32 / 100.0,
+                                place,
+                                &mut now
+                            ));
+                        } else {
+                            assert!(render_placed(&source, w, h, depth, params, place, &mut now));
+                            // Without sharpening, placing a pair is a copy.
+                            let mut pair = vec![0u8; source.len() * 2];
+                            assert!(render_pair(&source, w, h, depth, params, &mut pair));
+                            let mut copied = around.clone();
+                            assert!(place_pair(&pair, w, h, 0.0, place, &mut copied));
+                            assert!(copied == before, "copying {w}x{h} into {place:?}");
+                        }
+                        assert!(
+                            now == before,
+                            "{w}x{h} into {place:?}, sharpness {sharpness}, depth {}",
+                            depth.is_some()
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, cases.len() * 16);
+    }
+
+    #[test]
+    fn a_picture_that_does_not_fit_its_place_is_refused_and_nothing_is_written() {
+        let (source, _, _) = a_scene(4, 3);
+        let pair = vec![9u8; source.len() * 2];
+        let fits = Placement {
+            view: (6, 4),
+            x: 2,
+            y: 1,
+            swap: false,
+        };
+        let mut canvas = vec![7u8; fits.bytes()];
+        let untouched = canvas.clone();
+        let params = Params::default();
+        for place in [
+            // Too far right, too far down, and a canvas of another size.
+            Placement { x: 3, ..fits },
+            Placement { y: 2, ..fits },
+            Placement {
+                view: (6, 5),
+                ..fits
+            },
+        ] {
+            assert!(!render_placed(
+                &source,
+                4,
+                3,
+                None,
+                params,
+                place,
+                &mut canvas
+            ));
+            assert!(!place_pair(&pair, 4, 3, 0.5, place, &mut canvas));
+        }
+        assert!(!render_placed(
+            &source[4..],
+            4,
+            3,
+            None,
+            params,
+            fits,
+            &mut canvas
+        ));
+        assert!(!place_pair(&pair[8..], 4, 3, 0.5, fits, &mut canvas));
+        assert!(!render_placed(&[], 0, 0, None, params, fits, &mut canvas));
+        assert_eq!(canvas, untouched);
+        assert!(render_placed(
+            &source,
+            4,
+            3,
+            None,
+            params,
+            fits,
+            &mut canvas
+        ));
+        // The top row of the view is the third row of the picture from the
+        // bottom, in both halves; the one row of room is above it, which
+        // is the picture's last.
+        let row = 6 * 8;
+        assert_eq!(canvas[2 * row + 8..2 * row + 24], source[..16]);
+        assert_eq!(canvas[2 * row + 24 + 8..2 * row + 48], source[..16]);
+        assert_eq!(canvas[3 * row..], untouched[3 * row..]);
+    }
+
+    #[test]
+    fn sharpening_raises_contrast_at_an_edge_and_leaves_flat_areas_and_the_border() {
+        // Each view 5x3: a bright column in the middle of the left one, the
+        // right one flat.
+        let (w, h) = (5usize, 3usize);
+        let mut pair = vec![0u8; w * h * 8];
+        for y in 0..h {
+            for x in 0..w * 2 {
+                let v = if x == 2 { 200 } else { 100 };
+                pair[(y * w * 2 + x) * 4..(y * w * 2 + x) * 4 + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let place = Placement {
+            view: (w as u32, h as u32),
+            x: 0,
+            y: 0,
+            swap: false,
+        };
+        // Rows come out bottom first; this picture is the same upside down.
+        let mut image = vec![0u8; pair.len()];
+        assert!(place_pair(
+            &pair, w as u32, h as u32, 0.0, place, &mut image
+        ));
+        assert_eq!(image, pair, "amount 0 changes nothing");
+        assert!(place_pair(
+            &pair, w as u32, h as u32, 1.0, place, &mut image
+        ));
+        let at = |x: usize, y: usize| image[(y * w * 2 + x) * 4];
         assert!(at(2, 1) > 200, "the bright column gets brighter");
         assert!(at(1, 1) < 100, "its neighbour gets darker");
         assert_eq!(at(0, 1), 100, "the border column is left");
         assert_eq!(at(2, 0), 200, "the border row is left");
-        assert_eq!(image[(w + 2) * 4 + 3], 255, "alpha is left");
+        assert_eq!(image[(w * 2 + 2) * 4 + 3], 255, "alpha is left");
+        // The other view's edge column takes nothing in from this one.
+        assert_eq!(at(4, 1), 100);
+        assert!((5..10).all(|x| at(x, 1) == 100), "the flat view stays flat");
     }
 }

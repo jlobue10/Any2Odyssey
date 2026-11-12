@@ -7,8 +7,8 @@
 //! token, so the dialog appears once and not at every start.
 //!
 //! One thread owns the portal session and the PipeWire loop. Each frame is
-//! copied as it arrives into a slot that holds only the newest one; the
-//! reader takes it from there at its own pace, so a slow reader costs
+//! copied as it arrives and put into a slot that holds only the newest one;
+//! the reader takes it from there at its own pace, so a slow reader costs
 //! frames, never memory or delay.
 
 use std::os::fd::OwnedFd;
@@ -160,8 +160,8 @@ impl Frames {
     /// or the capture ends) and run `read` on the newest frame, new or not:
     /// a desktop sends frames only when the screen changes, and the reader
     /// may have its own reasons to look at a still screen again. `None`
-    /// before the first frame. Frames keep arriving while `read` runs but
-    /// wait for it to finish, so it should be quick.
+    /// before the first frame. A frame that arrives while `read` runs is
+    /// copied meanwhile and takes the slot when `read` has finished.
     pub fn with_newest<T>(
         &self,
         seen: u64,
@@ -215,35 +215,51 @@ fn run(
     let portal = async {
         let proxy = Screencast::new().await?;
         let session = proxy.create_session(Default::default()).await?;
-        // A screen shown somewhere else needs its pointer in the picture;
-        // a screen shown on itself has the real one on top already. Where
-        // the desktop cannot draw it into the stream, the stream comes
-        // without.
-        let cursor = match proxy.available_cursor_modes().await {
-            Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => CursorMode::Embedded,
-            _ => CursorMode::Hidden,
-        };
-        proxy
-            .select_sources(
-                &session,
-                SelectSourcesOptions::default()
-                    .set_cursor_mode(cursor)
-                    .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
-                    .set_multiple(false)
-                    .set_restore_token(restore_token.as_deref())
-                    .set_persist_mode(PersistMode::ExplicitlyRevoked),
-            )
-            .await?;
-        let response = proxy
-            .start(&session, None, Default::default())
-            .await?
-            .response()?;
-        let node = response.streams().first().map(|s| s.pipe_wire_node_id());
-        let token = response.restore_token().map(str::to_owned);
-        let fd = proxy
-            .open_pipe_wire_remote(&session, Default::default())
-            .await?;
-        ashpd::Result::Ok((session, node, token, fd))
+        let started = async {
+            // A screen shown somewhere else needs its pointer in the
+            // picture; a screen shown on itself has the real one on top
+            // already. Where the desktop cannot draw it into the stream,
+            // the stream comes without.
+            let cursor = match proxy.available_cursor_modes().await {
+                Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => {
+                    CursorMode::Embedded
+                }
+                _ => CursorMode::Hidden,
+            };
+            proxy
+                .select_sources(
+                    &session,
+                    SelectSourcesOptions::default()
+                        .set_cursor_mode(cursor)
+                        .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
+                        .set_multiple(false)
+                        .set_restore_token(restore_token.as_deref())
+                        .set_persist_mode(PersistMode::ExplicitlyRevoked),
+                )
+                .await?;
+            let response = proxy
+                .start(&session, None, Default::default())
+                .await?
+                .response()?;
+            let node = response.streams().first().map(|s| s.pipe_wire_node_id());
+            let token = response.restore_token().map(str::to_owned);
+            let fd = proxy
+                .open_pipe_wire_remote(&session, Default::default())
+                .await?;
+            ashpd::Result::Ok((node, token, fd))
+        }
+        .await;
+        match started {
+            Ok((node, token, fd)) => Ok((session, node, token, fd)),
+            Err(e) => {
+                // The session exists by now, and once `start` has answered
+                // the desktop is sharing the screen in it: it is closed, or
+                // it (and the desktop's sign that a screen is being shared)
+                // would stay for as long as this program runs.
+                let _ = session.close().await;
+                Err(e)
+            }
+        }
     };
     let (session, node, token, fd) = runtime.block_on(portal).map_err(|e| match e {
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
@@ -252,11 +268,11 @@ fn run(
         other => format!("the desktop's screen-cast portal refused: {other}"),
     })?;
     *lock(&shared.token) = token;
-    let node = node.ok_or("the portal returned no stream")?;
-    let streamed = if shared.stop.load(Ordering::Relaxed) {
-        Ok(())
-    } else {
-        stream(shared, node, fd, wake)
+    // Whatever comes of the stream, the session is closed after it.
+    let streamed = match node {
+        None => Err("the portal returned no stream".to_owned()),
+        Some(_) if shared.stop.load(Ordering::Relaxed) => Ok(()),
+        Some(node) => stream(shared, node, fd, wake),
     };
     let _ = runtime.block_on(session.close());
     streamed
@@ -265,6 +281,10 @@ fn run(
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
+    /// Where a frame is copied as it arrives; it then changes places with
+    /// the slot's, so the two buffers serve every frame and the reader is
+    /// kept waiting for the exchange only, not for the copy.
+    spare: Vec<u8>,
 }
 
 fn stream(
@@ -299,6 +319,7 @@ fn stream(
     let data = StreamData {
         format: Default::default(),
         shared: shared.clone(),
+        spare: Vec::new(),
     };
     let _listener = stream
         .add_local_listener_with_user_data(data)
@@ -378,10 +399,11 @@ fn stream(
             if frame.len() < needed {
                 return;
             }
+            data.spare.clear();
+            data.spare.extend_from_slice(&frame[..needed]);
             let first = {
                 let mut slot = lock(&data.shared.slot);
-                slot.bytes.clear();
-                slot.bytes.extend_from_slice(&frame[..needed]);
+                std::mem::swap(&mut slot.bytes, &mut data.spare);
                 slot.width = width;
                 slot.height = height;
                 slot.stride = stride;
@@ -521,6 +543,48 @@ fn stream(
     match reason {
         Some(reason) => Err(reason),
         None => Ok(()),
+    }
+}
+
+/// A capture fed by hand, for tests of what reads the frames.
+#[cfg(test)]
+pub struct Fed(Arc<Shared>);
+
+#[cfg(test)]
+impl Fed {
+    pub fn start() -> Fed {
+        Fed(Arc::new(Shared {
+            slot: Mutex::new(Slot::default()),
+            arrived: Condvar::new(),
+            state: Mutex::new(CaptureState::Asking),
+            token: Mutex::new(None),
+            stop: AtomicBool::new(false),
+        }))
+    }
+
+    pub fn frames(&self) -> Frames {
+        Frames(self.0.clone())
+    }
+
+    /// A frame of `width` x `height` BGRx pixels, as the stream delivers one.
+    pub fn feed(&self, width: u32, height: u32, bytes: &[u8]) {
+        let mut slot = lock(&self.0.slot);
+        slot.bytes.clear();
+        slot.bytes.extend_from_slice(bytes);
+        (slot.width, slot.height, slot.stride) = (width, height, width as usize * 4);
+        slot.bgr = true;
+        slot.serial += 1;
+        drop(slot);
+        *lock(&self.0.state) = CaptureState::Running { width, height };
+        self.0.arrived.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for Fed {
+    fn drop(&mut self) {
+        self.0.stop.store(true, Ordering::Relaxed);
+        self.0.arrived.notify_all();
     }
 }
 
