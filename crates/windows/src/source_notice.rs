@@ -79,7 +79,11 @@ impl SourceNotice {
 
 /// The status file's content when this process wrote it.
 fn read_own_status() -> Option<WorkerStatus> {
-    let text = std::fs::read_to_string(paths::worker_status_file()).ok()?;
+    let text = any2odyssey_core::fsutil::read_to_string_limited(
+        &paths::worker_status_file(),
+        any2odyssey_core::fsutil::SMALL_FILE_LIMIT,
+    )
+    .ok()?;
     let status: WorkerStatus = serde_json::from_str(&text).ok()?;
     (status.pid == current_pid()).then_some(status)
 }

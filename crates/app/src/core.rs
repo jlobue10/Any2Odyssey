@@ -852,7 +852,13 @@ impl Core {
 
 /// The status file, when it was written by the worker with this pid.
 fn read_worker_status(worker_pid: u32) -> Option<WorkerStatus> {
-    let text = std::fs::read_to_string(paths::worker_status_file()).ok()?;
+    // Read four times a second under the shared-state lock: never more
+    // than a status file can be, whatever is put in its place.
+    let text = any2odyssey_core::fsutil::read_to_string_limited(
+        &paths::worker_status_file(),
+        any2odyssey_core::fsutil::SMALL_FILE_LIMIT,
+    )
+    .ok()?;
     let status: WorkerStatus = serde_json::from_str(&text).ok()?;
     (status.pid == worker_pid).then_some(status)
 }

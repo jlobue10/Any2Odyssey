@@ -1,8 +1,47 @@
 //! Small file helpers shared by every crate.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
+
+/// The most this program reads of a settings, status or record file it
+/// loads whole: 1 MiB. The real ones are a few hundred bytes to a few
+/// kilobytes.
+pub const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
+
+/// Read a whole file that should be small, refusing one over `limit` bytes.
+///
+/// The files read this way can be written by other programs: Samsung's
+/// `OverlaySettings.json` lives under `LocalLow`, which low-integrity
+/// processes may write, and the data folder is open to everything the user
+/// runs. `fs::read` would load whatever size it finds, some of them four
+/// times a second. An oversized file is an `InvalidData` error naming the
+/// file; a missing one keeps its `NotFound`.
+pub fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is larger than {limit} bytes and was not read",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// [`read_limited`] for UTF-8 text.
+pub fn read_to_string_limited(path: &Path, limit: u64) -> io::Result<String> {
+    String::from_utf8(read_limited(path, limit)?).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })
+}
 
 /// Write `bytes` to `path` atomically: the content goes to a sibling temporary
 /// file first and is renamed into place, so readers never observe a partial
@@ -271,6 +310,40 @@ mod tests {
         assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 1"));
         write_json_atomic_once(&path, &serde_json::json!({"frames": 4})).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 4"));
+    }
+
+    #[test]
+    fn a_limited_read_takes_a_file_up_to_the_limit_and_refuses_a_larger_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status.json");
+        assert_eq!(
+            read_limited(&path, 8).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        fs::write(&path, b"").unwrap();
+        assert_eq!(read_limited(&path, 8).unwrap(), b"");
+        fs::write(&path, b"12345678").unwrap();
+        assert_eq!(read_limited(&path, 8).unwrap(), b"12345678");
+        assert_eq!(read_to_string_limited(&path, 8).unwrap(), "12345678");
+        fs::write(&path, b"123456789").unwrap();
+        for error in [
+            read_limited(&path, 8).unwrap_err(),
+            read_to_string_limited(&path, 8).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            let text = error.to_string();
+            assert!(
+                text.contains("status.json") && text.contains("larger than 8 bytes"),
+                "{text}"
+            );
+        }
+        // No overflow at the top of the range.
+        assert_eq!(read_limited(&path, u64::MAX).unwrap().len(), 9);
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert_eq!(
+            read_to_string_limited(&path, 8).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
