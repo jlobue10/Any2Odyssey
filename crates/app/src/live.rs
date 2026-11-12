@@ -183,6 +183,21 @@ struct DepthState {
     settled: bool,
 }
 
+impl DepthState {
+    /// Throw the map away (the model has failed): pictures are flat until
+    /// it answers again. Without a map there is nothing to throw away and
+    /// nothing changes, so a model that goes on failing does not have the
+    /// same flat picture made again at every attempt.
+    fn forget(&mut self) {
+        if self.latest.is_some() || !self.smoother.values().is_empty() {
+            *self = DepthState {
+                version: self.version + 1,
+                ..DepthState::default()
+            };
+        }
+    }
+}
+
 struct Shared {
     stop: AtomicBool,
     depth_pos: AtomicI32,
@@ -642,13 +657,7 @@ fn depth_loop(shared: &Shared) {
             Err(e) => {
                 // New frames must not use the previous scene's depth while
                 // inference is failing. Recovery starts a fresh smoother too.
-                {
-                    let mut depth = lock(&shared.depth);
-                    *depth = DepthState {
-                        version: depth.version + 1,
-                        ..DepthState::default()
-                    };
-                }
+                lock(&shared.depth).forget();
                 lock(&shared.for_model).busy = false;
                 {
                     let mut stats = lock(&shared.stats);
@@ -1053,6 +1062,43 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn a_model_that_fails_again_leaves_the_flat_picture_as_it_is() {
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(2, 1, &[0.0, 1.0], 0.0));
+        let mut depth = DepthState {
+            smoother,
+            version: 3,
+            latest: Some((6, 518, DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap())),
+            settled: true,
+        };
+        // The first failure takes the map away: another picture, flat.
+        depth.forget();
+        assert_eq!(depth.version, 4);
+        assert!(depth.latest.is_none() && !depth.settled);
+        assert!(depth.smoother.values().is_empty());
+        // The next attempts fail as well, and nothing has changed: the
+        // loop only gives the frame to the model again, and rests.
+        depth.forget();
+        depth.forget();
+        assert_eq!(depth.version, 4);
+        let (shown, found) = at_rest();
+        let (shown, flat) = (
+            Shown { depth: 4, ..shown },
+            Found {
+                depth: depth.version,
+                mapped: None,
+                settled: false,
+                ..found
+            },
+        );
+        let only_submit = Turn {
+            submit: true,
+            ..IDLE
+        };
+        assert_eq!(plan(Some(&shown), &flat), only_submit);
     }
 
     #[test]
