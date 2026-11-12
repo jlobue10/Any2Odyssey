@@ -215,35 +215,51 @@ fn run(
     let portal = async {
         let proxy = Screencast::new().await?;
         let session = proxy.create_session(Default::default()).await?;
-        // A screen shown somewhere else needs its pointer in the picture;
-        // a screen shown on itself has the real one on top already. Where
-        // the desktop cannot draw it into the stream, the stream comes
-        // without.
-        let cursor = match proxy.available_cursor_modes().await {
-            Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => CursorMode::Embedded,
-            _ => CursorMode::Hidden,
-        };
-        proxy
-            .select_sources(
-                &session,
-                SelectSourcesOptions::default()
-                    .set_cursor_mode(cursor)
-                    .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
-                    .set_multiple(false)
-                    .set_restore_token(restore_token.as_deref())
-                    .set_persist_mode(PersistMode::ExplicitlyRevoked),
-            )
-            .await?;
-        let response = proxy
-            .start(&session, None, Default::default())
-            .await?
-            .response()?;
-        let node = response.streams().first().map(|s| s.pipe_wire_node_id());
-        let token = response.restore_token().map(str::to_owned);
-        let fd = proxy
-            .open_pipe_wire_remote(&session, Default::default())
-            .await?;
-        ashpd::Result::Ok((session, node, token, fd))
+        let started = async {
+            // A screen shown somewhere else needs its pointer in the
+            // picture; a screen shown on itself has the real one on top
+            // already. Where the desktop cannot draw it into the stream,
+            // the stream comes without.
+            let cursor = match proxy.available_cursor_modes().await {
+                Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => {
+                    CursorMode::Embedded
+                }
+                _ => CursorMode::Hidden,
+            };
+            proxy
+                .select_sources(
+                    &session,
+                    SelectSourcesOptions::default()
+                        .set_cursor_mode(cursor)
+                        .set_sources(ashpd::enumflags2::BitFlags::from(SourceType::Monitor))
+                        .set_multiple(false)
+                        .set_restore_token(restore_token.as_deref())
+                        .set_persist_mode(PersistMode::ExplicitlyRevoked),
+                )
+                .await?;
+            let response = proxy
+                .start(&session, None, Default::default())
+                .await?
+                .response()?;
+            let node = response.streams().first().map(|s| s.pipe_wire_node_id());
+            let token = response.restore_token().map(str::to_owned);
+            let fd = proxy
+                .open_pipe_wire_remote(&session, Default::default())
+                .await?;
+            ashpd::Result::Ok((node, token, fd))
+        }
+        .await;
+        match started {
+            Ok((node, token, fd)) => Ok((session, node, token, fd)),
+            Err(e) => {
+                // The session exists by now, and once `start` has answered
+                // the desktop is sharing the screen in it: it is closed, or
+                // it (and the desktop's sign that a screen is being shared)
+                // would stay for as long as this program runs.
+                let _ = session.close().await;
+                Err(e)
+            }
+        }
     };
     let (session, node, token, fd) = runtime.block_on(portal).map_err(|e| match e {
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
@@ -252,11 +268,11 @@ fn run(
         other => format!("the desktop's screen-cast portal refused: {other}"),
     })?;
     *lock(&shared.token) = token;
-    let node = node.ok_or("the portal returned no stream")?;
-    let streamed = if shared.stop.load(Ordering::Relaxed) {
-        Ok(())
-    } else {
-        stream(shared, node, fd, wake)
+    // Whatever comes of the stream, the session is closed after it.
+    let streamed = match node {
+        None => Err("the portal returned no stream".to_owned()),
+        Some(_) if shared.stop.load(Ordering::Relaxed) => Ok(()),
+        Some(node) => stream(shared, node, fd, wake),
     };
     let _ = runtime.block_on(session.close());
     streamed
