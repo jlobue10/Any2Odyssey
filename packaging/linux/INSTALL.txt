@@ -19,6 +19,10 @@ Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use 
 `./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
 knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS only.
 
+The installer uses a Windows drive it finds by itself only when exactly one is mounted and it is a drive
+inside this machine. For Windows on a USB drive or a network share, or when several drives have one, name
+it: `./install.sh --windows-root /path/to/that/drive`.
+
 It was built on Ubuntu 24.04 and needs a system at least that new (glibc 2.39). To try it without
 installing, run `./any2odyssey` here.
 

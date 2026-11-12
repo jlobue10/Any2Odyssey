@@ -24,7 +24,8 @@
 #   --no-udev           do not install the udev rules
 #   --no-model          do not download the depth model
 #   --no-odyssey        do not prepare the Wine side
-#   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files")
+#   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files");
+#                       needed when it is on a USB drive or a network share, or when several drives have one
 #   --prefix DIR        install under DIR instead of ~/.local
 #   --packaged          the program is installed already (a distribution package): do steps 2 to 5 only
 #   --dry-run           say what would be done and do none of it
@@ -34,8 +35,11 @@ set -eu
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local
 YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
+# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board,
+# for mounted drives (with the mount table and the /sys entries that describe them) and for its udev rules.
+TEST_ROOT=${A2O_INSTALL_TEST_ROOT:-}
 RULES_NAME=70-any2odyssey-lens.rules
-RULES_DIR=/etc/udev/rules.d
+RULES_DIR=$TEST_ROOT/etc/udev/rules.d
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -47,9 +51,9 @@ while [ $# -gt 0 ]; do
         --packaged) PACKAGED=1 ;;
         --dry-run) DRY=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        --windows-root) [ $# -ge 2 ] || { echo "install: --windows-root needs a folder" >&2; exit 2; }; WINROOT=${2%/}; shift ;;
+        --windows-root) [ $# -ge 2 ] && [ -n "${2%/}" ] || { echo "install: --windows-root needs a folder" >&2; exit 2; }; WINROOT=${2%/}; shift ;;
         --prefix) [ $# -ge 2 ] || { echo "install: --prefix needs a folder" >&2; exit 2; }; PREFIX=$2; shift ;;
-        -h | --help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR >= 3 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
         *) echo "install: unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
@@ -60,8 +64,24 @@ if [ -z "$PREFIX" ] || [ "$PREFIX" != "$(printf '%s' "$PREFIX" | tr -d '\r\n')" 
     echo "install: --prefix must be a nonempty folder without line breaks" >&2
     exit 2
 fi
-# A launcher must work independently of the installer's working directory.
-PREFIX=$(readlink -m -- "$PREFIX")
+# A launcher must work independently of the installer's working directory, so the prefix is made absolute,
+# with its symbolic links followed as far as the path exists. GNU readlink does that; without it (BusyBox)
+# the nearest folder that exists is resolved and the rest of the path is kept as written.
+canonical() {
+    readlink -m -- "$1" 2>/dev/null && return 0
+    case $1 in /*) path=$1 ;; *) path=$PWD/$1 ;; esac
+    rest=
+    while [ ! -d "$path" ]; do
+        while [ "${path%/}" != "$path" ]; do path=${path%/}; done
+        rest=/${path##*/}$rest
+        path=${path%/*}
+        [ -n "$path" ] || path=/
+    done
+    path=$(cd "$path" && pwd -P) || return 1
+    path=${path%/}$rest
+    printf '%s\n' "${path:-/}"
+}
+PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -112,7 +132,20 @@ if [ -n "$UNINSTALL" ]; then
     fi
     if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?"; then
         if [ -x "$DATA/wine-lens/tools/tracking.sh" ]; then run "$DATA/wine-lens/tools/tracking.sh" stop >/dev/null 2>&1 || true; fi
-        WINEPREFIX="$DATA/wine-lens/prefix" WINEDEBUG=-all run wineserver -k 2>/dev/null || true
+        # The serial port's keeper (tools/noxon.sh) that tools/ensure-stack.sh left running, found the way
+        # that script finds it: the noted number counts only while its process still is the keeper.
+        for note in "${XDG_RUNTIME_DIR:-$DATA/wine-lens}/any2odyssey-noxon.pid" "$DATA/wine-lens/any2odyssey-noxon.pid"; do
+            [ -f "$note" ] || continue
+            keeper=$(cat "$note" 2>/dev/null) || keeper=
+            case $keeper in
+                '' | *[!0-9]*) ;;
+                *) if grep -q -a 'noxon\.sh' "/proc/$keeper/cmdline" 2>/dev/null; then run kill "$keeper" 2>/dev/null || true; fi ;;
+            esac
+            run rm -f "$note"
+        done
+        # Through env: an assignment in front of a shell function does not reach the command in every shell,
+        # and without it wineserver -k ends the programs of the user's default prefix instead.
+        run env WINEPREFIX="$DATA/wine-lens/prefix" WINEDEBUG=-all wineserver -k 2>/dev/null || true
         run rm -f "$DATA/any2odyssey-lens-helper" "$DATA/any2odyssey-weaver"
         run rm -rf "$DATA/wine-lens"
     fi
@@ -138,7 +171,7 @@ if [ -z "$PACKAGED" ]; then
         mkdir -p "$SHARE/applications"
         # Pass the path as data, never as a sed/awk program or replacement.
         # Exec arguments undergo both desktop-string and command-line unescaping.
-        A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
+        if ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
             function quote_arg(value,    slash, quoted, i, c) {
                 slash = sprintf("%c", 92)
                 quoted = "\""
@@ -160,13 +193,20 @@ if [ -z "$PACKAGED" ]; then
                 if (index(path, "=") || index(path, "%"))
                     command = "/bin/sh -c " quote_arg("exec \"$@\"") " any2odyssey " command
             }
-            /^Exec=any2odyssey([[:space:]]|$)/ {
+            /^Exec=any2odyssey([ \t]|$)/ {
                 sub(/^Exec=any2odyssey/, "")
                 print "Exec=" command $0
+                rewritten++
                 next
             }
             { print }
-        ' "$HERE/any2odyssey.desktop" >"$SHARE/applications/any2odyssey.desktop"
+            # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
+            END { if (rewritten != 1) exit 1 }
+        ' "$HERE/any2odyssey.desktop" >"$SHARE/applications/any2odyssey.desktop"; then
+            rm -f "$SHARE/applications/any2odyssey.desktop"
+            echo "install: could not write the desktop entry: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed)" >&2
+            exit 1
+        fi
     fi
     run install -Dm644 "$HERE/any2odyssey.png" "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
     for f in README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md \
@@ -190,13 +230,144 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------------------
-# Is the Odyssey 3D part wanted at all? Without its monitor there is nothing to prepare.
-find_windows() {
-    [ -n "$WINROOT" ] && { echo "$WINROOT"; return 0; }
-    for d in /run/media/"$USER"/* /media/"$USER"/* /media/* /mnt/*; do
-        [ -f "$d/Program Files/LeiaSR/Platform/bin/SRService.exe" ] && { echo "$d"; return 0; }
+# Which Windows drive? Step 5 copies Leia's runtime from it and then runs that copy under Wine as this user,
+# so a drive nobody named is used only when it is plainly this machine's own Windows: it has a Windows system
+# folder beside the runtime, its files belong to this user or to root (not a drive somebody else mounted or
+# a folder somebody else filled), and it is not on a USB or other removable drive. When more than one
+# qualifies the script does not choose; --windows-root names the one to use, and is taken as given.
+SERVICE='Program Files/LeiaSR/Platform/bin/SRService.exe'
+MY_UID=$(id -u)
+system_folder() { # <drive>: its Windows system folder, as the drive spells it
+    for spelling in Windows/System32 WINDOWS/system32 Windows/system32 WINDOWS/System32 windows/system32; do
+        [ -d "$1/$spelling" ] && { echo "$1/$spelling"; return 0; }
     done
     return 1
+}
+own_or_root() { # <file>...: each belongs to this user or to root
+    for owned in "$@"; do
+        # shellcheck disable=SC2012  # one named file; stat has no format option that every system has
+        owner=$(ls -ldn "$owned" 2>/dev/null | awk 'NR == 1 { print $3 }')
+        [ "$owner" = 0 ] || [ "$owner" = "$MY_UID" ] || return 1
+    done
+}
+# The source of the file system a folder is on (the mount table's first column, of the longest mount point
+# that holds the folder). Read from the kernel's table: findmnt and lsblk are not installed everywhere.
+mount_source() { # <folder, absolute and without symbolic links>
+    A2O_FOLDER=$1 awk '
+        function plain(text,    out, i) { # the table writes space, tab, newline and backslash as \ooo
+            out = ""
+            for (i = 1; i <= length(text); i++) {
+                if (substr(text, i, 1) == "\\" && substr(text, i + 1, 3) ~ /^[0-7][0-7][0-7]$/) {
+                    out = out sprintf("%c", substr(text, i + 1, 1) * 64 + substr(text, i + 2, 1) * 8 + substr(text, i + 3, 1))
+                    i += 3
+                } else out = out substr(text, i, 1)
+            }
+            return out
+        }
+        BEGIN { folder = ENVIRON["A2O_FOLDER"]; longest = -1 }
+        {
+            point = plain($2)
+            if (point != "/" && folder != point && substr(folder, 1, length(point) + 1) != point "/") next
+            # A later line for the same mount point lies on top of the earlier one.
+            if (length(point) >= longest) { longest = length(point); source = plain($1) }
+        }
+        END { if (longest >= 0) print source }
+    ' "$TEST_ROOT/proc/self/mounts" 2>/dev/null
+}
+# fixed, removable or unknown, for a block device by its kernel name. A mapped device (LUKS, LVM, RAID)
+# is what the devices under it are. "unknown" is everything this cannot see through: nobody is told a
+# drive is inside the machine on a guess.
+block_kind() { # <kernel name>
+    pending=$1 looked=0
+    while [ -n "$pending" ]; do
+        # shellcheck disable=SC2086  # a list of kernel names
+        set -- $pending
+        name=$1; shift; pending=$*
+        looked=$((looked + 1))
+        [ "$looked" -le 16 ] || { echo unknown; return 0; }
+        node=$(readlink -f "$TEST_ROOT/sys/class/block/$name" 2>/dev/null) || node=
+        [ -n "$node" ] && [ -d "$node" ] || { echo unknown; return 0; }
+        [ -f "$node/partition" ] && node=${node%/*}
+        under=
+        for part in "$node"/slaves/*; do
+            [ -e "$part" ] && under="$under ${part##*/}"
+        done
+        if [ -n "$under" ]; then pending="$pending$under"; continue; fi
+        case ${node#"$TEST_ROOT"} in */virtual/*) echo unknown; return 0 ;; esac # a loop device, a RAM disk
+        [ -r "$node/removable" ] || { echo unknown; return 0; }
+        [ "$(cat "$node/removable")" = 0 ] || { echo removable; return 0; }
+        case ${node#"$TEST_ROOT"} in */usb[0-9]*) echo removable; return 0 ;; esac
+    done
+    echo fixed
+}
+drive_kind() { # <folder>: fixed, removable or unknown (a network share, a file system without a device)
+    folder=$(cd "$1" 2>/dev/null && pwd -P) || { echo unknown; return 0; }
+    source=$(mount_source "$folder") || source=
+    case $source in /dev/*) ;; *) echo unknown; return 0 ;; esac
+    # /dev/mapper/<name> and /dev/disk/by-*/<name> are links to the kernel's own name for the device.
+    device=$(readlink -f "$source" 2>/dev/null) || device=
+    device=${device:-$source}
+    block_kind "${device##*/}"
+}
+no_windows_help() {
+    say "   No Windows installation of the Odyssey 3D Hub was found on a mounted drive."
+    say "   This part needs one: Leia's runtime is not distributed and has no public Linux version, so it is"
+    say "   copied from your own Windows. The expected set-up is a dual-boot PC, with Windows and the Odyssey"
+    say "   3D Hub on a drive of this machine, which has shown 3D on this monitor at least once."
+    NTFS=$(lsblk -n -l -o NAME,FSTYPE,MOUNTPOINT 2>/dev/null | awk '$2 == "ntfs" && $3 == "" { print $1 }')
+    BITLOCKER=$(lsblk -n -l -o NAME,FSTYPE 2>/dev/null | awk 'tolower($2) == "bitlocker" { print $1 }')
+    if [ -n "$NTFS" ]; then
+        say "   Windows partitions here that are not mounted (the system one holds \"Program Files\"):"
+        for p in $NTFS; do say "       udisksctl mount -b /dev/$p -o ro"; done
+    fi
+    # shellcheck disable=SC2086,SC2116  # the names on one line
+    [ -n "$BITLOCKER" ] && say "   Encrypted with BitLocker (unlock it, or suspend BitLocker in Windows, first): $(echo $BITLOCKER)"
+    say "   Mount the Windows system partition (read-only is enough), then run this script again, or:"
+    say "       $WINE_LENS/setup.sh /path/to/that/drive"
+    say "   Without a Windows installation this part is not available; everything else works."
+}
+# Sets WIN and succeeds, or says why there is no drive to use and fails.
+find_windows() {
+    WIN=$WINROOT
+    [ -n "$WIN" ] && return 0
+    login=${USER:-$(id -un)}
+    passed_over=
+    set --
+    for drive in "$TEST_ROOT"/run/media/"$login"/* "$TEST_ROOT"/media/"$login"/* "$TEST_ROOT"/media/* "$TEST_ROOT"/mnt/*; do
+        [ -f "$drive/$SERVICE" ] || continue
+        if ! system=$(system_folder "$drive"); then
+            passed_over="no Windows system folder beside Leia's runtime"
+        elif ! own_or_root "$drive" "$system" "$drive/Program Files" "$drive/Program Files/LeiaSR" \
+            "$drive/Program Files/LeiaSR/Platform" "$drive/Program Files/LeiaSR/Platform/bin" "$drive/$SERVICE"; then
+            passed_over="its files belong to another user"
+        elif [ "$(drive_kind "$drive")" = removable ]; then
+            passed_over="a removable drive"
+        else
+            set -- "$@" "$drive"
+            continue
+        fi
+        say "   not used: $drive ($passed_over)"
+    done
+    if [ $# -eq 0 ]; then
+        no_windows_help
+        [ -n "$passed_over" ] && say "   If a drive named above as not used is the right one after all, name it: --windows-root DIR"
+        return 1
+    fi
+    if [ $# -gt 1 ]; then
+        say "   More than one mounted drive has a Windows installation with the Odyssey 3D Hub:"
+        for drive in "$@"; do say "       $drive"; done
+        say "   This script does not choose between them: run it again with --windows-root and the right one."
+        return 1
+    fi
+    if [ "$(drive_kind "$1")" != fixed ]; then
+        if [ -n "$YES" ]; then
+            say "   Found $1, but could not tell that it is on a drive inside this machine (a network share?)."
+            say "   With --yes such a drive is not used unasked: run this script again with --windows-root '$1'"
+            return 1
+        fi
+        warn "could not tell that $1 is on a drive inside this machine; make sure it is your own Windows before agreeing"
+    fi
+    WIN=$1
 }
 lens_board() { grep -q -s -i '^354b$' /sys/bus/usb/devices/*/idVendor 2>/dev/null; }
 webcam_dir() {
@@ -207,7 +378,7 @@ webcam_dir() {
 }
 WANT_ODYSSEY=
 if [ -n "$ODYSSEY" ]; then
-    if lens_board || [ -e /dev/odyssey-lens ] || [ -n "$WINROOT" ]; then
+    if lens_board || [ -e "$TEST_ROOT/dev/odyssey-lens" ] || [ -n "$WINROOT" ]; then
         WANT_ODYSSEY=1
     else
         say ""
@@ -326,24 +497,11 @@ fi
 step "5. The Odyssey 3D's lens, eye tracker and weaver (Leia's runtime under Wine)"
 if [ -z "$WANT_ODYSSEY" ]; then
     say "   skipped"
-elif ! WIN=$(find_windows); then
-    say "   No Windows installation of the Odyssey 3D Hub was found on a mounted drive."
-    say "   This part needs one: Leia's runtime is not distributed and has no public Linux version, so it is"
-    say "   copied from your own Windows. The expected set-up is a dual-boot PC, with Windows and the Odyssey"
-    say "   3D Hub on a drive of this machine, which has shown 3D on this monitor at least once."
-    NTFS=$(lsblk -n -l -o NAME,FSTYPE,MOUNTPOINT 2>/dev/null | awk '$2 == "ntfs" && $3 == "" { print $1 }')
-    BITLOCKER=$(lsblk -n -l -o NAME,FSTYPE 2>/dev/null | awk 'tolower($2) == "bitlocker" { print $1 }')
-    if [ -n "$NTFS" ]; then
-        say "   Windows partitions here that are not mounted (the system one holds \"Program Files\"):"
-        for p in $NTFS; do say "       udisksctl mount -b /dev/$p -o ro"; done
-    fi
-    [ -n "$BITLOCKER" ] && say "   Encrypted with BitLocker (unlock it, or suspend BitLocker in Windows, first): $(echo $BITLOCKER)"
-    say "   Mount the Windows system partition (read-only is enough), then run this script again, or:"
-    say "       $WINE_LENS/setup.sh /path/to/that/drive"
-    say "   Without a Windows installation this part is not available; everything else works."
-elif [ ! -f "$WIN/Program Files/LeiaSR/Platform/bin/SRService.exe" ]; then
+elif ! find_windows; then
+    : # it has said why
+elif [ ! -f "$WIN/$SERVICE" ]; then
     warn "$WIN has no Leia SR runtime (Program Files/LeiaSR); is the Odyssey 3D Hub installed on that Windows?"
-elif [ ! -e /dev/odyssey-lens ] && [ -z "$DRY" ]; then
+elif [ ! -e "$TEST_ROOT/dev/odyssey-lens" ] && [ -z "$DRY" ]; then
     warn "the lens board is not available as /dev/odyssey-lens (step 3 installs the rule; the monitor must be awake). Then run: $WINE_LENS/setup.sh '$WIN'"
 elif ask "Prepare it now from $WIN (copies about 1 GB of your own installation into $DATA/wine-lens)?"; then
     run "$WINE_LENS/setup.sh" "$WIN" || warn "the setup did not finish; see its message above and docs/LENS-SWITCH.md"
