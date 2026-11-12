@@ -38,11 +38,17 @@ impl Source<'_> {
 }
 
 /// The threads a frame's rows are spread over: a quarter of the cores, at
-/// most six. The work is light and the cores have other things to do while
-/// a picture is live (the depth model, the eye tracker, the desktop).
+/// most six, and two wherever there are two cores at all (a quarter of four
+/// or six cores would be one thread, and the picture late for it). The work
+/// is light and the cores have other things to do while a picture is live
+/// (the depth model, the eye tracker, the desktop).
 fn threads_for(rows: usize) -> usize {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    (cores / 4).clamp(1, 6).min(rows.max(1))
+    threads_on(cores).min(rows.max(1))
+}
+
+fn threads_on(cores: usize) -> usize {
+    (cores / 4).clamp(cores.clamp(1, 2), 6)
 }
 
 /// Run `work(first_row, rows)` over `out` cut into bands of whole rows of
@@ -51,18 +57,31 @@ fn in_bands(out: &mut [u8], row_bytes: usize, work: impl Fn(usize, &mut [u8]) + 
     if row_bytes == 0 || out.is_empty() {
         return;
     }
+    in_bands_on(threads_for(out.len() / row_bytes), out, row_bytes, work);
+}
+
+/// [`in_bands`] over a stated number of threads. The calling thread works
+/// the first band itself: one thread fewer to start for every stage of
+/// every frame, and none at all for a single band.
+fn in_bands_on(
+    threads: usize,
+    out: &mut [u8],
+    row_bytes: usize,
+    work: impl Fn(usize, &mut [u8]) + Sync,
+) {
     let rows = out.len() / row_bytes;
-    let threads = threads_for(rows);
-    if threads <= 1 {
+    if threads <= 1 || rows <= 1 {
         work(0, out);
         return;
     }
     let band = rows.div_ceil(threads);
+    let (first, rest) = out.split_at_mut((band * row_bytes).min(out.len()));
     std::thread::scope(|scope| {
-        for (index, part) in out.chunks_mut(band * row_bytes).enumerate() {
+        for (index, part) in rest.chunks_mut(band * row_bytes).enumerate() {
             let work = &work;
-            scope.spawn(move || work(index * band, part));
+            scope.spawn(move || work((index + 1) * band, part));
         }
+        work(0, first);
     });
 }
 
@@ -601,6 +620,38 @@ mod tests {
         // A new size starts afresh; a flat scene is all far.
         assert!(smoother.update(1, 3, &[4.0, 4.0, 4.0], 0.9));
         assert_eq!(smoother.values(), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn two_cores_already_share_the_rows_and_six_threads_are_the_most() {
+        let threads: Vec<usize> = [1, 2, 3, 4, 7, 8, 12, 16, 24, 64]
+            .into_iter()
+            .map(threads_on)
+            .collect();
+        assert_eq!(threads, [1, 2, 2, 2, 2, 2, 3, 4, 6, 6]);
+    }
+
+    #[test]
+    fn bands_cover_every_row_once_whatever_the_number_of_threads() {
+        let row_bytes = 3;
+        for rows in [1usize, 2, 3, 5, 6, 7, 40] {
+            let expected: Vec<u8> = (0..rows)
+                .flat_map(|row| [row as u8 + 1, row as u8 + 2, row as u8 + 3])
+                .collect();
+            for threads in 1..=8 {
+                // Every byte has its row's number added, so a row worked
+                // twice or not at all shows.
+                let mut out = vec![0u8; rows * row_bytes];
+                in_bands_on(threads, &mut out, row_bytes, |first_row, band| {
+                    for (row, line) in band.chunks_exact_mut(row_bytes).enumerate() {
+                        for (i, byte) in line.iter_mut().enumerate() {
+                            *byte += (first_row + row + i) as u8 + 1;
+                        }
+                    }
+                });
+                assert_eq!(out, expected, "{rows} rows on {threads} threads");
+            }
+        }
     }
 
     #[test]
