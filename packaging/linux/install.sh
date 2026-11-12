@@ -132,14 +132,15 @@ if [ -n "$UNINSTALL" ]; then
     fi
     if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?"; then
         if [ -x "$DATA/wine-lens/tools/tracking.sh" ]; then run "$DATA/wine-lens/tools/tracking.sh" stop >/dev/null 2>&1 || true; fi
-        # The serial port's keeper (tools/noxon.sh) that tools/ensure-stack.sh left running, found the way
-        # that script finds it: the noted number counts only while its process still is the keeper.
+        # The serial port's keeper (tools/noxon.sh, or the program it becomes when setup.sh could build one)
+        # that tools/ensure-stack.sh left running, found the way that script finds it: the noted number
+        # counts only while its process still is the keeper.
         for note in "${XDG_RUNTIME_DIR:-$DATA/wine-lens}/any2odyssey-noxon.pid" "$DATA/wine-lens/any2odyssey-noxon.pid"; do
             [ -f "$note" ] || continue
             keeper=$(cat "$note" 2>/dev/null) || keeper=
             case $keeper in
                 '' | *[!0-9]*) ;;
-                *) if grep -q -a 'noxon\.sh' "/proc/$keeper/cmdline" 2>/dev/null; then run kill "$keeper" 2>/dev/null || true; fi ;;
+                *) if grep -q -a -e 'noxon\.sh' -e 'any2odyssey-noxon' "/proc/$keeper/cmdline" 2>/dev/null; then run kill "$keeper" 2>/dev/null || true; fi ;;
             esac
             run rm -f "$note"
         done
