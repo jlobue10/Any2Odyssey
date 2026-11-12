@@ -92,29 +92,49 @@ impl DepthMap {
         if (width, height) == (self.width, self.height) {
             return Ok(self.clone());
         }
-        let scale_x = self.width as f32 / width as f32;
-        let scale_y = self.height as f32 / height as f32;
+        let columns = self.resized_columns(width);
         let mut values = Vec::with_capacity(width as usize * height as usize);
         for y in 0..height {
-            let fy = ((y as f32 + 0.5) * scale_y - 0.5).clamp(0.0, (self.height - 1) as f32);
-            let y0 = fy.floor() as u32;
-            let y1 = (y0 + 1).min(self.height - 1);
-            let ty = fy - y0 as f32;
-            for x in 0..width {
-                let fx = ((x as f32 + 0.5) * scale_x - 0.5).clamp(0.0, (self.width - 1) as f32);
-                let x0 = fx.floor() as u32;
-                let x1 = (x0 + 1).min(self.width - 1);
-                let tx = fx - x0 as f32;
-                let top = self.get(x0, y0) * (1.0 - tx) + self.get(x1, y0) * tx;
-                let bottom = self.get(x0, y1) * (1.0 - tx) + self.get(x1, y1) * tx;
-                values.push(top * (1.0 - ty) + bottom * ty);
-            }
+            self.append_resized_row(height, y, &columns, &mut values);
         }
         Ok(DepthMap {
             width,
             height,
             values,
         })
+    }
+
+    /// Horizontal neighbours and weights are the same for every output row.
+    fn resized_columns(&self, width: u32) -> Vec<(u32, u32, f32)> {
+        let scale_x = self.width as f32 / width as f32;
+        (0..width)
+            .map(|x| {
+                let fx = ((x as f32 + 0.5) * scale_x - 0.5).clamp(0.0, (self.width - 1) as f32);
+                let x0 = fx.floor() as u32;
+                (x0, (x0 + 1).min(self.width - 1), fx - x0 as f32)
+            })
+            .collect()
+    }
+
+    /// Append just one row of the resampled map. Rendering consumes both
+    /// eyes of a row together, so it need not retain a full-size depth copy.
+    fn append_resized_row(
+        &self,
+        height: u32,
+        y: u32,
+        columns: &[(u32, u32, f32)],
+        values: &mut Vec<f32>,
+    ) {
+        let scale_y = self.height as f32 / height as f32;
+        let fy = ((y as f32 + 0.5) * scale_y - 0.5).clamp(0.0, (self.height - 1) as f32);
+        let y0 = fy.floor() as u32;
+        let y1 = (y0 + 1).min(self.height - 1);
+        let ty = fy - y0 as f32;
+        for &(x0, x1, tx) in columns {
+            let top = self.get(x0, y0) * (1.0 - tx) + self.get(x1, y0) * tx;
+            let bottom = self.get(x0, y1) * (1.0 - tx) + self.get(x1, y1) * tx;
+            values.push(top * (1.0 - ty) + bottom * ty);
+        }
     }
 }
 
@@ -163,17 +183,30 @@ pub fn synthesize(
     if width == 0 || height == 0 {
         return Err(DibrError::Empty);
     }
-    let depth = depth.resized(width, height)?;
     let mut out = RgbaImage::new(width * 2, height);
     let w = width as usize;
+    let native_depth = (depth.width, depth.height) == (width, height);
+    let columns = if native_depth {
+        Vec::new()
+    } else {
+        depth.resized_columns(width)
+    };
+    let mut resized_row = Vec::with_capacity(if native_depth { 0 } else { w });
     let mut colors = vec![[0u8; 4]; w];
     let mut nearness = vec![f32::NEG_INFINITY; w];
     for y in 0..height {
+        let row = if native_depth {
+            let start = y as usize * w;
+            &depth.values[start..start + w]
+        } else {
+            resized_row.clear();
+            depth.append_resized_row(height, y, &columns, &mut resized_row);
+            &resized_row
+        };
         // Left eye: near points move right. Right eye: near points move left.
         for (eye, direction) in [(0u32, 0.5f32), (1, -0.5)] {
             nearness.fill(f32::NEG_INFINITY);
-            for x in 0..width {
-                let d = depth.get(x, y);
+            for (x, &d) in row.iter().enumerate() {
                 let target = (x as f32 + direction * params.disparity(d, width)).round();
                 if target < 0.0 || target >= width as f32 {
                     continue;
@@ -181,7 +214,7 @@ pub fn synthesize(
                 let t = target as usize;
                 if d > nearness[t] {
                     nearness[t] = d;
-                    colors[t] = image.get_pixel(x, y).0;
+                    colors[t] = image.get_pixel(x as u32, y).0;
                 }
             }
             fill_gaps(&mut colors, &mut nearness);
@@ -301,6 +334,28 @@ mod tests {
         assert_eq!(row, vec![0.0, 0.25, 0.75, 1.0]);
         assert_eq!(map.resized(2, 1).unwrap(), map);
         assert_eq!(map.resized(0, 1), Err(DibrError::Empty));
+    }
+
+    #[test]
+    fn streamed_depth_rows_match_rendering_a_full_resized_map() {
+        for (width, height) in [(1, 3), (2, 1), (96, 7)] {
+            let image = RgbaImage::from_fn(width, height, |x, y| {
+                Rgba([x as u8, y as u8, (x * 7 + y * 11) as u8, (x + y * 13) as u8])
+            });
+            for (dw, dh) in [(1, 1), (3, 2), (8, 5), (width, height), (101, 9)] {
+                let raw = (0..dw * dh).map(|i| ((i * 37) % 101) as f32).collect();
+                let map = DepthMap::normalized(dw, dh, raw).unwrap();
+                let full = map.resized(width, height).unwrap();
+                for (strength, popout) in [(0.0, -1.0), (0.9, 0.0), (2.0, -1.0), (2.0, 1.0)] {
+                    let params = Params { strength, popout };
+                    assert_eq!(
+                        synthesize(&image, &map, params).unwrap(),
+                        synthesize(&image, &full, params).unwrap(),
+                        "{width}x{height}, depth {dw}x{dh}, {params:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
