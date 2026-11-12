@@ -119,6 +119,11 @@ pub struct Core {
     /// was running, and when the poller first saw it.
     held_status: Option<(String, Instant)>,
     settings_load_error: Option<String>,
+    /// What `settings.json` holds: the preferences as last written by this
+    /// process. `None` until the first successful save, so each session
+    /// proves once that the file can be written; after that a save of
+    /// unchanged preferences is skipped. See `save_preferences`.
+    saved_prefs: Option<Preferences>,
     pub supervisor: Supervisor,
     pub worker: Option<Worker>,
     operation: Option<mpsc::Receiver<WorkerResult>>,
@@ -212,6 +217,7 @@ impl Core {
             worker_state: None,
             held_status: None,
             settings_load_error,
+            saved_prefs: None,
             worker: None,
             operation: None,
             generation: 0,
@@ -240,6 +246,17 @@ impl Core {
         self.logger.log(message);
     }
 
+    /// Write the preferences to `settings.json` unless that is what the
+    /// file already holds.
+    ///
+    /// Every start, restart, Apply and recovery relaunch passes through
+    /// here, several of them twice (Start saves and then `start_worker`
+    /// saves again), and each write is flushed to disk while the caller
+    /// holds the lock the GUI takes every frame. Only the last copy this
+    /// process wrote successfully counts as saved: a failed write leaves
+    /// that record alone, so the same preferences are tried again by the
+    /// next caller and keep blocking Start, Apply and Restart until a
+    /// write succeeds.
     pub fn save_preferences(&mut self) -> bool {
         self.prefs.recover = self.supervisor.recover;
         if self.preview {
@@ -249,11 +266,17 @@ impl Core {
             self.status = settings_recovery_message(error);
             return false;
         }
+        // The saved form is the sanitized one; compare like with like.
+        self.prefs.sanitize();
+        if self.saved_prefs.as_ref() == Some(&self.prefs) {
+            return true;
+        }
         if let Err(e) = self.prefs.save() {
             self.status = format!("Could not save preferences: {e}");
             self.log(&self.status);
             return false;
         }
+        self.saved_prefs = Some(self.prefs.clone());
         true
     }
 
@@ -351,6 +374,7 @@ impl Core {
                         ));
                     }
                     self.settings_load_error = None;
+                    self.saved_prefs = Some(self.prefs.clone());
                 }
                 Err(error) => {
                     self.status =
@@ -1188,6 +1212,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unchanged_preferences_are_written_once_and_a_failed_save_is_retried() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let settings = dir.path().join("settings.json");
+        let mut core = isolated(dir.path());
+        core.preview = false;
+
+        // The first save of a session always writes, even defaults.
+        assert!(core.save_preferences());
+        let first = std::fs::read(&settings).unwrap();
+        // Removing the file shows whether a later call wrote it again.
+        std::fs::remove_file(&settings).unwrap();
+        assert!(core.save_preferences());
+        assert!(core.save_preferences());
+        assert!(!settings.exists(), "unchanged preferences were rewritten");
+
+        // A change is written, including one only the supervisor holds.
+        core.prefs.depth = 1.25;
+        assert!(core.save_preferences());
+        assert_eq!(Preferences::load_from(&settings).unwrap().depth, 1.25);
+        core.supervisor.recover = false;
+        assert!(core.save_preferences());
+        assert!(!Preferences::load_from(&settings).unwrap().recover);
+
+        // An out-of-range value is saved, and compared, in its clamped form.
+        core.prefs.depth = 99.0;
+        assert!(core.save_preferences());
+        std::fs::remove_file(&settings).unwrap();
+        core.prefs.depth = 99.0;
+        assert!(core.save_preferences());
+        assert!(!settings.exists(), "the clamped value was already saved");
+
+        // A failed save stays failed for as long as the write fails, and
+        // the same preferences are written once it can succeed.
+        std::fs::create_dir(&settings).unwrap();
+        core.prefs.side_by_side = true;
+        for _ in 0..2 {
+            assert!(!core.save_preferences());
+            assert!(core.status.starts_with("Could not save preferences:"));
+        }
+        std::fs::remove_dir(&settings).unwrap();
+        assert!(core.save_preferences());
+        assert!(Preferences::load_from(&settings).unwrap().side_by_side);
+        assert_ne!(std::fs::read(&settings).unwrap(), first);
+    }
+
     fn isolated(dir: &std::path::Path) -> Core {
         Core {
             prefs: Preferences::default(),
@@ -1197,6 +1270,7 @@ mod tests {
             worker_state: None,
             held_status: None,
             settings_load_error: None,
+            saved_prefs: None,
             supervisor: Supervisor::new(true),
             worker: None,
             operation: None,
