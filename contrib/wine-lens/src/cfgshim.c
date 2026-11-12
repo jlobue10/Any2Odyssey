@@ -26,13 +26,19 @@ static CONFIGRET (WINAPI *p_get_parent)(DEVINST *, DEVINST, ULONG, HANDLE);
 
 static BOOL load_real(void)
 {
+    HMODULE module;
+
     if (real) return TRUE;
-    real = LoadLibraryW(L"cfgmgw.dll");
-    if (!real) return FALSE;
-    p_get_id = (void *)GetProcAddress(real, "CM_Get_Device_ID_ExW");
-    p_locate = (void *)GetProcAddress(real, "CM_Locate_DevNode_ExW");
-    p_get_parent = (void *)GetProcAddress(real, "CM_Get_Parent_Ex");
-    return p_get_id && p_locate && p_get_parent;
+    module = LoadLibraryW(L"cfgmgw.dll");
+    if (!module) return FALSE;
+    p_get_id = (void *)GetProcAddress(module, "CM_Get_Device_ID_ExW");
+    p_locate = (void *)GetProcAddress(module, "CM_Locate_DevNode_ExW");
+    p_get_parent = (void *)GetProcAddress(module, "CM_Get_Parent_Ex");
+    if (!p_get_id || !p_locate || !p_get_parent) return FALSE;
+    /* Set last, and only when all three are there: `real` tells every later call, on any thread, that the
+     * three can be called. */
+    real = module;
+    return TRUE;
 }
 
 static const WCHAR ENUM_KEY[] = L"System\\CurrentControlSet\\Enum";

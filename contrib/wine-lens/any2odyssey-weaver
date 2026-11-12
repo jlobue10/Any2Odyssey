@@ -22,26 +22,38 @@ export WINEPREFIX=$T/prefix WINEDLLOVERRIDES="mscoree,mshtml="
 # keep it.
 exec 8>"$T/weaver.lock"
 flock 8
+# A second lock (file descriptor 7) is this script's alone, for as long as it lives and whatever ends it:
+# asking for that lock is how the process below waits for the script. Like the first, it is kept from the
+# programs started below.
+exec 7>"$T/weaver.alive"
+flock -n 7 || true
 # Leaving is the work of a process of its own, started now and holding the lock until it has done it:
 # Any2Odyssey does not wait long for this script, which may be ended at any point below, and what has
 # been started by then must still be undone.
 ME=$$ T=$T setsid sh -c '
     # (a script that was ended but not yet collected by its parent still has its number: state Z)
-    while state=$(cat "/proc/$ME/stat" 2>/dev/null) && case $state in *") Z "*) false ;; esac; do sleep 0.3; done
+    alive() { state=$(cat "/proc/$ME/stat" 2>/dev/null) && case $state in *") Z "*) false ;; esac; }
+    # Asking for the lock of the script blocks until the script has gone, so nothing is started over and
+    # over while the picture shows. The wait gives up every few seconds to look at the process itself, in
+    # case something else holds the lock; and should the lock be had with the script still there, the
+    # script never held it: then the process is looked at three times a second, as before there was a lock.
+    while alive; do
+        flock -w 5 "$T/weaver.alive" true 2>/dev/null && alive && sleep 0.3
+    done
     command -v busctl >/dev/null &&
         busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s any2odyssey-overlay >/dev/null 2>&1
     "$T/tools/tracking.sh" stop >/dev/null 2>&1 8>&-
-' </dev/null >/dev/null 2>&1 &
-"$T/tools/ensure-stack.sh" </dev/null 8>&- || exit 1
+' </dev/null >/dev/null 2>&1 7>&- &
+"$T/tools/ensure-stack.sh" </dev/null 8>&- 7>&- || exit 1
 # Where the Odyssey 3D is on Wine's desktop now (the monitors may have been rearranged since the service
 # started).
-python3 "$T/tools/mkedid.py" --place "$T/odyssey.place" 2>/dev/null 8>&-
+python3 "$T/tools/mkedid.py" --place "$T/odyssey.place" 2>/dev/null 8>&- 7>&-
 PLACE=$(cat "$T/odyssey.place" 2>/dev/null)
 [ -n "$PLACE" ] || { echo "error: the Odyssey 3D was not found among the monitors (see $T/edid.pairs)"; exit 1; }
 
 # Without eye positions Leia's weaver shows one view only, so a tracker that will not start is reported
 # but does not stop the picture.
-TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>&1 8>&-)
+TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>&1 8>&- 7>&-)
 [ "$TRACKING" = on ] || echo "tracking: ${TRACKING#error: }"
 
 FRAME=$(readlink -f "$1")
@@ -58,6 +70,6 @@ fi
 # leaves when Any2Odyssey closes it.
 # shellcheck disable=SC2086  # PLACE is four numbers
 WINEDEBUG=-all WINEPATH='C:\Program Files\LeiaSR\Platform\bin' \
-    wine "$T/build/any2odyssey-weaver.exe" "Z:$(printf %s "$FRAME" | tr / '\\')" $PLACE ${2:+"$2"} 2>/dev/null 8>&-
+    wine "$T/build/any2odyssey-weaver.exe" "Z:$(printf %s "$FRAME" | tr / '\\')" $PLACE ${2:+"$2"} 2>/dev/null 8>&- 7>&-
 STATUS=$?
 exit $STATUS

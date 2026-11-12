@@ -13,6 +13,11 @@
  * storage. The address is filled before submitting a receive, while that storage belongs to the caller.
  * A real datagram overwrites it. If the first destination arrives after a receive was submitted, that
  * receive cannot safely be amended: the next receive picks up the address. Closing a socket forgets it.
+ *
+ * Only the program's own closesocket calls are seen here. A socket closed by other code keeps its entry, so
+ * an entry is taken only where a destination is learned (a send), never for a socket that just receives, and
+ * when the table is full the entry not written for longest makes room: the table cannot fill up for good
+ * and leave the tracker without its pause.
  */
 #ifndef A2O_CONNRESET_TEST
 #include <winsock2.h>
@@ -25,8 +30,10 @@
 static struct {
     BOOL used;
     SOCKET socket;
-    struct sockaddr_in to; /* where its datagrams last went; family 0 before the first */
+    unsigned long long noted; /* when the destination was last noted, counted in sends */
+    struct sockaddr_in to;    /* where its datagrams last went */
 } last_sent[SOCKETS];
+static unsigned long long sends_noted;
 static CRITICAL_SECTION sent_lock;
 
 static int (WINAPI *real_sendto)(SOCKET, WSABUF *, DWORD, DWORD *, DWORD, const struct sockaddr *, int,
@@ -35,21 +42,30 @@ static int (WINAPI *real_closesocket)(SOCKET);
 static int (WINAPI *real_recvfrom)(SOCKET, WSABUF *, DWORD, DWORD *, DWORD *, struct sockaddr *, int *,
                                    WSAOVERLAPPED *, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
-/* The table entry of a socket, taking a free one for a socket not seen before; -1 when the table is full.
- * Call with the lock held. */
+/* The table entry of a socket, or -1 if it has none. Call with the lock held. */
 static int slot_of(SOCKET s)
 {
-    int free_slot = -1;
-    for (int i = 0; i < SOCKETS; i++) {
+    for (int i = 0; i < SOCKETS; i++)
         if (last_sent[i].used && last_sent[i].socket == s) return i;
-        if (free_slot < 0 && !last_sent[i].used) free_slot = i;
+    return -1;
+}
+
+/* The entry to note a socket's destination in: its own, else a free one, else the one whose destination was
+ * noted longest ago (most likely a socket that was closed without this shim seeing it). Call with the lock
+ * held. */
+static int slot_for_sender(SOCKET s)
+{
+    int slot = slot_of(s), oldest = 0;
+    if (slot >= 0) return slot;
+    for (int i = 0; i < SOCKETS && slot < 0; i++) {
+        if (!last_sent[i].used) slot = i;
+        else if (last_sent[i].noted < last_sent[oldest].noted) oldest = i;
     }
-    if (free_slot >= 0) {
-        memset(&last_sent[free_slot], 0, sizeof last_sent[free_slot]);
-        last_sent[free_slot].used = TRUE;
-        last_sent[free_slot].socket = s;
-    }
-    return free_slot;
+    if (slot < 0) slot = oldest;
+    memset(&last_sent[slot], 0, sizeof last_sent[slot]);
+    last_sent[slot].used = TRUE;
+    last_sent[slot].socket = s;
+    return slot;
 }
 
 static int WINAPI sendto_noting(SOCKET s, WSABUF *buffers, DWORD count, DWORD *sent, DWORD flags,
@@ -59,8 +75,9 @@ static int WINAPI sendto_noting(SOCKET s, WSABUF *buffers, DWORD count, DWORD *s
     if (to && to_len >= (int)sizeof(struct sockaddr_in) && to->sa_family == AF_INET) {
         int slot;
         EnterCriticalSection(&sent_lock);
-        slot = slot_of(s);
-        if (slot >= 0) memcpy(&last_sent[slot].to, to, sizeof last_sent[slot].to);
+        slot = slot_for_sender(s);
+        memcpy(&last_sent[slot].to, to, sizeof last_sent[slot].to);
+        last_sent[slot].noted = ++sends_noted;
         LeaveCriticalSection(&sent_lock);
     }
     return real_sendto(s, buffers, count, sent, flags, to, to_len, overlapped, routine);
@@ -72,9 +89,8 @@ static int WINAPI recvfrom_prefilled(SOCKET s, WSABUF *buffers, DWORD count, DWO
 {
     if (from && from_len && *from_len >= (int)sizeof(struct sockaddr_in)) {
         EnterCriticalSection(&sent_lock);
-        int slot = slot_of(s);
-        if (slot >= 0 && last_sent[slot].to.sin_family)
-            memcpy(from, &last_sent[slot].to, sizeof last_sent[slot].to);
+        int slot = slot_of(s); /* a socket that has not sent has no entry, and gets none for receiving */
+        if (slot >= 0) memcpy(from, &last_sent[slot].to, sizeof last_sent[slot].to);
         LeaveCriticalSection(&sent_lock);
     }
     /* Once submitted, Winsock may complete on another thread at any time. The caller can then free or
