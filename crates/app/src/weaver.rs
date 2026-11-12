@@ -51,6 +51,43 @@ const PLACES: u32 = 3;
 const HEADER_BYTES: u64 = 4096;
 /// Room for a pair of views at the panel's full size.
 const CAPACITY: u32 = PANEL.0 * 2 * PANEL.1 * 4;
+/// The frame file's whole length. It is made at that length without the
+/// room being taken, so a folder must be known to have the room.
+const FILE_BYTES: u64 = HEADER_BYTES + CAPACITY as u64 * PLACES as u64;
+
+/// The bytes this user may still write in the file system `folder` is on;
+/// `None` where that cannot be asked.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn room_in(folder: &Path) -> Option<u64> {
+    use std::ffi::{c_char, c_int, CString};
+    use std::os::unix::ffi::OsStrExt;
+    extern "C" {
+        fn statvfs(path: *const c_char, answer: *mut [u64; 32]) -> c_int;
+    }
+    let path = CString::new(folder.as_os_str().as_bytes()).ok()?;
+    let mut answer = [0u64; 32];
+    // SAFETY: `path` ends in a zero byte and lives across the call. The
+    // answer is a `struct statvfs`, which on 64-bit Linux (glibc and musl)
+    // is eleven 8-byte numbers and 24 spare bytes, 112 in all: it fits the
+    // 256 bytes given with room to spare.
+    if unsafe { statvfs(path.as_ptr(), &mut answer) } != 0 {
+        return None;
+    }
+    // The second number is the size of a block (f_frsize), the fifth the
+    // blocks free to this user (f_bavail).
+    answer[1].checked_mul(answer[4])
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn room_in(_: &Path) -> Option<u64> {
+    None
+}
+
+/// Whether a folder with `room` bytes left can take the frame file. A
+/// folder that does not say is tried.
+fn has_room(room: Option<u64>) -> bool {
+    room.is_none_or(|room| room >= FILE_BYTES)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WeaverStatus {
@@ -165,6 +202,20 @@ impl FrameFile {
                 let _ = std::fs::create_dir_all(&folder);
             }
             remove_orphans(&folder);
+            // The file is made at its whole length without the room being
+            // taken. In a folder too small for it (shared memory of 64 MB
+            // in a container, a small runtime folder) the making works and
+            // the second or third picture cannot be written, which ends
+            // the output: such a folder is passed over while there is
+            // another to try.
+            if !has_room(room_in(&folder)) {
+                failed = Some(std::io::Error::other(format!(
+                    "{} has less than the {} MB the pictures need",
+                    folder.display(),
+                    FILE_BYTES.div_ceil(1 << 20)
+                )));
+                continue;
+            }
             match FrameFile::create_in(&folder) {
                 Ok(file) => return Ok(file),
                 // Full, or not to be written to: the next folder may do.
@@ -188,7 +239,7 @@ impl FrameFile {
         header[..8].copy_from_slice(MAGIC);
         header[8..12].copy_from_slice(&CAPACITY.to_le_bytes());
         let file = named.as_file_mut();
-        file.set_len(HEADER_BYTES + u64::from(CAPACITY) * u64::from(PLACES))?;
+        file.set_len(FILE_BYTES)?;
         file.write_all(&header)?;
         // From here on the file is removed with the `FrameFile`.
         let (file, path) = named.keep().map_err(|e| e.error)?;
@@ -644,6 +695,27 @@ mod tests {
                 assert_eq!(*canvas.get_pixel(x, y), expected);
                 assert_eq!(*canvas.get_pixel(x + STILL_VIEW.0, y), expected);
             }
+        }
+    }
+
+    #[test]
+    fn a_folder_too_small_for_the_frame_file_is_passed_over() {
+        assert_eq!(
+            FILE_BYTES,
+            HEADER_BYTES + u64::from(CAPACITY) * u64::from(PLACES)
+        );
+        // A container's 64 MB of shared memory takes the first picture and
+        // not the second; a folder that does not say is tried.
+        assert!(!has_room(Some(64 << 20)));
+        assert!(!has_room(Some(FILE_BYTES - 1)));
+        assert!(has_room(Some(FILE_BYTES)));
+        assert!(has_room(None));
+        // Where the question can be asked, a real folder answers it.
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(room_in(dir.path()).is_some_and(|room| room > 0));
+            assert_eq!(room_in(&dir.path().join("none")), None);
         }
     }
 
