@@ -22,8 +22,8 @@ pub const LENS_NOTICE: &str = "Experimental. The picture only separates when the
 pub const PATTERN_HELP: &str = "Pattern: white for the left eye, black for the right. Right eye closed should look evenly bright, left eye closed evenly dark. Bands: change pitch, then slant. Wrong eye bright: move the offset by 0.5.";
 pub const KEYS_HELP: &str =
     "←/→ offset   ↑/↓ pitch   PgUp/PgDn slant   Shift = fine   C pattern   F11 full screen   Esc leave";
-/// How long the numbers must have been different from the file before they
-/// are written, so a drag or a held key is one write, not hundreds.
+/// How long the numbers must remain unchanged before they are written,
+/// so a drag or a held key is saved once after it stops.
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// One of the numbers the keys in the output window change.
@@ -62,7 +62,7 @@ pub struct LensState {
     pub pattern: bool,
     /// What `file` holds, as far as this process knows.
     saved: Lens,
-    dirty_since: Option<Instant>,
+    pending: Option<(Lens, Instant)>,
     /// Where the numbers are kept. None keeps them in memory only (tests).
     file: Option<PathBuf>,
     /// Why the file could not be read or written, for the page to show.
@@ -117,7 +117,7 @@ impl LensState {
 
     /// Write the numbers now if they differ from the file.
     pub fn store(&mut self) {
-        self.dirty_since = None;
+        self.pending = None;
         if self.lens == self.saved {
             return;
         }
@@ -146,16 +146,22 @@ impl LensState {
     /// Call once per frame.
     pub fn save_when_settled(&mut self, ctx: &egui::Context, now: Instant) {
         if self.lens == self.saved {
-            self.dirty_since = None;
+            self.pending = None;
             return;
         }
-        match self.dirty_since {
-            None => {
-                self.dirty_since = Some(now);
+        match self.pending {
+            Some((lens, since)) if lens == self.lens => {
+                let elapsed = now.duration_since(since);
+                if elapsed >= SAVE_DELAY {
+                    self.store();
+                } else {
+                    ctx.request_repaint_after(SAVE_DELAY - elapsed);
+                }
+            }
+            _ => {
+                self.pending = Some((self.lens, now));
                 ctx.request_repaint_after(SAVE_DELAY);
             }
-            Some(since) if now.duration_since(since) >= SAVE_DELAY => self.store(),
-            Some(since) => ctx.request_repaint_after(SAVE_DELAY - now.duration_since(since)),
         }
     }
 
@@ -376,6 +382,53 @@ mod tests {
         // Closing the output saves at once.
         state.nudge(Knob::Offset, 5.0);
         state.store();
+        assert_eq!(read_lens(&file).unwrap(), state.lens);
+    }
+
+    #[test]
+    fn continuous_calibration_waits_for_the_last_change_to_settle() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lens.json");
+        let mut state = LensState::load(file.clone());
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        let mut last = start;
+        // A held key or drag updates the value more often than SAVE_DELAY,
+        // for much longer than the delay measured from the first change.
+        for step in 0..20 {
+            state.nudge(Knob::Pitch, 1.0);
+            last = start + Duration::from_millis(step * 200);
+            state.save_when_settled(&ctx, last);
+            assert!(
+                !file.exists(),
+                "saved during active calibration at step {step}"
+            );
+        }
+        state.save_when_settled(&ctx, last + SAVE_DELAY - Duration::from_millis(1));
+        assert!(!file.exists());
+        state.save_when_settled(&ctx, last + SAVE_DELAY);
+        assert_eq!(read_lens(&file).unwrap(), state.lens);
+    }
+
+    #[test]
+    fn reverting_calibration_cancels_the_pending_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lens.json");
+        let mut state = LensState::load(file.clone());
+        let original = state.lens;
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        state.nudge(Knob::Pitch, 1.0);
+        state.save_when_settled(&ctx, start);
+        state.lens = original;
+        state.save_when_settled(&ctx, start + SAVE_DELAY);
+        assert!(!file.exists());
+        assert!(state.pending.is_none());
+        // A later edit gets its own full settling period.
+        state.nudge(Knob::Offset, 1.0);
+        state.save_when_settled(&ctx, start + SAVE_DELAY * 2);
+        assert!(!file.exists());
+        state.save_when_settled(&ctx, start + SAVE_DELAY * 3);
         assert_eq!(read_lens(&file).unwrap(), state.lens);
     }
 
