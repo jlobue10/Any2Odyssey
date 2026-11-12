@@ -405,3 +405,67 @@ mod monitor_overlap_tests {
         assert!(state.finish(false).is_err());
     }
 }
+
+/// Open a folder or a URL with whatever Windows associates with it, as a
+/// double-click would, through the shell itself rather than a helper
+/// process. Blocking; call it off the GUI thread.
+///
+/// The caller decides what may be opened (a folder of ours, an allow-listed
+/// URL): the shell runs a program when handed one.
+pub fn shell_open(target: &std::ffi::OsStr) -> windows::core::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::E_INVALIDARG;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = target.encode_wide().collect();
+    // The shell would stop at an embedded NUL and open something shorter
+    // than what the caller checked.
+    if file.is_empty() || file.contains(&0) {
+        return Err(E_INVALIDARG.into());
+    }
+    let file: Vec<u16> = file.into_iter().chain(std::iter::once(0)).collect();
+    // The shell may hand the request to a COM extension. A thread already in
+    // another apartment model keeps it; only a successful call is undone.
+    let initialized =
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        // NOASYNC: the calling thread ends right after this returns, so the
+        // launch must be complete by then. NO_UI: a failure is the caller's
+        // to handle, not a message box from a tray application.
+        fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: windows::core::w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` is fully initialized and `file` outlives the call.
+    let result = unsafe { ShellExecuteExW(&mut info) };
+    if initialized.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(test)]
+mod shell_open_tests {
+    use super::*;
+
+    // Opening something for real would put a browser or an Explorer window
+    // on the desktop of whoever runs the tests; only the refusals run here.
+    #[test]
+    fn nothing_is_opened_for_an_empty_or_nul_carrying_target() {
+        use std::ffi::OsStr;
+        use windows::Win32::Foundation::E_INVALIDARG;
+        for target in ["", "https://github.com/\0calc.exe", "\0"] {
+            let error = shell_open(OsStr::new(target)).unwrap_err();
+            assert_eq!(error.code(), E_INVALIDARG, "{target:?}");
+        }
+    }
+}

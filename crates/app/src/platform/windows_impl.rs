@@ -286,11 +286,28 @@ pub fn hide_window(hwnd: isize) {
 }
 
 pub fn open_path(path: &Path) {
-    // `open` waits up to 250 ms for its launcher; callers hold the shared
-    // state or the GUI frame, so do that off their thread.
-    let path = path.to_path_buf();
+    shell_open_detached(path.as_os_str().to_owned());
+}
+
+/// Open a web page in the default browser. The caller has checked the URL
+/// against the allow-list (`core::open_release_url`).
+pub fn open_url(url: &str) {
+    shell_open_detached(url.into());
+}
+
+/// Hand `target` to the shell on a thread of its own: callers hold the
+/// shared state or the GUI frame, and a launch can take a moment.
+///
+/// Through `ShellExecuteEx`, not the `open` crate: without a feature that
+/// needs another dependency, `open` 5.4 starts `powershell.exe -Command` to
+/// do the same, which takes a second or so and is refused outright where
+/// PowerShell is restricted by policy. It stays as the fallback, so a
+/// failed shell call still opens what it opened before.
+fn shell_open_detached(target: std::ffi::OsString) {
     std::thread::spawn(move || {
-        let _ = open::that_detached(path);
+        if win::shell_open(&target).is_err() {
+            let _ = open::that_detached(&target);
+        }
     });
 }
 
