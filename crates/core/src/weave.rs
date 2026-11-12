@@ -563,18 +563,15 @@ mod tests {
             for y in 0..height {
                 for x in 0..width {
                     let (px, py) = (origin.0 + i64::from(x), origin.1 + i64::from(y));
-                    let mut expected = [0, 0, 0, 255];
-                    let mut lit = [0, 0, 0, 255];
-                    for channel in 0..3 {
-                        let eye = if l.is_right(px, py, channel) {
-                            lit[channel] = 0;
-                            &right
-                        } else {
-                            lit[channel] = 255;
-                            &left
-                        };
-                        expected[channel] = eye.get_pixel(x, y).0[channel];
-                    }
+                    // Alpha is not a subpixel: it is opaque for either eye.
+                    let subpixel = |channel: usize, left: u8, right: u8| match channel {
+                        3 => 255,
+                        _ if l.is_right(px, py, channel) => right,
+                        _ => left,
+                    };
+                    let (in_left, in_right) = (left.get_pixel(x, y).0, right.get_pixel(x, y).0);
+                    let expected = [0, 1, 2, 3].map(|c| subpixel(c, in_left[c], in_right[c]));
+                    let lit = [0, 1, 2, 3].map(|c| subpixel(c, 255, 0));
                     assert_eq!(woven.get_pixel(x, y).0, expected, "({x}, {y}) {l:?}");
                     assert_eq!(pattern.get_pixel(x, y).0, lit, "({x}, {y}) {l:?}");
                 }
