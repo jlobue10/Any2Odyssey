@@ -331,6 +331,7 @@ pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
 /// while the program runs is enough. Blocks: call it off the UI thread.
 pub fn estimate_depth(
     image: &image::RgbaImage,
+    long_side: u32,
 ) -> Result<any2odyssey_core::dibr::DepthMap, String> {
     static ESTIMATOR: Mutex<Option<crate::depth::Estimator>> = Mutex::new(None);
     let mut slot = ESTIMATOR
@@ -340,7 +341,9 @@ pub fn estimate_depth(
         let model = crate::depth::locate_model()?;
         *slot = Some(crate::depth::Estimator::load(&model)?);
     }
-    slot.as_mut().expect("loaded above").estimate(image)
+    slot.as_mut()
+        .expect("loaded above")
+        .estimate(image, long_side)
 }
 
 pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
@@ -448,7 +451,16 @@ mod tests {
         // The instance is gone but its file is still there.
         drop(first);
         assert!(path.exists());
-        assert!(matches!(bind_instance(&path), Bound::Listening(_)));
+        // Another test's child process, between fork and exec, can still hold
+        // a copy of the listener for a moment; that is the test harness, so
+        // give it the moment.
+        let reclaimed = (0..200).any(|_| {
+            matches!(bind_instance(&path), Bound::Listening(_)) || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(reclaimed, "a stale socket file must be taken over");
     }
 
     #[test]

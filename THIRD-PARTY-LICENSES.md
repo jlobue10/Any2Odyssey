@@ -2,6 +2,8 @@
 
 Any2Odyssey itself is GPL-3.0-only (see `LICENSE` and `NOTICE`). This file lists the other works the Windows package contains: the Rust crates compiled into `Any2Odyssey.exe` and the fonts embedded in it. Samsung's and Leia's software is not included (see below).
 
+The Linux packages contain most of the same crates and further ones (the desktop portal and PipeWire bindings for the live screen, ONNX Runtime's bindings, the Wayland and X11 backends, and what they depend on). Those are listed, with their notices, in `THIRD-PARTY-LICENSES-LINUX.md`, which ships beside this file; the license texts they refer to are below.
+
 ## Rust crates
 
 The 161 crates below are the normal (non-build, non-test) dependencies of the `any2odyssey` binary for the `x86_64-pc-windows-msvc` target, as `Cargo.lock` resolves them. Their licenses are permissive (MIT, Apache-2.0, Zlib, BSD, ISC, BSL-1.0, Unicode-3.0, 0BSD, Unlicense) or file-level copyleft compatible with the GPL (MPL-2.0 for `option-ext`); the `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` entry is `epaint_default_fonts`, whose embedded fonts are listed under "Fonts embedded in the application". The license each crate is used under, its copyright notices and the full license texts are in [License texts and copyright notices for the Rust crates](#license-texts-and-copyright-notices-for-the-rust-crates) below.

@@ -32,7 +32,17 @@ pub const MODEL_SHA256: &str = "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d5
 
 /// The model works on patches of 14 pixels; its training size is 518.
 const PATCH: u32 = 14;
-const LONG_SIDE: u32 = 518;
+/// The long side of the picture the model sees, in pixels: the size it was
+/// trained at, and larger ones for finer depth (thin things and edges are
+/// found better; each step costs about twice the time of the one before).
+pub const DETAIL: [(u32, &str); 4] = [
+    (518, "Standard"),
+    (770, "Fine"),
+    (1022, "Finer"),
+    (1274, "Finest (slow without a GPU)"),
+];
+/// The size the model was trained at.
+pub const LONG_SIDE: u32 = DETAIL[0].0;
 /// ImageNet statistics the model's inputs are normalized with.
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -106,11 +116,12 @@ fn verify_download(file: &Path) -> Result<(), String> {
     }
 }
 
-/// The size the image is given to the model at: the long side near 518,
-/// the aspect ratio kept, both sides a whole number of patches.
-fn model_size(width: u32, height: u32) -> (u32, u32) {
+/// The size the image is given to the model at: the long side near
+/// `long_side`, the aspect ratio kept, both sides a whole number of patches.
+pub fn model_size(width: u32, height: u32, long_side: u32) -> (u32, u32) {
     let long = width.max(height).max(1) as f32;
-    let scale = LONG_SIDE as f32 / long;
+    let long_side = long_side.clamp(DETAIL[0].0, DETAIL[DETAIL.len() - 1].0);
+    let scale = long_side as f32 / long;
     let side = |pixels: u32| {
         let patches = (pixels as f32 * scale / PATCH as f32).round().max(1.0) as u32;
         patches * PATCH
@@ -120,8 +131,17 @@ fn model_size(width: u32, height: u32) -> (u32, u32) {
 
 /// `image` as the model's input: planar RGB, normalized, at `width` x `height`.
 fn planar_input(image: &RgbaImage, width: u32, height: u32) -> Vec<f32> {
-    let resized =
-        image::imageops::resize(image, width, height, image::imageops::FilterType::Triangle);
+    // A live screen's frames come at the model's size already.
+    let resized = if image.dimensions() == (width, height) {
+        std::borrow::Cow::Borrowed(image)
+    } else {
+        std::borrow::Cow::Owned(image::imageops::resize(
+            image,
+            width,
+            height,
+            image::imageops::FilterType::Triangle,
+        ))
+    };
     let plane = width as usize * height as usize;
     let mut data = vec![0.0f32; plane * 3];
     for (index, pixel) in resized.pixels().enumerate() {
@@ -131,6 +151,28 @@ fn planar_input(image: &RgbaImage, width: u32, height: u32) -> Vec<f32> {
         }
     }
     data
+}
+
+/// Make cuDNN's functions available to ONNX Runtime's CUDA provider.
+///
+/// The provider library uses cuDNN, but some distributions' packages of it
+/// (Arch's onnxruntime-cuda 1.29 among them) do not name cuDNN as a library
+/// they need. The provider then fails to load over a cuDNN function it
+/// cannot find, and depth silently runs on the processor, some fifteen
+/// times slower. Opening cuDNN first, with its names visible to libraries
+/// loaded later, is all the provider lacks. Without cuDNN installed nothing
+/// is opened and nothing changes.
+fn preload_cudnn() {
+    use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
+    for name in ["libcudnn.so.9", "libcudnn.so.8", "libcudnn.so"] {
+        // SAFETY: cuDNN is a library made to be loaded by programs like
+        // this one; opening it runs only its own initializers.
+        if let Ok(library) = unsafe { Library::open(Some(name), RTLD_NOW | RTLD_GLOBAL) } {
+            // Kept for the life of the process: the provider uses it.
+            std::mem::forget(library);
+            return;
+        }
+    }
 }
 
 /// Load the runtime library once per process. The outcome is remembered: a
@@ -143,6 +185,7 @@ fn runtime() -> Result<&'static Environment, String> {
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(RUNTIME_LIBRARY));
+            preload_cudnn();
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
                     "ONNX Runtime could not be loaded ({}): {e}. Install your distribution's onnxruntime package (Arch: onnxruntime-cpu or onnxruntime-cuda).",
@@ -161,6 +204,13 @@ fn runtime() -> Result<&'static Environment, String> {
         .map_err(Clone::clone)
 }
 
+/// The cores the model may use on the processor: a quarter of them, at
+/// least two and at most six.
+fn model_threads() -> usize {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    (cores / 4).clamp(2, 6)
+}
+
 pub struct Estimator {
     session: Session,
     input: String,
@@ -168,9 +218,21 @@ pub struct Estimator {
 
 impl Estimator {
     pub fn load(model: &Path) -> Result<Estimator, String> {
-        let session = Session::builder(runtime()?)
-            .and_then(|mut builder| builder.commit_from_file(model))
-            .map_err(|e| format!("Could not load the depth model {}: {e}", model.display()))?;
+        let failed = |e: &dyn std::fmt::Display| {
+            format!("Could not load the depth model {}: {e}", model.display())
+        };
+        // On the processor the model is given a few cores, not all of them:
+        // it runs beside whatever shows its result (a live screen's
+        // renderer, Leia's eye tracker under Wine), and a model that takes
+        // every core makes all of those late. On a GPU the setting is moot.
+        let mut builder = Session::builder(runtime()?)
+            .map_err(|e| failed(&e))?
+            .with_intra_threads(model_threads())
+            .map_err(|e| failed(&e))?
+            // Idle model threads sleep instead of spinning on their cores.
+            .with_intra_op_spinning(false)
+            .map_err(|e| failed(&e))?;
+        let session = builder.commit_from_file(model).map_err(|e| failed(&e))?;
         let input = session
             .inputs()
             .first()
@@ -182,14 +244,16 @@ impl Estimator {
         Ok(Estimator { session, input })
     }
 
-    /// Estimate the nearness of every pixel of `image`. The map comes back
-    /// at the model's working size; the renderer stretches it to the image.
-    pub fn estimate(&mut self, image: &RgbaImage) -> Result<DepthMap, String> {
+    /// Estimate the nearness of every pixel of `image`, which the model is
+    /// shown with its long side at about `long_side` pixels (one of
+    /// [`DETAIL`]). The map comes back at that working size; the renderer
+    /// stretches it to the image.
+    pub fn estimate(&mut self, image: &RgbaImage, long_side: u32) -> Result<DepthMap, String> {
         let (width, height) = image.dimensions();
         if width == 0 || height == 0 {
             return Err("The source contains no image.".into());
         }
-        let (w, h) = model_size(width, height);
+        let (w, h) = model_size(width, height, long_side);
         let tensor = Tensor::from_array((
             [1usize, 3, h as usize, w as usize],
             planar_input(image, w, h),
@@ -220,14 +284,22 @@ mod tests {
 
     #[test]
     fn the_model_size_keeps_the_aspect_ratio_in_whole_patches() {
-        assert_eq!(model_size(518, 518), (518, 518));
-        assert_eq!(model_size(3840, 2160), (518, 294));
-        assert_eq!(model_size(1080, 1920), (294, 518));
-        for (w, h) in [(1, 1), (7, 5000), (1920, 1080), (640, 480), (13, 13)] {
-            let (mw, mh) = model_size(w, h);
-            assert!(mw >= PATCH && mh >= PATCH, "{w}x{h} -> {mw}x{mh}");
-            assert_eq!((mw % PATCH, mh % PATCH), (0, 0), "{w}x{h} -> {mw}x{mh}");
-            assert!(mw.max(mh) <= LONG_SIDE + PATCH, "{w}x{h} -> {mw}x{mh}");
+        assert_eq!(model_size(518, 518, 518), (518, 518));
+        assert_eq!(model_size(3840, 2160, 518), (518, 294));
+        assert_eq!(model_size(1080, 1920, 518), (294, 518));
+        // Finer detail is a larger picture of the same shape.
+        assert_eq!(model_size(3840, 2160, 1022), (1022, 574));
+        assert_eq!(model_size(3840, 2160, 1274), (1274, 714));
+        // Sizes outside the choices are brought to the nearest end.
+        assert_eq!(model_size(3840, 2160, 0), (518, 294));
+        assert_eq!(model_size(3840, 2160, 99999), (1274, 714));
+        for long_side in DETAIL.map(|(side, _)| side) {
+            for (w, h) in [(1, 1), (7, 5000), (1920, 1080), (640, 480), (13, 13)] {
+                let (mw, mh) = model_size(w, h, long_side);
+                assert!(mw >= PATCH && mh >= PATCH, "{w}x{h} -> {mw}x{mh}");
+                assert_eq!((mw % PATCH, mh % PATCH), (0, 0), "{w}x{h} -> {mw}x{mh}");
+                assert!(mw.max(mh) <= long_side + PATCH, "{w}x{h} -> {mw}x{mh}");
+            }
         }
     }
 

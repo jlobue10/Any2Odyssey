@@ -9,6 +9,7 @@ crates/core      any2odyssey-core      platform-neutral logic (all OSes)
 crates/windows   any2odyssey-windows   Win32/DWM/WGC/D3D11, Samsung engine worker (Windows only)
 crates/app       any2odyssey           the GUI executable (controls, tray, worker supervision; the Linux stereo viewer)
 tools/iconmaker  any2odyssey-iconmaker brand asset generator
+contrib/         Linux helpers for Leia's runtime: wine-lens (lens, eye tracker and weaver under Wine), lens-helper (MIT)
 installer/       PowerShell installer family
 scripts/         packaging (Windows ZIP)
 packaging/       Linux desktop entry and the Arch Linux PKGBUILD

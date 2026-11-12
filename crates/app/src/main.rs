@@ -3,16 +3,21 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+mod capture;
 mod core;
 #[cfg(not(windows))]
 mod depth;
 mod guide;
 mod hotkeys;
 mod lens_switch;
+#[cfg(target_os = "linux")]
+mod live;
 mod platform;
 #[cfg(windows)]
 mod tray;
 mod ui;
+mod weaver;
 // Used by the Windows start path; compiled for tests everywhere.
 #[cfg(any(windows, test))]
 mod worker_version;

@@ -1,0 +1,63 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# any2odyssey-weaver: what Any2Odyssey starts to show a stereo picture on the Odyssey 3D through Leia's own
+# weaver, with the lens on and the picture following the viewer's eyes. Makes sure Leia's Windows SR service
+# is running in the Wine prefix that setup.sh prepared, starts eye tracking, then runs the weaver host there.
+#
+# usage: any2odyssey-weaver <frame file> [overlay]
+#   <frame file>  the shared picture Any2Odyssey writes (layout in src/weaver-host.c)
+#   overlay       the output lets the pointer through (for a live desktop)
+# Contract: prints "on" once the picture is showing, "eyes 0|1" as eye tracking is lost or found,
+# "tracking: <reason>" when eye tracking could not be started, "capture: excluded" or "capture: not
+# excluded" as the desktop does or does not keep the picture out of screen captures (overlay only), or
+# "error: <reason>"; leaves (lens off, tracking stopped) when standard input closes.
+T=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+export WINEPREFIX=$T/prefix WINEDLLOVERRIDES="mscoree,mshtml="
+
+[ $# -ge 1 ] && [ -f "$1" ] || { echo "error: no frame file"; exit 1; }
+[ -f "$T/build/any2odyssey-weaver.exe" ] || { echo "error: the weaver host was not set up (run contrib/wine-lens/setup.sh)"; exit 1; }
+# One picture at a time: a new start waits here until the one before has finished leaving (lens off,
+# tracking stopped, the desktop's arrangements undone), or the two would undo each other's work. The
+# lock is file descriptor 8; the programs started below do not get it, or the ones that stay would
+# keep it.
+exec 8>"$T/weaver.lock"
+flock 8
+# Leaving is the work of a process of its own, started now and holding the lock until it has done it:
+# Any2Odyssey does not wait long for this script, which may be ended at any point below, and what has
+# been started by then must still be undone.
+ME=$$ T=$T setsid sh -c '
+    # (a script that was ended but not yet collected by its parent still has its number: state Z)
+    while state=$(cat "/proc/$ME/stat" 2>/dev/null) && case $state in *") Z "*) false ;; esac; do sleep 0.3; done
+    command -v busctl >/dev/null &&
+        busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s any2odyssey-overlay >/dev/null 2>&1
+    "$T/tools/tracking.sh" stop >/dev/null 2>&1 8>&-
+' </dev/null >/dev/null 2>&1 &
+"$T/tools/ensure-stack.sh" </dev/null 8>&- || exit 1
+# Where the Odyssey 3D is on Wine's desktop now (the monitors may have been rearranged since the service
+# started).
+python3 "$T/tools/mkedid.py" --place "$T/odyssey.place" 2>/dev/null 8>&-
+PLACE=$(cat "$T/odyssey.place" 2>/dev/null)
+[ -n "$PLACE" ] || { echo "error: the Odyssey 3D was not found among the monitors (see $T/edid.pairs)"; exit 1; }
+
+# Without eye positions Leia's weaver shows one view only, so a tracker that will not start is reported
+# but does not stop the picture.
+TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>&1 8>&-)
+[ "$TRACKING" = on ] || echo "tracking: ${TRACKING#error: }"
+
+FRAME=$(readlink -f "$1")
+# A live screen may be the Odyssey's own: on KDE Plasma the picture's window is then kept out of the capture
+# (tools/kwin-overlay.js). Other desktops have no such switch, and there another screen has to be shown.
+KWIN_SCRIPT=
+if [ "${2:-}" = overlay ] && command -v busctl >/dev/null &&
+   busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s any2odyssey-overlay >/dev/null 2>&1; then
+    busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting loadScript ss "$T/tools/kwin-overlay.js" any2odyssey-overlay >/dev/null 2>&1 &&
+        busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting start >/dev/null 2>&1 && KWIN_SCRIPT=1
+    [ -n "$KWIN_SCRIPT" ] && echo "capture: excluded" || echo "capture: not excluded"
+fi
+# The host is not exec'ed: there is leaving to do after it. It gets this script's input, so it still
+# leaves when Any2Odyssey closes it.
+# shellcheck disable=SC2086  # PLACE is four numbers
+WINEDEBUG=-all WINEPATH='C:\Program Files\LeiaSR\Platform\bin' \
+    wine "$T/build/any2odyssey-weaver.exe" "Z:$(printf %s "$FRAME" | tr / '\\')" $PLACE ${2:+"$2"} 2>/dev/null 8>&-
+STATUS=$?
+exit $STATUS

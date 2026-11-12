@@ -73,6 +73,11 @@ impl DepthMap {
         self.height
     }
 
+    /// Every value, row by row.
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
     pub fn get(&self, x: u32, y: u32) -> f32 {
         self.values[y as usize * self.width as usize + x as usize]
     }

@@ -140,9 +140,110 @@ jobs:
             dist/*.zip
             dist/*.sha256
 
+  # The Linux edition, two ways: an archive for any recent distribution and a package for Arch-based ones.
+  # Like the Windows job, these build and test with a token that can only read.
+  linux-archive:
+    name: Build, test and package Linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+        with:
+          # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
+          toolchain: 1.99.1
+          components: clippy, rustfmt
+      - name: Verify tag matches VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: test "$TAG" = "v$(tr -d '[:space:]' < VERSION)"
+      - name: Desktop build dependencies (eframe; PipeWire for live capture)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxrandr-dev \
+            libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang
+      - name: Build (release)
+        run: cargo build --locked --release -p any2odyssey
+      - name: Test
+        run: cargo test --locked --release -p any2odyssey-core -p any2odyssey
+      - name: Third-party list for Linux matches the dependencies
+        run: |
+          scripts/third-party-linux.py > /tmp/third-party-linux.md
+          diff -u THIRD-PARTY-LICENSES-LINUX.md /tmp/third-party-linux.md
+      - name: Package
+        run: |
+          before=$(sha256sum target/release/Any2Odyssey)
+          scripts/package-linux.sh
+          # The archive must hold the executable that was tested, not one a later step rebuilt.
+          test "$before" = "$(sha256sum target/release/Any2Odyssey)"
+          cd dist && sha256sum -c ./*.sha256
+          mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
+          check/any2odyssey --help
+          test "$(sha256sum < check/any2odyssey)" = "$(sha256sum < ../target/release/Any2Odyssey)"
+          check/install.sh --prefix "$PWD/prefix" --no-deps --no-udev --no-model --no-odyssey
+          prefix/bin/any2odyssey --help
+          rm -rf prefix
+          rm -rf check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Any2Odyssey-release-linux-archive
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  arch-package:
+    name: Build, test and package for Arch Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: archlinux:base-devel
+    permissions:
+      contents: read
+    steps:
+      # makepkg runs as a user without sudo, so the package's own dependencies are installed here.
+      - name: Packaging tools and the package's dependencies
+        run: pacman -Syu --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build, test and package
+        run: |
+          useradd -m build
+          chown -R build:build .
+          su build -c 'cd packaging/arch && makepkg --noconfirm'
+      - name: Install the package and check what it installed
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls packaging/arch/any2odyssey-"${TAG#v}"-*-x86_64.pkg.tar.zst
+          pacman -U --noconfirm packaging/arch/any2odyssey-*.pkg.tar.zst
+          desktop-file-validate /usr/share/applications/any2odyssey.desktop
+          any2odyssey --help
+          test -x /usr/share/any2odyssey/wine-lens/setup.sh
+          test -s /usr/share/licenses/any2odyssey/THIRD-PARTY-LICENSES-LINUX.md
+          test -s /usr/lib/udev/rules.d/70-any2odyssey-lens.rules
+          any2odyssey-setup --help
+          mkdir dist && cp packaging/arch/any2odyssey-*.pkg.tar.zst dist/
+          cd dist && for f in ./*.pkg.tar.zst; do sha256sum "${f#./}" > "${f#./}.sha256"; done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Any2Odyssey-release-arch-package
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*.pkg.tar.zst
+            dist/*.sha256
+
   publish:
     name: Publish the GitHub release
-    needs: build
+    needs: [build, linux-archive, arch-package]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The only job with a write token. It checks out nothing and runs no code from the repository:
@@ -154,15 +255,24 @@ jobs:
         with:
           name: Any2Odyssey-release-package
           path: dist
-      - name: Verify the package against its SHA-256
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Any2Odyssey-release-linux-archive
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Any2Odyssey-release-arch-package
+          path: dist
+      - name: Verify the packages against their SHA-256
         working-directory: dist
         run: |
           ls -l
-          if [ "$(ls -1 ./*.zip | wc -l)" -ne 1 ] || [ "$(ls -1 ./*.sha256 | wc -l)" -ne 1 ]; then
-            echo "::error::Expected exactly one ZIP and one .sha256 file from the build job."
+          if [ "$(ls -1 ./*.zip | wc -l)" -ne 1 ] || [ "$(ls -1 ./*.tar.gz | wc -l)" -ne 1 ] ||
+             [ "$(ls -1 ./*.pkg.tar.zst | wc -l)" -ne 1 ] || [ "$(ls -1 ./*.sha256 | wc -l)" -ne 3 ]; then
+            echo "::error::Expected exactly one ZIP, one Linux archive and one Arch package, each with its .sha256 file."
             exit 1
           fi
-          sha256sum -c ./*.sha256
+          for sum in ./*.sha256; do sha256sum -c "$sum"; done
       # softprops/action-gh-release would otherwise replace same-named assets (a re-run, a re-pushed
       # tag) with a different build of the same version, without a word.
       - name: Refuse to replace the assets of an existing release
@@ -184,15 +294,21 @@ jobs:
             echo "::error::Could not find out whether release $TAG already exists."
             exit 1
           fi
-      - name: Create GitHub release with the ZIP and its SHA-256
+      - name: Create GitHub release with the packages and their SHA-256 files
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/*.zip
+            dist/*.tar.gz
+            dist/*.pkg.tar.zst
             dist/*.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
           # Second line of defence behind the step above: never overwrite an existing asset.
           overwrite_files: false
           body: |
-            Windows x64 package for Any2Odyssey ${{ github.ref_name }}. Extract the ZIP and run `Install.cmd` (full converter, needs Odyssey 3D Hub 1.5.1) or `Install-GUI.cmd` (controls only). Verify the download against the attached `.sha256`.
+            Any2Odyssey ${{ github.ref_name }}. Verify a download against its attached `.sha256`.
+
+            **Windows x64** (`Any2Odyssey-*-windows-x64.zip`): extract the ZIP and run `Install.cmd` (full converter, needs Odyssey 3D Hub 1.5.1) or `Install-GUI.cmd` (controls only).
+
+            **Linux x86_64**: the stereo viewer, with glasses-free output on an Odyssey 3D for images and a live screen through your own copy of Leia's runtime under Wine (experimental; see `docs/LENS-SWITCH.md`). The Odyssey 3D part needs a dual-boot PC: Windows with the Odyssey 3D Hub on a drive Linux can mount. On Arch-based distributions install `any2odyssey-*-x86_64.pkg.tar.zst` with `sudo pacman -U`, then run `any2odyssey-setup` for the depth model and the Odyssey 3D. Elsewhere extract `Any2Odyssey-*-linux-x86_64.tar.gz` (built on Ubuntu 24.04; needs glibc 2.39 or newer) and run its `./install.sh`, which installs the program for your user and asks about the packages it needs, the udev rules, the depth model and the Odyssey 3D setup.
