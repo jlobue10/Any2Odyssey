@@ -16,18 +16,20 @@ use any2odyssey_core::log::Logger;
 use any2odyssey_core::paths;
 use any2odyssey_core::prefs::{CaptureMode, Preferences};
 use any2odyssey_core::status::{exit_code, WorkerStatus};
-use windows::Win32::Foundation::{HWND, WAIT_EVENT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{HWND, LPARAM, WAIT_EVENT, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, TerminateProcess, WaitForMultipleObjects, INFINITE,
+    GetCurrentProcess, GetCurrentThreadId, TerminateProcess, WaitForMultipleObjects, INFINITE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_TIMER,
+    DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG, WM_TIMER,
 };
 
 use crate::engine::{self, EngineLibrary};
 use crate::ipc::{Event, InstanceGuard};
-use crate::mirror::{self, Mirror, TIMER_OVERLAY, TIMER_POLL, TIMER_UPDATE, WM_FRAME_ARRIVED};
+use crate::mirror::{
+    self, Mirror, TIMER_OVERLAY, TIMER_POLL, TIMER_UPDATE, WM_FRAME_ARRIVED, WM_STOP_WAKE,
+};
 use crate::overlay::OverlayController;
 use crate::processes::{current_pid, ParentWatch};
 use crate::source_notice::SourceNotice;
@@ -153,11 +155,19 @@ fn install_panic_hook(logger: Arc<Logger>) {
 /// grace period after either handle was signalled, so a slow but progressing
 /// shutdown under the grace is never cut short. Without it, a click-through
 /// topmost overlay would stay on screen with nothing left to remove it.
+///
+/// It is also what makes a stop prompt: the moment either handle is
+/// signalled it posts [`WM_STOP_WAKE`] to `loop_thread`, so a loop blocked in
+/// `GetMessageW` runs its stop checks at once instead of at its next
+/// half-second poll. The post is a courtesy on top of that poll, never a
+/// replacement: a thread without a message queue yet, or a nested message
+/// pump that swallows the message, only costs the old delay.
 fn spawn_watchdog(
     parent: ParentWatch,
     stop: Event,
     finished: Arc<AtomicBool>,
     log: Arc<dyn Fn(&str) + Send + Sync>,
+    loop_thread: u32,
 ) {
     let thread_log = log.clone();
     let spawned = std::thread::Builder::new()
@@ -175,6 +185,10 @@ fn spawn_watchdog(
                 thread_log("Watchdog: wait failed; the message loop's own checks remain the only stop path.");
                 return;
             }
+            // SAFETY: posting a thread message has no memory-safety
+            // preconditions; a thread id that is stale or has no queue makes
+            // the call fail, which is ignored.
+            let _ = unsafe { PostThreadMessageW(loop_thread, WM_STOP_WAKE, WPARAM(0), LPARAM(0)) };
             // The wait reports the lowest signalled index, so controls that
             // asked for a stop and then quit would read as "went away". Ask
             // the event itself: a requested stop is the more specific cause.
@@ -340,8 +354,10 @@ fn run_inner(
     // Duplicates, so the watchdog's wait never touches a handle this function
     // is about to close. A missing backstop is logged, not fatal: the loop's
     // own checks still cover every ordinary stop.
+    // SAFETY: no preconditions. This thread runs the message loop below.
+    let loop_thread = unsafe { GetCurrentThreadId() };
     match (parent.try_clone(), stop_event.try_clone()) {
-        (Ok(parent), Ok(stop)) => spawn_watchdog(parent, stop, finished, log.clone()),
+        (Ok(parent), Ok(stop)) => spawn_watchdog(parent, stop, finished, log.clone(), loop_thread),
         (Err(e), _) | (_, Err(e)) => log(&format!("Watchdog not started: {e}")),
     }
     let library = EngineLibrary::load()
@@ -459,8 +475,11 @@ fn run_inner(
         }
         // Timers wake an idle loop; deadlines also run between posted frames
         // so sustained capture cannot starve stop, liveness or overlay checks.
+        // The watchdog's wake-up runs the same checks without waiting for
+        // the deadline: it means a stop was requested or the controls ended.
         let now = Instant::now();
-        if poll_deadline.due(now) {
+        let stop_wake = msg.hwnd.0.is_null() && msg.message == WM_STOP_WAKE;
+        if poll_deadline.due(now) || stop_wake {
             // Three triggers end the loop here; only the first is a clean,
             // requested stop. Name each in the log so companion.log tells a
             // user stop from the engine giving up or the controls vanishing.
@@ -620,6 +639,51 @@ mod tests {
         assert!(line.contains("an unknown location") && line.contains("no message"));
         assert!(status.starts_with("Renderer error: internal fault at an unknown location"));
         assert!(panic_report(Some("  \n"), None, 1).0.contains("no message"));
+    }
+
+    #[test]
+    fn the_watchdog_wakes_the_message_loop_as_soon_as_a_stop_is_signalled() {
+        use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_NOREMOVE, PM_REMOVE};
+
+        // A name of its own, never the real instance's objects.
+        let name = format!(
+            "Local\\Any2Odyssey-wake-test-{}",
+            crate::ipc::new_session_id()
+        );
+        let stop = Event::create(&name, true).unwrap();
+        let parent = ParentWatch::open(current_pid()).expect("own process opens");
+        // Already "finished": the watchdog under test must only wake the
+        // loop and then stand down, never terminate the test process.
+        let finished = Arc::new(AtomicBool::new(true));
+        let mut msg = MSG::default();
+        // Give this thread its message queue before anything is posted.
+        let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
+        let loop_thread = unsafe { GetCurrentThreadId() };
+        spawn_watchdog(
+            parent,
+            stop.try_clone().unwrap(),
+            finished,
+            Arc::new(|_: &str| {}),
+            loop_thread,
+        );
+        // Nothing is posted while neither handle is signalled.
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !unsafe { PeekMessageW(&mut msg, None, WM_STOP_WAKE, WM_STOP_WAKE, PM_REMOVE) }
+                .as_bool()
+        );
+        stop.set().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut woken = false;
+        while !woken && Instant::now() < deadline {
+            woken = unsafe { PeekMessageW(&mut msg, None, WM_STOP_WAKE, WM_STOP_WAKE, PM_REMOVE) }
+                .as_bool();
+            if !woken {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(woken, "no wake-up was posted after the stop event");
+        assert!(msg.hwnd.0.is_null() && msg.message == WM_STOP_WAKE);
     }
 
     #[test]

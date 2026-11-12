@@ -34,6 +34,10 @@ use crate::win::{self, wide};
 
 /// `WM_APP + 1`: a capture frame arrived (posted from the capture thread).
 pub const WM_FRAME_ARRIVED: u32 = 0x8001;
+/// `WM_APP + 2`, posted to the message-loop thread itself (no window): the
+/// stop event was signalled or the controls process ended, so the loop
+/// should run its stop checks now instead of at the next poll.
+pub const WM_STOP_WAKE: u32 = 0x8002;
 pub const TIMER_UPDATE: usize = 1;
 pub const TIMER_POLL: usize = 2;
 pub const TIMER_OVERLAY: usize = 3;
