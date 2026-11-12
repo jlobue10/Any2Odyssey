@@ -35,11 +35,154 @@ fn data_dir_from(override_dir: Option<std::ffi::OsString>) -> PathBuf {
     if let Some(dir) = override_dir {
         return std::path::absolute(&dir).unwrap_or(dir);
     }
-    let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
-    if cfg!(windows) {
-        base.join("Any2Odyssey")
-    } else {
-        base.join("any2odyssey")
+    #[cfg(unix)]
+    {
+        match dirs::data_local_dir() {
+            Some(base) => base.join("any2odyssey"),
+            None => homeless_data_dir(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
+        if cfg!(windows) {
+            base.join("Any2Odyssey")
+        } else {
+            base.join("any2odyssey")
+        }
+    }
+}
+
+/// Where the data goes on Unix when no home folder can be found (no `$HOME`
+/// and no entry in the user database). Helpers are run from the data folder
+/// and the depth model, the capture token and the instance socket live
+/// there, so it is never a name in the shared temporary folder, which
+/// another user could have made first: it is a folder of our own in the
+/// session's runtime folder, or nowhere at all.
+#[cfg(unix)]
+fn homeless_data_dir() -> PathBuf {
+    // Worked out once: the answer does not change while the program runs,
+    // and finding it makes a folder and looks at who owns it.
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        private_runtime_dir(std::env::var_os("XDG_RUNTIME_DIR")).unwrap_or_else(|| {
+            // Nothing can be made under a file. Whoever reads or writes
+            // there gets an error that names this path, which every caller
+            // already handles (a data folder that cannot be made).
+            PathBuf::from("/dev/null/any2odyssey-has-no-home-or-runtime-folder")
+        })
+    })
+    .clone()
+}
+
+/// `any2odyssey` in the runtime folder `runtime` (`$XDG_RUNTIME_DIR`), made
+/// for this user only if it is not there. `None` unless both folders belong
+/// to this user and nobody else can write to them.
+#[cfg(unix)]
+fn private_runtime_dir(runtime: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let runtime = PathBuf::from(runtime.filter(|dir| !dir.is_empty())?);
+    if !runtime.is_absolute() {
+        return None;
+    }
+    let dir = runtime.join("any2odyssey");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    // A file made here belongs to this user, which is how the user's id is
+    // learnt without calling into the C library. It has no name and is gone
+    // when this function returns.
+    let me = tempfile::tempfile_in(&dir).ok()?.metadata().ok()?.uid();
+    let private = |metadata: std::fs::Metadata| {
+        metadata.is_dir() && metadata.uid() == me && metadata.mode() & 0o022 == 0
+    };
+    // The folder itself must be a real folder, not a link put in its place.
+    let ours = std::fs::metadata(&runtime).is_ok_and(private)
+        && std::fs::symlink_metadata(&dir).is_ok_and(private);
+    ours.then_some(dir)
+}
+
+#[cfg(all(test, unix))]
+mod homeless_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    fn set_mode(path: &std::path::Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn without_a_home_the_data_goes_to_a_private_folder_in_the_runtime_folder() {
+        let runtime = tempfile::tempdir().unwrap();
+        set_mode(runtime.path(), 0o700);
+        let dir = private_runtime_dir(Some(runtime.path().into())).unwrap();
+        assert_eq!(dir, runtime.path().join("any2odyssey"));
+        assert_eq!(mode(&dir), 0o700, "made for this user only");
+        // The second time it is found as it was left.
+        std::fs::write(dir.join("settings.json"), b"{}").unwrap();
+        assert_eq!(
+            private_runtime_dir(Some(runtime.path().into())),
+            Some(dir.clone())
+        );
+        assert!(dir.join("settings.json").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no probe left");
+    }
+
+    #[test]
+    fn a_runtime_folder_that_is_missing_relative_or_shared_is_refused() {
+        assert_eq!(private_runtime_dir(None), None);
+        assert_eq!(private_runtime_dir(Some("".into())), None);
+        assert_eq!(private_runtime_dir(Some("run/user/1000".into())), None);
+        let parent = tempfile::tempdir().unwrap();
+        assert_eq!(
+            private_runtime_dir(Some(parent.path().join("missing").into())),
+            None
+        );
+
+        // Our folder, but others may write to it.
+        let runtime = tempfile::tempdir().unwrap();
+        set_mode(runtime.path(), 0o700);
+        let dir = runtime.path().join("any2odyssey");
+        std::fs::create_dir(&dir).unwrap();
+        for open in [0o777, 0o770, 0o702] {
+            set_mode(&dir, open);
+            assert_eq!(private_runtime_dir(Some(runtime.path().into())), None);
+        }
+        set_mode(&dir, 0o700);
+        assert!(private_runtime_dir(Some(runtime.path().into())).is_some());
+        // A runtime folder others may write to could have our folder
+        // exchanged under us.
+        set_mode(runtime.path(), 0o777);
+        assert_eq!(private_runtime_dir(Some(runtime.path().into())), None);
+        set_mode(runtime.path(), 0o700);
+
+        // A link where the folder should be, even to a folder of ours.
+        std::fs::remove_dir(&dir).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        set_mode(elsewhere.path(), 0o700);
+        std::os::unix::fs::symlink(elsewhere.path(), &dir).unwrap();
+        assert_eq!(private_runtime_dir(Some(runtime.path().into())), None);
+        // And a file.
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::write(&dir, b"not a folder").unwrap();
+        assert_eq!(private_runtime_dir(Some(runtime.path().into())), None);
+    }
+
+    #[test]
+    fn the_place_of_last_resort_cannot_be_made_by_anyone() {
+        let nowhere = PathBuf::from("/dev/null/any2odyssey-has-no-home-or-runtime-folder");
+        assert!(std::fs::create_dir_all(&nowhere).is_err());
+        assert!(std::fs::write(nowhere.join("settings.json"), b"{}").is_err());
     }
 }
 
