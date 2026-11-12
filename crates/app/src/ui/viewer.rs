@@ -586,6 +586,21 @@ fn fit_centered(area: Rect, image: egui::Vec2) -> Rect {
     Rect::from_center_size(area.center(), image * scale)
 }
 
+/// Asks for a repaint when it goes. A thread that works for the page holds
+/// one beside the channel its answer goes into, declared before it so that
+/// it goes after: the page is then woken with the answer, and also when the
+/// thread panics instead of answering (a decoder or the model's runtime on
+/// a file they cannot take), where it finds the channel closed. Otherwise
+/// the page would learn of that only when something else repaints it, and
+/// an output waiting on black for a picture would wait until then.
+struct Wake(egui::Context);
+
+impl Drop for Wake {
+    fn drop(&mut self) {
+        self.0.request_repaint();
+    }
+}
+
 enum Picked {
     Open(Result<Option<PathBuf>, String>),
     Save(Result<Option<PathBuf>, String>),
@@ -730,12 +745,12 @@ impl ViewerState {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        let (ctx, file, options) = (ctx.clone(), path.to_owned(), self.options);
+        let (wake, file, options) = (Wake(ctx.clone()), path.to_owned(), self.options);
         let spawned = std::thread::Builder::new()
             .name("image-open".into())
             .spawn(move || {
+                let (_wake, tx) = (wake, tx);
                 let _ = tx.send(load(&file, options));
-                ctx.request_repaint();
             });
         match spawned {
             Ok(_) => {
@@ -841,13 +856,13 @@ impl ViewerState {
         // The thread reads the document's own image: nothing is copied.
         let image = Arc::clone(image);
         let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
+        let wake = Wake(ctx.clone());
         let detail = self.options.detail;
         let spawned = std::thread::Builder::new()
             .name("depth".into())
             .spawn(move || {
+                let (_wake, tx) = (wake, tx);
                 let _ = tx.send(platform::estimate_depth(&image, detail));
-                ctx.request_repaint();
             });
         match spawned {
             Ok(_) => {
@@ -1196,17 +1211,17 @@ impl ViewerState {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
+        let wake = Wake(ctx.clone());
         let spawned = std::thread::Builder::new()
             .name("file-dialog".into())
             .spawn(move || {
+                let (_wake, tx) = (wake, tx);
                 let picked = if save {
                     Picked::Save(platform::pick_save_png(DEFAULT_EXPORT_NAME))
                 } else {
                     Picked::Open(platform::pick_image())
                 };
                 let _ = tx.send(picked);
-                ctx.request_repaint();
             });
         match spawned {
             Ok(_) => self.picking = Some((rx, self.document.source_id)),
@@ -3296,5 +3311,39 @@ mod tests {
         finish_opening(&mut state, &ctx);
         assert_eq!(state.status, LOADED);
         assert_eq!(state.shown_path, Some(path));
+    }
+
+    #[test]
+    fn a_worker_wakes_the_page_after_its_answer_and_also_when_it_panics() {
+        use std::sync::Mutex;
+        for panics in [false, true] {
+            let ctx = egui::Context::default();
+            let (tx, rx) = mpsc::channel::<u8>();
+            // What the page would find in the channel when it is woken.
+            let found = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&found);
+            let rx = Mutex::new(rx);
+            ctx.set_request_repaint_callback(move |_| {
+                let now = match rx.lock().unwrap().try_recv() {
+                    Ok(_) => "answer",
+                    Err(TryRecvError::Disconnected) => "closed",
+                    Err(TryRecvError::Empty) => "nothing yet",
+                };
+                seen.lock().unwrap().push(now);
+            });
+            let wake = Wake(ctx.clone());
+            let worker = std::thread::spawn(move || {
+                let (_wake, tx) = (wake, tx);
+                if panics {
+                    // Unwinds as a panic does, without a message on the
+                    // test's output.
+                    std::panic::resume_unwind(Box::new("the decoder gave up"));
+                }
+                let _ = tx.send(1);
+            });
+            assert_eq!(worker.join().is_err(), panics);
+            let expected = if panics { "closed" } else { "answer" };
+            assert_eq!(*found.lock().unwrap(), [expected], "panics: {panics}");
+        }
     }
 }
