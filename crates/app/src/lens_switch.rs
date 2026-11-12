@@ -15,7 +15,7 @@
 //! the input is also what happens when this program dies, so a crash does
 //! not leave the lens on.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -27,6 +27,9 @@ pub const HELPER_ENV: &str = "ANY2ODYSSEY_LENS_HELPER";
 /// How long a helper gets to switch the lens off and leave by itself.
 const LEAVE_GRACE: Duration = Duration::from_secs(3);
 const MAX_REASON: usize = 200;
+/// The longest line a helper is heard out on. What follows is taken for
+/// the next line; nothing a helper has to say is nearly as long.
+const MAX_LINE: u64 = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LensStatus {
@@ -297,9 +300,23 @@ pub(crate) fn start(
     let (tx, rx) = mpsc::channel();
     let read = move || {
         if let Some(stdout) = stdout {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
+            let mut output = BufReader::new(stdout);
+            let mut line = Vec::new();
+            loop {
+                // Bytes, a bounded number at a time: a line that is not
+                // UTF-8 (a folder's name in a reason can be anything) must
+                // not end the listening, which would be taken for the
+                // helper leaving, and a helper that never ends its line
+                // must not be kept in memory whole.
+                line.clear();
+                match (&mut output).take(MAX_LINE).read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                if tx
+                    .send(String::from_utf8_lossy(&line).into_owned())
+                    .is_err()
+                {
                     return;
                 }
                 wake();
@@ -540,6 +557,30 @@ mod tests {
         }
         assert!(is_over(script), "the helper script was left running");
         assert!(is_over(program), "the helper's program was left running");
+    }
+
+    #[test]
+    fn odd_lines_from_a_helper_do_not_end_the_listening() {
+        // A line that is not UTF-8, then one far longer than any real one
+        // (it comes in pieces), then the helper's word; a reason that is
+        // not UTF-8 is shown as far as it can be.
+        for (body, expected) in [
+            (
+                "printf 'tracking: caf\\351\\n'\nhead -c 100000 /dev/zero | tr '\\0' x\necho\necho on\ncat >/dev/null",
+                LensStatus::On,
+            ),
+            (
+                "printf 'error: no caf\\351 here\\n'",
+                LensStatus::Failed("no caf\u{fffd} here".into()),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut switch = LensSwitch::with_helper(Some(script(dir.path(), body)));
+            turn_on(&mut switch, || {});
+            let settled = |s: &LensStatus| !matches!(s, LensStatus::Starting);
+            assert_eq!(wait_for(&mut switch, settled), expected);
+            switch.set(false, || {});
+        }
     }
 
     #[test]
