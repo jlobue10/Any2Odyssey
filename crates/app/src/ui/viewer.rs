@@ -891,9 +891,18 @@ impl ViewerState {
             Ok(false) => {}
             Err(e) => {
                 self.depth_failed = Some(id);
-                self.output_open = false;
+                self.close_output_without_picture();
                 self.status = e;
             }
+        }
+    }
+
+    /// The image has no picture to show (its depth failed, or the options
+    /// cannot take it): the output ends, unless what it shows is the
+    /// calibration pattern, which needs no picture and stays.
+    fn close_output_without_picture(&mut self) {
+        if !self.shows_pattern() {
+            self.output_open = false;
         }
     }
 
@@ -906,7 +915,7 @@ impl ViewerState {
     /// cannot be converted with them, or say what there is now.
     fn settle(&mut self, converted: Result<(), String>) {
         if let Err(e) = converted {
-            self.output_open = false;
+            self.close_output_without_picture();
             self.status = e;
         } else if self.document.result().is_some() {
             self.status = if self.output_open { OUTPUT_ON } else { LOADED }.into();
@@ -3198,6 +3207,45 @@ mod tests {
         state.toggle_output();
         assert!(!state.output_open);
         assert_eq!(state.status, NO_IMAGE);
+    }
+
+    #[test]
+    fn the_calibration_pattern_stays_up_when_the_image_has_no_picture() {
+        let showing_pattern = || {
+            let mut state = ViewerState::default();
+            state.options.output = Output::Lens;
+            state.lens.pattern = true;
+            state
+        };
+        // The model fails on the image while the pattern is being tuned.
+        let mut state = showing_pattern();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        state.toggle_output();
+        assert!(state.output_open);
+        let estimate = queued_depth(&mut state);
+        estimate.send(Err("no model".into())).unwrap();
+        state.poll_depth();
+        assert!(state.output_open, "the pattern needs no depth");
+        assert_eq!(state.status, "no model");
+        // Without the pattern the same failure ends the output.
+        state.lens.pattern = false;
+        state.depth_failed = None;
+        let estimate = queued_depth(&mut state);
+        estimate.send(Err("no model".into())).unwrap();
+        state.poll_depth();
+        assert!(!state.output_open);
+
+        // Options the image cannot be converted with.
+        let mut state = showing_pattern();
+        state.options.input = Input::Flat;
+        let odd = RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]));
+        state.document.set_source(odd, state.options).unwrap();
+        state.toggle_output();
+        state.options.input = Input::Pair;
+        state.options_changed();
+        assert!(state.output_open, "the pattern needs no pair");
+        assert!(state.status.contains("even width"), "{}", state.status);
     }
 
     #[test]
