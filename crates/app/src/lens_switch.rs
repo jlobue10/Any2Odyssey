@@ -111,18 +111,24 @@ pub(crate) struct Running {
 
 impl Running {
     /// Ask the helper to leave and make sure it does, without waiting here.
-    pub(crate) fn let_go(mut self) {
+    pub(crate) fn let_go(self) {
+        self.leave_within(LEAVE_GRACE);
+    }
+
+    fn leave_within(mut self, grace: Duration) {
         self.stdin = None;
         let mut child = self.child;
         let reap = move || {
-            let deadline = Instant::now() + LEAVE_GRACE;
+            let deadline = Instant::now() + grace;
             loop {
                 match child.try_wait() {
                     Ok(Some(_)) => return,
                     Ok(None) if Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(50));
                     }
-                    _ => break,
+                    // Still there, and not collected: its group is its own.
+                    Ok(None) => return end(&mut child),
+                    Err(_) => break,
                 }
             }
             let _ = child.kill();
@@ -235,12 +241,52 @@ impl Drop for LensSwitch {
     }
 }
 
+/// End a helper that has not left by itself, with everything it started
+/// that is still with it. The helpers here are shell scripts that run the
+/// program doing the work (a Windows program under Wine) and wait for it:
+/// ending the script alone would leave a program that hangs running, with
+/// the lens on. `child` must not have been collected yet: until then its
+/// number, which is also its group's (`start`), cannot be anybody else's.
+#[cfg(unix)]
+fn end(child: &mut Child) {
+    extern "C" {
+        /// kill(2) of the C library that every program here is linked to.
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    const SIGKILL: i32 = 9;
+    // 0 and 1 as a group would be this program's own and every process.
+    if let Some(group) = i32::try_from(child.id()).ok().filter(|id| *id > 1) {
+        // SAFETY: kill takes two numbers and reads or writes no memory of
+        // this program's; a negative first one names a process group.
+        let _ = unsafe { kill(-group, SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn end(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Start a helper with its input held and its output read line by line on
 /// a thread of its own; `wake` runs whenever it has said something.
+///
+/// The helper is made the leader of a process group of its own, so that it
+/// can be ended together with what it started (`end`). That also keeps a
+/// terminal's Ctrl+C, which goes to the group in the foreground, from the
+/// helper: this program is ended by it, the helper's input closes with
+/// that, and the helper leaves in the ordinary way, switching the lens off,
+/// where the signal would have ended it on the spot. What a helper puts
+/// in a session of its own (the Wine services, the eye tracker, its own
+/// tidying up) is in neither group and outlives both, as it is meant to.
 pub(crate) fn start(
     mut command: Command,
     wake: impl Fn() + Send + 'static,
 ) -> std::io::Result<Running> {
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -267,8 +313,7 @@ pub(crate) fn start(
         .name("lens-helper-read".into())
         .spawn(read)
     {
-        let _ = child.kill();
-        let _ = child.wait();
+        end(&mut child);
         return Err(e);
     }
     Ok(Running {
@@ -429,6 +474,72 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
         switch.poll();
         assert_eq!(switch.status(), LensStatus::On);
+    }
+
+    /// Whether process `pid` is over: gone, or ended and only waiting to
+    /// be collected by whoever inherited it.
+    #[cfg(target_os = "linux")]
+    fn is_over(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // "<pid> (<name>) <state> ...": the name may hold anything.
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_none_or(|(_, rest)| rest.starts_with(['Z', 'X'])),
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_that_does_not_leave_is_ended_with_what_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        // Like the real helpers: a script that starts the program doing the
+        // work and waits for it. This one's program ignores the closed
+        // input, as a hung one does; its number is noted for the test.
+        let helper = script(
+            dir.path(),
+            &format!(
+                "sleep 300 &\necho $! > '{0}.tmp' && mv '{0}.tmp' '{0}'\necho on\nwait",
+                started.display()
+            ),
+        );
+        let mut running = None;
+        for _ in 0..200 {
+            match start(Command::new(&helper), || {}) {
+                Ok(helper) => {
+                    running = Some(helper);
+                    break;
+                }
+                // (the freshly written script is "busy": see `turn_on`)
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let running = running.expect("the helper script did not start");
+        assert!(wait_for_file(&started));
+        let program: u32 = std::fs::read_to_string(&started)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let script = running.child.id();
+        // The script leads a group of its own, and its program is in it.
+        let group = |pid: u32| {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+            let rest = stat.rsplit_once(") ").unwrap().1.to_owned();
+            rest.split(' ').nth(2).unwrap().parse::<u32>().unwrap()
+        };
+        assert_eq!(group(script), script);
+        assert_eq!(group(program), script);
+        assert!(!is_over(program) && !is_over(script));
+
+        running.leave_within(Duration::from_millis(200));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(is_over(program) && is_over(script)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(is_over(script), "the helper script was left running");
+        assert!(is_over(program), "the helper's program was left running");
     }
 
     #[test]
