@@ -13,7 +13,7 @@
 //! (the pattern in [`calibration_pattern`] makes errors visible), and nothing
 //! here switches the panel's lens on.
 
-use image::{imageops, Rgba, RgbaImage};
+use image::{imageops, GenericImageView, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -175,10 +175,47 @@ pub fn calibration_pattern(width: u32, height: u32) -> (RgbaImage, RgbaImage) {
     )
 }
 
+/// [`weave`] of the [`calibration_pattern`] for an area of `width` x
+/// `height` panel pixels at `origin`, without making the two plain images
+/// first: a subpixel is simply lit or dark by the eye it belongs to. The
+/// pattern is woven again at every step of a calibration key.
+pub fn weave_pattern(
+    width: u32,
+    height: u32,
+    lens: &Lens,
+    origin: (i64, i64),
+) -> Result<RgbaImage, WeaveError> {
+    if width == 0 || height == 0 {
+        return Err(WeaveError::Empty);
+    }
+    let lens = lens.sanitized();
+    let mut out = RgbaImage::new(width, height);
+    for (y, dst) in out.chunks_exact_mut(width as usize * 4).enumerate() {
+        let row = Row::new(&lens, origin.1 + y as i64);
+        for (x, dst) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = origin.0 + x as i64;
+            for (channel, value) in dst[..3].iter_mut().enumerate() {
+                *value = if row.is_right(x, channel) { 0 } else { 255 };
+            }
+            dst[3] = 255;
+        }
+    }
+    Ok(out)
+}
+
 /// `image` scaled to fit a `width` x `height` area without distortion and
 /// centred on black. `stretch_x` widens the image first: 2.0 for one eye of
 /// a half-width pair, 1.0 otherwise.
 pub fn fit(image: &RgbaImage, width: u32, height: u32, stretch_x: f64) -> RgbaImage {
+    fit_view(image, width, height, stretch_x)
+}
+
+/// [`fit`] for any view of an image, so that one eye of a pair is fitted
+/// from where it lies in the pair.
+fn fit_view<I>(image: &I, width: u32, height: u32, stretch_x: f64) -> RgbaImage
+where
+    I: GenericImageView<Pixel = Rgba<u8>>,
+{
     let mut canvas = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
     if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
         return canvas;
@@ -193,22 +230,42 @@ pub fn fit(image: &RgbaImage, width: u32, height: u32, stretch_x: f64) -> RgbaIm
     let scale = (width as f64 / shown_w).min(height as f64 / shown_h);
     let w = ((shown_w * scale).round() as u32).clamp(1, width);
     let h = ((shown_h * scale).round() as u32).clamp(1, height);
+    let (left, top) = (((width - w) / 2) as i64, ((height - h) / 2) as i64);
     // Copy native-size pixels straight into the canvas; only a resize needs
     // its own temporary image.
-    let resized;
-    let scaled = if (w, h) == image.dimensions() {
-        image
+    if (w, h) == image.dimensions() {
+        imageops::replace(&mut canvas, image, left, top);
     } else {
-        resized = imageops::resize(image, w, h, imageops::FilterType::Triangle);
-        &resized
-    };
-    imageops::replace(
-        &mut canvas,
-        scaled,
-        ((width - w) / 2) as i64,
-        ((height - h) / 2) as i64,
-    );
+        let resized = imageops::resize(image, w, h, imageops::FilterType::Triangle);
+        imageops::replace(&mut canvas, &resized, left, top);
+    }
     canvas
+}
+
+/// The two eyes of a side-by-side `pair` (left eye in the left half), each
+/// fitted to an area of `width` x `height` panel pixels; `stretch_x` is as
+/// in [`fit`]. This is the part of [`weave_pair`] that does not depend on
+/// the lens, so a caller that weaves the same picture again for other lens
+/// numbers keeps it and calls [`weave`].
+pub fn fit_pair(
+    pair: &RgbaImage,
+    width: u32,
+    height: u32,
+    stretch_x: f64,
+) -> Result<(RgbaImage, RgbaImage), WeaveError> {
+    if pair.width() < 2 || pair.height() == 0 || width == 0 || height == 0 {
+        return Err(WeaveError::Empty);
+    }
+    let eye = pair.width() / 2;
+    let fitted = |x: u32| {
+        fit_view(
+            &*imageops::crop_imm(pair, x, 0, eye, pair.height()),
+            width,
+            height,
+            stretch_x,
+        )
+    };
+    Ok((fitted(0), fitted(pair.width() - eye)))
 }
 
 /// Interleave a side-by-side `pair` (left eye in the left half) for an area
@@ -222,18 +279,8 @@ pub fn weave_pair(
     lens: &Lens,
     origin: (i64, i64),
 ) -> Result<RgbaImage, WeaveError> {
-    if pair.width() < 2 || pair.height() == 0 || width == 0 || height == 0 {
-        return Err(WeaveError::Empty);
-    }
-    let eye = pair.width() / 2;
-    let left = imageops::crop_imm(pair, 0, 0, eye, pair.height()).to_image();
-    let right = imageops::crop_imm(pair, pair.width() - eye, 0, eye, pair.height()).to_image();
-    weave(
-        &fit(&left, width, height, stretch_x),
-        &fit(&right, width, height, stretch_x),
-        lens,
-        origin,
-    )
+    let (left, right) = fit_pair(pair, width, height, stretch_x)?;
+    weave(&left, &right, lens, origin)
 }
 
 #[cfg(test)]
@@ -428,6 +475,72 @@ mod tests {
         assert!(fit(&RgbaImage::new(0, 0), 2, 2, 1.0)
             .pixels()
             .all(|p| p.0 == [0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn the_pattern_woven_directly_is_the_woven_pattern() {
+        for l in [
+            lens(5.4, 0.3, 0.0),
+            lens(1.0, 0.0, 0.5),
+            lens(0.7, -2.0, 0.37),
+            Lens {
+                bgr: true,
+                ..lens(6.123, 0.2903, 0.81)
+            },
+            // Numbers out of range are sanitized the same way.
+            lens(0.0, f64::NAN, -3.25),
+        ] {
+            for (size, origin) in [((1, 1), (0, 0)), ((64, 9), (0, 0)), ((31, 17), (1913, -7))] {
+                let (white, black) = calibration_pattern(size.0, size.1);
+                assert_eq!(
+                    weave_pattern(size.0, size.1, &l, origin).unwrap(),
+                    weave(&white, &black, &l, origin).unwrap(),
+                    "{l:?} {size:?} {origin:?}"
+                );
+            }
+        }
+        assert_eq!(
+            weave_pattern(0, 4, &Lens::default(), (0, 0)),
+            Err(WeaveError::Empty)
+        );
+        assert_eq!(
+            weave_pattern(4, 0, &Lens::default(), (0, 0)),
+            Err(WeaveError::Empty)
+        );
+    }
+
+    #[test]
+    fn eyes_fitted_once_weave_like_a_pair_split_and_copied_each_time() {
+        let mut noise = 0x1234_5678u32;
+        // An odd width leaves the middle column out of both eyes.
+        for (width, height) in [(8, 2), (9, 4), (64, 18), (40, 30)] {
+            let pair = RgbaImage::from_fn(width, height, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                Rgba(noise.to_le_bytes())
+            });
+            let eye = width / 2;
+            let left = imageops::crop_imm(&pair, 0, 0, eye, height).to_image();
+            let right = imageops::crop_imm(&pair, width - eye, 0, eye, height).to_image();
+            // Areas the eye fits exactly, is shrunk into and is enlarged to.
+            for (w, h) in [(eye, height), (16, 9), (7, 5), (96, 54)] {
+                for stretch in [1.0, 2.0] {
+                    let (l, r) = fit_pair(&pair, w, h, stretch).unwrap();
+                    assert_eq!(l, fit(&left, w, h, stretch));
+                    assert_eq!(r, fit(&right, w, h, stretch));
+                    let lens = lens(5.4, 0.3, 0.2);
+                    assert_eq!(
+                        weave_pair(&pair, w, h, stretch, &lens, (3, 4)).unwrap(),
+                        weave(&l, &r, &lens, (3, 4)).unwrap()
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            fit_pair(&RgbaImage::new(1, 4), 8, 8, 1.0),
+            Err(WeaveError::Empty)
+        );
     }
 
     #[test]
