@@ -8,6 +8,7 @@
 //! there instead of opening a second window.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -192,27 +193,56 @@ pub fn signal_open(path: &Path) -> bool {
 }
 
 pub struct SingleInstance {
+    socket: Option<SocketFile>,
+}
+
+/// The directory entry we created or observed, without following symlinks.
+#[derive(PartialEq, Eq)]
+struct SocketFile {
     path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketFile {
+    fn at(path: &Path) -> Option<Self> {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        metadata.file_type().is_socket().then(|| Self {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn remove_if_unchanged(&self) -> bool {
+        Self::at(&self.path).as_ref() == Some(self) && std::fs::remove_file(&self.path).is_ok()
+    }
 }
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if let Some(socket) = &self.socket {
+            socket.remove_if_unchanged();
+        }
     }
 }
 
 /// `None` when another instance of this user already answers the socket.
 pub fn single_instance() -> Option<SingleInstance> {
-    let path = socket_path();
+    single_instance_at(socket_path())
+}
+
+fn single_instance_at(path: PathBuf) -> Option<SingleInstance> {
     match bind_instance(&path) {
         Bound::Listening(listener) => {
+            let socket = SocketFile::at(&path);
             *LISTENER.lock().expect("listener") = Some(listener);
-            Some(SingleInstance { path })
+            Some(SingleInstance { socket })
         }
         Bound::Occupied => None,
         // No socket could be created at all (read-only or missing folder):
         // run without a guard rather than refuse to start.
-        Bound::Unavailable => Some(SingleInstance { path }),
+        Bound::Unavailable => Some(SingleInstance { socket: None }),
     }
 }
 
@@ -230,12 +260,19 @@ fn bind_instance(path: &Path) -> Bound {
         match UnixListener::bind(path) {
             Ok(listener) => return Bound::Listening(listener),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                if UnixStream::connect(path).is_ok() {
-                    return Bound::Occupied;
+                // An unrelated file or symlink is never a stale socket.
+                let Some(socket) = SocketFile::at(path) else {
+                    return Bound::Unavailable;
+                };
+                match UnixStream::connect(path) {
+                    Ok(_) => return Bound::Occupied,
+                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                    // Permission and other failures do not prove the owner
+                    // has exited, so leave the entry alone.
+                    Err(_) => return Bound::Unavailable,
                 }
-                // A socket file nobody answers was left by an instance that
-                // did not exit cleanly. Remove it and bind once more.
-                if std::fs::remove_file(path).is_err() {
+                // Recheck the entry before reclaiming an abandoned socket.
+                if !socket.remove_if_unchanged() {
                     return Bound::Unavailable;
                 }
             }
@@ -482,5 +519,45 @@ mod tests {
         assert_eq!(server.join().unwrap(), Some(Request::Open(image)));
         // Nobody listens any more: the request is reported as not delivered.
         assert!(!send(&path, &Request::Show));
+    }
+
+    #[test]
+    fn an_unavailable_instance_does_not_delete_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        std::fs::write(&path, b"unrelated data").unwrap();
+        drop(single_instance_at(path.clone()));
+        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated data");
+    }
+
+    #[test]
+    fn an_unavailable_instance_does_not_delete_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let target = dir.path().join("missing-target");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        drop(single_instance_at(path.clone()));
+        assert_eq!(std::fs::read_link(path).unwrap(), target);
+    }
+
+    #[test]
+    fn a_guard_removes_its_own_socket_but_preserves_a_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let _first = UnixListener::bind(&path).unwrap();
+        let first_guard = SingleInstance {
+            socket: Some(SocketFile::at(&path).unwrap()),
+        };
+        // Keep the old inode alive at a different name while a new instance
+        // owns the original path.
+        std::fs::rename(&path, dir.path().join("old.sock")).unwrap();
+        let _second = UnixListener::bind(&path).unwrap();
+        let second_guard = SingleInstance {
+            socket: Some(SocketFile::at(&path).unwrap()),
+        };
+        drop(first_guard);
+        assert!(path.exists());
+        drop(second_guard);
+        assert!(!path.exists());
     }
 }
