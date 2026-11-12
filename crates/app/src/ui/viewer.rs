@@ -622,6 +622,9 @@ pub struct ViewerState {
     options: Options,
     /// The path box: what Open reads, and where a loaded file's path shows.
     path_text: String,
+    /// The file whose path the box was given to show. The text is not the
+    /// path where the name is not Unicode (`typed_path`).
+    shown_path: Option<PathBuf>,
     status: String,
     texture: Option<egui::TextureHandle>,
     uploaded: u64,
@@ -667,6 +670,7 @@ impl Default for ViewerState {
             document: Document::default(),
             options: Options::default(),
             path_text: String::new(),
+            shown_path: None,
             status: READY.into(),
             texture: None,
             uploaded: 0,
@@ -775,6 +779,7 @@ impl ViewerState {
         match installed {
             Ok(()) => {
                 self.path_text = path.display().to_string();
+                self.shown_path = Some(path);
                 self.depth_failed = None;
                 // With AI depth the status follows from the estimate.
                 if self.options.input != Input::Ai {
@@ -783,6 +788,21 @@ impl ViewerState {
             }
             Err(e) => self.status = e,
         }
+    }
+
+    /// The file the path box names. While the box still shows the loaded
+    /// file's path as it was put there, that is the file itself: the text
+    /// stands in for a name that is not Unicode with replacement characters,
+    /// and read back it would name no file, or another one. Anything typed
+    /// is taken as typed, less the blanks around it.
+    fn typed_path(&self) -> Option<PathBuf> {
+        if let Some(shown) = &self.shown_path {
+            if self.path_text == shown.display().to_string() {
+                return Some(shown.clone());
+            }
+        }
+        let typed = self.path_text.trim();
+        (!typed.is_empty()).then(|| PathBuf::from(typed))
     }
 
     /// Whether the picture is still on its way: the options ask for AI
@@ -1413,9 +1433,10 @@ impl ViewerState {
                             .hint_text("Path of a PNG, JPEG or BMP"),
                     );
                     let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if entered && !state.path_text.trim().is_empty() {
-                        let path = PathBuf::from(state.path_text.trim());
-                        state.open(ui.ctx(), &path);
+                    if entered {
+                        if let Some(path) = state.typed_path() {
+                            state.open(ui.ctx(), &path);
+                        }
                     }
                     if gold_button(ui, "Open…", false, p).clicked() {
                         state.pick(ui.ctx(), false);
@@ -3177,5 +3198,55 @@ mod tests {
         state.toggle_output();
         assert!(!state.output_open);
         assert_eq!(state.status, NO_IMAGE);
+    }
+
+    #[test]
+    fn the_path_box_names_the_file_it_shows_and_typed_text_as_typed() {
+        let mut state = ViewerState::default();
+        assert_eq!(state.typed_path(), None);
+        state.path_text = "   ".into();
+        assert_eq!(state.typed_path(), None);
+        state.path_text = "  /tmp/typed.png ".into();
+        assert_eq!(state.typed_path(), Some(PathBuf::from("/tmp/typed.png")));
+
+        // A loaded file whose name ends in a blank is that file, not the
+        // one its trimmed text would name.
+        let blank = PathBuf::from("/tmp/pair.png ");
+        state.shown_path = Some(blank.clone());
+        state.path_text = blank.display().to_string();
+        assert_eq!(state.typed_path(), Some(blank));
+        // Edited, the box is text again.
+        state.path_text.insert(0, ' ');
+        assert_eq!(state.typed_path(), Some(PathBuf::from("/tmp/pair.png")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enter_in_the_path_box_reopens_a_file_whose_name_is_not_unicode() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let name = std::ffi::OsString::from_vec(b"pair-\xff\xfe.png".to_vec());
+        let path = dir.path().join(name);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        pair()
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, bytes.into_inner()).unwrap();
+        let ctx = egui::Context::default();
+        let mut state = ViewerState::default();
+        state.open(&ctx, &path);
+        finish_opening(&mut state, &ctx);
+        assert_eq!(state.status, LOADED);
+        // The box can only show a likeness of the name, which names no file.
+        assert!(state.path_text.contains('\u{fffd}'), "{}", state.path_text);
+        assert!(!Path::new(&state.path_text).exists());
+        // What Enter in the box opens is the file all the same.
+        assert_eq!(state.typed_path(), Some(path.clone()));
+        state.status.clear();
+        let again = state.typed_path().unwrap();
+        state.open(&ctx, &again);
+        finish_opening(&mut state, &ctx);
+        assert_eq!(state.status, LOADED);
+        assert_eq!(state.shown_path, Some(path));
     }
 }
