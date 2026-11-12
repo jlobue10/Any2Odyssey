@@ -30,6 +30,24 @@ struct Ids {
 
 static IDS: OnceLock<Mutex<Option<Ids>>> = OnceLock::new();
 
+/// Whether [`drain`] does anything with an icon event. The library reports
+/// every mouse move over the icon, and entering, leaving and each button
+/// press and release; only a double-click is acted on.
+fn acted_on(event: &TrayIconEvent) -> bool {
+    matches!(event, TrayIconEvent::DoubleClick { .. })
+}
+
+/// The icon-event handler: keep what [`drain`] acts on, drop the rest.
+/// Every kept event wakes the poller for a whole supervision tick (the
+/// shared state locked, the worker's status file read), so forwarding the
+/// moves would run one tick after another for as long as the pointer
+/// travels across the icon.
+fn forward_icon_event(event: TrayIconEvent) {
+    if acted_on(&event) {
+        ICON_EVENTS.push(event);
+    }
+}
+
 pub fn build_menu() -> (Menu, MenuItem, CheckMenuItem) {
     let menu = Menu::new();
     let mut map = Vec::new();
@@ -89,7 +107,7 @@ impl Tray {
         // event and wake the poller. Should a library ignore its handler
         // (one was set before), events keep arriving on its channel, which
         // `drain` still reads.
-        TrayIconEvent::set_event_handler(Some(|event| ICON_EVENTS.push(event)));
+        TrayIconEvent::set_event_handler(Some(forward_icon_event));
         MenuEvent::set_event_handler(Some(|event| MENU_EVENTS.push(event)));
         let (menu, toggle_item, keep_item) = build_menu();
         let icon = Icon::from_rgba(icon_rgba, width, height).map_err(|e| e.to_string())?;
@@ -140,7 +158,7 @@ pub fn drain(core: &mut Core) {
     let mut icon_events = ICON_EVENTS.take();
     icon_events.extend(TrayIconEvent::receiver().try_iter());
     for event in icon_events {
-        if let TrayIconEvent::DoubleClick { .. } = event {
+        if acted_on(&event) {
             core.request(UiRequest::ShowControls);
         }
     }
@@ -158,5 +176,65 @@ pub fn drain(core: &mut Core) {
         if let Some((_, cmd)) = ids.map.iter().find(|(id, _)| *id == event.id) {
             core.menu(*cmd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tray_icon::dpi::PhysicalPosition;
+    use tray_icon::{MouseButton, MouseButtonState, Rect, TrayIconId};
+
+    #[test]
+    fn only_a_double_click_is_forwarded_to_the_poller() {
+        let id = || TrayIconId::new("test");
+        let position = PhysicalPosition::new(10.0, 10.0);
+        let rect = Rect::default();
+        // What the library sends while the pointer crosses the icon and for
+        // a single click: none of it may queue an event or wake the poller.
+        for ignored in [
+            TrayIconEvent::Enter {
+                id: id(),
+                position,
+                rect,
+            },
+            TrayIconEvent::Move {
+                id: id(),
+                position,
+                rect,
+            },
+            TrayIconEvent::Leave {
+                id: id(),
+                position,
+                rect,
+            },
+            TrayIconEvent::Click {
+                id: id(),
+                position,
+                rect,
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Down,
+            },
+            TrayIconEvent::Click {
+                id: id(),
+                position,
+                rect,
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Up,
+            },
+        ] {
+            assert!(!acted_on(&ignored), "{ignored:?}");
+            forward_icon_event(ignored);
+        }
+        assert!(ICON_EVENTS.take().is_empty());
+        forward_icon_event(TrayIconEvent::DoubleClick {
+            id: id(),
+            position,
+            rect,
+            button: MouseButton::Left,
+        });
+        let kept = ICON_EVENTS.take();
+        assert_eq!(kept.len(), 1);
+        assert!(matches!(kept[0], TrayIconEvent::DoubleClick { .. }));
     }
 }
