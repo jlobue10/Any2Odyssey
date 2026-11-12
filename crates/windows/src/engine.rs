@@ -2,7 +2,10 @@
 //! run before conversion is started.
 
 use std::ffi::c_void;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::time::SystemTime;
 
 use any2odyssey_core::engine::{check_resolution, verify_engine_file, EngineError};
 use any2odyssey_core::paths;
@@ -44,15 +47,64 @@ pub unsafe extern "C" fn on_engine_closed() {
     ENGINE_CLOSED.store(true, Ordering::Release);
 }
 
+/// What identified a file when its content was last verified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileStamp {
+    path: PathBuf,
+    len: u64,
+    modified: SystemTime,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        path: path.to_path_buf(),
+        len: metadata.len(),
+        modified: metadata.modified().ok()?,
+    })
+}
+
+/// The engine file as it was when this process last verified its hash.
+static VERIFIED_ENGINE: Mutex<Option<FileStamp>> = Mutex::new(None);
+
+/// Run `verify` on `dll` unless the same file (path, size and modification
+/// time) already passed it in this process.
+///
+/// Both the controls and the worker hash the 17 MB engine library before
+/// every start. The worker is a new process each time and loads the
+/// library, so it always hashes what it is about to load; this record only
+/// saves the controls from hashing again on every restart, Apply and
+/// recovery relaunch, where the check exists to give a message before a
+/// worker is launched. Only a pass is remembered, and only when the file
+/// did not change while it was being read; a failure is checked afresh
+/// every time, so a repaired installation is noticed at once.
+fn verify_unless_unchanged(
+    dll: &Path,
+    verified: &Mutex<Option<FileStamp>>,
+    verify: impl FnOnce(&Path) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    let before = file_stamp(dll);
+    if before.is_some() && *verified.lock().unwrap_or_else(PoisonError::into_inner) == before {
+        return Ok(());
+    }
+    let result = verify(dll);
+    let record = match &result {
+        Ok(()) => before.filter(|stamp| file_stamp(dll).as_ref() == Some(stamp)),
+        Err(_) => None,
+    };
+    *verified.lock().unwrap_or_else(PoisonError::into_inner) = record;
+    result
+}
+
 /// All prerequisite checks, in the order the user sees them.
 pub fn validate() -> Result<(), EngineError> {
-    verify_engine_file(&paths::engine_dll())?;
+    verify_unless_unchanged(&paths::engine_dll(), &VERIFIED_ENGINE, verify_engine_file)?;
     if !paths::worker_exe().is_file() {
         return Err(EngineError::WorkerMissing);
     }
     let (screen, _, _) = win::primary_monitor().ok_or(EngineError::WrongResolution)?;
     check_resolution(screen.width, screen.height)?;
-    match devices::device_is_working(paths::STEREO_CAMERA_NAME) {
+    match devices::camera_is_working(paths::STEREO_CAMERA_NAME) {
         Ok(true) => {}
         Ok(false) => return Err(EngineError::CameraUnavailable),
         Err(e) => return Err(EngineError::CameraCheckFailed(e.to_string())),
@@ -215,6 +267,65 @@ mod tests {
         library.stop(&event);
         assert!(WAS_SIGNALED.with(Cell::get));
         assert!(event.is_signaled());
+    }
+
+    #[test]
+    fn an_unchanged_engine_file_is_verified_once_and_a_changed_one_again() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        let dll = dir.path().join("ConversionWrapper.dll");
+        let verified = Mutex::new(None);
+        let runs = Cell::new(0);
+        let pass = |_: &Path| {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        // A missing file is never remembered, whatever the check says.
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(runs.replace(0), 2);
+
+        std::fs::write(&dll, b"engine build one").unwrap();
+        for _ in 0..3 {
+            assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        }
+        assert_eq!(runs.replace(0), 1, "an unchanged file was hashed again");
+
+        // Another size, or the same size with another modification time.
+        std::fs::write(&dll, b"engine build two, longer").unwrap();
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(runs.replace(0), 1);
+        let file = std::fs::OpenOptions::new().write(true).open(&dll).unwrap();
+        file.set_modified(SystemTime::now() + std::time::Duration::from_secs(120))
+            .unwrap();
+        drop(file);
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(runs.replace(0), 1);
+
+        // A failure is not remembered, and it forgets the earlier pass.
+        std::fs::write(&dll, b"something else").unwrap();
+        let fail = |_: &Path| {
+            runs.set(runs.get() + 1);
+            Err(EngineError::HashMismatch { actual: "0".into() })
+        };
+        for _ in 0..2 {
+            assert!(verify_unless_unchanged(&dll, &verified, fail).is_err());
+        }
+        assert_eq!(runs.replace(0), 2);
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(runs.replace(0), 1);
+
+        // A file replaced while it was being read is not remembered.
+        std::fs::write(&dll, b"before").unwrap();
+        let swap = |path: &Path| {
+            runs.set(runs.get() + 1);
+            std::fs::write(path, b"after, and longer").unwrap();
+            Ok(())
+        };
+        assert_eq!(verify_unless_unchanged(&dll, &verified, swap), Ok(()));
+        assert_eq!(verify_unless_unchanged(&dll, &verified, pass), Ok(()));
+        assert_eq!(runs.replace(0), 2);
     }
 
     #[test]
