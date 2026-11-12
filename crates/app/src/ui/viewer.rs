@@ -311,9 +311,12 @@ impl Document {
         let Some(result) = &self.result else {
             return Err(NO_IMAGE.into());
         };
-        result
-            .save_with_format(path, image::ImageFormat::Png)
-            .map_err(|e| format!("Could not save {}: {e}", path.display()))
+        any2odyssey_core::fsutil::write_atomic_document_with(path, |writer| {
+            result
+                .write_to(writer, image::ImageFormat::Png)
+                .map_err(std::io::Error::other)
+        })
+        .map_err(|e| format!("Could not save {}: {e}", path.display()))
     }
 }
 
@@ -1459,6 +1462,68 @@ mod tests {
             .unwrap_err();
         assert!(missing.starts_with("Could not open "), "{missing}");
         assert!(document.result().is_some(), "the loaded image stays");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_png_exports_preserve_the_previous_file() {
+        const CHILD_PATH: &str = "ANY2ODYSSEY_TEST_PNG_FAILURE_PATH";
+        const CHILD_SIZE: &str = "ANY2ODYSSEY_TEST_PNG_FAILURE_SIZE";
+        if let Some(path) = std::env::var_os(CHILD_PATH) {
+            let size: u32 = std::env::var(CHILD_SIZE).unwrap().parse().unwrap();
+            let mut noise = 0x12345678u32;
+            let source = RgbaImage::from_fn(size, size, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                image::Rgba(noise.to_le_bytes())
+            });
+            let mut document = Document::default();
+            document
+                .set_source(
+                    source,
+                    Options {
+                        input: Input::Flat,
+                        ..Options::default()
+                    },
+                )
+                .unwrap();
+            let error = document
+                .save_png(Path::new(&path))
+                .expect_err("write or final flush failure must be reported");
+            assert!(error.starts_with("Could not save "), "{error}");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut failures = Vec::new();
+        // A tiny PNG fails only when its buffered bytes are flushed; a
+        // noisy large PNG also exercises a failure partway through encoding.
+        // Restrict only the child process, never this parallel test runner.
+        for (blocks, size) in [("0", "2"), ("1", "128")] {
+            let target = dir.path().join(format!("preview-{size}.png"));
+            std::fs::write(&target, b"previous export").unwrap();
+            let output = std::process::Command::new("sh")
+                .args(["-c", "ulimit -f \"$1\"; trap '' XFSZ; exec \"$2\" --exact ui::viewer::tests::failed_png_exports_preserve_the_previous_file --nocapture", "png-save-test", blocks])
+                .arg(std::env::current_exe().unwrap())
+                .env(CHILD_PATH, &target)
+                .env(CHILD_SIZE, size)
+                .output().unwrap();
+            if !output.status.success() || std::fs::read(&target).unwrap() != b"previous export" {
+                failures.push(format!(
+                    "{size}x{size}: {}\n{}\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            2,
+            "no abandoned staging files"
+        );
     }
 
     #[test]
