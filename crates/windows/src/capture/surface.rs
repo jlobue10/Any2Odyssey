@@ -3,7 +3,9 @@
 
 use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11RenderTargetView, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
@@ -14,7 +16,9 @@ use windows::Win32::Graphics::Dxgi::{
 };
 
 pub struct GpuSurface {
-    device: ID3D11Device,
+    /// The device's immediate context, fetched once: asking the device for
+    /// it on every present is a reference-counted COM round trip per frame.
+    context: ID3D11DeviceContext,
     swap_chain: IDXGISwapChain1,
     buffer: ID3D11Texture2D,
     target: ID3D11RenderTargetView,
@@ -58,7 +62,7 @@ impl GpuSurface {
         let mut target = None;
         unsafe { device.CreateRenderTargetView(&buffer, None, Some(&mut target))? };
         Ok(GpuSurface {
-            device: device.clone(),
+            context: unsafe { device.GetImmediateContext()? },
             swap_chain,
             buffer,
             target: target.expect("created"),
@@ -67,21 +71,19 @@ impl GpuSurface {
 
     /// Copy `image` (same size and format as the back buffer) and present.
     pub fn present(&self, image: &ID3D11Texture2D) -> windows::core::Result<()> {
-        let context = unsafe { self.device.GetImmediateContext()? };
-        unsafe { context.CopyResource(&self.buffer, image) };
+        unsafe { self.context.CopyResource(&self.buffer, image) };
         unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) }.ok()
     }
 
     /// Fill with a solid colour and present (diagnostics).
     pub fn clear(&self, rgb: [u8; 3]) -> windows::core::Result<()> {
-        let context = unsafe { self.device.GetImmediateContext()? };
         let color = [
             rgb[0] as f32 / 255.0,
             rgb[1] as f32 / 255.0,
             rgb[2] as f32 / 255.0,
             1.0,
         ];
-        unsafe { context.ClearRenderTargetView(&self.target, &color) };
+        unsafe { self.context.ClearRenderTargetView(&self.target, &color) };
         unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) }.ok()
     }
 }

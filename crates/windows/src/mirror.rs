@@ -24,8 +24,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, KillTimer,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetTimer, SetWindowLongPtrW, GWLP_USERDATA,
-    HWND_BOTTOM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
+    HWND_BOTTOM, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::capture::GpuDesktopCapture;
@@ -43,6 +43,24 @@ const CLASS_NAME: &str = "Any2OdysseySurface";
 const SURFACE_EX_STYLE: u32 = 0x0800_0000 | 0x80 | 0x20;
 const HTTRANSPARENT: isize = -1;
 const MA_NOACTIVATE: isize = 3;
+
+/// How long a passed off-screen check of the capture surface stands. The
+/// check enumerates the monitors; once per frame it ran 60 times a second
+/// to guard something that changes with the display arrangement.
+const OFFSCREEN_RECHECK: Duration = Duration::from_millis(100);
+
+/// Set by the window procedure when Windows announces a display change, so
+/// the next frame checks the surface again without waiting out
+/// [`OFFSCREEN_RECHECK`].
+static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the surface must be checked against the monitors before the next
+/// frame is presented: never checked, a display change was announced, or
+/// the last check is older than [`OFFSCREEN_RECHECK`].
+fn offscreen_check_due(checked: Option<Instant>, now: Instant, display_changed: bool) -> bool {
+    display_changed
+        || checked.is_none_or(|at| now.saturating_duration_since(at) >= OFFSCREEN_RECHECK)
+}
 
 /// Window procedure shared by the surface and the diagnostic test windows.
 /// `GWLP_USERDATA` holds `0xFFFFFFFF` for "do not paint" or a COLORREF to fill.
@@ -74,6 +92,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
         // without /F, a window-management tool) destroy the capture surface
         // under a running engine and end the worker's loop through WM_QUIT.
         WM_CLOSE => LRESULT(0),
+        WM_DISPLAYCHANGE => {
+            DISPLAY_CHANGED.store(true, Ordering::Release);
+            unsafe { DefWindowProcW(hwnd, msg, w, l) }
+        }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
@@ -164,6 +186,8 @@ pub struct Mirror {
     thumbnail_size: Option<(i32, i32)>,
     desktop: Option<GpuDesktopCapture>,
     frame_wake: Arc<FrameWake>,
+    /// When the surface was last found clear of every monitor.
+    offscreen_checked: Option<Instant>,
     sampled: Instant,
     sample_frames: u64,
     capture_millis: f64,
@@ -214,6 +238,7 @@ impl Mirror {
             thumbnail_size: None,
             desktop: None,
             frame_wake: Arc::new(FrameWake::default()),
+            offscreen_checked: None,
             sampled: Instant::now(),
             sample_frames: 0,
             capture_millis: 0.0,
@@ -312,7 +337,14 @@ impl Mirror {
     }
 
     fn capture_desktop(&mut self) -> Result<(), String> {
-        self.assert_offscreen()?;
+        // Swap first: a change announced during the check is kept for the
+        // next frame instead of being cleared unseen.
+        let display_changed = DISPLAY_CHANGED.swap(false, Ordering::AcqRel);
+        let now = Instant::now();
+        if offscreen_check_due(self.offscreen_checked, now, display_changed) {
+            self.assert_offscreen()?;
+            self.offscreen_checked = Some(now);
+        }
         let started = Instant::now();
         let hwnd = self.hwnd;
         let capture = self.desktop.as_mut().expect("desktop mode");
@@ -476,5 +508,41 @@ impl Mirror {
 impl Drop for Mirror {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_offscreen_check_runs_at_first_on_a_display_change_and_when_stale() {
+        let t0 = Instant::now();
+        assert!(offscreen_check_due(None, t0, false), "never checked");
+        // Frames between two checks ride on the last one.
+        for millis in [0, 8, 16, 99] {
+            assert!(
+                !offscreen_check_due(Some(t0), t0 + Duration::from_millis(millis), false),
+                "{millis} ms"
+            );
+        }
+        assert!(offscreen_check_due(Some(t0), t0 + OFFSCREEN_RECHECK, false));
+        assert!(offscreen_check_due(
+            Some(t0),
+            t0 + Duration::from_secs(5),
+            false
+        ));
+        // An announced display change does not wait for the interval.
+        assert!(offscreen_check_due(
+            Some(t0),
+            t0 + Duration::from_millis(1),
+            true
+        ));
+        // A check stamped after `now` (never in practice) is not "stale".
+        assert!(!offscreen_check_due(
+            Some(t0 + Duration::from_millis(5)),
+            t0,
+            false
+        ));
     }
 }
