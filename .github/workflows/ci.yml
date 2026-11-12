@@ -191,6 +191,16 @@ jobs:
           ASAN_OPTIONS=detect_leaks=0 /tmp/test-connreset
       - name: Clippy
         run: cargo clippy --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
+      - name: Camera reader lifecycle tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            contrib/wine-lens/tests/test-camera-stream.c -o /tmp/test-camera-stream
+          ASAN_OPTIONS=detect_leaks=0 /tmp/test-camera-stream
+      - name: Camera reader threaded shutdown tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
+            contrib/wine-lens/tests/test-camera-reader.c -o /tmp/test-camera-reader
+          ASAN_OPTIONS=detect_leaks=0 timeout 30 /tmp/test-camera-reader
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
