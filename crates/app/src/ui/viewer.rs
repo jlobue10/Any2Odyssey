@@ -226,7 +226,7 @@ impl Document {
     pub fn open(&mut self, path: &Path, options: Options) -> Result<(), String> {
         let image = image::open(path)
             .map_err(|e| format!("Could not open {}: {e}", path.display()))?
-            .to_rgba8();
+            .into_rgba8();
         self.set_source(image, options)
             .map_err(|e| format!("Could not use {}: {e}", path.display()))
     }
