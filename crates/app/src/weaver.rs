@@ -183,7 +183,10 @@ impl FrameFile {
         }
         let mut flipped = std::mem::take(&mut self.flipped);
         flipped.clear();
-        flipped.extend(rgba.chunks_exact(row).rev().flatten());
+        flipped.reserve(rgba.len());
+        for pixels in rgba.chunks_exact(row).rev() {
+            flipped.extend_from_slice(pixels);
+        }
         let shown = self.show_bottom_up(width, height, &flipped);
         self.flipped = flipped;
         shown
