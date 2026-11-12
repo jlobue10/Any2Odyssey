@@ -370,17 +370,10 @@ pub fn estimate_depth(
     image: &image::RgbaImage,
     long_side: u32,
 ) -> Result<any2odyssey_core::dibr::DepthMap, String> {
-    static ESTIMATOR: Mutex<Option<crate::depth::Estimator>> = Mutex::new(None);
-    let mut slot = ESTIMATOR
-        .lock()
-        .map_err(|_| "The depth model is not usable after an earlier failure.")?;
-    if slot.is_none() {
-        let model = crate::depth::locate_model()?;
-        *slot = Some(crate::depth::Estimator::load(&model)?);
-    }
-    slot.as_mut()
-        .expect("loaded above")
-        .estimate(image, long_side)
+    Ok(
+        crate::depth::estimate_unless_cancelled(image, long_side, || false)?
+            .expect("this request cannot be cancelled"),
+    )
 }
 
 pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
