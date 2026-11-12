@@ -1,0 +1,44 @@
+# cargo-deny policy, checked by the "Dependency policy" job in .github/workflows/ci.yml:
+#
+#   cargo deny --locked check advisories bans sources
+#
+# Licenses are not checked here: THIRD-PARTY-LICENSES*.md are generated from the dependency tree and CI
+# compares them.
+
+[graph]
+# The platforms that are built and released; advisories for code compiled nowhere else do not apply.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# Vulnerabilities, unsound code and yanked versions fail the check wherever they are in the tree. An
+# advisory that does not apply is listed in `ignore` with its reason, and removed again when the
+# dependency is updated.
+yanked = "deny"
+# "Unmaintained" notices fail it only for crates this workspace depends on directly. For a crate several
+# levels down (today a font parser under the GUI toolkit, D-Bus types under the portal client and a
+# proc-macro helper under the GTK bindings) the only remedy is the next release of the crate above it,
+# and a check that stays red until then stops being read.
+unmaintained = "workspace"
+ignore = []
+
+[bans]
+# Two versions of one crate are ordinary in a tree with a GUI toolkit, and listing them all would bury
+# what this check is for.
+multiple-versions = "allow"
+# A dependency without a version requirement would take whatever is published next.
+wildcards = "deny"
+# The workspace's own crates name each other by path.
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io, where Cargo.lock pins each crate by checksum. A git or alternative
+# registry source needs an entry here, with the reason.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
