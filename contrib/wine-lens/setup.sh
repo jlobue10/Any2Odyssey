@@ -113,6 +113,12 @@ $CC -O2 -shared -nostdlib -nostartfiles -Wl,--subsystem,native -Wl,--entry,Drive
     -o "$B/a2ousb.sys" "$S/a2ousb.c" -L"$WINELIB" -lntoskrnl
 $CC -O2 -o "$B/monprobe.exe" "$S/monprobe.c"
 $CC -O2 -o "$B/any2odyssey-lens-helper.exe" "$S/lens-helper-win.c"
+# The serial port's keeper as one small native program; without a C compiler tools/noxon.sh does the same
+# work with a shell loop, at the cost of two programs started for every look at the port.
+rm -f "$B/any2odyssey-noxon"
+if command -v cc >/dev/null; then
+    cc -O2 -o "$B/any2odyssey-noxon" "$S/noxon.c" || rm -f "$B/any2odyssey-noxon"
+fi
 WEAVER=
 rm -f "$B/any2odyssey-weaver.exe"
 if ! command -v clang++ >/dev/null; then

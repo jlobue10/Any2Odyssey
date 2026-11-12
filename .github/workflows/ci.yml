@@ -206,6 +206,8 @@ jobs:
           cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
             contrib/wine-lens/tests/test-camera-client.c -o /tmp/test-camera-client
           ASAN_OPTIONS=detect_leaks=0 timeout 60 /tmp/test-camera-client
+      - name: Serial port keeper tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-noxon.py
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
