@@ -151,6 +151,11 @@ pub fn scale_to_rgba(source: Source<'_>, out: &mut [u8], width: u32, height: u32
     true
 }
 
+/// How near to its end a depth map eased towards a still picture's own map
+/// counts as there. At the widest view and the strongest depth this much
+/// nearness moves a pixel by about a tenth of its width.
+pub const SETTLED: f32 = 1.0 / 2048.0;
+
 /// Depth that stays put between frames.
 ///
 /// The model sees every frame afresh: its scale drifts and its surfaces
@@ -211,6 +216,58 @@ impl DepthSmoother {
                 let new = ((v - low) * scale).clamp(0.0, 1.0);
                 *old = *old * keep + new * (1.0 - keep);
             }
+        }
+        true
+    }
+
+    /// Take the map of a picture that has not changed once more, in place
+    /// of asking the model about the same pixels again: the same step
+    /// [`DepthSmoother::update`] makes, so depth eases towards the still
+    /// picture's own map as it would have. True once it has arrived and
+    /// further steps would change nothing; the last of the way, too small
+    /// to see ([`SETTLED`]), is taken at once.
+    pub fn settle(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32) -> bool {
+        if !self.update(width, height, raw, steadiness) {
+            // A map that cannot be used never will be.
+            return true;
+        }
+        let Some((low, high)) = self.range else {
+            return true;
+        };
+        let scale = |low: f32, high: f32| {
+            let span = high - low;
+            if span > f32::EPSILON {
+                1.0 / span
+            } else {
+                0.0
+            }
+        };
+        // Where the steps lead: the map normalized with its own range.
+        let (mut end_low, mut end_high) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &v in raw {
+            end_low = end_low.min(v);
+            end_high = end_high.max(v);
+        }
+        let (now, end) = (scale(low, high), scale(end_low, end_high));
+        let at_end = |v: f32| ((v - end_low) * end).clamp(0.0, 1.0);
+        // A flat map has no range to ease to (a range that only narrows
+        // never counts as flat), so its end is taken at once. For any
+        // other, both what is shown and what the next step would blend in
+        // have to be there: the range moves more slowly than the values.
+        if end > 0.0 {
+            let mut off = 0.0f32;
+            for (&value, &v) in self.values.iter().zip(raw) {
+                let target = at_end(v);
+                let next = ((v - low) * now).clamp(0.0, 1.0);
+                off = off.max((value - target).abs()).max((next - target).abs());
+            }
+            if off > SETTLED {
+                return false;
+            }
+        }
+        self.range = Some((end_low, end_high));
+        for (value, &v) in self.values.iter_mut().zip(raw) {
+            *value = at_end(v);
         }
         true
     }
@@ -823,6 +880,56 @@ mod tests {
         // A new size starts afresh; a flat scene is all far.
         assert!(smoother.update(1, 3, &[4.0, 4.0, 4.0], 0.9));
         assert_eq!(smoother.values(), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_still_pictures_map_is_eased_in_as_before_and_then_stays_put() {
+        let (w, h) = (16u32, 9u32);
+        let before: Vec<f32> = (0..w * h).map(|i| (i % 7) as f32).collect();
+        let still: Vec<f32> = (0..w * h).map(|i| ((i * 5) % 11) as f32 * 0.25).collect();
+        let own = {
+            let mut fresh = DepthSmoother::default();
+            assert!(fresh.update(w, h, &still, 0.0));
+            fresh
+        };
+        for steadiness in [0.0, 0.6, 0.95] {
+            // `again` is asked about the same pixels for ever, as the model
+            // was; `eased` takes the one answer again and again.
+            let mut again = DepthSmoother::default();
+            assert!(again.update(w, h, &before, steadiness));
+            assert!(again.update(w, h, &still, steadiness));
+            let mut eased = again.clone();
+            let mut steps = 0;
+            loop {
+                steps += 1;
+                assert!(steps < 2000, "never settled at {steadiness}");
+                assert!(again.update(w, h, &still, steadiness));
+                if eased.settle(w, h, &still, steadiness) {
+                    break;
+                }
+                assert_eq!(eased.values(), again.values(), "step {steps}");
+            }
+            // It ends on the picture's own map exactly, a step the eye
+            // cannot see away from where asking again had got to.
+            assert_eq!(eased.values(), own.values());
+            for (a, b) in again.values().iter().zip(eased.values()) {
+                assert!((a - b).abs() <= SETTLED, "{a} {b} at {steadiness}");
+            }
+            // More steps change nothing.
+            assert!(eased.settle(w, h, &still, steadiness));
+            assert_eq!(eased.values(), own.values());
+            // Depth that follows the model at once is there after the range
+            // has caught up; steadier depth takes longer.
+            assert!(steadiness > 0.0 || steps < 40, "{steps}");
+        }
+        // A flat picture is flat at once (its range has nowhere to ease
+        // to), and an unusable map ends the easing.
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(2, 1, &[1.0, 3.0], 0.5));
+        assert!(smoother.settle(2, 1, &[4.0, 4.0], 0.5));
+        assert_eq!(smoother.values(), [0.0, 0.0]);
+        assert!(smoother.settle(2, 1, &[f32::NAN, 1.0], 0.5));
+        assert_eq!(smoother.values(), [0.0, 0.0]);
     }
 
     #[test]
