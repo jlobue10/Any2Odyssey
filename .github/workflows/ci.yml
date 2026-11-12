@@ -107,12 +107,17 @@ jobs:
     # By digest, as the actions are by commit: the tag moves to every new build of the image.
     # This is archlinux:base-devel as of 2026-11-12. To bump it, take the digest that
     # `docker buildx imagetools inspect archlinux:base-devel` prints and put it here and in release.yml.
+    # The first step brings an older image up to date, so this need not follow every build of the image;
+    # bump it when that step grows slow or pacman refuses a signature there.
     container: archlinux:base-devel@sha256:fa2d4ce3310ddd90a4208e5168be8ad367da5129af1245f38fd2d803bcbe3239
     steps:
       # makepkg runs as a user without sudo, so the package's own dependencies are installed here.
       # The keyring first: the pinned image's copy ages, and packages signed with a newer key would be refused.
+      # pacman-key --init before it: the image comes without pacman's local signing key, and without one
+      # the keyring package cannot take its new keys in (its install script fails and pacman carries on).
       - name: Packaging tools and the package's dependencies
         run: |
+          pacman-key --init
           pacman -Sy --noconfirm --needed archlinux-keyring
           pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
