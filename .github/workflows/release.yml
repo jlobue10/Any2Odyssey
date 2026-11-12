@@ -344,6 +344,22 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/*.pkg.tar.zst
+      # Not a gate: the step above fails when an attestation could not be made or stored, and that is what
+      # holds the release back. This one tries the command the release text gives people and only warns,
+      # because it depends on more that can have a bad moment (Sigstore's trust root, the attestation
+      # showing up in the API) and a tag day must not fail over that. It needs no permission beyond the
+      # ones this job has.
+      - name: Try the verification the release text describes (warns only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in dist/*.zip dist/*.tar.gz dist/*.pkg.tar.zst; do
+            if timeout 120 gh attestation verify "$file" -R "$GITHUB_REPOSITORY" > /dev/null; then
+              echo "verified: $file"
+            else
+              echo "::warning::gh attestation verify did not accept $file just now. Run it by hand before pointing people at it: gh attestation verify <file> -R $GITHUB_REPOSITORY"
+            fi
+          done
 
   publish:
     name: Publish the GitHub release
