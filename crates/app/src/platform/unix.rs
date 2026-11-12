@@ -8,6 +8,7 @@
 //! there instead of opening a second window.
 
 use std::io::{Read, Write};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -59,6 +60,13 @@ enum Request {
 impl Request {
     fn parse(line: &str) -> Option<Request> {
         let line = line.trim_end_matches(['\r', '\n']);
+        if let Some(encoded) = line.strip_prefix("open-bytes ") {
+            let bytes: Vec<u8> = serde_json::from_str(encoded).ok()?;
+            if bytes.is_empty() || bytes.contains(&0) {
+                return None;
+            }
+            return Some(Request::Open(std::ffi::OsString::from_vec(bytes).into()));
+        }
         match line {
             "quit" => Some(Request::Quit),
             "show" => Some(Request::Show),
@@ -75,7 +83,17 @@ impl Request {
             Request::Quit => "quit\n".into(),
             Request::Show => "show\n".into(),
             Request::Toggle => "toggle\n".into(),
-            Request::Open(path) => format!("open {}\n", path.display()),
+            Request::Open(path) => match path.to_str() {
+                // Preserve compatibility for ordinary paths. Names containing
+                // line breaks need framing; non-Unicode names must not go
+                // through Display's lossy conversion either.
+                Some(text) if !text.contains(['\r', '\n']) => format!("open {text}\n"),
+                _ => format!(
+                    "open-bytes {}\n",
+                    serde_json::to_string(path.as_os_str().as_bytes())
+                        .expect("byte slices always serialize")
+                ),
+            },
         }
     }
 }
@@ -331,7 +349,7 @@ fn bind_instance(path: &Path) -> Bound {
     Bound::Unavailable
 }
 
-/// Run the first of `candidates` that is installed and return its trimmed
+/// Run the first of `candidates` that is installed and return its filename from
 /// standard output. `None` when the dialog was cancelled or none exists.
 fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String> {
     for (program, arguments) in candidates {
@@ -341,12 +359,15 @@ fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String>
             .stderr(std::process::Stdio::null())
             .output()
         {
-            Ok(output) => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let text = text.trim_end_matches(['\r', '\n']);
-                return Ok(
-                    (output.status.success() && !text.is_empty()).then(|| PathBuf::from(text))
-                );
+            Ok(mut output) => {
+                // Zenity and kdialog append one LF after the filename. Any
+                // other line breaks belong to that name, including a CR
+                // immediately before the delimiter. Keep the OS bytes too.
+                if output.stdout.last() == Some(&b'\n') {
+                    output.stdout.pop();
+                }
+                return Ok((output.status.success() && !output.stdout.is_empty())
+                    .then(|| std::ffi::OsString::from_vec(output.stdout).into()));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(format!("{program}: {e}")),
@@ -562,6 +583,128 @@ mod tests {
             None
         );
         assert!(!called);
+    }
+
+    #[test]
+    fn image_handoff_preserves_paths_with_line_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let misleading = dir.path().join("pair.png");
+        let wanted = dir.path().join("pair.png\nother.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+            .save(&misleading)
+            .unwrap();
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]))
+            .save(&wanted)
+            .unwrap();
+        for path in [
+            wanted,
+            dir.path().join("trailing.png\n"),
+            dir.path().join("trailing.png\r"),
+            dir.path().join("trailing.png\r\n"),
+        ] {
+            let request = Request::Open(path.clone());
+            let wire = request.line();
+            let mut input = std::io::Cursor::new(wire.as_bytes());
+            let line = read_message(MAX_REQUEST_BYTES, IO_TIMEOUT, |buffer, _| {
+                input.read(buffer)
+            })
+            .expect("complete bounded request");
+            let delivered = Request::parse(&line).expect("valid open request");
+            assert_eq!(delivered, request);
+            assert_eq!(wire.bytes().filter(|&b| b == b'\n').count(), 1);
+            if path.exists() {
+                let Request::Open(delivered_path) = delivered else {
+                    panic!("open request")
+                };
+                assert_eq!(
+                    image::open(delivered_path)
+                        .unwrap()
+                        .to_rgba8()
+                        .get_pixel(0, 0)
+                        .0,
+                    [0, 255, 0, 255]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_image_paths_preserve_bytes_and_reject_invalid_payloads() {
+        let path: PathBuf =
+            std::ffi::OsString::from_vec(b"/tmp/non-unicode-\xff.png".to_vec()).into();
+        let request = Request::Open(path);
+        let wire = request.line();
+        assert!(wire.starts_with("open-bytes "));
+        assert_eq!(Request::parse(&wire), Some(request));
+        for payload in [
+            "",
+            "[]",
+            "[0]",
+            "[47,0,97]",
+            "[256]",
+            "[-1]",
+            "null",
+            "[47] junk",
+        ] {
+            assert_eq!(
+                Request::parse(&format!("open-bytes {payload}\n")),
+                None,
+                "{payload}"
+            );
+        }
+        let ordinary = Request::Open(PathBuf::from("/tmp/caf\u{e9} \"pair\".png"));
+        assert_eq!(ordinary.line(), "open /tmp/caf\u{e9} \"pair\".png\n");
+        assert_eq!(Request::parse(&ordinary.line()), Some(ordinary));
+    }
+
+    #[test]
+    fn dialog_preserves_filename_bytes_and_only_removes_its_delimiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("dialog-output");
+        for bytes in [
+            b"/tmp/ordinary.png".as_slice(),
+            b"/tmp/line\nbreak.png",
+            b"/tmp/trailing.png\n",
+            b"/tmp/trailing.png\r\n",
+            b"/tmp/non-unicode-\xff.png",
+            b"/tmp/trailing space ",
+            b"\n",
+        ] {
+            let mut stdout = bytes.to_vec();
+            stdout.push(b'\n');
+            std::fs::write(&output, stdout).unwrap();
+            let candidates = |status: &str| {
+                vec![(
+                    "/bin/sh",
+                    vec![
+                        "-c".into(),
+                        "cat \"$1\"; exit \"$2\"".into(),
+                        "dialog-fixture".into(),
+                        output.to_str().unwrap().into(),
+                        status.into(),
+                    ],
+                )]
+            };
+            let selected = dialog(&candidates("0")).unwrap().unwrap();
+            assert_eq!(selected.as_os_str().as_bytes(), bytes);
+            assert_eq!(dialog(&candidates("1")).unwrap(), None);
+        }
+        for empty in [b"".as_slice(), b"\n"] {
+            std::fs::write(&output, empty).unwrap();
+            assert_eq!(
+                dialog(&[(
+                    "/bin/sh",
+                    vec![
+                        "-c".into(),
+                        "cat \"$1\"".into(),
+                        "dialog-fixture".into(),
+                        output.to_str().unwrap().into(),
+                    ]
+                )])
+                .unwrap(),
+                None
+            );
+        }
     }
 
     #[test]
