@@ -265,7 +265,21 @@ pub fn fit_pair(
             stretch_x,
         )
     };
-    Ok((fitted(0), fitted(pair.width() - eye)))
+    let right_x = pair.width() - eye;
+    // Each eye is a resize of its own and, for a large pair, most of what
+    // a new picture costs: the two are made at the same time where there
+    // are cores for it and the area is worth a thread.
+    if crate::dibr::threads_for(width as usize, height as usize) < 2 {
+        return Ok((fitted(0), fitted(right_x)));
+    }
+    Ok(std::thread::scope(|scope| {
+        let right = scope.spawn(|| fitted(right_x));
+        let left = fitted(0);
+        let right = right
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (left, right)
+    }))
 }
 
 /// Interleave a side-by-side `pair` (left eye in the left half) for an area
@@ -541,6 +555,25 @@ mod tests {
             fit_pair(&RgbaImage::new(1, 4), 8, 8, 1.0),
             Err(WeaveError::Empty)
         );
+    }
+
+    #[test]
+    fn the_eyes_of_an_area_worth_two_threads_are_fitted_as_one_after_the_other() {
+        let mut noise = 0x0bad_5eedu32;
+        let pair = RgbaImage::from_fn(96, 40, |_, _| {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            Rgba(noise.to_le_bytes())
+        });
+        let left = imageops::crop_imm(&pair, 0, 0, 48, 40).to_image();
+        let right = imageops::crop_imm(&pair, 48, 0, 48, 40).to_image();
+        // 512 x 256 is past the size that is kept on one thread.
+        for (w, h, stretch) in [(512, 256, 1.0), (512, 256, 2.0), (300, 300, 1.0)] {
+            let (l, r) = fit_pair(&pair, w, h, stretch).unwrap();
+            assert!(l == fit(&left, w, h, stretch), "left {w}x{h} {stretch}");
+            assert!(r == fit(&right, w, h, stretch), "right {w}x{h} {stretch}");
+        }
     }
 
     #[test]
