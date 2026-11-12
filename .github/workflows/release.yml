@@ -145,7 +145,7 @@ jobs:
   linux-archive:
     name: Build, test and package Linux x86_64
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
@@ -167,11 +167,39 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxrandr-dev \
-            libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang
+            libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang \
+            desktop-file-utils libglib2.0-bin
+      # Same checks as the Linux job of ci.yml, with its commands: a tag can be pushed from a commit whose
+      # CI never ran or failed. A step added to or changed in one file belongs in the other too. (The Arch
+      # job below builds the same commit, so these run once, here.)
+      - name: Release installer and desktop launcher tests
+        run: python3 packaging/linux/tests/test-install.py
+      - name: Format check
+        run: cargo fmt --all --check
       - name: Build (release)
         run: cargo build --locked --release -p any2odyssey
       - name: Test
         run: cargo test --locked --release -p any2odyssey-core -p any2odyssey
+      - name: Camera bridge authentication tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-camera-bridge.py
+      - name: UDP shim lifetime tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
+            contrib/wine-lens/tests/test-connreset.c -o /tmp/test-connreset
+          ASAN_OPTIONS=detect_leaks=0 /tmp/test-connreset
+      # The dev profile, like ci.yml: it does not touch the release executable built and tested above.
+      - name: Clippy
+        run: cargo clippy --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
+      - name: Camera reader lifecycle tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            contrib/wine-lens/tests/test-camera-stream.c -o /tmp/test-camera-stream
+          ASAN_OPTIONS=detect_leaks=0 /tmp/test-camera-stream
+      - name: Camera reader threaded shutdown tests (no hardware)
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
+            contrib/wine-lens/tests/test-camera-reader.c -o /tmp/test-camera-reader
+          ASAN_OPTIONS=detect_leaks=0 timeout 30 /tmp/test-camera-reader
       - name: Third-party list for Linux matches the dependencies
         run: |
           scripts/third-party-linux.py > /tmp/third-party-linux.md
