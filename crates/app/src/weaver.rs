@@ -314,6 +314,32 @@ impl FrameSink {
     }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+impl FrameSink {
+    /// A picture file in `folder` that nobody reads.
+    pub(crate) fn in_folder(folder: &Path) -> std::io::Result<FrameSink> {
+        Ok(FrameSink(Arc::new(Mutex::new(FrameFile::create_in(
+            folder,
+        )?))))
+    }
+
+    /// How many pictures have been written, and the newest as a reader
+    /// finds it: width, height and the bytes.
+    pub(crate) fn written(&self) -> (u32, u32, u32, Vec<u8>) {
+        use std::os::unix::fs::FileExt;
+        let frames = self.0.lock().unwrap();
+        let mut header = [0u8; 28];
+        frames.file.read_exact_at(&mut header, 0).unwrap();
+        let field = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        let (sequence, width, height, place) = (field(12), field(16), field(20), field(24));
+        assert_eq!(sequence % 2, 0, "a finished picture");
+        let mut bytes = vec![0u8; width as usize * height as usize * 4];
+        let at = HEADER_BYTES + u64::from(place) * u64::from(CAPACITY);
+        frames.file.read_exact_at(&mut bytes, at).unwrap();
+        (sequence / 2, width, height, bytes)
+    }
+}
+
 struct Session {
     /// Whether the desktop keeps the picture out of screen captures, once
     /// the helper has said (it says so for a live screen only).

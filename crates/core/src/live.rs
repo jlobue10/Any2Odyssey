@@ -613,47 +613,6 @@ fn sharpen_row(above: &[u8], here: &[u8], below: &[u8], k: i32, out: &mut [u8]) 
     }
 }
 
-/// Sharpen the RGBA picture `image` (`width` pixels wide) in place by
-/// `amount` (0.0 leaves it, 1.0 is strong): each pixel is pushed away from
-/// the mean of its four neighbours. `scratch` is working room the caller
-/// keeps between frames.
-pub fn sharpen(image: &mut [u8], width: u32, amount: f32, scratch: &mut Vec<u8>) {
-    let w = width as usize;
-    if amount <= 0.0 || w < 3 || image.len() < w * 4 * 3 || !image.len().is_multiple_of(w * 4) {
-        return;
-    }
-    scratch.clear();
-    scratch.extend_from_slice(image);
-    let before: &[u8] = scratch;
-    let row = w * 4;
-    let rows = image.len() / row;
-    // Fixed point: 256 is 1.0.
-    let k = (amount.min(2.0) * 256.0) as i32;
-    in_bands(image, row, |first_row, band| {
-        for (index, line) in band.chunks_exact_mut(row).enumerate() {
-            let y = first_row + index;
-            if y == 0 || y + 1 >= rows {
-                continue;
-            }
-            let (above, here, below) = (
-                &before[(y - 1) * row..y * row],
-                &before[y * row..(y + 1) * row],
-                &before[(y + 1) * row..(y + 2) * row],
-            );
-            for x in 1..w - 1 {
-                for c in 0..3 {
-                    let i = x * 4 + c;
-                    let centre = here[i] as i32;
-                    let around =
-                        above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
-                    let value = centre + (((centre * 4 - around) * k) >> 10);
-                    line[i] = value.clamp(0, 255) as u8;
-                }
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

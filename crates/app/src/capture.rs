@@ -546,6 +546,48 @@ fn stream(
     }
 }
 
+/// A capture fed by hand, for tests of what reads the frames.
+#[cfg(test)]
+pub struct Fed(Arc<Shared>);
+
+#[cfg(test)]
+impl Fed {
+    pub fn start() -> Fed {
+        Fed(Arc::new(Shared {
+            slot: Mutex::new(Slot::default()),
+            arrived: Condvar::new(),
+            state: Mutex::new(CaptureState::Asking),
+            token: Mutex::new(None),
+            stop: AtomicBool::new(false),
+        }))
+    }
+
+    pub fn frames(&self) -> Frames {
+        Frames(self.0.clone())
+    }
+
+    /// A frame of `width` x `height` BGRx pixels, as the stream delivers one.
+    pub fn feed(&self, width: u32, height: u32, bytes: &[u8]) {
+        let mut slot = lock(&self.0.slot);
+        slot.bytes.clear();
+        slot.bytes.extend_from_slice(bytes);
+        (slot.width, slot.height, slot.stride) = (width, height, width as usize * 4);
+        slot.bgr = true;
+        slot.serial += 1;
+        drop(slot);
+        *lock(&self.0.state) = CaptureState::Running { width, height };
+        self.0.arrived.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for Fed {
+    fn drop(&mut self) {
+        self.0.stop.store(true, Ordering::Relaxed);
+        self.0.arrived.notify_all();
+    }
+}
+
 /// What the screen cast of the remembered screen contains, for a few
 /// seconds. Run by hand while something is on that screen:
 /// `cargo test --release -p any2odyssey capture::probe -- --ignored --nocapture`
