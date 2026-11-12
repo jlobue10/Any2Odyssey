@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 typedef int BOOL;
 typedef int32_t LONG, HRESULT;
@@ -28,6 +29,8 @@ typedef int64_t LONGLONG;
 #define WAIT_FAILED UINT32_MAX
 #define DUPLICATE_SAME_ACCESS 2
 #define MF_SOURCE_READERF_STREAMTICK 0x100
+#define MF_SOURCE_READERF_ERROR 0x1
+#define MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED ((HRESULT)-2)
 #define say(...) ((void)0)
 typedef pthread_mutex_t CRITICAL_SECTION;
 static void InitializeCriticalSection(CRITICAL_SECTION *m) { assert(!pthread_mutex_init(m, NULL)); }
@@ -48,9 +51,9 @@ struct thread {
 };
 struct handle { BOOL is_thread; atomic_bool open; void *object; };
 typedef struct handle *HANDLE;
-static struct event events[32];
+static struct event events[64];
 static struct thread threads[32];
-static struct handle handles[96];
+static struct handle handles[160];
 static unsigned event_count, thread_count, handle_count;
 static atomic_int live_handles;
 static _Thread_local DWORD current_thread = 1;
@@ -62,7 +65,7 @@ static DWORD GetLastError(void) { return 8; }
 
 static HANDLE handle(BOOL is_thread, void *object)
 {
-    assert(handle_count < 96);
+    assert(handle_count < 160);
     HANDLE h = &handles[handle_count++];
     h->is_thread = is_thread;
     h->object = object;
@@ -81,7 +84,7 @@ static HANDLE CreateEventW(void *security, BOOL manual, BOOL initial, const void
 {
     (void)security; (void)name;
     if (fail_event) return NULL;
-    assert(!manual && event_count < 32);
+    assert(!manual && event_count < 64);
     struct event *e = &events[event_count++];
     assert(!pthread_mutex_init(&e->lock, NULL));
     assert(!pthread_cond_init(&e->changed, NULL));
@@ -168,7 +171,8 @@ struct reader;
 typedef struct {
     struct reader *reader;
     BOOL release_self;
-    atomic_int released, calls;
+    BOOL free_running; /* count the calls and return at once, instead of waiting at the gate */
+    atomic_int released, calls, errors, flushes;
 } IMFSourceReaderCallback;
 struct source { IMFMediaSource IMFMediaSource_iface; atomic_int released; };
 struct reader {
@@ -177,8 +181,8 @@ struct reader {
     struct source *source;
     IMFSourceReaderCallback *callback;
     CRITICAL_SECTION lock;
-    HANDLE wake, thread;
-    BOOL streaming, ticked, quit, flush;
+    HANDLE wake, thread, arrived;
+    BOOL streaming, ticked, quit, flush, lost;
     LONG pending;
     unsigned char *frame;
     BOOL have_frame;
@@ -217,6 +221,7 @@ static BOOL entered, allowed;
 static void callback(IMFSourceReaderCallback *c)
 {
     atomic_fetch_add(&c->calls, 1);
+    if (c->free_running) return;
     if (c->release_self) {
         assert(reader_Release(&c->reader->IMFSourceReader_iface) == 0);
         return;
@@ -230,12 +235,20 @@ static void callback(IMFSourceReaderCallback *c)
 static void IMFSourceReaderCallback_OnFlush(IMFSourceReaderCallback *c, DWORD stream)
 {
     (void)stream;
+    atomic_fetch_add(&c->flushes, 1);
     callback(c);
 }
 static void IMFSourceReaderCallback_OnReadSample(IMFSourceReaderCallback *c, HRESULT hr, DWORD stream,
                                                 DWORD flags, LONGLONG time, IMFSample *sample)
 {
-    (void)hr; (void)stream; (void)flags; (void)time; (void)sample;
+    (void)stream; (void)time;
+    if (hr == MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED) {
+        /* The error comes the way a synchronous read reports it: flagged, and with no sample. */
+        assert(flags == MF_SOURCE_READERF_ERROR && !sample);
+        atomic_fetch_add(&c->errors, 1);
+    } else {
+        assert(!(flags & MF_SOURCE_READERF_ERROR));
+    }
     callback(c);
 }
 
@@ -290,6 +303,107 @@ static void release_case(BOOL flush, BOOL self, BOOL duplicate_fails, DWORD wait
     forced_wait_result = 0;
 }
 
+static void wait_for_calls(IMFSourceReaderCallback *cb, int calls)
+{
+    struct timespec tick = { 0, 1000000 };
+    for (int i = 0; atomic_load(&cb->calls) < calls && i < 10000; i++) nanosleep(&tick, NULL);
+    assert(atomic_load(&cb->calls) == calls);
+}
+
+static struct reader *running_reader(struct source *source, IMFSourceReaderCallback *cb)
+{
+    struct reader *r = calloc(1, sizeof *r);
+    assert(r);
+    r->refs = 1;
+    r->source = source;
+    r->callback = cb;
+    cb->reader = r;
+    cb->free_running = TRUE;
+    InitializeCriticalSection(&r->lock);
+    assert(reader_launch(r) == S_OK);
+    return r;
+}
+
+static void finish(struct reader *r, struct source *source, IMFSourceReaderCallback *cb, int calls)
+{
+    struct thread *thread = r->thread->object;
+    assert(reader_Release(&r->IMFSourceReader_iface) == 0);
+    assert(!pthread_join(thread->native, NULL));
+    assert(atomic_load(&source->released) == 1 && atomic_load(&cb->released) == 1);
+    assert(atomic_load(&cb->calls) == calls); /* nothing was delivered after the release */
+    assert(atomic_load(&live_handles) == 0);
+}
+
+/* What reader_frame does when the bridge announces that the connection has gone. */
+static void lose_camera(struct reader *r)
+{
+    EnterCriticalSection(&r->lock);
+    r->lost = TRUE;
+    LeaveCriticalSection(&r->lock);
+    SetEvent(r->wake);
+    SetEvent(r->arrived);
+}
+
+/* The camera goes while samples are asked for: each request gets the error once, later ones too, and
+ * nothing comes without a request or after the release. */
+static void camera_lost(BOOL frame_waiting)
+{
+    struct source source = {0};
+    IMFSourceReaderCallback cb = {0};
+    struct reader *r = running_reader(&source, &cb);
+
+    if (frame_waiting) {
+        EnterCriticalSection(&r->lock);
+        r->have_frame = r->ticked = TRUE; /* a stale picture must not be handed on as the answer */
+        LeaveCriticalSection(&r->lock);
+    }
+    lose_camera(r);
+    wait_for_calls(&cb, 0); /* no request, no callback */
+    for (int i = 0; i < 3; i++) reader_request(r);
+    wait_for_calls(&cb, 3);
+    assert(atomic_load(&cb.errors) == 3);
+    reader_request(r);
+    wait_for_calls(&cb, 4);
+    assert(atomic_load(&cb.errors) == 4 && !atomic_load(&cb.flushes));
+    /* Requests that are still waiting when the reader is released are dropped with it. */
+    EnterCriticalSection(&r->lock);
+    r->lost = r->have_frame = FALSE;
+    LeaveCriticalSection(&r->lock);
+    reader_request(r);
+    finish(r, &source, &cb, 4);
+}
+
+/* Requests are counted while the thread hands samples on: every request gets exactly one callback. */
+static void request_counting(void)
+{
+    enum { REQUESTS = 3000 };
+    struct source source = {0};
+    IMFSourceReaderCallback cb = {0};
+    struct reader *r = running_reader(&source, &cb);
+    struct timespec tick = { 0, 200000 };
+
+    for (int i = 0; i < REQUESTS; i++) {
+        reader_request(r);
+        EnterCriticalSection(&r->lock);
+        r->have_frame = TRUE;
+        LeaveCriticalSection(&r->lock);
+        SetEvent(r->wake);
+    }
+    for (int i = 0; atomic_load(&cb.calls) < REQUESTS && i < 50000; i++) {
+        EnterCriticalSection(&r->lock);
+        r->have_frame = TRUE; /* the next frame */
+        LeaveCriticalSection(&r->lock);
+        SetEvent(r->wake);
+        nanosleep(&tick, NULL);
+    }
+    wait_for_calls(&cb, REQUESTS);
+    EnterCriticalSection(&r->lock);
+    assert(r->pending == 0);
+    LeaveCriticalSection(&r->lock);
+    assert(!atomic_load(&cb.errors));
+    finish(r, &source, &cb, REQUESTS);
+}
+
 static void creation_failure(BOOL event_fails)
 {
     struct source source = {0};
@@ -319,6 +433,9 @@ int main(void)
     release_case(FALSE, FALSE, FALSE, 0, TRUE);
     creation_failure(TRUE);
     creation_failure(FALSE);
+    camera_lost(FALSE);
+    camera_lost(TRUE);
+    request_counting();
     for (unsigned i = 0; i < event_count; i++) {
         assert(!pthread_mutex_destroy(&events[i].lock));
         assert(!pthread_cond_destroy(&events[i].changed));

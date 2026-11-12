@@ -82,6 +82,8 @@ static BOOL config_string(const WCHAR *name, WCHAR *value, DWORD bytes)
  * The connection to the bridge. Also compiled by tests/test-camera-client.c, against a simulated bridge.
  */
 #if !defined(A2O_CAMERA_TEST) || defined(A2O_CAMERA_CLIENT_TEST)
+/* Called on the bridge's thread for every frame, and once more with no data when the connection has gone
+ * (the camera was unplugged, the bridge ended, or a command got no reply). */
 typedef void (*frame_fn)(void *ctx, UINT64 time_us, const BYTE *data, DWORD length);
 
 #ifndef BRIDGE_REPLY_MS
@@ -93,13 +95,14 @@ typedef void (*frame_fn)(void *ctx, UINT64 time_us, const BYTE *data, DWORD leng
 struct bridge {
     SOCKET sock; /* never changes; `closed` says whether it is still ours to use */
     HANDLE thread, replied;
-    CRITICAL_SECTION command_lock, frame_lock;
+    CRITICAL_SECTION command_lock, reply_lock, frame_lock;
     LONG refs;
     BOOL closed; /* guarded by command_lock */
-    /* guarded by frame_lock: */
+    /* guarded by reply_lock: */
     char reply[8192];
     BOOL awaiting; /* a command has been sent and waits for its reply */
     BOOL dead;     /* nothing more will come, and no command is sent any more */
+    /* guarded by frame_lock, which is held while a frame is handed on: */
     frame_fn on_frame;
     void *frame_ctx;
 };
@@ -122,6 +125,7 @@ static void bridge_unref(struct bridge *b)
     CloseHandle(b->thread);
     CloseHandle(b->replied);
     DeleteCriticalSection(&b->command_lock);
+    DeleteCriticalSection(&b->reply_lock);
     DeleteCriticalSection(&b->frame_lock);
     free(b);
 }
@@ -145,7 +149,7 @@ static DWORD WINAPI bridge_thread(void *arg)
         }
         if (!read_all(b->sock, data, length)) break;
         if (head[0] == 'R') {
-            EnterCriticalSection(&b->frame_lock);
+            EnterCriticalSection(&b->reply_lock);
             if (b->awaiting) { /* a reply nobody waits for answers nothing */
                 DWORD n = length < sizeof b->reply - 1 ? length : sizeof b->reply - 1;
                 memcpy(b->reply, data, n);
@@ -153,7 +157,7 @@ static DWORD WINAPI bridge_thread(void *arg)
                 b->awaiting = FALSE;
                 SetEvent(b->replied);
             }
-            LeaveCriticalSection(&b->frame_lock);
+            LeaveCriticalSection(&b->reply_lock);
         } else if (head[0] == 'F') {
             EnterCriticalSection(&b->frame_lock);
             if (b->on_frame) b->on_frame(b->frame_ctx, time_us, data, length);
@@ -161,9 +165,12 @@ static DWORD WINAPI bridge_thread(void *arg)
         }
     }
     free(data);
-    EnterCriticalSection(&b->frame_lock);
+    EnterCriticalSection(&b->reply_lock);
     b->dead = TRUE;
     SetEvent(b->replied);
+    LeaveCriticalSection(&b->reply_lock);
+    EnterCriticalSection(&b->frame_lock);
+    if (b->on_frame) b->on_frame(b->frame_ctx, 0, NULL, 0); /* whoever takes the frames: no more will come */
     LeaveCriticalSection(&b->frame_lock);
     say("bridge: connection closed");
     bridge_unref(b);
@@ -195,19 +202,19 @@ static BOOL bridge_command(struct bridge *b, char *reply, DWORD size, const char
     line[n++] = '\n';
 
     EnterCriticalSection(&b->command_lock);
-    EnterCriticalSection(&b->frame_lock);
+    EnterCriticalSection(&b->reply_lock);
     sent = !b->dead;
     b->awaiting = sent;
     ResetEvent(b->replied);
-    LeaveCriticalSection(&b->frame_lock);
+    LeaveCriticalSection(&b->reply_lock);
     if (sent) {
         if (send(b->sock, line, n, 0) == n) WaitForSingleObject(b->replied, BRIDGE_REPLY_MS);
-        EnterCriticalSection(&b->frame_lock);
+        EnterCriticalSection(&b->reply_lock);
         answered = !b->awaiting; /* the thread takes the mark away when it stores a reply */
         b->awaiting = FALSE;
         if (answered) memcpy(text, b->reply, sizeof text);
         else b->dead = TRUE;
-        LeaveCriticalSection(&b->frame_lock);
+        LeaveCriticalSection(&b->reply_lock);
         /* Replies carry no mark of the command they answer. One that came after its command had stopped
          * waiting would be taken for the next command's, and the command itself may still be carried out
          * (the camera started, for one) with nobody to stop it again. So a connection that did not answer
@@ -262,11 +269,13 @@ static struct bridge *bridge_start(SOCKET sock, const char *key)
     b->sock = sock;
     b->refs = 2;
     InitializeCriticalSection(&b->command_lock);
+    InitializeCriticalSection(&b->reply_lock);
     InitializeCriticalSection(&b->frame_lock);
     if (!(b->thread = CreateThread(NULL, 0, bridge_thread, b, 0, NULL))) {
         closesocket(sock);
         CloseHandle(b->replied);
         DeleteCriticalSection(&b->command_lock);
+        DeleteCriticalSection(&b->reply_lock);
         DeleteCriticalSection(&b->frame_lock);
         free(b);
         return NULL;
@@ -719,9 +728,11 @@ struct reader {
     IMFSourceReaderCallback *callback; /* asynchronous mode when set */
     CRITICAL_SECTION lock;
     HANDLE wake, thread;
+    HANDLE arrived; /* set for every frame and when the camera has gone: a synchronous read waits on it */
     UINT32 current;
     BOOL streaming, ticked, quit, flush;
-    LONG pending;
+    BOOL lost;    /* the connection to the bridge has gone: no more frames will come */
+    LONG pending; /* samples asked for and not yet delivered; guarded by the lock */
     BYTE *frame; /* the newest frame not yet handed on */
     DWORD frame_length, frame_size;
     LONGLONG frame_time;
@@ -757,14 +768,16 @@ static void reader_frame(void *ctx, UINT64 time_us, const BYTE *data, DWORD leng
     struct reader *r = ctx;
 
     EnterCriticalSection(&r->lock);
-    if (length > r->frame_size) {
+    if (!data) {
+        r->lost = TRUE; /* whoever waits for a sample is told, instead of waiting for ever */
+    } else if (length > r->frame_size) {
         BYTE *bigger = realloc(r->frame, length);
         if (bigger) {
             r->frame = bigger;
             r->frame_size = length;
         }
     }
-    if (length <= r->frame_size) {
+    if (data && length <= r->frame_size) {
         memcpy(r->frame, data, length);
         r->frame_length = length;
         r->frame_time = capture_time(time_us);
@@ -772,6 +785,7 @@ static void reader_frame(void *ctx, UINT64 time_us, const BYTE *data, DWORD leng
     }
     LeaveCriticalSection(&r->lock);
     SetEvent(r->wake);
+    SetEvent(r->arrived);
 }
 
 /* Take the newest frame as a sample. Call with the lock held. */
@@ -805,6 +819,7 @@ static void reader_free(struct reader *r)
 {
     CloseHandle(r->thread);
     CloseHandle(r->wake);
+    CloseHandle(r->arrived);
     if (r->callback) IMFSourceReaderCallback_Release(r->callback);
     source_Release(&r->source->IMFMediaSource_iface);
     DeleteCriticalSection(&r->lock);
@@ -820,7 +835,7 @@ static DWORD WINAPI reader_thread(void *arg)
     for (;;) {
         IMFSample *sample = NULL;
         LONGLONG time = 0;
-        BOOL tick = FALSE, deliver = FALSE, flushed;
+        BOOL tick = FALSE, deliver = FALSE, lost = FALSE, flushed;
 
         WaitForSingleObject(r->wake, INFINITE);
         EnterCriticalSection(&r->lock);
@@ -833,10 +848,15 @@ static DWORD WINAPI reader_thread(void *arg)
         }
         flushed = r->flush;
         r->flush = FALSE;
-        if (!flushed && r->callback && r->have_frame && r->pending > 0) {
+        if (!flushed && r->callback && r->pending > 0 && (r->have_frame || r->lost)) {
             r->pending--;
             deliver = TRUE;
-            if (!r->ticked) { /* Windows starts a live stream with a tick and no sample */
+            if (r->lost) {
+                /* The camera has gone. Every sample still asked for is answered with the error, as Windows
+                 * answers it, or the caller would wait for ever with nothing to tell it. One a turn. */
+                lost = TRUE;
+                if (r->pending > 0) SetEvent(r->wake);
+            } else if (!r->ticked) { /* Windows starts a live stream with a tick and no sample */
                 r->ticked = tick = TRUE;
             } else {
                 sample = reader_take_sample(r, &time);
@@ -844,7 +864,10 @@ static DWORD WINAPI reader_thread(void *arg)
         }
         LeaveCriticalSection(&r->lock);
         if (flushed) IMFSourceReaderCallback_OnFlush(r->callback, 0);
-        if (deliver) {
+        if (lost) {
+            IMFSourceReaderCallback_OnReadSample(r->callback, MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED, 0,
+                                                 MF_SOURCE_READERF_ERROR, 0, NULL);
+        } else if (deliver) {
             IMFSourceReaderCallback_OnReadSample(r->callback, sample || tick ? S_OK : E_OUTOFMEMORY, 0,
                                                  tick ? MF_SOURCE_READERF_STREAMTICK : 0, time, sample);
             if (sample) IMFSample_Release(sample);
@@ -856,10 +879,21 @@ static DWORD WINAPI reader_thread(void *arg)
 static HRESULT reader_launch(struct reader *r)
 {
     r->wake = CreateEventW(NULL, FALSE, FALSE, NULL);
-    if (!r->wake) return HRESULT_FROM_WIN32(GetLastError());
+    r->arrived = r->wake ? CreateEventW(NULL, FALSE, FALSE, NULL) : NULL;
+    if (!r->arrived) return HRESULT_FROM_WIN32(GetLastError());
     r->thread = CreateThread(NULL, 0, reader_thread, r, 0, NULL);
     if (!r->thread) return HRESULT_FROM_WIN32(GetLastError());
     return S_OK;
+}
+
+/* One more sample is wanted (asynchronous mode). The count changes under the lock here as everywhere else:
+ * an increment made outside it could be lost against the thread's decrement, and the request with it. */
+static void reader_request(struct reader *r)
+{
+    EnterCriticalSection(&r->lock);
+    r->pending++;
+    LeaveCriticalSection(&r->lock);
+    SetEvent(r->wake);
 }
 
 #endif /* production and the reader test */
@@ -874,9 +908,10 @@ static HRESULT reader_start(struct reader *r)
     r->have_frame = FALSE;
     bridge_set_frames(r->source->bridge, reader_frame, r);
     if (!bridge_command(r->source->bridge, NULL, 0, "F %s %u %u %u", f->fourcc, f->width, f->height, f->fps)) {
-        /* A timed-out command can still start the camera later. This reader
-         * never became streaming, so reader_stop() will not detach it on
-         * release. Drain any current callback and remove its borrowed pointer. */
+        /* This reader never became streaming, so reader_stop() will not detach it on
+         * release. Drain any current callback and remove its borrowed pointer.
+         * (A start that got no reply in time cannot switch the camera on later:
+         * bridge_command has closed the connection, and the bridge stops with it.) */
         bridge_set_frames(r->source->bridge, NULL, NULL);
         say("reader: the camera would not start %s %ux%u@%u", f->fourcc, f->width, f->height, f->fps);
         return MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED;
@@ -1039,14 +1074,17 @@ static HRESULT WINAPI reader_ReadSample(IMFSourceReader *iface, DWORD index, DWO
 
     if (r->callback) {
         if (actual || flags || time || sample) return E_INVALIDARG;
-        InterlockedIncrement(&r->pending);
-        SetEvent(r->wake);
+        reader_request(r);
         return S_OK;
     }
 
     if (!sample) return E_POINTER;
     *sample = NULL;
-    for (int waited = 0; waited < 500; waited++) { /* at most five seconds */
+    /* At most five seconds. The event is set as a frame arrives, so the frame is handed on then and not at
+     * the next look some milliseconds later: the tracker's picture of the eyes would be that much older. */
+    for (DWORD started = GetTickCount(), waited = 0; waited < 5000; waited = GetTickCount() - started) {
+        BOOL lost;
+
         EnterCriticalSection(&r->lock);
         if (r->have_frame) {
             LONGLONG t;
@@ -1057,9 +1095,10 @@ static HRESULT WINAPI reader_ReadSample(IMFSourceReader *iface, DWORD index, DWO
             if (time) *time = t;
             return *sample ? S_OK : E_OUTOFMEMORY;
         }
+        lost = r->lost;
         LeaveCriticalSection(&r->lock);
-        if (r->source->bridge->dead) break;
-        Sleep(10);
+        if (lost) break;
+        WaitForSingleObject(r->arrived, 5000 - waited);
     }
     if (actual) *actual = 0;
     if (flags) *flags = MF_SOURCE_READERF_ERROR;

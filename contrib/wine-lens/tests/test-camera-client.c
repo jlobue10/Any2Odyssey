@@ -34,7 +34,7 @@ typedef int SOCKET;
 #define INVALID_SOCKET (-1)
 #define SD_BOTH SHUT_RDWR
 #define say(...) ((void)0)
-#define BRIDGE_REPLY_MS 300
+#define BRIDGE_REPLY_MS 1000 /* long enough for a busy machine to answer, short enough to test */
 
 static atomic_int live_locks, live_handles, running_threads, socket_closes;
 
@@ -76,8 +76,12 @@ static HANDLE new_handle(BOOL is_thread)
 {
     assert(handle_count < 64);
     HANDLE h = &handles[handle_count++];
+    pthread_condattr_t attr;
+    assert(!pthread_condattr_init(&attr));
+    assert(!pthread_condattr_setclock(&attr, CLOCK_MONOTONIC)); /* timed waits must not follow clock changes */
     assert(!pthread_mutex_init(&h->lock, NULL));
-    assert(!pthread_cond_init(&h->changed, NULL));
+    assert(!pthread_cond_init(&h->changed, &attr));
+    assert(!pthread_condattr_destroy(&attr));
     h->is_thread = is_thread;
     atomic_store(&h->open, TRUE);
     atomic_fetch_add(&live_handles, 1);
@@ -142,7 +146,7 @@ static DWORD WaitForSingleObject(HANDLE h, DWORD timeout)
         assert(timeout == 5000); /* Shutdown stays bounded for the closing caller. */
         if (thread_wait_times_out) return WAIT_TIMEOUT;
     }
-    assert(!clock_gettime(CLOCK_REALTIME, &until));
+    assert(!clock_gettime(CLOCK_MONOTONIC, &until));
     until.tv_sec += timeout / 1000;
     until.tv_nsec += (long)(timeout % 1000) * 1000000;
     if (until.tv_nsec >= 1000000000) until.tv_sec++, until.tv_nsec -= 1000000000;
@@ -371,6 +375,7 @@ static atomic_int frames;
 static void slow_frame(void *ctx, UINT64 time_us, const BYTE *data, DWORD length)
 {
     (void)time_us;
+    if (!data) return; /* the end of the connection, announced after the close below */
     assert(ctx == &frames && length == 3 && !memcmp(data, "abc", 3));
     atomic_fetch_add(&frames, 1);
     assert(!pthread_mutex_lock(&gate_lock));
@@ -415,6 +420,74 @@ static void close_while_thread_is_busy(void)
     assert(atomic_load(&frames) == 1 && atomic_load(&f.saw_end));
 }
 
+/* Whoever takes the frames is told once when the connection has gone, and nobody is told who had stopped
+ * taking them. */
+static atomic_int ends, pictures;
+
+static void counting_frame(void *ctx, UINT64 time_us, const BYTE *data, DWORD length)
+{
+    (void)time_us;
+    assert(ctx == &ends);
+    if (data) assert(length == 3 && !memcmp(data, "abc", 3));
+    else assert(!length);
+    atomic_fetch_add(data ? &pictures : &ends, 1);
+}
+static void script_frame_then_leave(struct fake *f)
+{
+    char line[256];
+    if (!fake_handshake(f)) return;
+    assert(fake_line(f, line, sizeof line) && !strncmp(line, "F ", 2));
+    fake_reply(f, "ok");
+    fake_packet(f, 'F', "abc", 3);
+    /* The next command finds the camera unplugged: the bridge closes the connection without a reply. */
+    assert(fake_line(f, line, sizeof line) && !strcmp(line, "S"));
+}
+static void end_is_announced(BOOL still_listening)
+{
+    struct fake f;
+    struct bridge *b = open_bridge(&f, script_frame_then_leave, KEY);
+
+    assert(b);
+    atomic_store(&ends, 0);
+    atomic_store(&pictures, 0);
+    bridge_set_frames(b, counting_frame, &ends);
+    assert(bridge_command(b, NULL, 0, "F MJPG 640 480 60"));
+    for (int i = 0; atomic_load(&pictures) < 1 && i < 5000; i++) pause_ms(1);
+    if (!still_listening) bridge_set_frames(b, NULL, NULL);
+    assert(!bridge_command(b, NULL, 0, "S"));
+    for (int i = 0; atomic_load(&running_threads) && i < 5000; i++) pause_ms(1);
+    assert(!atomic_load(&running_threads));
+    assert(atomic_load(&pictures) == 1 && atomic_load(&ends) == (still_listening ? 1 : 0));
+    bridge_close(b);
+    expect_clean(&f);
+    assert(atomic_load(&ends) == (still_listening ? 1 : 0));
+}
+
+/* A command that gets no reply ends the connection, and whoever takes the frames hears of that too. */
+static void script_silent(struct fake *f)
+{
+    char line[256];
+    if (!fake_handshake(f)) return;
+    assert(fake_line(f, line, sizeof line));
+    fake_until_end(f);
+}
+static void timeout_is_announced(void)
+{
+    struct fake f;
+    struct bridge *b = open_bridge(&f, script_silent, KEY);
+
+    assert(b);
+    atomic_store(&ends, 0);
+    atomic_store(&pictures, 0);
+    bridge_set_frames(b, counting_frame, &ends);
+    assert(!bridge_command(b, NULL, 0, "Q 980900"));
+    for (int i = 0; atomic_load(&running_threads) && i < 5000; i++) pause_ms(1);
+    assert(atomic_load(&ends) == 1 && !atomic_load(&pictures));
+    bridge_close(b);
+    expect_clean(&f);
+    assert(atomic_load(&f.saw_end) && !atomic_load(&f.lines_after));
+}
+
 /* The event or the thread cannot be made: nothing is left behind, and the socket is closed. */
 static void script_nobody(struct fake *f)
 {
@@ -439,6 +512,9 @@ int main(void)
     late_reply();
     bridge_gone();
     close_while_thread_is_busy();
+    end_is_announced(TRUE);
+    end_is_announced(FALSE);
+    timeout_is_announced();
     creation_failure(TRUE);
     creation_failure(FALSE);
     puts("camera bridge client tests passed");
