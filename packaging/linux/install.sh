@@ -14,7 +14,9 @@
 #      for the monitor's webcam);
 #   4. downloads the open depth model for 2D -> 3D (about 95 MB);
 #   5. prepares the Odyssey 3D's lens, eye tracker and weaver under Wine from your own Windows installation
-#      of the Odyssey 3D Hub, if it finds one mounted or is given one.
+#      of the Odyssey 3D Hub, if it finds one mounted or is given one. This part expects a dual-boot PC:
+#      Windows with the Odyssey 3D Hub on a drive of this machine, which has shown 3D on this monitor at
+#      least once. Mount its system partition (read-only is enough) before running this script.
 #
 # Options:
 #   --yes               answer yes to every question
@@ -288,9 +290,19 @@ if [ -z "$WANT_ODYSSEY" ]; then
     say "   skipped"
 elif ! WIN=$(find_windows); then
     say "   No Windows installation of the Odyssey 3D Hub was found on a mounted drive."
-    say "   Mount the Windows system drive (read-only is enough) and run:"
+    say "   This part needs one: Leia's runtime is not distributed and has no public Linux version, so it is"
+    say "   copied from your own Windows. The expected set-up is a dual-boot PC, with Windows and the Odyssey"
+    say "   3D Hub on a drive of this machine, which has shown 3D on this monitor at least once."
+    NTFS=$(lsblk -n -l -o NAME,FSTYPE,MOUNTPOINT 2>/dev/null | awk '$2 == "ntfs" && $3 == "" { print $1 }')
+    BITLOCKER=$(lsblk -n -l -o NAME,FSTYPE 2>/dev/null | awk 'tolower($2) == "bitlocker" { print $1 }')
+    if [ -n "$NTFS" ]; then
+        say "   Windows partitions here that are not mounted (the system one holds \"Program Files\"):"
+        for p in $NTFS; do say "       udisksctl mount -b /dev/$p -o ro"; done
+    fi
+    [ -n "$BITLOCKER" ] && say "   Encrypted with BitLocker (unlock it, or suspend BitLocker in Windows, first): $(echo $BITLOCKER)"
+    say "   Mount the Windows system partition (read-only is enough), then run this script again, or:"
     say "       $WINE_LENS/setup.sh /path/to/that/drive"
-    say "   or this script again with --windows-root /path/to/that/drive."
+    say "   Without a Windows installation this part is not available; everything else works."
 elif [ ! -f "$WIN/Program Files/LeiaSR/Platform/bin/SRService.exe" ]; then
     warn "$WIN has no Leia SR runtime (Program Files/LeiaSR); is the Odyssey 3D Hub installed on that Windows?"
 elif [ ! -e /dev/odyssey-lens ] && [ -z "$DRY" ]; then

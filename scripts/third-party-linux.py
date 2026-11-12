@@ -15,8 +15,11 @@ import glob, os, re, subprocess, sys
 TARGET = "x86_64-unknown-linux-gnu"
 
 def tree(target):
-    out = subprocess.run(["cargo", "tree", "-p", "any2odyssey", "--target", target, "-e", "normal", "--prefix",
-                          "none", "--format", "{p}|{l}"], capture_output=True, text=True, check=True).stdout
+    # Plain text whatever the environment says about colour (CI sets CARGO_TERM_COLOR=always).
+    out = subprocess.run(["cargo", "tree", "--color", "never", "-p", "any2odyssey", "--target", target, "-e",
+                          "normal", "--prefix", "none", "--format", "{p}|{l}"], capture_output=True, text=True,
+                         check=True, env={**os.environ, "CARGO_TERM_COLOR": "never"}).stdout
+    out = re.sub(r"\x1b\[[0-9;]*m", "", out)
     crates = {}
     for line in out.splitlines():
         m = re.match(r"(\S+) v(\S+)(?: \(.*?\))*\|(.*)$", line)

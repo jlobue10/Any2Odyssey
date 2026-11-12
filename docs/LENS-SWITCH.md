@@ -21,7 +21,18 @@ The asking is done by a separate small program, `any2odyssey-lens-helper`, so th
 
 ## Leia's Windows runtime under Wine
 
-If the monitor is also used from Windows on the same machine, the Odyssey 3D Hub has installed Leia's SR runtime there. `contrib/wine-lens/setup.sh` copies that installation into a Wine prefix of its own and makes Leia's unmodified `SRService` and `SRSession` run in it. The helper then asks that service for the lens exactly as a Windows program would. Leia's service does all the talking to the lens board, including its authentication; Any2Odyssey and the helper send the board nothing, and nothing of Leia's is distributed here.
+**A Windows installation is required for the Odyssey 3D part.** Leia's runtime is not distributed with Any2Odyssey and has no public Linux version, so the lens, the eye tracker and the weaver come from your own Windows installation: the expected set-up is a dual-boot PC, with Windows and the Odyssey 3D Hub installed on a drive of the same machine that Linux can mount. What that Windows installation has to be:
+
+- **Windows with the Odyssey 3D Hub installed** (it installs Leia's SR runtime under `Program Files\LeiaSR` and keeps the monitor's data under `ProgramData\Simulated Reality`). Hub 1.5.1 with SR runtime 1.36.4 is what was used.
+- **Used with this monitor at least once**, with 3D working: the runtime fetches the monitor's own calibration and tracker data when it first sees it and keeps them under `ProgramData`, by the monitor's serial number. A Windows installation that has never run this monitor has nothing for it.
+- **On a drive Linux can read.** The Windows system partition (NTFS) is mounted read-only; nothing is written to it. A partition encrypted with BitLocker cannot be read from Linux: suspend or turn off BitLocker for it in Windows, or unlock it with a tool such as `dislocker` first. Windows left hibernated or with Fast Startup on can still be mounted read-only.
+- **Only at set-up time.** `setup.sh` copies what it needs (about 1 GB) into your data folder; afterwards the drive need not be mounted, and Windows need not be started again. Run `setup.sh` again after the Hub has updated Leia's runtime in Windows, if you want the newer one, and after replacing the monitor.
+
+A Windows installation in a virtual machine, or the files copied over from another PC, would do as well if they meet the first two points; neither has been tried. Without any Windows installation the Odyssey 3D output and the lens switch are not available, and the rest of the viewer works as before.
+
+To find and mount the Windows partition: `lsblk -f` lists the partitions with their file systems (the Windows system partition is the NTFS one that holds `Program Files`); mount it from the file manager, or with `udisksctl mount -b /dev/<partition> -o ro`, which prints where it is mounted (usually under `/run/media/<you>/`). That folder is what `setup.sh` and the installer's `--windows-root` take.
+
+The Odyssey 3D Hub has installed Leia's SR runtime there. `contrib/wine-lens/setup.sh` copies that installation into a Wine prefix of its own and makes Leia's unmodified `SRService` and `SRSession` run in it. The helper then asks that service for the lens exactly as a Windows program would. Leia's service does all the talking to the lens board, including its authentication; Any2Odyssey and the helper send the board nothing, and nothing of Leia's is distributed here.
 
 What is needed: Wine (11.x was used), `mingw-w64-gcc`, Python 3, `xrandr` (the service runs through XWayland or X11), `rsync`, and the Windows system drive mounted read-only. A native C compiler (`cc`) is needed as well for the eye tracker's camera bridge, and `clang++` for the weaver host; without them only the lens switch is set up. On KDE Plasma, `busctl` (part of systemd) is used to load the script that lets the Odyssey show its own screen live.
 

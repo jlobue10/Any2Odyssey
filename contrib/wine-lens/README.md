@@ -4,6 +4,8 @@ Switches the Samsung Odyssey 3D (G90XF) lens on from Linux by running your own c
 under Wine, runs Leia's eye tracker there too, with the monitor's webcam handed to it by a small native
 bridge, and shows Any2Odyssey's pictures through Leia's weaver. `docs/LENS-SWITCH.md` explains how it works, what it needs and what has been checked.
 
+**Needs a dual-boot PC** (or another way to reach a Windows installation): Windows with the Odyssey 3D Hub, which has run this monitor in 3D at least once, on a drive Linux can mount read-only. A BitLocker-encrypted drive has to be unlocked first. The drive is needed only while `setup.sh` runs. `docs/LENS-SWITCH.md` has the details.
+
 ```sh
 sudo cp 70-any2odyssey-lens.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
 ./setup.sh /path/to/mounted/windows-drive      # the drive that has the Odyssey 3D Hub installed
