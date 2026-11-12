@@ -16,6 +16,8 @@ On Linux the Windows crate is only compile-checked: `cargo check --workspace --t
 
 ## Linux
 
+`python3 contrib/wine-lens/tests/test-camera-bridge.py` builds the native camera bridge with the system C compiler and tests its loopback authentication, including silent and trickling clients. It uses a temporary test secret and `/dev/null` instead of a camera; no Wine, hardware or root access is needed. Both Linux CI architectures run it.
+
 Building needs the PipeWire development files and clang beside the desktop libraries (Ubuntu: `libpipewire-0.3-dev libclang-dev clang`; Arch: `libpipewire clang`). `cargo test -p any2odyssey-core -p any2odyssey` runs everywhere and starts no helper, capture or model. Three measurements are kept as ignored tests for a machine with the hardware: `live::bench` (stage timings, needs the depth model), `capture::probe` (what the screen cast of the remembered screen contains) and `live::probe` (the whole live path against the Odyssey; `PROBE_ROUNDS`, `PROBE_LINES`, `PROBE_DETAIL`, `PROBE_SECONDS`). Run one with `cargo test --release -p any2odyssey <name> -- --ignored --nocapture`. `scripts/package-linux.sh` stages the Linux release archive from a release build and `scripts/third-party-linux.py` writes `THIRD-PARTY-LICENSES-LINUX.md`; CI runs both and refuses a list that no longer matches the dependencies. What has been checked on a G90XF is recorded in `docs/LENS-SWITCH.md` ("What has been checked") and `docs/PLATFORMS.md`.
 
 ## Windows diagnostics (provided by the Windows crate)

@@ -79,39 +79,55 @@ pub fn locate_model() -> Result<PathBuf, String> {
 /// against [`MODEL_SHA256`] and only then give it its name. Returns where
 /// it was put.
 pub fn install_model() -> Result<PathBuf, String> {
-    let folder = paths::data_dir().join("models");
-    std::fs::create_dir_all(&folder)
+    install_model_in(
+        &paths::data_dir().join("models"),
+        std::process::Command::new("curl"),
+        MODEL_SHA256,
+    )
+}
+
+fn install_model_in(
+    folder: &Path,
+    mut command: std::process::Command,
+    expected: &str,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(folder)
         .map_err(|e| format!("Could not create {}: {e}", folder.display()))?;
     let target = folder.join(MODEL_FILE);
-    let partial = folder.join(format!("{MODEL_FILE}.part"));
-    let status = std::process::Command::new("curl")
-        .args(["--fail", "--location", "--proto", "=https", "--output"])
-        .arg(&partial)
+    // Exclusive creation keeps simultaneous installers independent and never
+    // follows a pre-existing .part symlink. Curl writes through the already
+    // open file, not a pathname it would reopen and truncate.
+    let partial = tempfile::Builder::new()
+        .prefix(".depth-download-")
+        .tempfile_in(folder)
+        .map_err(|e| format!("Could not create a model download: {e}"))?;
+    let output = partial
+        .reopen()
+        .map_err(|e| format!("Could not open the model download: {e}"))?;
+    let status = command
+        .args(["--fail", "--location", "--proto", "=https", "--output", "-"])
         .arg(MODEL_URL)
+        .stdout(std::process::Stdio::from(output))
         .status()
         .map_err(|e| format!("Could not run curl ({e}). Install curl, or download {MODEL_URL} and save it as {}.", target.display()))?;
     if !status.success() {
-        let _ = std::fs::remove_file(&partial);
         return Err(format!("The download failed (curl: {status})."));
     }
-    let outcome = verify_download(&partial).and_then(|()| {
-        std::fs::rename(&partial, &target)
-            .map_err(|e| format!("Could not move the model into place: {e}"))
-    });
-    if outcome.is_err() {
-        let _ = std::fs::remove_file(&partial);
-    }
-    outcome.map(|()| target)
+    verify_download(partial.path(), expected)?;
+    partial
+        .persist(&target)
+        .map_err(|e| format!("Could not move the model into place: {e}"))?;
+    Ok(target)
 }
 
-fn verify_download(file: &Path) -> Result<(), String> {
+fn verify_download(file: &Path, expected: &str) -> Result<(), String> {
     let actual = any2odyssey_core::engine::sha256_hex(file)
         .map_err(|e| format!("Could not read the downloaded file: {e}"))?;
-    if actual.eq_ignore_ascii_case(MODEL_SHA256) {
+    if actual.eq_ignore_ascii_case(expected) {
         Ok(())
     } else {
         Err(format!(
-            "The downloaded file is not the expected model (SHA-256 {actual}, expected {MODEL_SHA256}). Nothing was installed."
+            "The downloaded file is not the expected model (SHA-256 {actual}, expected {expected}). Nothing was installed."
         ))
     }
 }
@@ -329,9 +345,79 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("model.part");
         std::fs::write(&file, b"not the model").unwrap();
-        let error = verify_download(&file).unwrap_err();
+        let error = verify_download(&file, MODEL_SHA256).unwrap_err();
         assert!(error.contains("not the expected model"), "{error}");
-        assert!(verify_download(&dir.path().join("missing")).is_err());
+        assert!(verify_download(&dir.path().join("missing"), MODEL_SHA256).is_err());
+    }
+
+    #[cfg(unix)]
+    fn download_command(body: &str) -> std::process::Command {
+        let mut command = std::process::Command::new("sh");
+        // Curl's arguments become shell positional parameters, not code.
+        command.args(["-c", body, "fake-curl"]);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_downloads_preserve_the_installed_model_and_remove_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(MODEL_FILE);
+        std::fs::write(&target, b"installed").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&target).unwrap();
+        for body in ["printf wrong", "printf partial; exit 1"] {
+            assert!(install_model_in(dir.path(), download_command(body), &expected).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"installed");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
+        assert!(install_model_in(
+            dir.path(),
+            std::process::Command::new(dir.path().join("missing-curl")),
+            &expected,
+        )
+        .is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_legacy_partial_symlink_cannot_redirect_a_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(MODEL_FILE);
+        let victim = dir.path().join("unrelated");
+        std::fs::write(&victim, b"preserve me").unwrap();
+        std::fs::write(&target, b"model").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&target).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join(format!("{MODEL_FILE}.part"))).unwrap();
+        install_model_in(dir.path(), download_command("printf model"), &expected).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"preserve me");
+        assert_eq!(std::fs::read(&target).unwrap(), b"model");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_downloads_publish_only_their_own_verified_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(MODEL_FILE);
+        std::fs::write(&target, b"model").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&target).unwrap();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    install_model_in(
+                        dir.path(),
+                        download_command("printf mo; sleep 0.1; printf del"),
+                        &expected,
+                    )
+                    .unwrap();
+                });
+            }
+        });
+        assert_eq!(std::fs::read(&target).unwrap(), b"model");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

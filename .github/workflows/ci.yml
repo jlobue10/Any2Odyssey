@@ -179,6 +179,8 @@ jobs:
           cmp /tmp/guide.html USER-GUIDE.html
       - name: Test
         run: cargo test --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey
+      - name: Camera bridge authentication tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-camera-bridge.py
       - name: Clippy
         run: cargo clippy --locked -p any2odyssey-core -p any2odyssey-iconmaker -p any2odyssey --all-targets -- -D warnings
       - name: Windows cross-check (no linking)

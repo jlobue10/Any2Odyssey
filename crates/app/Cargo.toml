@@ -26,6 +26,8 @@ global-hotkey = "0.7"
 open = "5"
 html-escape = "0.2"
 raw-window-handle = "0.6"
+# Each model download owns its staging file through verification and publication.
+tempfile = "3"
 
 # Display-server backends are only meaningful off Windows; features unify
 # with the entry above, so the Windows build drops the wayland/x11 code.
@@ -56,6 +58,3 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsA
 
 [build-dependencies]
 winresource = "0.1"
-
-[dev-dependencies]
-tempfile = "3"
