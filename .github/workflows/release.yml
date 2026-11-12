@@ -327,8 +327,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The only job that can write to the repository and its releases. It checks out nothing and runs
-    # no code from the repository: it downloads the packages the build jobs made (the same artifacts the attest job signed),
-    # verifies them and attaches them to the release.
+    # no code from the repository: it downloads the packages the build jobs made (the same artifacts
+    # the attest job signed), verifies them and attaches them to the release.
     permissions:
       contents: write
     steps:
