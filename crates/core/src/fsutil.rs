@@ -18,6 +18,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_inner(path, bytes, false, Audience::Owner)
 }
 
+/// How often the rename that publishes a file is tried again after a
+/// transient failure, and how long each wait is: up to 100 ms in all.
+const REPLACE_RETRIES: u32 = 25;
+const REPLACE_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(4);
+
+#[cfg(test)]
+thread_local! {
+    /// Retries of the publishing rename made on this thread, so a test can
+    /// count them instead of timing them.
+    static REPLACE_RETRIES_MADE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// [`write_atomic`] that also flushes the content to disk before the rename,
 /// for the preference files: a power loss right after Apply must not leave
 /// an empty `settings.json` that the next launch treats as damaged. Status
@@ -76,6 +88,16 @@ fn write_atomic_with(
     audience: Audience,
     write: impl FnOnce(&mut fs::File) -> io::Result<()>,
 ) -> io::Result<()> {
+    write_atomic_retrying(path, sync, audience, REPLACE_RETRIES, write)
+}
+
+fn write_atomic_retrying(
+    path: &Path,
+    sync: bool,
+    audience: Audience,
+    retries: u32,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -109,10 +131,12 @@ fn write_atomic_with(
     loop {
         match tmp.persist(path) {
             Ok(_) => return Ok(()),
-            Err(e) if attempt < 25 && is_transient_replace_error(&e.error) => {
+            Err(e) if attempt < retries && is_transient_replace_error(&e.error) => {
                 attempt += 1;
                 tmp = e.file;
-                std::thread::sleep(std::time::Duration::from_millis(4));
+                #[cfg(test)]
+                REPLACE_RETRIES_MADE.with(|made| made.set(made.get() + 1));
+                std::thread::sleep(REPLACE_RETRY_PAUSE);
             }
             Err(e) => return Err(e.error),
         }
@@ -142,6 +166,20 @@ pub fn strip_utf8_bom_str(text: &str) -> &str {
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
     write_atomic(path, text.as_bytes())
+}
+
+/// [`write_json_atomic`] for telemetry written from a thread that must not
+/// wait: one attempt at the rename, no retries. A reader or a virus scanner
+/// holding the old file open makes [`write_atomic`] sleep for up to 100 ms;
+/// on the capture thread that is several lost frames for a file whose next
+/// version is due seconds later. The caller skips a failed write, and the
+/// previous file stays in place. Never for preferences or for a status the
+/// controls act on.
+pub fn write_json_atomic_once<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
+    write_atomic_retrying(path, false, Audience::Owner, 0, |file| {
+        file.write_all(text.as_bytes())
+    })
 }
 
 /// [`write_json_atomic`] through [`write_atomic_durable`].
@@ -203,6 +241,36 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "two");
         // Whatever name the temporary had, nothing but the published file remains.
         assert_eq!(entries(&nested), ["file.json"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_single_attempt_write_gives_up_at_once_when_the_file_is_held() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desktop-capture-status.json");
+        write_json_atomic_once(&path, &serde_json::json!({"frames": 1})).unwrap();
+        // Opened without sharing: the rename over it is refused the way it
+        // is while a scanner or a reader without FILE_SHARE_DELETE has it.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let retries = || REPLACE_RETRIES_MADE.with(|made| made.replace(0));
+        retries();
+        let once = write_json_atomic_once(&path, &serde_json::json!({"frames": 2}));
+        assert!(once.is_err(), "the held file was replaced");
+        assert_eq!(retries(), 0, "the single attempt waited and tried again");
+        // The ordinary write does retry this very failure, to the limit.
+        assert!(write_json_atomic(&path, &serde_json::json!({"frames": 3})).is_err());
+        assert_eq!(retries(), REPLACE_RETRIES);
+        drop(held);
+        // Neither failure left a temporary behind or touched the content.
+        assert_eq!(entries(dir.path()), ["desktop-capture-status.json"]);
+        assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 1"));
+        write_json_atomic_once(&path, &serde_json::json!({"frames": 4})).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 4"));
     }
 
     #[test]

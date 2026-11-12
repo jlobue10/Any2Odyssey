@@ -339,7 +339,9 @@ impl Mirror {
                 bounds: self.screen,
                 source_bounds: win::window_rect(hwnd).unwrap_or_default(),
             };
-            let _ = any2odyssey_core::fsutil::write_json_atomic(
+            // Telemetry, on the capture thread: one attempt, and a write
+            // that fails is simply skipped until the next sample.
+            let _ = any2odyssey_core::fsutil::write_json_atomic_once(
                 &any2odyssey_core::paths::desktop_capture_status_file(),
                 &status,
             );
