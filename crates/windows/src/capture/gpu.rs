@@ -196,8 +196,15 @@ impl GpuDesktopCapture {
         } else {
             DirectXPixelFormat::B8G8R8A8UIntNormalized
         };
-        let (source, border) = WgcFrameSource::new(&device, found.monitor, format, on_frame, log)
-            .map_err(|e| format!("Windows Graphics Capture: {e}"))?;
+        let (source, border) = WgcFrameSource::new(
+            &device,
+            found.monitor,
+            format,
+            display_color::refresh_rate(device_name),
+            on_frame,
+            log,
+        )
+        .map_err(|e| format!("Windows Graphics Capture: {e}"))?;
         log(&format!(
             "GPU desktop capture format: {format:?}; SDR white scale {}",
             color.color().white_scale
