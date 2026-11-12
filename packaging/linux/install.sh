@@ -48,12 +48,20 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY=1 ;;
         --uninstall) UNINSTALL=1 ;;
         --windows-root) [ $# -ge 2 ] || { echo "install: --windows-root needs a folder" >&2; exit 2; }; WINROOT=${2%/}; shift ;;
-        --prefix) [ $# -ge 2 ] || { echo "install: --prefix needs a folder" >&2; exit 2; }; PREFIX=${2%/}; shift ;;
+        --prefix) [ $# -ge 2 ] || { echo "install: --prefix needs a folder" >&2; exit 2; }; PREFIX=$2; shift ;;
         -h | --help) sed -n '3,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "install: unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
 done
+
+# Desktop entries are line based, and an empty prefix must not select /bin.
+if [ -z "$PREFIX" ] || [ "$PREFIX" != "$(printf '%s' "$PREFIX" | tr -d '\r\n')" ]; then
+    echo "install: --prefix must be a nonempty folder without line breaks" >&2
+    exit 2
+fi
+# A launcher must work independently of the installer's working directory.
+PREFIX=$(readlink -m -- "$PREFIX")
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -128,7 +136,37 @@ if [ -z "$PACKAGED" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
     else
         mkdir -p "$SHARE/applications"
-        sed "s|^Exec=any2odyssey|Exec=\"$BIN/any2odyssey\"|" "$HERE/any2odyssey.desktop" >"$SHARE/applications/any2odyssey.desktop"
+        # Pass the path as data, never as a sed/awk program or replacement.
+        # Exec arguments undergo both desktop-string and command-line unescaping.
+        A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
+            function quote_arg(value,    slash, quoted, i, c) {
+                slash = sprintf("%c", 92)
+                quoted = "\""
+                for (i = 1; i <= length(value); i++) {
+                    c = substr(value, i, 1)
+                    if (c == slash) quoted = quoted slash slash slash slash
+                    else if (c == "\"" || c == "$" || c == "`") quoted = quoted slash slash c
+                    else if (c == "%") quoted = quoted "%%"
+                    else quoted = quoted c
+                }
+                return quoted "\""
+            }
+            BEGIN {
+                path = ENVIRON["A2O_DESKTOP_EXE"]
+                command = quote_arg(path)
+                # Exec forbids = in its executable name; GLib also looks up that
+                # name before expanding %%. Use a fixed script for those paths,
+                # keeping the path and file as data in positional arguments.
+                if (index(path, "=") || index(path, "%"))
+                    command = "/bin/sh -c " quote_arg("exec \"$@\"") " any2odyssey " command
+            }
+            /^Exec=any2odyssey([[:space:]]|$)/ {
+                sub(/^Exec=any2odyssey/, "")
+                print "Exec=" command $0
+                next
+            }
+            { print }
+        ' "$HERE/any2odyssey.desktop" >"$SHARE/applications/any2odyssey.desktop"
     fi
     run install -Dm644 "$HERE/any2odyssey.png" "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
     for f in README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md \
