@@ -214,6 +214,8 @@ jobs:
           ASAN_OPTIONS=detect_leaks=0 timeout 60 /tmp/test-camera-client
       - name: Serial port keeper tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-noxon.py
+      - name: Monitor registry file tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-mkedid.py
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
