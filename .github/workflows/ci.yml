@@ -9,13 +9,16 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request supersedes its running checks. Every other run gets a group of
-# its own, so each commit on main still produces its artifacts: within one group GitHub keeps only
-# the newest pending run even with cancel-in-progress off, which is how a per-branch group cancelled
-# the queued run of one merge when the next merge arrived.
+# A newer push to a pull request supersedes its running checks, and so does a newer push to main:
+# a series of merges otherwise queues one full run per merge (44 merges once queued 28 of them)
+# and the pull requests still open wait behind runs whose result nobody will read. The price is
+# that a commit on main overtaken by the next one gets no finished run and no artifacts of its
+# own: its cancelled run can be re-run from the Actions page once main is quiet (a re-run joins
+# the same group). A run started by hand (workflow_dispatch) gets a group of its own and is never
+# cancelled.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 env:
   CARGO_TERM_COLOR: always
