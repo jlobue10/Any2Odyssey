@@ -1745,6 +1745,10 @@ impl ViewerState {
     pub fn show_output(&mut self, ctx: &egui::Context) {
         if !self.output_open {
             // Every way the output ends comes through here on the next frame.
+            // One that ends by itself (depth that failed, options the image
+            // cannot take) has not let the lens picture go: the two fitted
+            // eyes and the texture, each as large as the panel.
+            self.lens.release();
             self.lens_switch.set(false, || {});
             self.weaver.stop();
             self.stop_live();
@@ -3444,5 +3448,32 @@ mod tests {
         state.options_edited(before);
         assert!(state.output_open);
         assert_eq!(state.status, OUTPUT_ON);
+    }
+
+    #[test]
+    fn an_output_that_ends_by_itself_lets_the_lens_picture_go() {
+        let ctx = egui::Context::default();
+        let mut state = ViewerState::default();
+        state.options.output = Output::Lens;
+        state.options.half_width = false;
+        state.document.set_source(pair(), state.options).unwrap();
+        state.toggle_output();
+        assert!(state.output_open);
+        // What the output window does for its area of the panel.
+        let generation = state.document.generation;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let pair = state.document.result.as_deref();
+            let woven = state
+                .lens
+                .texture(ctx, pair, generation, 1.0, [8, 4], (0, 0));
+            assert!(woven.is_some());
+        });
+        assert!(state.lens.holds_picture());
+        // The image cannot be a pair any more: the output ends by itself.
+        state.document.source = Some(Arc::new(RgbaImage::new(3, 2)));
+        state.options_changed();
+        assert!(!state.output_open);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| state.show_output(ctx));
+        assert!(!state.lens.holds_picture());
     }
 }
