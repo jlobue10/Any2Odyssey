@@ -750,6 +750,14 @@ impl ViewerState {
     fn show_odyssey(&mut self, ctx: &egui::Context) {
         self.lens.release();
         self.lens_switch.set(false, || {});
+        if !self.options.live() && self.document.result().is_none() {
+            // AI depth may be pending after changing the image or its options.
+            // Retire the old picture without replacing the estimation status.
+            self.output_open = false;
+            self.weaver.stop();
+            self.stop_live();
+            return;
+        }
         if !self.weaver.is_running() {
             if matches!(self.weaver.status(), WeaverStatus::Failed(_)) {
                 // Started and failed: say why and leave it at that.
@@ -1924,6 +1932,78 @@ mod tests {
             fit_centered(area, egui::Vec2::ZERO).size(),
             egui::Vec2::ZERO
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn odyssey_stops_showing_the_previous_still_while_depth_is_pending() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("weaver.sh");
+        std::fs::write(&helper, "#!/bin/sh\nprintf 'on\n'\ncat >/dev/null\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for transition in 0..3 {
+            let mut state = ViewerState::default();
+            state.options.output = Output::Odyssey;
+            if transition != 0 {
+                state.options.input = Input::Ai;
+            }
+            state.document.set_source(pair(), state.options).unwrap();
+            if transition != 0 {
+                state
+                    .document
+                    .set_depth(
+                        state.document.source_id,
+                        DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap(),
+                        state.options,
+                    )
+                    .unwrap();
+            }
+            assert!(state.document.result().is_some());
+            state.weaver = Weaver::with_helper(Some(helper.clone()));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                state.weaver.start(false, || {});
+                if !matches!(state.weaver.status(), WeaverStatus::Failed(ref e) if e.contains("busy"))
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            while !matches!(state.weaver.status(), WeaverStatus::On { .. }) {
+                assert!(!state.weaver.poll(), "helper stopped");
+                assert!(!matches!(state.weaver.status(), WeaverStatus::Failed(_)));
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // A real frame has been published before conversion becomes pending.
+            state.weaver.show(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]);
+            state.output_open = true;
+            match transition {
+                0 => {
+                    state.options.input = Input::Ai;
+                    state.options_changed();
+                }
+                1 => {
+                    state.document.forget_depth();
+                    state.options_changed();
+                }
+                _ => {
+                    state.document.set_source(pair(), state.options).unwrap();
+                }
+            }
+            assert!(state.document.result().is_none());
+            state.status = ESTIMATING.into();
+            state.show_output(&egui::Context::default());
+            assert!(
+                !state.weaver.is_running(),
+                "previous picture survives transition {transition}"
+            );
+            assert!(!state.output_open);
+            assert_eq!(state.status, ESTIMATING);
+        }
     }
 
     #[test]
