@@ -1,9 +1,11 @@
 //! Shared application state and the supervisor loop. The GUI thread renders
 //! from it; a poller thread drives worker supervision, named events, tray
 //! menu and hotkey events every 250 ms, so everything keeps working while the
-//! controls window is hidden in the tray.
+//! controls window is hidden in the tray. A hotkey, a tray command or a
+//! finished start or stop wakes the poller at once; the 250 ms tick is what
+//! notices everything else.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use any2odyssey_core::log::Logger;
@@ -16,6 +18,71 @@ use any2odyssey_core::update::{self, Comparison, UpdateState};
 use crate::platform::{self, ControlEvents, Worker};
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Lets another thread end the poller's wait early. A wake-up that arrives
+/// while the poller is busy is kept for its next wait, so none is lost.
+pub struct PollWake {
+    pending: Mutex<bool>,
+    signal: Condvar,
+}
+
+impl PollWake {
+    pub const fn new() -> PollWake {
+        PollWake {
+            pending: Mutex::new(false),
+            signal: Condvar::new(),
+        }
+    }
+
+    pub fn notify(&self) {
+        *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.signal.notify_one();
+    }
+
+    /// Wait for a wake-up, at most `timeout`. True when woken early.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut pending, _) = self
+            .signal
+            .wait_timeout_while(pending, timeout, |pending| !*pending)
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *pending)
+    }
+}
+
+static POLL_WAKE: PollWake = PollWake::new();
+
+/// Run the poller's next tick now instead of up to [`POLL_INTERVAL`] from
+/// now. Takes no lock but its own, so it is safe from any thread, including
+/// a window procedure and a thread that holds `Core`.
+pub fn wake_poller() {
+    POLL_WAKE.notify();
+}
+
+/// Events a library hands to a callback on the GUI thread (hotkeys, the tray
+/// icon and its menu), kept until the poller drains them. Pushing one wakes
+/// the poller, so a hotkey acts when it is pressed rather than at the next
+/// tick.
+pub struct Forwarded<T>(Mutex<Vec<T>>);
+
+impl<T> Forwarded<T> {
+    pub const fn new() -> Forwarded<T> {
+        Forwarded(Mutex::new(Vec::new()))
+    }
+
+    pub fn push(&self, event: T) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event);
+        wake_poller();
+    }
+
+    /// Everything pushed since the last call, oldest first.
+    pub fn take(&self) -> Vec<T> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
 
 /// How long the answer to a user action stays on the status line while a
 /// running worker keeps reporting the same state. See `show_worker_state`.
@@ -119,6 +186,11 @@ pub struct Core {
     /// was running, and when the poller first saw it.
     held_status: Option<(String, Instant)>,
     settings_load_error: Option<String>,
+    /// What `settings.json` holds: the preferences as last written by this
+    /// process. `None` until the first successful save, so each session
+    /// proves once that the file can be written; after that a save of
+    /// unchanged preferences is skipped. See `save_preferences`.
+    saved_prefs: Option<Preferences>,
     pub supervisor: Supervisor,
     pub worker: Option<Worker>,
     operation: Option<mpsc::Receiver<WorkerResult>>,
@@ -212,6 +284,7 @@ impl Core {
             worker_state: None,
             held_status: None,
             settings_load_error,
+            saved_prefs: None,
             worker: None,
             operation: None,
             generation: 0,
@@ -240,6 +313,17 @@ impl Core {
         self.logger.log(message);
     }
 
+    /// Write the preferences to `settings.json` unless that is what the
+    /// file already holds.
+    ///
+    /// Every start, restart, Apply and recovery relaunch passes through
+    /// here, several of them twice (Start saves and then `start_worker`
+    /// saves again), and each write is flushed to disk while the caller
+    /// holds the lock the GUI takes every frame. Only the last copy this
+    /// process wrote successfully counts as saved: a failed write leaves
+    /// that record alone, so the same preferences are tried again by the
+    /// next caller and keep blocking Start, Apply and Restart until a
+    /// write succeeds.
     pub fn save_preferences(&mut self) -> bool {
         self.prefs.recover = self.supervisor.recover;
         if self.preview {
@@ -249,11 +333,17 @@ impl Core {
             self.status = settings_recovery_message(error);
             return false;
         }
+        // The saved form is the sanitized one; compare like with like.
+        self.prefs.sanitize();
+        if self.saved_prefs.as_ref() == Some(&self.prefs) {
+            return true;
+        }
         if let Err(e) = self.prefs.save() {
             self.status = format!("Could not save preferences: {e}");
             self.log(&self.status);
             return false;
         }
+        self.saved_prefs = Some(self.prefs.clone());
         true
     }
 
@@ -351,6 +441,7 @@ impl Core {
                         ));
                     }
                     self.settings_load_error = None;
+                    self.saved_prefs = Some(self.prefs.clone());
                 }
                 Err(error) => {
                     self.status =
@@ -417,6 +508,7 @@ impl Core {
                 // A closed receiver must never leave a newly spawned worker orphaned.
                 worker.stop();
             }
+            wake_poller();
         });
     }
 
@@ -434,6 +526,8 @@ impl Core {
             }
             std::thread::spawn(move || {
                 let _ = tx.send(WorkerResult::Stopped(worker.stop()));
+                // An Apply or Restart is waiting for this to start again.
+                wake_poller();
             });
         }
     }
@@ -540,6 +634,7 @@ impl Core {
         self.update_task = Some(rx);
         std::thread::spawn(move || {
             let _ = tx.send(platform::check_updates());
+            wake_poller();
         });
     }
 
@@ -757,7 +852,13 @@ impl Core {
 
 /// The status file, when it was written by the worker with this pid.
 fn read_worker_status(worker_pid: u32) -> Option<WorkerStatus> {
-    let text = std::fs::read_to_string(paths::worker_status_file()).ok()?;
+    // Read four times a second under the shared-state lock: never more
+    // than a status file can be, whatever is put in its place.
+    let text = any2odyssey_core::fsutil::read_to_string_limited(
+        &paths::worker_status_file(),
+        any2odyssey_core::fsutil::SMALL_FILE_LIMIT,
+    )
+    .ok()?;
     let status: WorkerStatus = serde_json::from_str(&text).ok()?;
     (status.pid == worker_pid).then_some(status)
 }
@@ -768,16 +869,21 @@ fn read_status(worker_pid: u32) -> Option<String> {
 
 /// Open a page from an update result in the browser. Only GitHub's own hosts
 /// pass; anything else is ignored. The check runs here, synchronously; the
-/// launch itself runs on its own thread because `open` can wait up to 250 ms
-/// for the launcher and the caller holds the shared state inside a GUI frame.
+/// launch itself runs on its own thread because it can take a moment and
+/// the caller holds the shared state inside a GUI frame.
 pub fn open_release_url(url: &str) {
     if !update::allowed_url(url) {
         return;
     }
-    let url = url.to_owned();
-    std::thread::spawn(move || {
-        let _ = open::that_detached(url);
-    });
+    #[cfg(windows)]
+    platform::open_url(url);
+    #[cfg(not(windows))]
+    {
+        let url = url.to_owned();
+        std::thread::spawn(move || {
+            let _ = open::that_detached(url);
+        });
+    }
 }
 
 fn settings_recovery_message(error: &str) -> String {
@@ -846,7 +952,7 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
     std::thread::Builder::new()
         .name("any2odyssey-poller".into())
         .spawn(move || loop {
-            std::thread::sleep(POLL_INTERVAL);
+            POLL_WAKE.wait(POLL_INTERVAL);
             let mut show = false;
             let mut quit = false;
             let repaint;
@@ -1188,6 +1294,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unchanged_preferences_are_written_once_and_a_failed_save_is_retried() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let settings = dir.path().join("settings.json");
+        let mut core = isolated(dir.path());
+        core.preview = false;
+
+        // The first save of a session always writes, even defaults.
+        assert!(core.save_preferences());
+        let first = std::fs::read(&settings).unwrap();
+        // Removing the file shows whether a later call wrote it again.
+        std::fs::remove_file(&settings).unwrap();
+        assert!(core.save_preferences());
+        assert!(core.save_preferences());
+        assert!(!settings.exists(), "unchanged preferences were rewritten");
+
+        // A change is written, including one only the supervisor holds.
+        core.prefs.depth = 1.25;
+        assert!(core.save_preferences());
+        assert_eq!(Preferences::load_from(&settings).unwrap().depth, 1.25);
+        core.supervisor.recover = false;
+        assert!(core.save_preferences());
+        assert!(!Preferences::load_from(&settings).unwrap().recover);
+
+        // An out-of-range value is saved, and compared, in its clamped form.
+        core.prefs.depth = 99.0;
+        assert!(core.save_preferences());
+        std::fs::remove_file(&settings).unwrap();
+        core.prefs.depth = 99.0;
+        assert!(core.save_preferences());
+        assert!(!settings.exists(), "the clamped value was already saved");
+
+        // A failed save stays failed for as long as the write fails, and
+        // the same preferences are written once it can succeed.
+        std::fs::create_dir(&settings).unwrap();
+        core.prefs.side_by_side = true;
+        for _ in 0..2 {
+            assert!(!core.save_preferences());
+            assert!(core.status.starts_with("Could not save preferences:"));
+        }
+        std::fs::remove_dir(&settings).unwrap();
+        assert!(core.save_preferences());
+        assert!(Preferences::load_from(&settings).unwrap().side_by_side);
+        assert_ne!(std::fs::read(&settings).unwrap(), first);
+    }
+
+    #[test]
+    fn a_wake_up_ends_the_poll_wait_early_and_is_never_lost() {
+        let wake = Arc::new(PollWake::new());
+        // Nothing pending: the wait runs out.
+        assert!(!wake.wait(Duration::from_millis(20)));
+        // Signalled while nobody waits (the poller is busy): the next wait
+        // returns at once, and only once.
+        wake.notify();
+        wake.notify();
+        let started = Instant::now();
+        assert!(wake.wait(Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!wake.wait(Duration::from_millis(20)));
+        // Signalled from another thread during the wait.
+        let waker = {
+            let wake = wake.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                wake.notify();
+            })
+        };
+        let started = Instant::now();
+        assert!(wake.wait(Duration::from_secs(30)));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        waker.join().unwrap();
+    }
+
+    #[test]
+    fn forwarded_events_come_out_once_in_order() {
+        let queue = Forwarded::new();
+        assert!(queue.take().is_empty());
+        queue.push(1);
+        queue.push(2);
+        assert_eq!(queue.take(), vec![1, 2]);
+        assert!(queue.take().is_empty());
+        queue.push(3);
+        assert_eq!(queue.take(), vec![3]);
+    }
+
     fn isolated(dir: &std::path::Path) -> Core {
         Core {
             prefs: Preferences::default(),
@@ -1197,6 +1391,7 @@ mod tests {
             worker_state: None,
             held_status: None,
             settings_load_error: None,
+            saved_prefs: None,
             supervisor: Supervisor::new(true),
             worker: None,
             operation: None,

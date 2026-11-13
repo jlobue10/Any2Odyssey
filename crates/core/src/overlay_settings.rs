@@ -53,7 +53,9 @@ pub fn update_file(
     popout: f64,
 ) -> std::io::Result<()> {
     use std::io::{self, Write};
-    let original = match std::fs::read(path) {
+    // Capped: the file sits where low-integrity processes may write, and
+    // the worker would otherwise load whatever size it finds at every start.
+    let original = match crate::fsutil::read_limited(path, crate::fsutil::SMALL_FILE_LIMIT) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
@@ -122,6 +124,23 @@ pub fn update_file(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_oversized_settings_file_is_refused_and_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        // Valid JSON, one byte over the limit.
+        let filler = "x".repeat(crate::fsutil::SMALL_FILE_LIMIT as usize - 9);
+        let original = format!(r#"{{"pad":"{filler}"}}"#);
+        assert_eq!(original.len() as u64, crate::fsutil::SMALL_FILE_LIMIT + 1);
+        std::fs::write(&path, &original).unwrap();
+        let error = update_file(&path, &backup, false, 0.9, 0.0).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("larger than"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(!backup.exists());
+    }
 
     #[test]
     fn writes_expected_section_and_keeps_other_content() {

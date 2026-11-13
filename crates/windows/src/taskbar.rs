@@ -15,14 +15,16 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{FlashWindowEx, FLASHWINFO, FLASHW_STOP};
 
 use crate::processes::current_pid;
-use crate::win::{class_name, process_id, title, wide};
+use crate::win::{class_name, process_id, stored_title, wide};
 
 /// Remove `window`'s taskbar button. Refuses anything that is not this
 /// process's renderer output window, so a bug cannot touch other apps.
 pub fn remove_renderer_tab(window: HWND) -> Result<(), String> {
     if process_id(window) != current_pid()
         || class_name(window) != ipc::ENGINE_OUTPUT_CLASS
-        || !ipc::is_output_title(&title(window))
+        // The stored title: asking the window itself would wait for the
+        // engine's thread (see `win::stored_title`).
+        || !ipc::is_output_title(&stored_title(window))
     {
         return Err("Refusing taskbar cleanup for a window outside this renderer.".into());
     }

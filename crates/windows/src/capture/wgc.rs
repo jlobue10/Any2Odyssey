@@ -65,6 +65,56 @@ fn optional_frame<T>(result: windows::core::Result<T>) -> Result<Option<T>, Stri
     }
 }
 
+/// The minimum update interval used when the display's refresh rate is
+/// unknown: 16 ms, in the 100 ns units of a `TimeSpan`.
+const DEFAULT_MIN_UPDATE_INTERVAL: i64 = 160_000;
+
+/// A refresh rate the cadence can be derived from. Anything outside this
+/// range is a failed or nonsensical query, not a display.
+fn plausible_refresh(refresh_hz: Option<f64>) -> Option<f64> {
+    refresh_hz.filter(|hz| (24.0..=1000.0).contains(hz))
+}
+
+/// How many display refreshes pass per delivered frame: as close to 60
+/// frames a second as a whole number of refreshes gets.
+fn refreshes_per_frame(refresh_hz: f64) -> f64 {
+    (refresh_hz / 60.0).round().max(1.0)
+}
+
+/// The capture session's minimum update interval, in 100 ns units, for a
+/// display refreshing at `refresh_hz`.
+///
+/// Windows delivers a frame at the first refresh after the interval has
+/// passed, so an interval close to a multiple of the refresh period beats
+/// against it: the fixed 16 ms left 0.67 ms of slack at 120 Hz (two refreshes
+/// are 16.67 ms), and ordinary timing jitter slipped frames to the third
+/// refresh (57 fps measured); at 144 Hz it selected every third refresh
+/// (48 fps). Half a refresh short of the wanted number of refreshes puts the
+/// deadline midway between two of them. A rate that is unknown or implausible
+/// keeps the old 16 ms.
+pub fn min_update_interval(refresh_hz: Option<f64>) -> i64 {
+    let Some(hz) = plausible_refresh(refresh_hz) else {
+        return DEFAULT_MIN_UPDATE_INTERVAL;
+    };
+    let period = 10_000_000.0 / hz;
+    ((refreshes_per_frame(hz) - 0.5) * period).round() as i64
+}
+
+/// The cadence part of the capture-started log line.
+fn cadence_note(refresh_hz: Option<f64>) -> String {
+    let millis = min_update_interval(refresh_hz) as f64 / 10_000.0;
+    match (plausible_refresh(refresh_hz), refresh_hz) {
+        (Some(hz), _) => format!(
+            "{millis:.2} ms minimum interval (display at {hz:.2} Hz, one frame per {} refresh(es))",
+            refreshes_per_frame(hz)
+        ),
+        (None, Some(hz)) => format!(
+            "{millis:.2} ms minimum interval (the reported refresh rate, {hz:.2} Hz, was not used)"
+        ),
+        (None, None) => format!("{millis:.2} ms minimum interval (display refresh rate unknown)"),
+    }
+}
+
 /// Information about the border-permission request, for the status file.
 pub struct BorderOutcome {
     pub access: String,
@@ -76,10 +126,13 @@ impl WgcFrameSource {
     /// Start capturing `monitor` with `device`. `on_frame` is invoked on a
     /// capture thread for every arriving frame (the caller should just wake
     /// its own thread; use [`WgcFrameSource::take_latest`] to read).
+    /// `refresh_hz` is the monitor's refresh rate when known; it sets the
+    /// frame cadence, see [`min_update_interval`].
     pub fn new(
         device: &ID3D11Device,
         monitor: HMONITOR,
         pixel_format: DirectXPixelFormat,
+        refresh_hz: Option<f64>,
         on_frame: impl Fn() + Send + Sync + 'static,
         log: &dyn Fn(&str),
     ) -> windows::core::Result<(WgcFrameSource, BorderOutcome)> {
@@ -111,8 +164,9 @@ impl WgcFrameSource {
                 ));
             }
             let border = configure_border(&session, log);
-            // 16 ms minimum interval; TimeSpan is in 100 ns units.
-            session.SetMinUpdateInterval(TimeSpan { Duration: 160_000 })?;
+            session.SetMinUpdateInterval(TimeSpan {
+                Duration: min_update_interval(refresh_hz),
+            })?;
             let handler = windows::Foundation::TypedEventHandler::<
                 Direct3D11CaptureFramePool,
                 windows::core::IInspectable,
@@ -155,7 +209,10 @@ impl WgcFrameSource {
                 return Err(e);
             }
         };
-        log("WGC desktop capture started: cursor excluded, latest frame only, 16 ms minimum interval.");
+        log(&format!(
+            "WGC desktop capture started: cursor excluded, latest frame only, {}.",
+            cadence_note(refresh_hz)
+        ));
         Ok((
             WgcFrameSource {
                 _device: wrapped,
@@ -278,6 +335,64 @@ impl BorderOutcome {
 mod tests {
     use super::*;
     use windows::Win32::Foundation::{E_FAIL, RO_E_CLOSED};
+
+    #[test]
+    fn the_capture_interval_sits_half_a_refresh_before_the_wanted_one() {
+        // (refresh rate, refreshes per frame, resulting frames per second)
+        for (hz, refreshes, fps) in [
+            (60.0, 1.0, 60.0),
+            (59.94, 1.0, 59.94),
+            (75.0, 1.0, 75.0),
+            (100.0, 2.0, 50.0),
+            (120.0, 2.0, 60.0),
+            (144.0, 2.0, 72.0),
+            (165.0, 3.0, 55.0),
+            (240.0, 4.0, 60.0),
+        ] {
+            let interval = min_update_interval(Some(hz)) as f64;
+            let period = 10_000_000.0 / hz;
+            assert_eq!(refreshes_per_frame(hz), refreshes, "{hz} Hz");
+            // Half a period of slack on both sides of the deadline: the
+            // refresh before it is too early, the wanted one is late enough.
+            assert!(
+                (interval - (refreshes - 0.5) * period).abs() <= 0.5,
+                "{hz} Hz: {interval}"
+            );
+            assert!(interval > (refreshes - 1.0) * period && interval < refreshes * period);
+            assert!((hz / refreshes - fps).abs() < 1e-9, "{hz} Hz");
+        }
+        assert_eq!(min_update_interval(Some(120.0)), 125_000);
+        assert_eq!(min_update_interval(Some(60.0)), 83_333);
+        assert_eq!(min_update_interval(Some(24.0)), 208_333);
+        // Unknown or implausible: the value every earlier version used.
+        for unknown in [
+            None,
+            Some(0.0),
+            Some(23.9),
+            Some(1000.1),
+            Some(-60.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            assert_eq!(min_update_interval(unknown), 160_000, "{unknown:?}");
+        }
+    }
+
+    #[test]
+    fn the_start_line_names_the_cadence_and_where_it_came_from() {
+        assert_eq!(
+            cadence_note(Some(120.0)),
+            "12.50 ms minimum interval (display at 120.00 Hz, one frame per 2 refresh(es))"
+        );
+        assert_eq!(
+            cadence_note(None),
+            "16.00 ms minimum interval (display refresh rate unknown)"
+        );
+        assert_eq!(
+            cadence_note(Some(5.0)),
+            "16.00 ms minimum interval (the reported refresh rate, 5.00 Hz, was not used)"
+        );
+    }
 
     #[test]
     fn successful_null_frame_is_idle_but_failed_hresult_is_not() {

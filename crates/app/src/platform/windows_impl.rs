@@ -9,7 +9,8 @@ use any2odyssey_core::prefs::Preferences;
 use any2odyssey_core::update::{self, Comparison};
 use any2odyssey_windows::ipc::{Event, InstanceGuard};
 use any2odyssey_windows::{diagnostics, engine, processes, win, worker};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, IsIconic, SetForegroundWindow, ShowWindow, ASFW_ANY, SW_HIDE,
     SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
@@ -18,6 +19,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub use any2odyssey_windows::ipc::ControlEvents;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// How long a signalled worker gets to stop before it is killed. The
+/// worker's own watchdog uses the same grace (`WATCHDOG_GRACE`).
+const STOP_GRACE: Duration = Duration::from_secs(7);
 
 pub fn run_worker(event: &str, parent: u32, source: isize, preferences: Preferences) -> i32 {
     worker::run(event, parent, source, preferences)
@@ -199,16 +204,35 @@ impl Worker {
     /// Returns a log line when the worker had to be killed.
     pub fn stop(mut self) -> Option<String> {
         let _ = self.stop.set();
-        let deadline = Instant::now() + Duration::from_secs(7);
-        while Instant::now() < deadline {
-            if self.has_exited().is_some() {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        if self.wait_for_exit(STOP_GRACE) {
+            return None;
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
         Some("Renderer did not stop in 7 seconds; ending only the owned renderer.".into())
+    }
+
+    /// Block until the process has exited or `timeout` has passed; true
+    /// when it exited. Waits on the process handle, so the caller returns
+    /// the moment the worker is gone instead of at the next 50 ms look.
+    fn wait_for_exit(&mut self, timeout: Duration) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        if self.has_exited().is_some() {
+            return true;
+        }
+        let deadline = Instant::now() + timeout;
+        let handle = HANDLE(self.child.as_raw_handle());
+        // SAFETY: the handle belongs to `self.child`, which outlives the
+        // call, and a process handle from `Command::spawn` can be waited on.
+        let waited = unsafe { WaitForSingleObject(handle, timeout.as_millis() as u32) };
+        if waited != WAIT_OBJECT_0 && waited != WAIT_TIMEOUT {
+            // The wait itself failed. Fall back to looking at intervals, so
+            // a worker that is stopping still gets its full grace.
+            while self.has_exited().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        self.has_exited().is_some()
     }
 }
 
@@ -262,11 +286,28 @@ pub fn hide_window(hwnd: isize) {
 }
 
 pub fn open_path(path: &Path) {
-    // `open` waits up to 250 ms for its launcher; callers hold the shared
-    // state or the GUI frame, so do that off their thread.
-    let path = path.to_path_buf();
+    shell_open_detached(path.as_os_str().to_owned());
+}
+
+/// Open a web page in the default browser. The caller has checked the URL
+/// against the allow-list (`core::open_release_url`).
+pub fn open_url(url: &str) {
+    shell_open_detached(url.into());
+}
+
+/// Hand `target` to the shell on a thread of its own: callers hold the
+/// shared state or the GUI frame, and a launch can take a moment.
+///
+/// Through `ShellExecuteEx`, not the `open` crate: without a feature that
+/// needs another dependency, `open` 5.4 starts `powershell.exe -Command` to
+/// do the same, which takes a second or so and is refused outright where
+/// PowerShell is restricted by policy. It stays as the fallback, so a
+/// failed shell call still opens what it opened before.
+fn shell_open_detached(target: std::ffi::OsString) {
     std::thread::spawn(move || {
-        let _ = open::that_detached(path);
+        if win::shell_open(&target).is_err() {
+            let _ = open::that_detached(&target);
+        }
     });
 }
 
@@ -305,4 +346,46 @@ pub fn install_jump_list() {
 pub fn check_updates() -> Result<Comparison, String> {
     let body = any2odyssey_windows::update::fetch(&update::Request::latest_release())?;
     update::evaluate_latest_release(&body).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_running(command: &str) -> Worker {
+        let mut worker = Worker::fake();
+        let _ = worker.child.wait();
+        worker.child = Command::new("cmd.exe")
+            .args(["/C", command])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cmd.exe");
+        worker
+    }
+
+    #[test]
+    fn waiting_for_a_worker_returns_when_it_exits_and_times_out_when_it_does_not() {
+        // Exits by itself after about a second: the wait must end with it,
+        // long before the timeout.
+        let mut quick = fake_running("ping -n 2 127.0.0.1 >NUL");
+        let started = Instant::now();
+        assert!(quick.wait_for_exit(Duration::from_secs(60)));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(quick.has_exited().is_some());
+        assert!(quick.wait_for_exit(Duration::ZERO), "already exited");
+
+        // Still running when the timeout ends.
+        let mut slow = fake_running("ping -n 30 127.0.0.1 >NUL");
+        let started = Instant::now();
+        assert!(!slow.wait_for_exit(Duration::from_millis(200)));
+        // A timed wait may end up to one tick of the system clock (15.6 ms)
+        // early; it must not return at once.
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(slow.has_exited().is_none());
+        let _ = slow.child.kill();
+        let _ = slow.child.wait();
+    }
 }

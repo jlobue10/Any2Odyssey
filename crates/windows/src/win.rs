@@ -18,10 +18,10 @@ use windows::Win32::Graphics::Gdi::{
 const MONITORINFOF_PRIMARY: u32 = 1;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS, SET_WINDOW_POS_FLAGS,
-    SHOW_WINDOW_CMD, WINDOW_EX_STYLE,
+    GetWindowTextW, GetWindowThreadProcessId, InternalGetWindowText, IsIconic, IsWindow,
+    IsWindowVisible, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
+    LAYERED_WINDOW_ATTRIBUTES_FLAGS, SET_WINDOW_POS_FLAGS, SHOW_WINDOW_CMD, WINDOW_EX_STYLE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowDisplayAffinity, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
@@ -73,6 +73,16 @@ pub fn title(h: HWND) -> String {
     let mut buf = [0u16; 512];
     let n = unsafe { GetWindowTextW(h, &mut buf) };
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+/// The title as the window manager stores it, read without sending
+/// `WM_GETTEXT`. `GetWindowTextW` sends that message, and waits for the
+/// answer, when the window belongs to another thread of this process; a
+/// thread that is busy or stuck then holds the caller. For a window whose
+/// class leaves its text to the default window procedure the two agree.
+pub fn stored_title(h: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { InternalGetWindowText(h, &mut buf) };
+    String::from_utf16_lossy(&buf[..n.clamp(0, buf.len() as i32) as usize])
 }
 pub fn class_name(h: HWND) -> String {
     let mut buf = [0u16; 256];
@@ -142,6 +152,12 @@ pub fn set_layer_alpha(h: HWND, alpha: u8) -> windows::core::Result<()> {
 pub fn show_window(h: HWND, cmd: i32) -> bool {
     unsafe { ShowWindow(h, SHOW_WINDOW_CMD(cmd)).as_bool() }
 }
+/// `ShowWindow` posted to the thread that owns `h` instead of sent to it:
+/// the caller does not wait for that thread. False when it could not be
+/// posted.
+pub fn show_window_async(h: HWND, cmd: i32) -> bool {
+    unsafe { ShowWindowAsync(h, SHOW_WINDOW_CMD(cmd)).as_bool() }
+}
 pub fn set_window_pos(
     h: HWND,
     after: Option<HWND>,
@@ -160,6 +176,10 @@ pub const SWP_NOSIZE_NOMOVE_NOACTIVATE: u32 = 0x0001 | 0x0002 | 0x0010;
 pub const SWP_NOZORDER: u32 = 0x0004;
 pub const SWP_SHOWWINDOW: u32 = 0x0040;
 pub const SWP_FRAMECHANGED: u32 = 0x0020;
+/// The request is posted to the thread that owns the window rather than sent
+/// to it, so the caller does not wait for that thread to process it. Only
+/// for a window of another thread; the new position applies a moment later.
+pub const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
 pub const SW_SHOWNOACTIVATE: i32 = 4;
 
 pub fn set_capture_excluded(h: HWND) -> windows::core::Result<()> {
@@ -383,5 +403,69 @@ mod monitor_overlap_tests {
             .observe(bounds, Some(Rect::new(0, 0, 3840, 2160)))
             .as_bool());
         assert!(state.finish(false).is_err());
+    }
+}
+
+/// Open a folder or a URL with whatever Windows associates with it, as a
+/// double-click would, through the shell itself rather than a helper
+/// process. Blocking; call it off the GUI thread.
+///
+/// The caller decides what may be opened (a folder of ours, an allow-listed
+/// URL): the shell runs a program when handed one.
+pub fn shell_open(target: &std::ffi::OsStr) -> windows::core::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::E_INVALIDARG;
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file: Vec<u16> = target.encode_wide().collect();
+    // The shell would stop at an embedded NUL and open something shorter
+    // than what the caller checked.
+    if file.is_empty() || file.contains(&0) {
+        return Err(E_INVALIDARG.into());
+    }
+    let file: Vec<u16> = file.into_iter().chain(std::iter::once(0)).collect();
+    // The shell may hand the request to a COM extension. A thread already in
+    // another apartment model keeps it; only a successful call is undone.
+    let initialized =
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        // NOASYNC: the calling thread ends right after this returns, so the
+        // launch must be complete by then. NO_UI: a failure is the caller's
+        // to handle, not a message box from a tray application.
+        fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI,
+        lpVerb: windows::core::w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: `info` is fully initialized and `file` outlives the call.
+    let result = unsafe { ShellExecuteExW(&mut info) };
+    if initialized.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(test)]
+mod shell_open_tests {
+    use super::*;
+
+    // Opening something for real would put a browser or an Explorer window
+    // on the desktop of whoever runs the tests; only the refusals run here.
+    #[test]
+    fn nothing_is_opened_for_an_empty_or_nul_carrying_target() {
+        use std::ffi::OsStr;
+        use windows::Win32::Foundation::E_INVALIDARG;
+        for target in ["", "https://github.com/\0calc.exe", "\0"] {
+            let error = shell_open(OsStr::new(target)).unwrap_err();
+            assert_eq!(error.code(), E_INVALIDARG, "{target:?}");
+        }
     }
 }

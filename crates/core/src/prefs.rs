@@ -2,7 +2,7 @@
 //! (`ui-settings.json`). Keys keep Any2Odd's PascalCase names so a one-time
 //! import of an existing Any2Odd `settings.json` is a plain load.
 
-use crate::fsutil::write_json_atomic_durable;
+use crate::fsutil::{read_to_string_limited, write_json_atomic_durable, SMALL_FILE_LIMIT};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -125,7 +125,7 @@ impl Preferences {
     /// Only a missing file uses first-run defaults. Existing settings that
     /// cannot be read or parsed must not silently enable desktop capture.
     pub fn load_from(path: &Path) -> io::Result<Preferences> {
-        let text = match std::fs::read_to_string(path) {
+        let text = match read_to_string_limited(path, SMALL_FILE_LIMIT) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e),
@@ -202,7 +202,7 @@ impl UiSettings {
     /// unlike `settings.json`; the second value says why, so the launch can
     /// log it before the next save overwrites the file.
     pub fn load_from(path: &Path) -> (UiSettings, Option<String>) {
-        let text = match std::fs::read_to_string(path) {
+        let text = match read_to_string_limited(path, SMALL_FILE_LIMIT) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), None),
             Err(e) => return (Self::default(), Some(e.to_string())),
