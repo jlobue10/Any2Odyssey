@@ -2,6 +2,8 @@
 //! pass-through. No depth estimation and no panel calibration happen here.
 //! This is the portable-edition conversion, shared by every OS.
 
+use std::borrow::Cow;
+
 use image::{imageops, RgbaImage};
 use thiserror::Error;
 
@@ -34,64 +36,94 @@ pub fn convert(
     half_width: bool,
     swap: bool,
 ) -> Result<RgbaImage, StereoError> {
+    convert_shared(image, layout, half_width, swap).map(Cow::into_owned)
+}
+
+/// [`convert`] that hands `image` itself back where the result is the
+/// image unchanged (flat, and a side-by-side pair that is not swapped), so a
+/// caller that keeps the source does not hold a second copy of it.
+pub fn convert_shared(
+    image: &RgbaImage,
+    layout: Layout,
+    half_width: bool,
+    swap: bool,
+) -> Result<Cow<'_, RgbaImage>, StereoError> {
     if image.width() == 0 || image.height() == 0 {
         return Err(StereoError::Empty);
     }
     if layout == Layout::Flat {
-        return Ok(image.clone());
+        return Ok(Cow::Borrowed(image));
     }
     if image.width() < 2 || !image.width().is_multiple_of(2) {
         return Err(StereoError::OddWidth);
     }
-    if layout == Layout::Sbs {
-        if !swap {
-            return Ok(image.clone());
-        }
-        let mut out = RgbaImage::new(image.width(), image.height());
-        // Copy each eye directly into its destination, preserving every
-        // channel without allocating two intermediate eye images.
-        let row_bytes = image.width() as usize * 4;
-        for (src, dst) in image
-            .as_raw()
-            .chunks_exact(row_bytes)
-            .zip(out.as_mut().chunks_exact_mut(row_bytes))
-        {
-            let (left, right) = src.split_at(row_bytes / 2);
-            let (dst_left, dst_right) = dst.split_at_mut(row_bytes / 2);
-            dst_left.copy_from_slice(right);
-            dst_right.copy_from_slice(left);
-        }
-        return Ok(out);
-    }
+    let row_bytes = image.width() as usize * 4;
     let eye = image.width() / 2;
-    let mut left = imageops::crop_imm(image, 0, 0, eye, image.height()).to_image();
-    let mut right = imageops::crop_imm(image, eye, 0, eye, image.height()).to_image();
-    if swap {
-        std::mem::swap(&mut left, &mut right);
-    }
     match layout {
-        Layout::Flat | Layout::Sbs => unreachable!(),
-        Layout::Anaglyph => {
-            if half_width {
-                left = imageops::resize(
-                    &left,
-                    image.width(),
-                    image.height(),
-                    imageops::FilterType::Triangle,
-                );
-                right = imageops::resize(
-                    &right,
-                    image.width(),
-                    image.height(),
-                    imageops::FilterType::Triangle,
-                );
+        Layout::Flat => unreachable!(),
+        Layout::Sbs if !swap => Ok(Cow::Borrowed(image)),
+        Layout::Sbs => {
+            let mut out = RgbaImage::new(image.width(), image.height());
+            // Copy each eye directly into its destination, preserving every
+            // channel without allocating two intermediate eye images.
+            for (src, dst) in image
+                .as_raw()
+                .chunks_exact(row_bytes)
+                .zip(out.as_mut().chunks_exact_mut(row_bytes))
+            {
+                let (left, right) = src.split_at(row_bytes / 2);
+                let (dst_left, dst_right) = dst.split_at_mut(row_bytes / 2);
+                dst_left.copy_from_slice(right);
+                dst_right.copy_from_slice(left);
             }
-            let mut out = right;
-            for (dst, src) in out.pixels_mut().zip(left.pixels()) {
+            Ok(Cow::Owned(out))
+        }
+        Layout::Anaglyph if half_width => {
+            // Each eye is read where it lies in the pair: the filter needs
+            // no copy of its half first.
+            let stretched = |x: u32| {
+                imageops::resize(
+                    &*imageops::crop_imm(image, x, 0, eye, image.height()),
+                    image.width(),
+                    image.height(),
+                    imageops::FilterType::Triangle,
+                )
+            };
+            let (left, right) = if swap { (eye, 0) } else { (0, eye) };
+            let red = stretched(left);
+            let mut out = stretched(right);
+            for (dst, src) in out.pixels_mut().zip(red.pixels()) {
                 dst.0[0] = src.0[0];
                 dst.0[3] = 255;
             }
-            Ok(out)
+            Ok(Cow::Owned(out))
+        }
+        Layout::Anaglyph => {
+            // Red from the left eye, green and blue from the right, written
+            // straight from the pair's rows.
+            let mut out = RgbaImage::new(eye, image.height());
+            for (src, dst) in image
+                .as_raw()
+                .chunks_exact(row_bytes)
+                .zip(out.as_mut().chunks_exact_mut(row_bytes / 2))
+            {
+                let (first, second) = src.split_at(row_bytes / 2);
+                let (left, right) = if swap {
+                    (second, first)
+                } else {
+                    (first, second)
+                };
+                let pixels = dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(left.as_chunks::<4>().0)
+                    .zip(right.as_chunks::<4>().0);
+                for ((dst, left), right) in pixels {
+                    *dst = [left[0], right[1], right[2], 255];
+                }
+            }
+            Ok(Cow::Owned(out))
         }
     }
 }
@@ -158,6 +190,76 @@ mod tests {
             convert(&RgbaImage::new(0, 0), Layout::Flat, true, false),
             Err(StereoError::Empty)
         );
+    }
+
+    /// The conversion as it was when every eye was copied out of the pair
+    /// first. Kept as the definition of the result.
+    fn reference(image: &RgbaImage, layout: Layout, half_width: bool, swap: bool) -> RgbaImage {
+        if layout == Layout::Flat {
+            return image.clone();
+        }
+        let eye = image.width() / 2;
+        let mut left = imageops::crop_imm(image, 0, 0, eye, image.height()).to_image();
+        let mut right = imageops::crop_imm(image, eye, 0, eye, image.height()).to_image();
+        if swap {
+            std::mem::swap(&mut left, &mut right);
+        }
+        if layout == Layout::Sbs {
+            let mut out = RgbaImage::new(image.width(), image.height());
+            imageops::replace(&mut out, &left, 0, 0);
+            imageops::replace(&mut out, &right, i64::from(eye), 0);
+            return out;
+        }
+        if half_width {
+            let stretch = |eye: &RgbaImage| {
+                imageops::resize(
+                    eye,
+                    image.width(),
+                    image.height(),
+                    imageops::FilterType::Triangle,
+                )
+            };
+            (left, right) = (stretch(&left), stretch(&right));
+        }
+        let mut out = right;
+        for (dst, src) in out.pixels_mut().zip(left.pixels()) {
+            dst.0[0] = src.0[0];
+            dst.0[3] = 255;
+        }
+        out
+    }
+
+    #[test]
+    fn every_conversion_matches_the_copying_one_and_only_changes_are_copies() {
+        let mut noise = 0x9e37_79b9u32;
+        for (width, height) in [(2, 1), (6, 3), (34, 9)] {
+            let source = RgbaImage::from_fn(width, height, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                Rgba(noise.to_le_bytes())
+            });
+            for layout in [Layout::Flat, Layout::Sbs, Layout::Anaglyph] {
+                for (half_width, swap) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    let shared = convert_shared(&source, layout, half_width, swap).unwrap();
+                    let expected = reference(&source, layout, half_width, swap);
+                    assert_eq!(
+                        *shared, expected,
+                        "{width}x{height} {layout:?} {half_width} {swap}"
+                    );
+                    assert_eq!(
+                        convert(&source, layout, half_width, swap).unwrap(),
+                        expected
+                    );
+                    // The source itself comes back exactly where nothing
+                    // is changed.
+                    let unchanged = layout == Layout::Flat || (layout == Layout::Sbs && !swap);
+                    assert_eq!(matches!(shared, Cow::Borrowed(_)), unchanged);
+                }
+            }
+        }
     }
 
     #[test]

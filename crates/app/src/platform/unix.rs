@@ -28,6 +28,145 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 // unbounded request from a local peer (or an acknowledgement from a server).
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_REPLY_BYTES: usize = 16;
+/// How long a launch waits for another launch to finish looking at the
+/// socket and binding its own, which takes that one a few milliseconds.
+const LOCK_PATIENCE: Duration = Duration::from_secs(2);
+/// How long an instance that is leaving waits for the same before it leaves
+/// its socket's name behind for the next launch to clear away.
+const EXIT_PATIENCE: Duration = Duration::from_millis(500);
+
+/// The three calls into the C library this module makes. The standard
+/// library has no stable way to ask who is at the other end of a socket, and
+/// its file locks are newer than the oldest compiler this crate builds with.
+mod sys {
+    use std::ffi::c_int;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    extern "C" {
+        fn geteuid() -> u32;
+        fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+
+    /// The same numbers on Linux, the BSDs and macOS.
+    const LOCK_EX: c_int = 2;
+    const LOCK_NB: c_int = 4;
+
+    /// The user this process acts as.
+    pub fn own_uid() -> u32 {
+        // SAFETY: takes nothing, cannot fail and touches no memory.
+        unsafe { geteuid() }
+    }
+
+    /// Take the whole-file lock on `file` if no other open file holds it.
+    /// It goes when `file` is closed, however this process ends.
+    pub fn try_lock(file: &std::fs::File) -> std::io::Result<bool> {
+        // SAFETY: the descriptor is open for as long as `file` is borrowed,
+        // and the call touches no memory of ours.
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    /// The user at the other end of `stream`, as the kernel recorded it when
+    /// the connection was made. `Err` when the kernel does not say.
+    ///
+    /// Linux only, and only where the two option numbers are the common
+    /// ones (they differ on MIPS, PowerPC, SPARC and others).
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "x86",
+            target_arch = "arm",
+            target_arch = "riscv64"
+        )
+    ))]
+    pub fn peer_uid(stream: &UnixStream) -> Result<Option<u32>, std::io::Error> {
+        use std::ffi::c_void;
+        extern "C" {
+            fn getsockopt(
+                fd: c_int,
+                level: c_int,
+                name: c_int,
+                value: *mut c_void,
+                length: *mut u32,
+            ) -> c_int;
+        }
+        const SOL_SOCKET: c_int = 1;
+        const SO_PEERCRED: c_int = 17;
+        /// `struct ucred`: process, user and group of the peer.
+        #[repr(C)]
+        struct Credentials {
+            pid: i32,
+            uid: u32,
+            gid: u32,
+        }
+        let mut credentials = Credentials {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut length = std::mem::size_of::<Credentials>() as u32;
+        // SAFETY: `value` points at a `struct ucred` of `length` bytes that
+        // lives across the call, and the descriptor is open while `stream`
+        // is borrowed.
+        let status = unsafe {
+            getsockopt(
+                stream.as_raw_fd(),
+                SOL_SOCKET,
+                SO_PEERCRED,
+                (&raw mut credentials).cast(),
+                &mut length,
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if length as usize != std::mem::size_of::<Credentials>() {
+            return Err(std::io::Error::other("unexpected peer credentials"));
+        }
+        let _ = (credentials.pid, credentials.gid);
+        Ok(Some(credentials.uid))
+    }
+
+    /// Elsewhere the question is not asked: who may reach the socket is
+    /// decided by its permissions and its folder's alone.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "x86",
+            target_arch = "arm",
+            target_arch = "riscv64"
+        )
+    )))]
+    pub fn peer_uid(_: &UnixStream) -> Result<Option<u32>, std::io::Error> {
+        Ok(None)
+    }
+}
+
+/// Whether a connection whose other end is `peer` (see [`sys::peer_uid`]) is
+/// one of this user's own, `own`. A peer the kernel would not name is not.
+fn same_user(peer: Result<Option<u32>, std::io::Error>, own: u32) -> bool {
+    match peer {
+        Ok(Some(uid)) => uid == own,
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+fn peer_is_this_user(stream: &UnixStream) -> bool {
+    same_user(sys::peer_uid(stream), sys::own_uid())
+}
 
 /// Where the instance socket lives: the data folder when one was set
 /// explicitly (an isolated run must not find or disturb the real instance),
@@ -153,7 +292,12 @@ impl ControlEvents {
             .name("instance-socket".into())
             .spawn(move || {
                 for stream in listener.incoming() {
-                    let Ok(stream) = stream else { continue };
+                    let Ok(stream) = stream else {
+                        // A failure that lasts (no descriptors left) must
+                        // not turn this loop into a busy one.
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    };
                     match serve(stream) {
                         Some(Request::Quit) => quit.set(),
                         Some(Request::Show) => show.set(),
@@ -216,8 +360,22 @@ fn read_socket_line(mut stream: &UnixStream, limit: usize) -> Option<String> {
 }
 
 /// Read one request and acknowledge it. A connection that sends nothing (the
-/// liveness probe of another launch) is not a request.
+/// liveness probe of another launch) is not a request, and neither is
+/// anything from another user: the socket's permissions keep others out,
+/// and this does where a folder or a umask was left open. Connections are
+/// served one after another, each with [`IO_TIMEOUT`] for its line, which
+/// is enough when only this user's own launches are heard.
 fn serve(stream: UnixStream) -> Option<Request> {
+    // Before anything is read from it.
+    if !peer_is_this_user(&stream) {
+        static NOTED: AtomicBool = AtomicBool::new(false);
+        if !NOTED.swap(true, Ordering::Relaxed) {
+            any2odyssey_core::log::Logger::default_location().log(
+                "A request on the instance socket from another user was ignored. Further ones are ignored without a line here.",
+            );
+        }
+        return None;
+    }
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
     let line = read_socket_line(&stream, MAX_REQUEST_BYTES)?;
     let request = Request::parse(&line)?;
@@ -234,6 +392,10 @@ fn send(path: &Path, request: &Request) -> bool {
     let Ok(stream) = UnixStream::connect(path) else {
         return false;
     };
+    // A request can name a file: it is told to this user's instance only.
+    if !peer_is_this_user(&stream) {
+        return false;
+    }
     if stream.set_write_timeout(Some(IO_TIMEOUT)).is_err()
         || (&stream).write_all(line.as_bytes()).is_err()
     {
@@ -281,15 +443,60 @@ impl SocketFile {
         })
     }
 
+    /// Remove the entry if it is still the one that was seen. Looking and
+    /// removing are two steps by name, so the caller holds the
+    /// [`InstanceLock`]: otherwise another launch could clear this entry
+    /// away and bind its own between them, and lose it here.
     fn remove_if_unchanged(&self) -> bool {
         Self::at(&self.path).as_ref() == Some(self) && std::fs::remove_file(&self.path).is_ok()
+    }
+}
+
+/// The lock that makes looking at the socket's name, clearing an abandoned
+/// one away and binding a new one a single step among this user's launches,
+/// and keeps an instance that is leaving from removing a newer one's name.
+/// It is a lock on a file beside the socket, held while this value lives
+/// and let go by the kernel if the process dies. The file itself stays.
+struct InstanceLock {
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    /// Wait up to `patience` for the lock that belongs to `socket`. `None`
+    /// when the folder takes no lock file or another launch keeps the lock.
+    fn acquire(socket: &Path, patience: Duration) -> Option<InstanceLock> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut name = socket.as_os_str().to_owned();
+        name.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(name)
+            .ok()?;
+        let deadline = Instant::now() + patience;
+        loop {
+            match sys::try_lock(&file) {
+                Ok(true) => return Some(InstanceLock { _file: file }),
+                Ok(false) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return None,
+            }
+        }
     }
 }
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
         if let Some(socket) = &self.socket {
-            socket.remove_if_unchanged();
+            // Without the lock the name is left for the next launch to
+            // clear away, which it does once nobody answers.
+            if let Some(_lock) = InstanceLock::acquire(&socket.path, EXIT_PATIENCE) {
+                socket.remove_if_unchanged();
+            }
         }
     }
 }
@@ -323,30 +530,79 @@ fn bind_instance(path: &Path) -> Bound {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // One launch at a time, so that of two launches that find an abandoned
+    // socket the second finds the first one's new socket answering, instead
+    // of removing it or giving up and running as a second instance.
+    let lock = InstanceLock::acquire(path, LOCK_PATIENCE);
     for _ in 0..2 {
-        match UnixListener::bind(path) {
+        let taken = match bind_private(path) {
             Ok(listener) => return Bound::Listening(listener),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                // An unrelated file or symlink is never a stale socket.
-                let Some(socket) = SocketFile::at(path) else {
-                    return Bound::Unavailable;
-                };
-                match UnixStream::connect(path) {
-                    Ok(_) => return Bound::Occupied,
-                    Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
-                    // Permission and other failures do not prove the owner
-                    // has exited, so leave the entry alone.
-                    Err(_) => return Bound::Unavailable,
-                }
-                // Recheck the entry before reclaiming an abandoned socket.
-                if !socket.remove_if_unchanged() {
-                    return Bound::Unavailable;
-                }
-            }
+            Err(e) => matches!(
+                e.kind(),
+                std::io::ErrorKind::AddrInUse | std::io::ErrorKind::AlreadyExists
+            ),
+        };
+        // An unrelated file or symlink is never a stale socket.
+        let Some(socket) = SocketFile::at(path).filter(|_| taken) else {
+            return Bound::Unavailable;
+        };
+        match UnixStream::connect(path) {
+            Ok(_) => return Bound::Occupied,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            // Permission and other failures do not prove the owner
+            // has exited, so leave the entry alone.
             Err(_) => return Bound::Unavailable,
+        }
+        // Nothing is removed without the lock (a folder that takes no lock
+        // file, or a launch that has kept the lock for seconds): the entry
+        // could be a socket another launch has just bound.
+        if lock.is_none() || !socket.remove_if_unchanged() {
+            return Bound::Unavailable;
         }
     }
     Bound::Unavailable
+}
+
+/// Bind the instance socket at `path`, which must not exist, so that it is
+/// at no moment a socket another user could connect to, whatever the umask
+/// and the folder: it is bound inside a new folder only this user can enter,
+/// given its permissions there, and only then given its name by a hard
+/// link, which fails where a rename would replace. Changing the umask
+/// instead would change it for every thread.
+fn bind_private(path: &Path) -> std::io::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let private = std::fs::Permissions::from_mode(0o600);
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staged = tempfile::Builder::new()
+        .prefix(".instance-socket-")
+        // Asked for: a new folder is otherwise as open as the umask leaves it.
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(dir)
+        .and_then(|staging| {
+            let entered_by = std::fs::metadata(staging.path())?.permissions().mode();
+            if entered_by & 0o077 != 0 {
+                return Err(std::io::Error::other("the staging folder is not private"));
+            }
+            let name = staging.path().join("s");
+            let listener = UnixListener::bind(&name)?;
+            std::fs::set_permissions(&name, private.clone())?;
+            // The staging folder and the first name go when this returns.
+            std::fs::hard_link(&name, path).map(|()| listener)
+        });
+    match staged {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        // No hard links here, or a path too long for a socket once the
+        // staging folder is in it: bind in place and close it at once.
+        Err(_) => {
+            let listener = UnixListener::bind(path)?;
+            std::fs::set_permissions(path, private)?;
+            Ok(listener)
+        }
+    }
 }
 
 /// Run the first of `candidates` that is installed and return its filename from
@@ -766,6 +1022,125 @@ mod tests {
             }
         });
         assert!(reclaimed, "a stale socket file must be taken over");
+    }
+
+    /// A socket file nobody listens on any more, as a killed instance
+    /// leaves it. Waits out a copy of the listener in another test's child
+    /// process between its fork and its exec.
+    fn abandoned_socket(path: &Path) {
+        drop(UnixListener::bind(path).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(path).is_ok() {
+            assert!(Instant::now() < deadline, "the listener never went away");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn launches_racing_for_an_abandoned_socket_leave_one_instance_and_no_unguarded_one() {
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(SOCKET_NAME);
+            abandoned_socket(&path);
+            let barrier = std::sync::Barrier::new(8);
+            let bound: Vec<Bound> = std::thread::scope(|scope| {
+                let launches: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            bind_instance(&path)
+                        })
+                    })
+                    .collect();
+                // Every launch's result is kept until all have finished, so
+                // the winner's listener is there for the others to find.
+                launches.into_iter().map(|l| l.join().unwrap()).collect()
+            });
+            let count = |wanted: fn(&Bound) -> bool| bound.iter().filter(|b| wanted(b)).count();
+            assert_eq!(count(|b| matches!(b, Bound::Listening(_))), 1);
+            assert_eq!(count(|b| matches!(b, Bound::Occupied)), 7);
+            // The one socket is the winner's, and it answers.
+            assert!(UnixStream::connect(&path).is_ok());
+        }
+    }
+
+    #[test]
+    fn the_socket_is_private_from_its_first_moment_and_nothing_is_left_beside_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A folder anyone may enter, as a data folder can be.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let Bound::Listening(_listener) = bind_instance(&path) else {
+            panic!("bind");
+        };
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [SOCKET_NAME.to_owned(), format!("{SOCKET_NAME}.lock")]
+        );
+        assert!(UnixStream::connect(&path).is_ok());
+        // Binding where something already is fails rather than replaces.
+        assert_eq!(
+            bind_private(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn only_this_users_own_connections_are_heard() {
+        let (near, far) = UnixStream::pair().unwrap();
+        assert!(peer_is_this_user(&near) && peer_is_this_user(&far));
+        let own = sys::own_uid();
+        assert!(same_user(Ok(Some(own)), own));
+        assert!(!same_user(Ok(Some(own.wrapping_add(1))), own));
+        // Root is another user too, and so is a peer the kernel would not name.
+        assert!(!same_user(Ok(Some(0)), 1000));
+        assert!(!same_user(Err(std::io::Error::other("no answer")), own));
+        // Where the kernel is not asked, the socket's permissions decide.
+        assert!(same_user(Ok(None), own));
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert_eq!(sys::peer_uid(&near).unwrap(), Some(own));
+        // A request from this user still goes through.
+        (&far).write_all(b"toggle\n").unwrap();
+        assert_eq!(serve(near), Some(Request::Toggle));
+    }
+
+    #[test]
+    fn a_leaving_instance_does_not_touch_the_socket_while_a_launch_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let Bound::Listening(_listener) = bind_instance(&path) else {
+            panic!("bind");
+        };
+        let guard = SingleInstance {
+            socket: SocketFile::at(&path),
+        };
+        // Not at once: `bind_instance` has only just closed its own lock, and
+        // a child that another test's thread forked in that moment keeps a
+        // copy of it open until its exec.
+        let launch = InstanceLock::acquire(&path, LOCK_PATIENCE).expect("the lock is free");
+        assert!(
+            InstanceLock::acquire(&path, Duration::ZERO).is_none(),
+            "one holder at a time"
+        );
+        drop(guard);
+        assert!(
+            path.exists(),
+            "left for the launch that is looking at it to clear away"
+        );
+        drop(launch);
+        drop(SingleInstance {
+            socket: SocketFile::at(&path),
+        });
+        assert!(!path.exists());
     }
 
     #[test]
