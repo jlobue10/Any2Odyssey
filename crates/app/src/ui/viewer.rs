@@ -391,6 +391,8 @@ pub struct ViewerState {
     output_fullscreen: bool,
     /// A file dialog running on its own thread.
     picking: Option<Receiver<Picked>>,
+    /// Adding .png selected an existing path the file dialog did not confirm.
+    pending_save: Option<PathBuf>,
     /// The model running on its own thread, with the source id it was given.
     estimating: Option<(u64, Receiver<Result<DepthMap, String>>)>,
     /// The source the model last failed on, so the same failure is not
@@ -428,6 +430,7 @@ impl Default for ViewerState {
             output_open: false,
             output_fullscreen: false,
             picking: None,
+            pending_save: None,
             estimating: None,
             depth_failed: None,
             lens: LensState::default(),
@@ -796,7 +799,7 @@ impl ViewerState {
     /// Run a blocking file dialog off the UI thread; `poll_dialog` collects
     /// the answer. One dialog at a time.
     fn pick(&mut self, ctx: &egui::Context, save: bool) {
-        if self.picking.is_some() {
+        if self.picking.is_some() || self.pending_save.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
@@ -831,9 +834,68 @@ impl ViewerState {
         self.picking = None;
         match picked {
             Picked::Open(Ok(Some(path))) => self.open(&path),
-            Picked::Save(Ok(Some(path))) => self.save(&with_png_extension(path)),
+            Picked::Save(Ok(Some(path))) => self.save_selected(path),
             Picked::Open(Ok(None)) | Picked::Save(Ok(None)) => {}
             Picked::Open(Err(e)) | Picked::Save(Err(e)) => self.status = e,
+        }
+    }
+
+    fn save_selected(&mut self, selected: PathBuf) {
+        let destination = with_png_extension(selected.clone());
+        if destination != selected {
+            // The native dialog confirmed only `selected`. Adding the suffix
+            // can select a different existing file, including a dangling
+            // symlink that the atomic writer would replace.
+            match std::fs::symlink_metadata(&destination) {
+                Ok(_) => {
+                    self.pending_save = Some(destination);
+                    return;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    self.status = format!("Could not check {}: {e}", destination.display());
+                    return;
+                }
+            }
+        }
+        self.save(&destination);
+    }
+
+    fn finish_save_confirmation(&mut self, replace: bool) {
+        let Some(path) = self.pending_save.take() else {
+            return;
+        };
+        if replace {
+            self.save(&path);
+        } else {
+            self.status = "Export cancelled.".into();
+        }
+    }
+
+    fn show_save_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(path) = &self.pending_save else {
+            return;
+        };
+        let modal = egui::Modal::new(egui::Id::new("viewer-replace-png")).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.heading("Replace existing PNG?");
+            ui.label("Adding .png selects an existing file:");
+            ui.label(RichText::new(format!("{path:?}")).monospace());
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    Some(false)
+                } else if ui.button("Replace").clicked() {
+                    Some(true)
+                } else {
+                    None
+                }
+            })
+            .inner
+        });
+        if let Some(replace) = modal.inner {
+            self.finish_save_confirmation(replace);
+        } else if modal.should_close() {
+            self.finish_save_confirmation(false);
         }
     }
 
@@ -1206,6 +1268,7 @@ impl ViewerState {
             .color(color(p.muted))
             .size(11.0),
         );
+        self.show_save_confirmation(&ctx);
     }
 
     /// The output window: the converted image on black, fitted, in a window
@@ -1428,6 +1491,97 @@ mod tests {
         options.input = Input::Flat;
         document.reconvert(options).unwrap();
         assert!(document.result().is_some());
+    }
+
+    #[test]
+    fn appending_png_does_not_overwrite_a_different_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("out");
+        let destination = dir.path().join("out.png");
+        std::fs::write(&destination, b"existing export").unwrap();
+        let mut state = ViewerState::default();
+        state.document.set_source(pair(), state.options).unwrap();
+        let (tx, rx) = mpsc::channel();
+        state.picking = Some(rx);
+        tx.send(Picked::Save(Ok(Some(chosen.clone())))).unwrap();
+        state.poll_dialog();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing export");
+        assert_eq!(state.pending_save.as_ref(), Some(&destination));
+        state.finish_save_confirmation(false);
+        assert!(state.pending_save.is_none());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing export");
+        state.save_selected(chosen);
+        state.finish_save_confirmation(true);
+        assert!(state.pending_save.is_none());
+        assert_eq!(
+            image::open(destination).unwrap().to_rgba8(),
+            *state.document.result().unwrap()
+        );
+    }
+
+    #[test]
+    fn new_png_destinations_and_unchanged_names_need_no_extra_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = ViewerState::default();
+        state.document.set_source(pair(), state.options).unwrap();
+        let chosen = dir.path().join("new export");
+        let destination = with_png_extension(chosen.clone());
+        state.save_selected(chosen);
+        assert!(state.pending_save.is_none());
+        assert!(destination.exists());
+        // An exact PNG path has already had the native dialog's overwrite check.
+        std::fs::write(&destination, b"old").unwrap();
+        state.save_selected(destination.clone());
+        assert!(state.pending_save.is_none());
+        assert_eq!(
+            image::open(destination).unwrap().to_rgba8(),
+            *state.document.result().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_appended_png_that_is_a_dangling_symlink_requires_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("link");
+        let destination = with_png_extension(chosen.clone());
+        let missing = dir.path().join("missing");
+        std::os::unix::fs::symlink(&missing, &destination).unwrap();
+        let mut state = ViewerState::default();
+        state.document.set_source(pair(), state.options).unwrap();
+        state.save_selected(chosen);
+        assert_eq!(state.pending_save.as_ref(), Some(&destination));
+        assert_eq!(std::fs::read_link(&destination).unwrap(), missing);
+        state.finish_save_confirmation(false);
+        assert_eq!(std::fs::read_link(&destination).unwrap(), missing);
+    }
+
+    #[test]
+    fn escape_cancels_the_export_confirmation_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.png");
+        std::fs::write(&path, b"existing export").unwrap();
+        let mut state = ViewerState {
+            pending_save: Some(path.clone()),
+            ..ViewerState::default()
+        };
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            state.show_save_confirmation(ctx)
+        });
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| state.show_save_confirmation(ctx));
+        assert!(state.pending_save.is_none());
+        assert_eq!(std::fs::read(path).unwrap(), b"existing export");
     }
 
     #[test]
