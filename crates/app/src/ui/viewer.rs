@@ -925,6 +925,43 @@ impl ViewerState {
         }
     }
 
+    /// Take in what the page's controls changed of the options, which were
+    /// `before`.
+    fn options_edited(&mut self, before: Options) {
+        if self.options == before {
+            return;
+        }
+        if self.options.live() != before.live() && self.output_open {
+            // A live screen and a still picture use the output differently.
+            self.stop_output();
+        }
+        if self.options.detail != before.detail {
+            self.document.forget_depth();
+            self.depth_failed = None;
+        }
+        if self.options.input != before.input {
+            // A fresh choice of input format is a reason to try the
+            // model again after a failure.
+            self.depth_failed = None;
+        }
+        // Converting is the expensive part of a change, and a slider
+        // makes one at every step: only what changes the result does it.
+        if self.options.conversion() != before.conversion() || self.options.detail != before.detail
+        {
+            self.options_changed();
+        } else {
+            self.settle(Ok(()));
+        }
+        if self.output_open && self.options.live() && self.options.output != Output::Odyssey {
+            // A live screen is shown by the weaver alone, and is not started
+            // for another output (`toggle_output`): one that is running ends
+            // when another output is chosen, and the page says so instead
+            // of going on telling the rates of a screen that has stopped.
+            self.stop_output();
+            self.status = LIVE_NEEDS_ODYSSEY.into();
+        }
+    }
+
     fn options_changed(&mut self) {
         let converted = self.document.reconvert(self.options);
         self.settle(converted);
@@ -1640,30 +1677,7 @@ impl ViewerState {
             ui.add_space(5.0);
             output_panel(ui, self);
         }
-        if self.options != before {
-            if self.options.live() != before.live() && self.output_open {
-                // A live screen and a still picture use the output differently.
-                self.stop_output();
-            }
-            if self.options.detail != before.detail {
-                self.document.forget_depth();
-                self.depth_failed = None;
-            }
-            if self.options.input != before.input {
-                // A fresh choice of input format is a reason to try the
-                // model again after a failure.
-                self.depth_failed = None;
-            }
-            // Converting is the expensive part of a change, and a slider
-            // makes one at every step: only what changes the result does it.
-            if self.options.conversion() != before.conversion()
-                || self.options.detail != before.detail
-            {
-                self.options_changed();
-            } else {
-                self.settle(Ok(()));
-            }
-        }
+        self.options_edited(before);
         self.lens.save_when_settled(&ctx, std::time::Instant::now());
         self.ensure_depth(&ctx);
         self.sync_texture(&ctx);
@@ -3388,5 +3402,47 @@ mod tests {
             let expected = if panics { "closed" } else { "answer" };
             assert_eq!(*found.lock().unwrap(), [expected], "panics: {panics}");
         }
+    }
+
+    #[test]
+    fn a_live_screen_ends_when_another_output_than_the_odyssey_is_chosen() {
+        // With an image in the document (it would have been put into an
+        // output window as if it were what "live screen" shows) and without
+        // one (the output closed without a word and the page went on
+        // telling the rates of the screen).
+        for with_image in [false, true] {
+            let mut state = ViewerState::default();
+            state.options.input = Input::Desktop;
+            state.options.output = Output::Odyssey;
+            if with_image {
+                state.document.set_source(pair(), state.options).unwrap();
+            }
+            state.output_open = true;
+            state.status = "Live: a 3840 × 2160 screen, 30 pictures a second.".into();
+            let before = state.options;
+            // A setting of the live screen leaves it running.
+            state.options.steady_pos += 1;
+            state.options_edited(before);
+            assert!(state.output_open);
+            let before = state.options;
+            state.options.output = Output::Anaglyph;
+            state.options_edited(before);
+            assert!(!state.output_open, "image: {with_image}");
+            assert_eq!(state.status, LIVE_NEEDS_ODYSSEY);
+            // As when it is asked to start there.
+            state.toggle_output();
+            assert!(!state.output_open);
+            assert_eq!(state.status, LIVE_NEEDS_ODYSSEY);
+        }
+        // A still picture's output is another output's to keep.
+        let mut state = ViewerState::default();
+        state.options.output = Output::Odyssey;
+        state.document.set_source(pair(), state.options).unwrap();
+        state.output_open = true;
+        let before = state.options;
+        state.options.output = Output::Sbs;
+        state.options_edited(before);
+        assert!(state.output_open);
+        assert_eq!(state.status, OUTPUT_ON);
     }
 }
