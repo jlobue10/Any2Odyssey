@@ -146,6 +146,9 @@ if [ -n "$UNINSTALL" ]; then
         # Only folders this script made, named in full.
         [ -d "$PREFIX/share/any2odyssey" ] && run rm -rf "$PREFIX/share/any2odyssey"
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
+        # The caches the installation refreshed still name the entry and the icon that are gone now.
+        [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
+        [ -d "$SHARE/icons/hicolor" ] && have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
@@ -234,8 +237,12 @@ if [ -z "$PACKAGED" ]; then
     fi
     run install -Dm644 "$HERE/any2odyssey.png" "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
     for f in README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md \
-        INSTALL.txt docs/LENS-SWITCH.md docs/PLATFORMS.md; do
+        INSTALL.txt installer/README.md; do
         [ -f "$HERE/$f" ] && run install -Dm644 "$HERE/$f" "$DOCDIR/$f"
+    done
+    # Everything README.md links to goes with it: the other documents and its screenshots.
+    for f in "$HERE"/docs/*.md "$HERE"/docs/assets/*.png; do
+        [ -f "$f" ] && run install -Dm644 "$f" "$DOCDIR/${f#"$HERE"/}"
     done
     # The Wine setup and this script (for --uninstall later), replaced as a whole.
     if [ -n "$DRY" ]; then
