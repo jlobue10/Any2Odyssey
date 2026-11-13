@@ -16,6 +16,7 @@
  *
  * If C:\a2ocam.log exists, calls are logged to it.
  */
+#ifndef A2O_CAMERA_STREAM_TEST
 #define COBJMACROS
 #include <winsock2.h>
 #include <windows.h>
@@ -757,6 +758,9 @@ static DWORD WINAPI reader_thread(void *arg)
     return 0;
 }
 
+#endif /* !A2O_CAMERA_STREAM_TEST */
+
+/* Also compiled by the native lifecycle tests with a simulated bridge. */
 static HRESULT reader_start(struct reader *r)
 {
     const struct format *f = &r->source->formats[r->current];
@@ -765,6 +769,10 @@ static HRESULT reader_start(struct reader *r)
     r->have_frame = FALSE;
     bridge_set_frames(r->source->bridge, reader_frame, r);
     if (!bridge_command(r->source->bridge, NULL, 0, "F %s %u %u %u", f->fourcc, f->width, f->height, f->fps)) {
+        /* A timed-out command can still start the camera later. This reader
+         * never became streaming, so reader_stop() will not detach it on
+         * release. Drain any current callback and remove its borrowed pointer. */
+        bridge_set_frames(r->source->bridge, NULL, NULL);
         say("reader: the camera would not start %s %ux%u@%u", f->fourcc, f->width, f->height, f->fps);
         return MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED;
     }
@@ -782,6 +790,7 @@ static void reader_stop(struct reader *r)
     say("reader: stopped");
 }
 
+#ifndef A2O_CAMERA_STREAM_TEST
 static BOOL is_video_stream(DWORD index)
 {
     return index == 0 || index == (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM;
@@ -1174,3 +1183,4 @@ HRESULT WINAPI A2OEnumDeviceSources(IMFAttributes *attributes, IMFActivate ***so
     say("enum: one camera, %ls", link);
     return S_OK;
 }
+#endif /* !A2O_CAMERA_STREAM_TEST */

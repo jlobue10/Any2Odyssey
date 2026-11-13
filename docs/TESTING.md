@@ -30,6 +30,16 @@ This runs the production send/receive/close wrappers against a simulated Winsock
 
 Building needs the PipeWire development files and clang beside the desktop libraries (Ubuntu: `libpipewire-0.3-dev libclang-dev clang`; Arch: `libpipewire clang`). `cargo test -p any2odyssey-core -p any2odyssey` runs everywhere and starts no helper, capture or model. Three measurements are kept as ignored tests for a machine with the hardware: `live::bench` (stage timings, needs the depth model), `capture::probe` (what the screen cast of the remembered screen contains) and `live::probe` (the whole live path against the Odyssey; `PROBE_ROUNDS`, `PROBE_LINES`, `PROBE_DETAIL`, `PROBE_SECONDS`). Run one with `cargo test --release -p any2odyssey <name> -- --ignored --nocapture`. `scripts/package-linux.sh` stages the Linux release archive from a release build and `scripts/third-party-linux.py` writes `THIRD-PARTY-LICENSES-LINUX.md`; CI runs both and refuses a list that no longer matches the dependencies. What has been checked on a G90XF is recorded in `docs/LENS-SWITCH.md` ("What has been checked") and `docs/PLATFORMS.md`.
 
+### Camera reader startup lifetime
+
+```sh
+cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+  contrib/wine-lens/tests/test-camera-stream.c -o /tmp/test-camera-stream
+ASAN_OPTIONS=detect_leaks=0 /tmp/test-camera-stream
+```
+
+This compiles the production camera reader start/stop paths with a simulated bridge. It checks a late frame after a failed start and reader release, failed-start retry, repeated start/stop, and restart after stopping. AddressSanitizer detects a retained callback into the freed reader. It does not exercise Media Foundation, bridge threading, or the physical camera; startup, failure recovery, and camera release on the target Wine installation remain hardware checks. Both Linux CI architectures run the native test.
+
 ## Windows diagnostics (provided by the Windows crate)
 
 Run these with conversion stopped. They are GUI executables; use `Start-Process -Wait -PassThru` to read the exit code.
