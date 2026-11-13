@@ -33,6 +33,9 @@
 #   --dry-run           say what would be done and do none of it
 #   --uninstall         remove the installed files (and, when confirmed, the udev rules and the Wine side)
 set -eu
+# Nothing this script makes is writable by others, whatever the shell's umask is: the program's entry in the
+# menu and the Wine setup are run as the user later. A stricter umask is kept.
+umask go-w
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local PREFIX_GIVEN=

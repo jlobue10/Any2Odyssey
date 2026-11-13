@@ -599,6 +599,35 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("prefix", result.stderr)
 
+    def test_a_desktop_entry_that_is_a_link_is_replaced_and_not_written_through(self):
+        # The program and the icon replaced a link; the entry was written into whatever the link named
+        # (as root in a user's home: any file of the system).
+        prefix = self.root / "prefix"
+        other = self.root / "another file"
+        other.write_text("not the installer's\n")
+        entry = prefix / "share/applications/any2odyssey.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.symlink_to(other)
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(other.read_text(), "not the installer's\n")
+        self.assertFalse(entry.is_symlink())
+        self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
+        self.assertEqual([path.name for path in entry.parent.glob("any2odyssey.desktop*")], ["any2odyssey.desktop"])
+
+    def test_nothing_installed_can_be_written_by_others_whatever_the_umask(self):
+        # With umask 000 the menu entry and the Wine setup, which are run as the user later, were
+        # writable by everybody (the program itself, the icon and the documents never were).
+        previous = os.umask(0)
+        self.addCleanup(os.umask, previous)
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        writable = [str(path) for path in [prefix, *prefix.rglob("*")]
+                    if not path.is_symlink() and path.stat().st_mode & 0o022]
+        self.assertEqual(writable, [])
+        self.assertTrue((prefix / "share/applications/any2odyssey.desktop").is_file())
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.
@@ -618,22 +647,6 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("libpipewire", missing)
         self.assertNotIn("libxkbcommon", missing)
         self.assertNotIn("libglvnd", missing)
-
-    def test_a_desktop_entry_that_is_a_link_is_replaced_and_not_written_through(self):
-        # The program and the icon replaced a link; the entry was written into whatever the link named
-        # (as root in a user's home: any file of the system).
-        prefix = self.root / "prefix"
-        other = self.root / "another file"
-        other.write_text("not the installer's\n")
-        entry = prefix / "share/applications/any2odyssey.desktop"
-        entry.parent.mkdir(parents=True)
-        entry.symlink_to(other)
-        result = self.install(prefix)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(other.read_text(), "not the installer's\n")
-        self.assertFalse(entry.is_symlink())
-        self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
-        self.assertEqual([path.name for path in entry.parent.glob("any2odyssey.desktop*")], ["any2odyssey.desktop"])
 
 
 if __name__ == "__main__":
