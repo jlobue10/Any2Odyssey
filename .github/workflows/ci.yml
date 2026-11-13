@@ -142,6 +142,7 @@ jobs:
           test -s /usr/lib/udev/rules.d/70-any2odyssey-lens.rules
           test -z "$(find /usr/share/any2odyssey -name __pycache__ -o -name '*.pyc')"
           test ! -e /usr/share/any2odyssey/wine-lens/tests
+          sh scripts/check-doc-links.sh /usr/share/doc/any2odyssey
           any2odyssey-setup --help
           any2odyssey-setup --dry-run --no-deps --no-odyssey < /dev/null
           any2odyssey --help
@@ -263,11 +264,14 @@ jobs:
           test -z "$(find check -name __pycache__ -o -name '*.pyc')"
           # Nor the tests of the Wine setup, which are for a checkout.
           test ! -e check/wine-lens/tests
+          # No link in the packaged documents that leads to a file the archive does not have.
+          ../scripts/check-doc-links.sh check
           # The installer: into a folder of its own, without the steps that need root or hardware.
           check/install.sh --prefix "$PWD/prefix" --no-deps --no-udev --no-model --no-odyssey
           prefix/bin/any2odyssey --help
           desktop-file-validate prefix/share/applications/any2odyssey.desktop || true
           test -x prefix/share/any2odyssey/wine-lens/setup.sh
+          ../scripts/check-doc-links.sh prefix/share/doc/any2odyssey
           prefix/share/any2odyssey/install.sh --prefix "$PWD/prefix" --uninstall < /dev/null
           test ! -e prefix/bin/any2odyssey -a ! -e prefix/share/any2odyssey
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

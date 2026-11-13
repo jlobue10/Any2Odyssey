@@ -237,8 +237,12 @@ if [ -z "$PACKAGED" ]; then
     fi
     run install -Dm644 "$HERE/any2odyssey.png" "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
     for f in README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md \
-        INSTALL.txt docs/LENS-SWITCH.md docs/PLATFORMS.md; do
+        INSTALL.txt installer/README.md; do
         [ -f "$HERE/$f" ] && run install -Dm644 "$HERE/$f" "$DOCDIR/$f"
+    done
+    # Everything README.md links to goes with it: the other documents and its screenshots.
+    for f in "$HERE"/docs/*.md "$HERE"/docs/assets/*.png; do
+        [ -f "$f" ] && run install -Dm644 "$f" "$DOCDIR/${f#"$HERE"/}"
     done
     # The Wine setup and this script (for --uninstall later), replaced as a whole.
     if [ -n "$DRY" ]; then
