@@ -74,6 +74,8 @@ On Windows a second program of Leia's, the eye tracker (`LeiaSR/Tracker`, servic
 - `~/.local/share/any2odyssey/wine-lens/tools/tracking.sh start` starts the bridge and the tracker (Leia's service must be running), `stop` stops them, `status` reports. The weaver helper below does both by itself.
 - **Pausing.** On Windows the tracker pauses (camera off, no processor use) when no program wants eye positions. It learns that from a bounced datagram: the service closes its UDP port, the tracker's next datagram to it is refused, and Windows fails the tracker's waiting receive with the address of that port. Linux reports a refused datagram on such a socket only when asked, and Wine neither asks nor fills in the address, so under Wine the tracker ran on at a full processor core. Two small pieces restore the Windows behaviour: `any2odyssey-udp.so`, preloaded into the prefix's Wine processes, asks Linux for those reports (`IP_RECVERR`), and `a2ocam.dll` puts the address in place inside the tracker. With them the tracker pauses and resumes as on Windows.
 
+  The address shim fills only receive buffers that have not yet been submitted to Winsock. It never retains their pointers: a pending operation may complete and its caller may reuse the storage at any time. If a receive was submitted before the first destination was known, the address is available on the next receive; pause/resume timing for that case must be rechecked on the target Wine/Leia installation. The earlier hardware measurements below describe the previous implementation, not verification of this lifetime correction.
+
 The tracker reports the eye positions to Leia's service, where a program using Leia's SDK gets them; Leia's weaver is such a program.
 
 ## The picture through Leia's weaver
