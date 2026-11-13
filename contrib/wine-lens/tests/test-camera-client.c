@@ -482,6 +482,7 @@ static void close_while_thread_is_busy(void)
 {
     struct fake f = {0};
     struct bridge *b = open_bridge(&f, script_one_frame, KEY);
+    int replacement[2];
 
     assert(b);
     entered = allowed = FALSE;
@@ -495,6 +496,12 @@ static void close_while_thread_is_busy(void)
     thread_wait_times_out = TRUE;
     bridge_close(b); /* returns although the thread has not left */
     thread_wait_times_out = FALSE;
+    /* Another connection may reuse a closed descriptor immediately. Leave a complete frame on it:
+     * the old reader must neither deliver that frame nor consume any of this connection's bytes. */
+    assert(!socketpair(AF_UNIX, SOCK_STREAM, 0, replacement));
+    struct fake other = { .fd = replacement[1] };
+    fake_packet(&other, 'F', "abc", 3);
+    assert(!shutdown(replacement[1], SHUT_WR));
     /* The thread still uses the bridge's memory (ASan reports it if that was freed) and frees it itself. */
     assert(atomic_load(&live_handles) && atomic_load(&live_locks));
     assert(!pthread_mutex_lock(&gate_lock));
@@ -503,6 +510,11 @@ static void close_while_thread_is_busy(void)
     assert(!pthread_mutex_unlock(&gate_lock));
     expect_clean(&f);
     assert(atomic_load(&frames) == 1 && atomic_load(&f.saw_end));
+    unsigned char untouched[19];
+    assert(recv(replacement[0], untouched, sizeof untouched, MSG_DONTWAIT) == sizeof untouched);
+    assert(untouched[0] == 'F' && !memcmp(untouched + 16, "abc", 3));
+    close(replacement[0]);
+    close(replacement[1]);
 }
 
 /* Whoever takes the frames is told once when the connection has gone, and nobody is told who had stopped

@@ -96,11 +96,11 @@ typedef void (*frame_fn)(void *ctx, UINT64 time_us, const BYTE *data, DWORD leng
 /* The memory has two holders, whoever opened the bridge and its thread, and the one that lets go last frees
  * it: bridge_close does not wait for the thread for ever, and the thread must not find its memory gone. */
 struct bridge {
-    SOCKET sock; /* never changes; `closed` says whether it is still ours to use */
+    SOCKET sock; /* owned until the last reference is released, including the reader thread's */
     HANDLE thread, replied;
     CRITICAL_SECTION command_lock, reply_lock, frame_lock;
     LONG refs;
-    BOOL closed; /* guarded by command_lock */
+    BOOL closed; /* shutdown requested; guarded by command_lock */
     /* guarded by reply_lock: */
     char reply[8192];
     BOOL awaiting; /* a command has been sent and waits for its reply */
@@ -126,6 +126,7 @@ static BOOL read_all(SOCKET s, void *buffer, DWORD length)
 static void bridge_unref(struct bridge *b)
 {
     if (InterlockedDecrement(&b->refs)) return;
+    closesocket(b->sock);
     CloseHandle(b->thread);
     CloseHandle(b->replied);
     DeleteCriticalSection(&b->command_lock);
@@ -187,14 +188,14 @@ static DWORD WINAPI bridge_thread(void *arg)
     return 0;
 }
 
-/* Close the connection: the thread's read then fails, and the bridge stops the camera and lets go of it, as
- * it does whenever its client leaves. Call with command_lock held. */
+/* Shut down the connection: the thread's read then fails, and the bridge stops the camera and lets go of
+ * it. Keep the descriptor until both holders have finished: closing it here could let another connection
+ * reuse it while the reader is still about to call recv. Call with command_lock held. */
 static void bridge_drop(struct bridge *b)
 {
     if (b->closed) return;
     b->closed = TRUE;
     shutdown(b->sock, SD_BOTH);
-    closesocket(b->sock);
 }
 
 /* Send one command and wait for its reply. FALSE if the bridge is gone or said no (reply then starts with '!'). */
@@ -213,7 +214,7 @@ static BOOL bridge_command(struct bridge *b, char *reply, DWORD size, const char
 
     EnterCriticalSection(&b->command_lock);
     EnterCriticalSection(&b->reply_lock);
-    sent = !b->dead;
+    sent = !b->dead && !b->closed;
     b->awaiting = sent;
     ResetEvent(b->replied);
     LeaveCriticalSection(&b->reply_lock);
