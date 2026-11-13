@@ -358,19 +358,24 @@ fn shift_row(
     right: &mut [u8],
 ) {
     let w = nearness.len();
+    // The same for every pixel of the row: `Params::disparity` in its parts.
+    let (scale, screen) = params.disparity_terms(width);
+    // Whole pixels, and rows cut to one length: nothing in the loop then
+    // has to be checked against the end of a row.
+    let pixels = &pixels.as_chunks::<4>().0[..w];
+    let placed = &mut placed[..w];
     // Left eye: near points move right. Right eye: near points move left.
     for (view, direction) in [(left, 0.5f32), (right, -0.5f32)] {
         placed.fill(f32::NEG_INFINITY);
-        for x in 0..w {
-            let near = nearness[x];
-            let target = (x as f32 + direction * params.disparity(near, width)).round();
-            if target < 0.0 || target >= w as f32 {
+        let colours = &mut view.as_chunks_mut::<4>().0[..w];
+        for (x, (&near, pixel)) in nearness.iter().zip(pixels).enumerate() {
+            let moved = x as f32 + direction * (scale * (near - screen));
+            let Some(t) = crate::dibr::column(moved, w) else {
                 continue;
-            }
-            let t = target as usize;
+            };
             if near > placed[t] {
                 placed[t] = near;
-                view[t * 4..t * 4 + 4].copy_from_slice(&pixels[x * 4..x * 4 + 4]);
+                colours[t] = *pixel;
             }
         }
         fill_gaps(view, placed);
@@ -605,15 +610,26 @@ fn sharpen_row(above: &[u8], here: &[u8], below: &[u8], k: i32, out: &mut [u8]) 
     let end = here.len() - 4;
     out[..4].copy_from_slice(&here[..4]);
     out[end..].copy_from_slice(&here[end..]);
-    for x in (4..end).step_by(4) {
-        for i in x..x + 3 {
-            let centre = here[i] as i32;
-            let around =
-                above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
-            let value = centre + (((centre * 4 - around) * k) >> 10);
-            out[i] = value.clamp(0, 255) as u8;
-        }
-        out[x + 3] = here[x + 3];
+    // Byte by byte over rows cut to one length, alpha like a colour: with
+    // nothing to check against the end of a row and no byte treated
+    // differently from the next, the compiler does several at a time.
+    let bytes = out[4..end]
+        .iter_mut()
+        .zip(&here[4..end])
+        .zip(&above[4..end])
+        .zip(&below[4..end])
+        .zip(&here[..end - 4])
+        .zip(&here[8..]);
+    for (((((out, &centre), &above), &below), &before), &after) in bytes {
+        let centre = centre as i32;
+        let around = above as i32 + below as i32 + before as i32 + after as i32;
+        let value = centre + (((centre * 4 - around) * k) >> 10);
+        *out = value.clamp(0, 255) as u8;
+    }
+    // Alpha is not a colour: it is put back as it was.
+    let pixels = out.as_chunks_mut::<4>().0.iter_mut();
+    for (out, here) in pixels.zip(here.as_chunks::<4>().0) {
+        out[3] = here[3];
     }
 }
 
@@ -923,6 +939,149 @@ mod tests {
                     }
                 });
                 assert_eq!(out, expected, "{rows} rows on {threads} threads");
+            }
+        }
+    }
+
+    /// A row of the views and a sharpened row as they were made before:
+    /// a byte at a time, each looked up by its place and checked against
+    /// the end of its row, the column through the C library's `round`.
+    /// Kept as the definition of both.
+    mod a_byte_at_a_time {
+        use super::super::*;
+
+        pub fn shift_row(
+            pixels: &[u8],
+            nearness: &[f32],
+            placed: &mut [f32],
+            params: Params,
+            width: u32,
+            left: &mut [u8],
+            right: &mut [u8],
+        ) {
+            let w = nearness.len();
+            for (view, direction) in [(left, 0.5f32), (right, -0.5f32)] {
+                placed.fill(f32::NEG_INFINITY);
+                for x in 0..w {
+                    let near = nearness[x];
+                    let target = (x as f32 + direction * params.disparity(near, width)).round();
+                    if target < 0.0 || target >= w as f32 {
+                        continue;
+                    }
+                    let t = target as usize;
+                    if near > placed[t] {
+                        placed[t] = near;
+                        view[t * 4..t * 4 + 4].copy_from_slice(&pixels[x * 4..x * 4 + 4]);
+                    }
+                }
+                fill_gaps(view, placed);
+            }
+        }
+
+        pub fn sharpen_row(above: &[u8], here: &[u8], below: &[u8], k: i32, out: &mut [u8]) {
+            let end = here.len() - 4;
+            out[..4].copy_from_slice(&here[..4]);
+            out[end..].copy_from_slice(&here[end..]);
+            for x in (4..end).step_by(4) {
+                for i in x..x + 3 {
+                    let centre = here[i] as i32;
+                    let around =
+                        above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
+                    let value = centre + (((centre * 4 - around) * k) >> 10);
+                    out[i] = value.clamp(0, 255) as u8;
+                }
+                out[x + 3] = here[x + 3];
+            }
+        }
+    }
+
+    fn noise() -> impl FnMut(usize) -> Vec<u8> {
+        let mut noise = 0x9e37_79b9u32;
+        move |count| {
+            let mut next = || {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                noise as u8
+            };
+            (0..count).map(|_| next()).collect()
+        }
+    }
+
+    #[test]
+    fn a_row_of_the_views_made_in_whole_pixels_is_the_row_made_a_byte_at_a_time() {
+        let mut bytes = noise();
+        // Every width up to a good many, and rows as long as a screen's.
+        for w in (1..=70usize).chain([97, 333, 1021, 3840]) {
+            let pixels = bytes(w * 4);
+            // Trembling depth, near blocks on a slope, a flat scene, and
+            // values no depth map should hold but a caller could pass.
+            let odd = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0e30, -7.5];
+            let maps: [Vec<f32>; 4] = [
+                bytes(w).iter().map(|&v| v as f32 / 255.0).collect(),
+                (0..w)
+                    .map(|x| match (x / 5) % 3 {
+                        0 => 1.0,
+                        _ => x as f32 / w as f32 * 0.5,
+                    })
+                    .collect(),
+                vec![0.5; w],
+                bytes(w)
+                    .iter()
+                    .map(|&v| match v {
+                        0..5 => odd[v as usize],
+                        _ => v as f32 / 255.0,
+                    })
+                    .collect(),
+            ];
+            for nearness in &maps {
+                for (strength, popout) in [
+                    (0.0, 0.3),
+                    (0.9, 0.0),
+                    (2.0, -1.0),
+                    (2.0, 1.0),
+                    (1.37, 0.41),
+                ] {
+                    let params = Params { strength, popout };
+                    // Stale bytes show a pixel that was not written.
+                    let mut now = (vec![0xa5u8; w * 4], vec![0x5au8; w * 4], vec![0.0f32; w]);
+                    let mut before = now.clone();
+                    let width = w as u32;
+                    shift_row(
+                        &pixels, nearness, &mut now.2, params, width, &mut now.0, &mut now.1,
+                    );
+                    a_byte_at_a_time::shift_row(
+                        &pixels,
+                        nearness,
+                        &mut before.2,
+                        params,
+                        width,
+                        &mut before.0,
+                        &mut before.1,
+                    );
+                    assert!(
+                        now.0 == before.0 && now.1 == before.1,
+                        "{w} wide, {params:?}, nearness {nearness:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_sharpened_several_bytes_at_a_time_is_the_row_sharpened_a_byte_at_a_time() {
+        let mut bytes = noise();
+        // Every width up to past several of the compiler's steps, and rows
+        // as long as a screen's. Alpha is noise too: it must come through.
+        for w in (3..=70usize).chain([97, 333, 1021, 3840]) {
+            let (above, here, below) = (bytes(w * 4), bytes(w * 4), bytes(w * 4));
+            // None, hardly any, the page's range and the most there is.
+            for k in [0, 1, 90, 256, 511, 512] {
+                // Stale bytes show a byte that was not written.
+                let (mut now, mut before) = (vec![0xa5u8; w * 4], vec![0xa5u8; w * 4]);
+                sharpen_row(&above, &here, &below, k, &mut now);
+                a_byte_at_a_time::sharpen_row(&above, &here, &below, k, &mut before);
+                assert!(now == before, "{w} wide, sharpened by {k}");
             }
         }
     }

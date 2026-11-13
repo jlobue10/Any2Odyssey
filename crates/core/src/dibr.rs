@@ -174,7 +174,7 @@ impl Params {
     /// image `width` pixels wide: the disparity per unit of nearness, and
     /// the nearness that lies on the screen plane. A renderer works them out
     /// once per picture instead of once per pixel.
-    fn disparity_terms(&self, width: u32) -> (f32, f32) {
+    pub(crate) fn disparity_terms(&self, width: u32) -> (f32, f32) {
         let strength = self.strength.clamp(0.0, 2.0) as f32;
         let popout = self.popout.clamp(-1.0, 1.0) as f32;
         (
@@ -182,6 +182,31 @@ impl Params {
             0.5 - popout * 0.5,
         )
     }
+}
+
+/// The column of a row `width` pixels wide that a pixel moved to `value`
+/// lands on: `value.round()` (halves away from zero), or `None` off either
+/// end of the row. Where the processor has no instruction for it (x86-64 as
+/// this is built) `round` is a call into the C library for each pixel of
+/// each view, and its result has to be turned into a whole number after.
+/// Any value small enough to have a fraction is rounded here in whole
+/// numbers instead, to the same column.
+#[inline]
+pub(crate) fn column(value: f32, width: usize) -> Option<usize> {
+    // Below 2^23 the whole part is exact as an `i32`, and so is the rest.
+    if value.abs() < 8_388_608.0 {
+        let whole = value as i32;
+        let rest = value - whole as f32;
+        let column = whole + i32::from(rest >= 0.5) - i32::from(rest <= -0.5);
+        return usize::try_from(column)
+            .ok()
+            .filter(|&column| column < width);
+    }
+    let target = value.round();
+    if target < 0.0 || target >= width as f32 {
+        return None;
+    }
+    Some(target as usize)
 }
 
 /// Render the left and right views of `image` and return them side by side,
@@ -260,11 +285,10 @@ fn synthesize_on(
                 let view = view.as_chunks_mut::<4>().0;
                 nearness.fill(f32::NEG_INFINITY);
                 for (x, (&d, pixel)) in row.iter().zip(pixels).enumerate() {
-                    let target = (x as f32 + direction * (scale * (d - screen))).round();
-                    if target < 0.0 || target >= width as f32 {
+                    let moved = x as f32 + direction * (scale * (d - screen));
+                    let Some(t) = column(moved, w) else {
                         continue;
-                    }
-                    let t = target as usize;
+                    };
                     if d > nearness[t] {
                         nearness[t] = d;
                         view[t] = *pixel;
@@ -523,6 +547,68 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_column_found_in_whole_numbers_is_the_one_the_c_library_rounds_to() {
+        // The column as it was found before, for every pixel of each view.
+        fn rounded(value: f32, width: usize) -> Option<usize> {
+            let target = value.round();
+            if target < 0.0 || target >= width as f32 {
+                return None;
+            }
+            Some(target as usize)
+        }
+        let mut values = vec![
+            0.0,
+            -0.0,
+            f32::MIN_POSITIVE,
+            1.0e-45,
+            0.499_999_97,
+            0.5,
+            1.0,
+            // The last values with a fraction, the first without, and
+            // those no whole number of any size holds.
+            8_388_607.5,
+            8_388_608.0,
+            8_388_609.0,
+            16_777_216.0,
+            2_147_483_648.0,
+            4_294_967_296.0,
+            1.0e19,
+            1.0e30,
+            f32::MAX,
+            f32::INFINITY,
+            f32::NAN,
+        ];
+        // Every half up to past the widest row, and its two neighbours.
+        for whole in 0..20_000u32 {
+            let half = (whole as f32 + 0.5).to_bits();
+            values.extend([half - 1, half, half + 1].map(f32::from_bits));
+        }
+        let mut noise = 0x2545_f491u32;
+        let mut next = move || {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            noise
+        };
+        for _ in 0..200_000 {
+            // Any number at all, and numbers around a row.
+            values.push(f32::from_bits(next()));
+            values.push((next() % 80_000) as f32 / 4.0 + (next() % 1024) as f32 / 4096.0);
+        }
+        let widths = [1, 2, 97, 1920, 15_360, 1 << 24, (1 << 24) + 1, usize::MAX];
+        for value in values.into_iter().flat_map(|value| [value, -value]) {
+            for width in widths {
+                assert_eq!(
+                    column(value, width),
+                    rounded(value, width),
+                    "{value:?} ({:#x}) in {width}",
+                    value.to_bits()
+                );
             }
         }
     }
