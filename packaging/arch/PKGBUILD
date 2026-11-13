@@ -10,7 +10,7 @@
 # with /usr/share/any2odyssey/wine-lens/setup.sh. Samsung's conversion engine
 # exists only on Windows; see docs/PLATFORMS.md.
 pkgname=any2odyssey
-pkgver=0.9.1
+pkgver=0.9.2
 pkgrel=1
 pkgdesc="Stereo viewer and Odyssey 3D output for images and a live screen (Linux edition of Any2Odyssey)"
 arch=('x86_64' 'aarch64')

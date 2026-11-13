@@ -2,6 +2,66 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.2 (2026-11-13)
+
+A second audit release, mostly for the Linux edition: eight pull requests (#116 to #123) from two further rounds that used methods not used before. The published 0.9.1 files were inspected, round 14's own fixes were reviewed again, the shared core was put through mutation testing, the running Linux viewer was soaked for thousands of operations, the tests were run under sanitizers and repeated under load, every script was run in hostile environments, and every Win32 call of the Windows edition was checked against its contract. No new features. Built and tested in CI; not yet run on the monitor, see Hardware verification.
+
+**Linux: an installation of 0.9.0 or 0.9.1 made the usual way (`./install.sh`, under `~/.local`) never finished preparing the Odyssey 3D.** Update, then run `./install.sh` again and let it prepare the Odyssey 3D. Do not run the old installation's `--uninstall` first: it removes your settings and the depth model.
+
+### Security
+
+- **Linux: the installer does not install as root into a folder that is not root's alone.** Started as root with a user's home folder, it wrote by path into folders that user can change, and whoever can change a folder can redirect what is written there. It now stops before the first write and says to run it as the user it is for. Uninstalling is not refused. (#123)
+- **Linux: the menu entry is never written through a link.** It is prepared in a private folder and moved into place, so an entry that is there is whole. (#120, #123)
+- **Linux: nothing the installer writes can be written by others**, whatever the shell's umask is. With umask 000 the menu entry and the Wine setup were. (#120)
+
+### Fixed
+
+Linux, installing:
+
+- **The usual installation put its setup files where the Wine side is built.** `setup.sh` stopped with "are the same file" before it linked the lens helper; installing again, even with `--no-odyssey`, removed the Wine prefix and the camera's secret; `--uninstall` removed settings, the depth model and the Wine side while saying they stay. Installations with `--prefix` were not affected, which is why no test saw it. (#120)
+- **Arch package: its copy of the installer, run directly with `--uninstall`, took `/usr` for its own installation** and as root removed the package's files. It now behaves like `any2odyssey-setup --uninstall`. (#117)
+- The packages' `README.md` comes with everything it links to (screenshots, `docs/TESTING.md`, `docs/PORTING.md`, `installer/README.md`; in the Arch package also the licence files beside it), and no longer with the Wine setup's test programs. (#116)
+- `--uninstall` refreshes the desktop and icon caches, so the removed entry is no longer offered for image files. (#116)
+- Installed libraries are no longer reported missing where `ldconfig` is not on the PATH (Debian). (#120)
+- A staging folder left by an installer that was killed is removed by the next run. (#123)
+
+Linux, the viewer:
+
+- **The viewer no longer keeps hundreds of megabytes after large images are closed.** Each 8K-wide pair that was opened and replaced left about 200 MB behind: 120 MB grew to 1.7 GB over 1000 images. (#121)
+- **Quitting while the Odyssey output is on no longer leaves a hung helper, or a file dialog's window, behind.** (#121)
+- **Open... and Save preview PNG... work again after a file dialog hung or was lost**: pressing either closes the dialog that is still open and opens a new one. (#118)
+- The Output panel stays inside the window with an Odyssey output selected. (#121)
+- `--help` lists the modes of the platform it runs on, and Windows-only diagnostics say so on Linux; `--help` and error messages no longer end in a panic when their output is closed; `--help`, `--quit` and `--export-guide` no longer create the data folder. (#121)
+
+Linux, the Wine side:
+
+- Mirrored monitors no longer stop `mkedid.py`, and with it the start of the lens stack; the Odyssey 3D is chosen for the shared position. (#118)
+
+Windows:
+
+- **Apply or a tray mode command during the 8-second "Trying once more" wait no longer turns 3D off** with "Another renderer is already running"; the wait runs to its end. (#117)
+- **A conversion is no longer stopped as "did not initialize" when Samsung's log was restarted with several megabytes ahead of its ready line.** (#118)
+
+Both editions:
+
+- **`companion.log` no longer grows for ever.** Once past 4 MiB it is kept as `companion.old.log` at the next start and a new log begins. (#118)
+
+### Performance
+
+- **Linux: showing a still on the Odyssey resizes both views at once**: 202 to 111 ms for a 3840x2160 pair, 291 to 200 ms for 7680x2160, with the same picture byte for byte. (#118)
+
+### Tests and releases
+
+- **The published 0.9.1 files were checked for the first time**: checksums, build provenance, versions, contents against the tag, hardening of the programs, and an installation and removal from the archive. Nothing was wrong with the Windows ZIP. A check that every link in the packaged documents leads to a packaged file now runs when the Linux packages are made. (#116)
+- **Mutation testing of the shared core** (1,474 mutants) found no defect; about 140 gaps in its tests were closed, among them live frame scaling by rows, depth-map resizing, the readiness probe on an untouched log, the settings-recovery backup and the temporary-file sweep. (#119)
+- **Sanitizers** (thread, address, memory) on the Rust and C tests reported nothing. Repeating the tests under load found two races in the tests of the file dialogs, which failed now and then on a busy machine. (#122)
+- **A ledger of every Win32 and COM call site of the Windows edition** (149 entries: handle ownership, return values, buffers, lifetimes, threading) found no defect, and repeated calls left handle counts where they were. Nothing changed.
+- CI: a newer push to `main` cancels the run of the commit it supersedes. (#116)
+
+### Hardware verification
+
+Pending: these changes were made and tested without the monitor, Wine, the camera or the lens. `docs/TESTING.md`, "Pending hardware verification", lists the checks under "New in 0.9.2". Most in need of a real run: the usual Linux installation from start to "setup: done", and the live screen's frame rate after the viewer's memory change.
+
 ## 0.9.1 (2026-11-12)
 
 An audit release for both editions: 44 pull requests (#71 to #114) from a series of security, performance and correctness reviews of 0.9.0, the later rounds by fuzzing, measurement and a walkthrough across components. No new features. Built and tested in CI on Windows and Linux (x86_64 and aarch64) and in an Arch Linux container; almost none of it has been run on the monitor yet, see Hardware verification.
