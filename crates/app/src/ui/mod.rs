@@ -754,6 +754,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.viewer.save_lens();
         let cleanup = {
             let mut c = self.core.lock().expect("core");
             c.save_preferences();

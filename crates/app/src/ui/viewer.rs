@@ -460,6 +460,12 @@ impl ViewerState {
         }
     }
 
+    /// Flush calibration changes when the application exits, even if their
+    /// settling delay has not elapsed or the viewer page is no longer shown.
+    pub fn save_lens(&mut self) {
+        self.lens.store();
+    }
+
     /// The calibration pattern is a picture of its own: it needs no image.
     fn shows_pattern(&self) -> bool {
         self.options.output == Output::Lens && self.lens.pattern
@@ -1582,6 +1588,19 @@ mod tests {
         let _ = ctx.run(input, |ctx| state.show_save_confirmation(ctx));
         assert!(state.pending_save.is_none());
         assert_eq!(std::fs::read(path).unwrap(), b"existing export");
+    }
+
+    #[test]
+    fn shutdown_flushes_calibration_before_the_settling_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lens.json");
+        let mut state = ViewerState {
+            lens: LensState::load(file.clone()),
+            ..ViewerState::default()
+        };
+        state.lens.nudge(lens::Knob::Pitch, 2.0);
+        state.save_lens();
+        assert_eq!(lens::read_lens(&file).unwrap(), state.lens.lens);
     }
 
     #[test]
