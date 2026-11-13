@@ -478,7 +478,16 @@ else FAMILY= INSTALL=; fi
 present() {
     case $1 in
         cmd:*) have "${1#cmd:}" ;;
-        lib:*) ldconfig -p 2>/dev/null | grep -q -F "${1#lib:}" || ls /usr/lib*/"${1#lib:}"* /usr/lib/*/"${1#lib:}"* >/dev/null 2>&1 ;;
+        lib:*)
+            # The linker's list where there is one to ask (ldconfig is not on an ordinary user's PATH
+            # on Debian), then the usual folders, each pattern by itself: ls fails for all of them when
+            # one matches nothing, which reported every installed library as missing.
+            if [ -z "$TEST_ROOT" ] && ldconfig -p 2>/dev/null | grep -q -F "${1#lib:}"; then return 0; fi
+            for found in "$TEST_ROOT"/usr/lib*/"${1#lib:}"* "$TEST_ROOT"/usr/lib/*/"${1#lib:}"*; do
+                [ -e "$found" ] && return 0
+            done
+            return 1
+            ;;
     esac
 }
 MISSING= UNNAMED=

@@ -599,6 +599,26 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("prefix", result.stderr)
 
+    def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
+        # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
+        # one ls, which fails when either pattern matches nothing: every library was reported missing.
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "pacman").write_text("#!/bin/sh\nexit 0\n")  # the Arch names, on any system
+        (tools / "pacman").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        for library in ["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0", "usr/lib64/libGL.so.1.7.0"]:
+            (self.system / library).parent.mkdir(parents=True, exist_ok=True)
+            (self.system / library).touch()
+        result = self.install(self.root / "prefix")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+        self.assertEqual(len(lines), 1, result.stdout)
+        missing = lines[0].removeprefix("   missing packages: ").split()
+        self.assertIn("libpipewire", missing)
+        self.assertNotIn("libxkbcommon", missing)
+        self.assertNotIn("libglvnd", missing)
+
 
 if __name__ == "__main__":
     unittest.main()
