@@ -393,6 +393,9 @@ fn depth_loop(shared: &Shared) {
                 }
             }
             Err(e) => {
+                // New frames must not use the previous scene's depth while
+                // inference is failing. Recovery starts a fresh smoother too.
+                *lock(&shared.depth) = DepthSmoother::default();
                 {
                     let mut stats = lock(&shared.stats);
                     stats.depth_rate = 0.0;
@@ -432,6 +435,95 @@ mod tests {
         // Odd requests are brought into range.
         assert_eq!(layout((1920, 1080), 99999).0, (3840, 2160));
         assert_eq!(layout((1920, 1080), 0).0, (640, 360));
+    }
+
+    #[test]
+    fn failed_depth_estimation_returns_new_frames_to_flat_output() {
+        const CHILD: &str = "ANY2ODYSSEY_TEST_DEPTH_FAILURE";
+        if std::env::var_os(CHILD).is_none() {
+            // Isolate the estimator/runtime caches and environment from the
+            // other tests. No model, runtime, capture portal or GPU is needed.
+            let dir = tempfile::tempdir().unwrap();
+            let model = dir.path().join("model.onnx");
+            std::fs::write(&model, b"test model placeholder").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "live::tests::failed_depth_estimation_returns_new_frames_to_flat_output",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(crate::depth::MODEL_ENV, &model)
+                .env("ORT_DYLIB_PATH", dir.path().join("missing-runtime.so"))
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let mut previous = DepthSmoother::default();
+        assert!(previous.update(2, 1, &[0.0, 1.0], 0.0));
+        let shared = Arc::new(Shared {
+            stop: AtomicBool::new(false),
+            depth_pos: AtomicI32::new(0),
+            pop_pos: AtomicI32::new(0),
+            sharpness: AtomicI32::new(0),
+            steadiness: AtomicI32::new(90),
+            lines: AtomicI32::new(1080),
+            detail: AtomicI32::new(518),
+            swap: AtomicBool::new(false),
+            sink: Mutex::new(None),
+            for_model: Mutex::new(Some(RgbaImage::new(28, 14))),
+            model_wanted: Condvar::new(),
+            depth: Mutex::new(previous),
+            stats: Mutex::new(Stats {
+                depth_rate: 30.0,
+                ..Stats::default()
+            }),
+        });
+        let worker_state = shared.clone();
+        let worker = std::thread::spawn(move || depth_loop(&worker_state));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lock(&shared.stats).depth_error.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.model_wanted.notify_all();
+        worker.join().unwrap();
+        let stats = lock(&shared.stats);
+        assert!(stats
+            .depth_error
+            .as_deref()
+            .is_some_and(|e| e.contains("ONNX Runtime could not be loaded")));
+        assert_eq!(stats.depth_rate, 0.0);
+        drop(stats);
+
+        let picture = RgbaImage::from_fn(128, 1, |x, _| {
+            image::Rgba([x as u8, 255 - x as u8, 70, 255])
+        });
+        let mut rendered = vec![0; picture.len() * 2];
+        let mut flat = rendered.clone();
+        let mut depth = lock(&shared.depth);
+        let (width, height) = depth.size();
+        let map = (!depth.values().is_empty()).then(|| Depth {
+            values: depth.values(),
+            width,
+            height,
+        });
+        live::render_pair(&picture, 128, 1, map, Params::default(), &mut rendered);
+        live::render_pair(&picture, 128, 1, None, Params::default(), &mut flat);
+        assert!(
+            rendered == flat,
+            "an estimator failure kept warping new pixels with the old scene's depth"
+        );
+        assert!(depth.values().is_empty());
+        // Recovery must begin with the new map, without blending the old scene.
+        assert!(depth.update(2, 1, &[1.0, 0.0], 0.9));
+        assert_eq!(depth.values(), &[1.0, 0.0]);
     }
 
     #[test]
