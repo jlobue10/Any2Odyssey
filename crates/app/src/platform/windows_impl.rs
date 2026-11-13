@@ -381,7 +381,9 @@ mod tests {
         let mut slow = fake_running("ping -n 30 127.0.0.1 >NUL");
         let started = Instant::now();
         assert!(!slow.wait_for_exit(Duration::from_millis(200)));
-        assert!(started.elapsed() >= Duration::from_millis(200));
+        // A timed wait may end up to one tick of the system clock (15.6 ms)
+        // early; it must not return at once.
+        assert!(started.elapsed() >= Duration::from_millis(150));
         assert!(slow.has_exited().is_none());
         let _ = slow.child.kill();
         let _ = slow.child.wait();
