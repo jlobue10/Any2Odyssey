@@ -79,24 +79,8 @@ pub fn convert_shared(
             Ok(Cow::Owned(out))
         }
         Layout::Anaglyph if half_width => {
-            // Each eye is read where it lies in the pair: the filter needs
-            // no copy of its half first.
-            let stretched = |x: u32| {
-                imageops::resize(
-                    &*imageops::crop_imm(image, x, 0, eye, image.height()),
-                    image.width(),
-                    image.height(),
-                    imageops::FilterType::Triangle,
-                )
-            };
-            let (left, right) = if swap { (eye, 0) } else { (0, eye) };
-            let red = stretched(left);
-            let mut out = stretched(right);
-            for (dst, src) in out.pixels_mut().zip(red.pixels()) {
-                dst.0[0] = src.0[0];
-                dst.0[3] = 255;
-            }
-            Ok(Cow::Owned(out))
+            let threads = crate::dibr::threads_for(image.width() as usize, image.height() as usize);
+            Ok(Cow::Owned(stretched_anaglyph(image, swap, threads)))
         }
         Layout::Anaglyph => {
             // Red from the left eye, green and blue from the right, written
@@ -126,6 +110,47 @@ pub fn convert_shared(
             Ok(Cow::Owned(out))
         }
     }
+}
+
+/// The anaglyph of a half-width pair (even width, not empty): each eye
+/// widened to the pair's width, red from the left one, green and blue from
+/// the right.
+///
+/// Widening is nearly all of the work, and it leaves the height alone. The
+/// filter then makes every row from that row of the pair and no other (its
+/// weights for the rows above and below are exactly zero), so the rows are
+/// widened in bands on `threads` threads and the picture is the same as
+/// when each eye is widened whole, which the tests hold it against.
+fn stretched_anaglyph(image: &RgbaImage, swap: bool, threads: usize) -> RgbaImage {
+    let (width, height) = image.dimensions();
+    let eye = width / 2;
+    let row_bytes = width as usize * 4;
+    let (left, right) = if swap { (eye, 0) } else { (0, eye) };
+    let mut out = RgbaImage::new(width, height);
+    crate::dibr::in_bands(&mut out, row_bytes, threads, |first_row, band| {
+        let rows = (band.len() / row_bytes) as u32;
+        // Each eye is read where it lies in the pair: the filter needs no
+        // copy of its half first.
+        let stretched = |x: u32| {
+            imageops::resize(
+                &*imageops::crop_imm(image, x, first_row as u32, eye, rows),
+                width,
+                rows,
+                imageops::FilterType::Triangle,
+            )
+        };
+        let (red, rest) = (stretched(left), stretched(right));
+        let pixels = band
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(red.as_raw().as_chunks::<4>().0)
+            .zip(rest.as_raw().as_chunks::<4>().0);
+        for ((dst, red), rest) in pixels {
+            *dst = [red[0], rest[1], rest[2], 255];
+        }
+    });
+    out
 }
 
 #[cfg(test)]
@@ -258,6 +283,31 @@ mod tests {
                     let unchanged = layout == Layout::Flat || (layout == Layout::Sbs && !swap);
                     assert_eq!(matches!(shared, Cow::Borrowed(_)), unchanged);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_half_width_pair_widened_in_bands_is_the_pair_widened_whole() {
+        let mut noise = 0x51f1_5eedu32;
+        // Heights that do not divide into the bands, a single row, a pair
+        // large enough for the public entry to start threads of its own.
+        for (width, height) in [(2, 1), (6, 2), (34, 9), (130, 67), (640, 120)] {
+            let source = RgbaImage::from_fn(width, height, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                Rgba(noise.to_le_bytes())
+            });
+            for swap in [false, true] {
+                let expected = reference(&source, Layout::Anaglyph, true, swap);
+                for threads in [1, 2, 3, 7, 64, 1000] {
+                    assert!(
+                        stretched_anaglyph(&source, swap, threads) == expected,
+                        "{width}x{height}, swapped {swap}, {threads} threads"
+                    );
+                }
+                assert!(convert(&source, Layout::Anaglyph, true, swap).unwrap() == expected);
             }
         }
     }

@@ -204,7 +204,7 @@ pub fn synthesize(
 /// at most eight, and one for a picture too small to be worth starting any.
 /// The viewer renders again at every step of a slider, so this decides how
 /// closely the picture follows the pointer.
-fn threads_for(width: usize, height: usize) -> usize {
+pub(crate) fn threads_for(width: usize, height: usize) -> usize {
     if width.saturating_mul(height) < 1 << 16 {
         return 1;
     }
@@ -275,20 +275,33 @@ fn synthesize_on(
         }
     };
     let mut out = vec![0u8; bytes];
-    let rows = height as usize;
-    let threads = threads.clamp(1, rows);
-    if threads == 1 {
-        render(0, &mut out);
-    } else {
-        let band = rows.div_ceil(threads);
-        std::thread::scope(|scope| {
-            for (index, part) in out.chunks_mut(band * row_bytes).enumerate() {
-                let render = &render;
-                scope.spawn(move || render(index * band, part));
-            }
-        });
-    }
+    in_bands(&mut out, row_bytes, threads, render);
     RgbaImage::from_raw(pair_width, height, out).ok_or(DibrError::TooLarge)
+}
+
+/// Share the rows of `out` (`row_bytes` bytes each) out in bands over
+/// `threads` threads: `render` is given the number of a band's first row
+/// and the band. For work that makes every row by itself, so that the
+/// picture is the same however its rows are shared out.
+pub(crate) fn in_bands(
+    out: &mut [u8],
+    row_bytes: usize,
+    threads: usize,
+    render: impl Fn(usize, &mut [u8]) + Sync,
+) {
+    let rows = out.len() / row_bytes.max(1);
+    let threads = threads.clamp(1, rows.max(1));
+    if threads == 1 {
+        render(0, out);
+        return;
+    }
+    let band = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (index, part) in out.chunks_mut(band * row_bytes).enumerate() {
+            let render = &render;
+            scope.spawn(move || render(index * band, part));
+        }
+    });
 }
 
 /// Fill the pixels nothing was warped onto. A gap opens where a near object

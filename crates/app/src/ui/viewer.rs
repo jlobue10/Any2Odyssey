@@ -35,6 +35,8 @@ const OUTPUT_HINT: &str =
     "Move this window to the display you want, then double-click or press F11 for full screen. Esc leaves.";
 const LOADED: &str = "Image loaded. Check the input format before starting output.";
 const NO_IMAGE: &str = "Open an image first.";
+const DEPTH_NOT_READY: &str =
+    "The image's depth is still being estimated. Start output when the picture is in the preview.";
 const OUTPUT_ON: &str =
     "Output window open. Stop output, Esc in that window, or closing it ends it.";
 const OUTPUT_OFF: &str = "Output stopped.";
@@ -584,6 +586,21 @@ fn fit_centered(area: Rect, image: egui::Vec2) -> Rect {
     Rect::from_center_size(area.center(), image * scale)
 }
 
+/// Asks for a repaint when it goes. A thread that works for the page holds
+/// one beside the channel its answer goes into, declared before it so that
+/// it goes after: the page is then woken with the answer, and also when the
+/// thread panics instead of answering (a decoder or the model's runtime on
+/// a file they cannot take), where it finds the channel closed. Otherwise
+/// the page would learn of that only when something else repaints it, and
+/// an output waiting on black for a picture would wait until then.
+struct Wake(egui::Context);
+
+impl Drop for Wake {
+    fn drop(&mut self) {
+        self.0.request_repaint();
+    }
+}
+
 enum Picked {
     Open(Result<Option<PathBuf>, String>),
     Save(Result<Option<PathBuf>, String>),
@@ -620,6 +637,9 @@ pub struct ViewerState {
     options: Options,
     /// The path box: what Open reads, and where a loaded file's path shows.
     path_text: String,
+    /// The file whose path the box was given to show. The text is not the
+    /// path where the name is not Unicode (`typed_path`).
+    shown_path: Option<PathBuf>,
     status: String,
     texture: Option<egui::TextureHandle>,
     uploaded: u64,
@@ -647,6 +667,9 @@ pub struct ViewerState {
     /// Output through Leia's weaver, and the picture it was last given.
     weaver: Weaver,
     woven: Option<Woven>,
+    /// The weaver's line as it was last put into the status for the picture
+    /// that is showing.
+    weaver_said: Option<String>,
     /// The live screen while it is being shown.
     #[cfg(target_os = "linux")]
     live: Option<crate::live::Live>,
@@ -665,6 +688,7 @@ impl Default for ViewerState {
             document: Document::default(),
             options: Options::default(),
             path_text: String::new(),
+            shown_path: None,
             status: READY.into(),
             texture: None,
             uploaded: 0,
@@ -681,6 +705,7 @@ impl Default for ViewerState {
             lens_switch: LensSwitch::with_helper(None),
             weaver: Weaver::with_helper(None),
             woven: None,
+            weaver_said: None,
             #[cfg(target_os = "linux")]
             live: None,
             #[cfg(target_os = "linux")]
@@ -724,12 +749,12 @@ impl ViewerState {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        let (ctx, file, options) = (ctx.clone(), path.to_owned(), self.options);
+        let (wake, file, options) = (Wake(ctx.clone()), path.to_owned(), self.options);
         let spawned = std::thread::Builder::new()
             .name("image-open".into())
             .spawn(move || {
+                let (_wake, tx) = (wake, tx);
                 let _ = tx.send(load(&file, options));
-                ctx.request_repaint();
             });
         match spawned {
             Ok(_) => {
@@ -773,6 +798,7 @@ impl ViewerState {
         match installed {
             Ok(()) => {
                 self.path_text = path.display().to_string();
+                self.shown_path = Some(path);
                 self.depth_failed = None;
                 // With AI depth the status follows from the estimate.
                 if self.options.input != Input::Ai {
@@ -781,6 +807,21 @@ impl ViewerState {
             }
             Err(e) => self.status = e,
         }
+    }
+
+    /// The file the path box names. While the box still shows the loaded
+    /// file's path as it was put there, that is the file itself: the text
+    /// stands in for a name that is not Unicode with replacement characters,
+    /// and read back it would name no file, or another one. Anything typed
+    /// is taken as typed, less the blanks around it.
+    fn typed_path(&self) -> Option<PathBuf> {
+        if let Some(shown) = &self.shown_path {
+            if self.path_text == shown.display().to_string() {
+                return Some(shown.clone());
+            }
+        }
+        let typed = self.path_text.trim();
+        (!typed.is_empty()).then(|| PathBuf::from(typed))
     }
 
     /// Whether the picture is still on its way: the options ask for AI
@@ -819,13 +860,13 @@ impl ViewerState {
         // The thread reads the document's own image: nothing is copied.
         let image = Arc::clone(image);
         let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
+        let wake = Wake(ctx.clone());
         let detail = self.options.detail;
         let spawned = std::thread::Builder::new()
             .name("depth".into())
             .spawn(move || {
+                let (_wake, tx) = (wake, tx);
                 let _ = tx.send(platform::estimate_depth(&image, detail));
-                ctx.request_repaint();
             });
         match spawned {
             Ok(_) => {
@@ -869,9 +910,18 @@ impl ViewerState {
             Ok(false) => {}
             Err(e) => {
                 self.depth_failed = Some(id);
-                self.output_open = false;
+                self.close_output_without_picture();
                 self.status = e;
             }
+        }
+    }
+
+    /// The image has no picture to show (its depth failed, or the options
+    /// cannot take it): the output ends, unless what it shows is the
+    /// calibration pattern, which needs no picture and stays.
+    fn close_output_without_picture(&mut self) {
+        if !self.shows_pattern() {
+            self.output_open = false;
         }
     }
 
@@ -884,7 +934,7 @@ impl ViewerState {
     /// cannot be converted with them, or say what there is now.
     fn settle(&mut self, converted: Result<(), String>) {
         if let Err(e) = converted {
-            self.output_open = false;
+            self.close_output_without_picture();
             self.status = e;
         } else if self.document.result().is_some() {
             self.status = if self.output_open { OUTPUT_ON } else { LOADED }.into();
@@ -906,7 +956,15 @@ impl ViewerState {
                 self.status = WeaverStatus::Starting.describe();
             }
         } else if self.document.result().is_none() && !self.shows_pattern() {
-            self.status = NO_IMAGE.into();
+            if self.document.depth_request(self.options).is_some() {
+                // There is an image: what is missing is its depth, which is
+                // on its way, or failed and is tried again for this request
+                // (the model may have been installed since).
+                self.depth_failed = None;
+                self.status = DEPTH_NOT_READY.into();
+            } else {
+                self.status = NO_IMAGE.into();
+            }
         } else if self.options.output == Output::Odyssey && !self.weaver.available() {
             self.status = WeaverStatus::NoHelper.describe();
         } else {
@@ -1141,12 +1199,22 @@ impl ViewerState {
             self.weaver
                 .show(picture.width(), picture.height(), picture.as_raw());
             self.woven = Some(wanted);
+            self.weaver_said = None;
         }
         if self.document.result().is_some() {
-            self.status = match status {
+            let line = match status {
                 WeaverStatus::On { .. } => format!("{ODYSSEY_ON} {}", status.describe()),
                 _ => status.describe(),
             };
+            // Said when it changes, with each new picture, and in place of
+            // the output window's line, which is not true of this output.
+            // Not at every frame: what the page said since (a preview that
+            // was saved or could not be, a file that could not be opened)
+            // would never be seen.
+            if self.weaver_said.as_deref() != Some(line.as_str()) || self.status == OUTPUT_ON {
+                self.status.clone_from(&line);
+                self.weaver_said = Some(line);
+            }
         }
     }
 
@@ -1157,17 +1225,17 @@ impl ViewerState {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        let ctx = ctx.clone();
+        let wake = Wake(ctx.clone());
         let spawned = std::thread::Builder::new()
             .name("file-dialog".into())
             .spawn(move || {
+                let (_wake, tx) = (wake, tx);
                 let picked = if save {
                     Picked::Save(platform::pick_save_png(DEFAULT_EXPORT_NAME))
                 } else {
                     Picked::Open(platform::pick_image())
                 };
                 let _ = tx.send(picked);
-                ctx.request_repaint();
             });
         match spawned {
             Ok(_) => self.picking = Some((rx, self.document.source_id)),
@@ -1403,9 +1471,10 @@ impl ViewerState {
                             .hint_text("Path of a PNG, JPEG or BMP"),
                     );
                     let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if entered && !state.path_text.trim().is_empty() {
-                        let path = PathBuf::from(state.path_text.trim());
-                        state.open(ui.ctx(), &path);
+                    if entered {
+                        if let Some(path) = state.typed_path() {
+                            state.open(ui.ctx(), &path);
+                        }
                     }
                     if gold_button(ui, "Open…", false, p).clicked() {
                         state.pick(ui.ctx(), false);
@@ -2701,6 +2770,42 @@ mod tests {
         assert!(state.woven.is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn what_the_page_says_stays_readable_while_the_odyssey_shows_a_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 0);
+        assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        // A preview saved (or not) while the output is on: said by the page
+        // before the output is looked at, on the same frame and on later ones.
+        let target = dir.path().join("preview.png");
+        state.save(&target);
+        let saved = format!("Preview saved to {}.", target.display());
+        assert_eq!(state.status, saved);
+        for _ in 0..3 {
+            state.show_output(&ctx);
+            assert_eq!(state.status, saved);
+        }
+        state.save(dir.path());
+        let refused = state.status.clone();
+        assert!(refused.contains("it is a folder"), "{refused}");
+        state.show_output(&ctx);
+        assert_eq!(state.status, refused);
+
+        // The output window's own line is not true of this output: an
+        // option that leaves the picture as it is puts it there.
+        state.settle(Ok(()));
+        assert_eq!(state.status, OUTPUT_ON);
+        state.show_output(&ctx);
+        assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        // And a new picture is said again.
+        state.document.set_source(pair(), state.options).unwrap();
+        state.status = LOADED.into();
+        state.show_output(&ctx);
+        assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
+        assert!(state.output_open && state.weaver.is_running());
+    }
+
     #[test]
     fn the_output_window_waits_for_depth_too_and_closes_when_there_is_none_to_come() {
         let ctx = egui::Context::default();
@@ -3123,5 +3228,172 @@ mod tests {
         state.toggle_output();
         assert!(!state.output_open);
         assert_eq!(state.status, OUTPUT_OFF);
+    }
+
+    #[test]
+    fn starting_output_before_the_depth_is_there_says_so_and_tries_a_failed_one_again() {
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        // The estimate is running: there is an image, so "open one" is wrong.
+        let estimate = queued_depth(&mut state);
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, DEPTH_NOT_READY);
+        assert!(state.estimating.is_some(), "the estimate goes on");
+
+        // It failed. Asking for output is asking for the picture again.
+        estimate.send(Err("no model".into())).unwrap();
+        state.poll_depth();
+        assert_eq!(state.status, "no model");
+        assert!(!state.depth_pending());
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, DEPTH_NOT_READY);
+        assert!(state.depth_pending(), "the next frame starts the model");
+
+        // With the picture there, output starts.
+        let estimate = queued_depth(&mut state);
+        estimate
+            .send(Ok(DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap()))
+            .unwrap();
+        state.poll_depth();
+        state.toggle_output();
+        assert!(state.output_open);
+        assert_eq!(state.status, OUTPUT_ON);
+
+        // An image the options cannot take is not waiting for anything.
+        let mut state = ViewerState::default();
+        state.options.input = Input::Flat;
+        let odd = RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]));
+        state.document.set_source(odd, state.options).unwrap();
+        state.options.input = Input::Pair;
+        state.options_changed();
+        state.toggle_output();
+        assert!(!state.output_open);
+        assert_eq!(state.status, NO_IMAGE);
+    }
+
+    #[test]
+    fn the_calibration_pattern_stays_up_when_the_image_has_no_picture() {
+        let showing_pattern = || {
+            let mut state = ViewerState::default();
+            state.options.output = Output::Lens;
+            state.lens.pattern = true;
+            state
+        };
+        // The model fails on the image while the pattern is being tuned.
+        let mut state = showing_pattern();
+        state.options.input = Input::Ai;
+        state.document.set_source(pair(), state.options).unwrap();
+        state.toggle_output();
+        assert!(state.output_open);
+        let estimate = queued_depth(&mut state);
+        estimate.send(Err("no model".into())).unwrap();
+        state.poll_depth();
+        assert!(state.output_open, "the pattern needs no depth");
+        assert_eq!(state.status, "no model");
+        // Without the pattern the same failure ends the output.
+        state.lens.pattern = false;
+        state.depth_failed = None;
+        let estimate = queued_depth(&mut state);
+        estimate.send(Err("no model".into())).unwrap();
+        state.poll_depth();
+        assert!(!state.output_open);
+
+        // Options the image cannot be converted with.
+        let mut state = showing_pattern();
+        state.options.input = Input::Flat;
+        let odd = RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 255]));
+        state.document.set_source(odd, state.options).unwrap();
+        state.toggle_output();
+        state.options.input = Input::Pair;
+        state.options_changed();
+        assert!(state.output_open, "the pattern needs no pair");
+        assert!(state.status.contains("even width"), "{}", state.status);
+    }
+
+    #[test]
+    fn the_path_box_names_the_file_it_shows_and_typed_text_as_typed() {
+        let mut state = ViewerState::default();
+        assert_eq!(state.typed_path(), None);
+        state.path_text = "   ".into();
+        assert_eq!(state.typed_path(), None);
+        state.path_text = "  /tmp/typed.png ".into();
+        assert_eq!(state.typed_path(), Some(PathBuf::from("/tmp/typed.png")));
+
+        // A loaded file whose name ends in a blank is that file, not the
+        // one its trimmed text would name.
+        let blank = PathBuf::from("/tmp/pair.png ");
+        state.shown_path = Some(blank.clone());
+        state.path_text = blank.display().to_string();
+        assert_eq!(state.typed_path(), Some(blank));
+        // Edited, the box is text again.
+        state.path_text.insert(0, ' ');
+        assert_eq!(state.typed_path(), Some(PathBuf::from("/tmp/pair.png")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enter_in_the_path_box_reopens_a_file_whose_name_is_not_unicode() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let name = std::ffi::OsString::from_vec(b"pair-\xff\xfe.png".to_vec());
+        let path = dir.path().join(name);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        pair()
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, bytes.into_inner()).unwrap();
+        let ctx = egui::Context::default();
+        let mut state = ViewerState::default();
+        state.open(&ctx, &path);
+        finish_opening(&mut state, &ctx);
+        assert_eq!(state.status, LOADED);
+        // The box can only show a likeness of the name, which names no file.
+        assert!(state.path_text.contains('\u{fffd}'), "{}", state.path_text);
+        assert!(!Path::new(&state.path_text).exists());
+        // What Enter in the box opens is the file all the same.
+        assert_eq!(state.typed_path(), Some(path.clone()));
+        state.status.clear();
+        let again = state.typed_path().unwrap();
+        state.open(&ctx, &again);
+        finish_opening(&mut state, &ctx);
+        assert_eq!(state.status, LOADED);
+        assert_eq!(state.shown_path, Some(path));
+    }
+
+    #[test]
+    fn a_worker_wakes_the_page_after_its_answer_and_also_when_it_panics() {
+        use std::sync::Mutex;
+        for panics in [false, true] {
+            let ctx = egui::Context::default();
+            let (tx, rx) = mpsc::channel::<u8>();
+            // What the page would find in the channel when it is woken.
+            let found = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&found);
+            let rx = Mutex::new(rx);
+            ctx.set_request_repaint_callback(move |_| {
+                let now = match rx.lock().unwrap().try_recv() {
+                    Ok(_) => "answer",
+                    Err(TryRecvError::Disconnected) => "closed",
+                    Err(TryRecvError::Empty) => "nothing yet",
+                };
+                seen.lock().unwrap().push(now);
+            });
+            let wake = Wake(ctx.clone());
+            let worker = std::thread::spawn(move || {
+                let (_wake, tx) = (wake, tx);
+                if panics {
+                    // Unwinds as a panic does, without a message on the
+                    // test's output.
+                    std::panic::resume_unwind(Box::new("the decoder gave up"));
+                }
+                let _ = tx.send(1);
+            });
+            assert_eq!(worker.join().is_err(), panics);
+            let expected = if panics { "closed" } else { "answer" };
+            assert_eq!(*found.lock().unwrap(), [expected], "panics: {panics}");
+        }
     }
 }

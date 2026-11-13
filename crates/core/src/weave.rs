@@ -135,32 +135,42 @@ pub fn weave(
     }
     let lens = lens.sanitized();
     let mut out = RgbaImage::new(left.width(), left.height());
-    let width = left.width() as usize;
-    let rows = out
-        .chunks_exact_mut(width * 4)
-        .zip(left.chunks_exact(width * 4))
-        .zip(right.chunks_exact(width * 4));
-    for (y, ((dst, l), r)) in rows.enumerate() {
-        let row = Row::new(&lens, origin.1 + y as i64);
-        let pixels = dst
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(l.as_chunks::<4>().0)
-            .zip(r.as_chunks::<4>().0);
-        for (x, ((dst, l), r)) in pixels.enumerate() {
-            let x = origin.0 + x as i64;
-            for channel in 0..3 {
-                dst[channel] = if row.is_right(x, channel) {
-                    r[channel]
-                } else {
-                    l[channel]
-                };
+    let row_bytes = left.width() as usize * 4;
+    let (left, right) = (left.as_raw(), right.as_raw());
+    // Every row is woven by itself (a calibration key weaves the whole
+    // panel again at each step), so the rows are shared out over threads.
+    in_bands(&mut out, row_bytes, |first_row, band| {
+        for (index, dst) in band.chunks_exact_mut(row_bytes).enumerate() {
+            let y = first_row + index;
+            let row = Row::new(&lens, origin.1 + y as i64);
+            let of_row = y * row_bytes..(y + 1) * row_bytes;
+            let pixels = dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(left[of_row.clone()].as_chunks::<4>().0)
+                .zip(right[of_row].as_chunks::<4>().0);
+            for (x, ((dst, l), r)) in pixels.enumerate() {
+                let x = origin.0 + x as i64;
+                for channel in 0..3 {
+                    dst[channel] = if row.is_right(x, channel) {
+                        r[channel]
+                    } else {
+                        l[channel]
+                    };
+                }
+                dst[3] = 255;
             }
-            dst[3] = 255;
         }
-    }
+    });
     Ok(out)
+}
+
+/// The rows of `out` in bands on as many threads as a picture of its size
+/// is worth (`dibr::in_bands`).
+fn in_bands(out: &mut RgbaImage, row_bytes: usize, weave: impl Fn(usize, &mut [u8]) + Sync) {
+    let threads = crate::dibr::threads_for(out.width() as usize, out.height() as usize);
+    crate::dibr::in_bands(out, row_bytes, threads, weave);
 }
 
 /// The calibration pattern: white for the left eye and black for the right.
@@ -190,16 +200,19 @@ pub fn weave_pattern(
     }
     let lens = lens.sanitized();
     let mut out = RgbaImage::new(width, height);
-    for (y, dst) in out.chunks_exact_mut(width as usize * 4).enumerate() {
-        let row = Row::new(&lens, origin.1 + y as i64);
-        for (x, dst) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let x = origin.0 + x as i64;
-            for (channel, value) in dst[..3].iter_mut().enumerate() {
-                *value = if row.is_right(x, channel) { 0 } else { 255 };
+    let row_bytes = width as usize * 4;
+    in_bands(&mut out, row_bytes, |first_row, band| {
+        for (index, dst) in band.chunks_exact_mut(row_bytes).enumerate() {
+            let row = Row::new(&lens, origin.1 + (first_row + index) as i64);
+            for (x, dst) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let x = origin.0 + x as i64;
+                for (channel, value) in dst[..3].iter_mut().enumerate() {
+                    *value = if row.is_right(x, channel) { 0 } else { 255 };
+                }
+                dst[3] = 255;
             }
-            dst[3] = 255;
         }
-    }
+    });
     Ok(out)
 }
 
@@ -265,7 +278,21 @@ pub fn fit_pair(
             stretch_x,
         )
     };
-    Ok((fitted(0), fitted(pair.width() - eye)))
+    let right_x = pair.width() - eye;
+    // Each eye is a resize of its own and, for a large pair, most of what
+    // a new picture costs: the two are made at the same time where there
+    // are cores for it and the area is worth a thread.
+    if crate::dibr::threads_for(width as usize, height as usize) < 2 {
+        return Ok((fitted(0), fitted(right_x)));
+    }
+    Ok(std::thread::scope(|scope| {
+        let right = scope.spawn(|| fitted(right_x));
+        let left = fitted(0);
+        let right = right
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (left, right)
+    }))
 }
 
 /// Interleave a side-by-side `pair` (left eye in the left half) for an area
@@ -510,6 +537,49 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_woven_on_threads_is_woven_subpixel_by_subpixel() {
+        // Past the size that is kept on one thread, with a height the bands
+        // do not divide and an origin away from the panel's corner.
+        let (width, height, origin) = (331u32, 263u32, (1913i64, -7i64));
+        let mut noise = 0x7f4a_7c15u32;
+        let mut picture = || {
+            RgbaImage::from_fn(width, height, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                Rgba(noise.to_le_bytes())
+            })
+        };
+        let (left, right) = (picture(), picture());
+        for l in [
+            lens(5.4, 0.3, 0.0),
+            Lens {
+                bgr: true,
+                ..lens(6.123, -0.2903, 0.81)
+            },
+        ] {
+            let woven = weave(&left, &right, &l, origin).unwrap();
+            let pattern = weave_pattern(width, height, &l, origin).unwrap();
+            for y in 0..height {
+                for x in 0..width {
+                    let (px, py) = (origin.0 + i64::from(x), origin.1 + i64::from(y));
+                    // Alpha is not a subpixel: it is opaque for either eye.
+                    let subpixel = |channel: usize, left: u8, right: u8| match channel {
+                        3 => 255,
+                        _ if l.is_right(px, py, channel) => right,
+                        _ => left,
+                    };
+                    let (in_left, in_right) = (left.get_pixel(x, y).0, right.get_pixel(x, y).0);
+                    let expected = [0, 1, 2, 3].map(|c| subpixel(c, in_left[c], in_right[c]));
+                    let lit = [0, 1, 2, 3].map(|c| subpixel(c, 255, 0));
+                    assert_eq!(woven.get_pixel(x, y).0, expected, "({x}, {y}) {l:?}");
+                    assert_eq!(pattern.get_pixel(x, y).0, lit, "({x}, {y}) {l:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn eyes_fitted_once_weave_like_a_pair_split_and_copied_each_time() {
         let mut noise = 0x1234_5678u32;
         // An odd width leaves the middle column out of both eyes.
@@ -541,6 +611,25 @@ mod tests {
             fit_pair(&RgbaImage::new(1, 4), 8, 8, 1.0),
             Err(WeaveError::Empty)
         );
+    }
+
+    #[test]
+    fn the_eyes_of_an_area_worth_two_threads_are_fitted_as_one_after_the_other() {
+        let mut noise = 0x0bad_5eedu32;
+        let pair = RgbaImage::from_fn(96, 40, |_, _| {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            Rgba(noise.to_le_bytes())
+        });
+        let left = imageops::crop_imm(&pair, 0, 0, 48, 40).to_image();
+        let right = imageops::crop_imm(&pair, 48, 0, 48, 40).to_image();
+        // 512 x 256 is past the size that is kept on one thread.
+        for (w, h, stretch) in [(512, 256, 1.0), (512, 256, 2.0), (300, 300, 1.0)] {
+            let (l, r) = fit_pair(&pair, w, h, stretch).unwrap();
+            assert!(l == fit(&left, w, h, stretch), "left {w}x{h} {stretch}");
+            assert!(r == fit(&right, w, h, stretch), "right {w}x{h} {stretch}");
+        }
     }
 
     #[test]
