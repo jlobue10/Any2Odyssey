@@ -67,7 +67,17 @@ done
 # would otherwise look in ~/.local, remove nothing of its own and whatever another installation has there.
 if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ]; then
     case $HERE in
-        */share/any2odyssey) PREFIX=${HERE%/share/any2odyssey}; PREFIX=${PREFIX:-/} ;;
+        */share/any2odyssey)
+            # A distribution's package keeps this script in the same place and runs it through
+            # any2odyssey-setup, which says --packaged. Run by its own name it is still the package's copy:
+            # the files beside it are the package manager's to remove, not this script's.
+            if [ -e "${HERE%/share/any2odyssey}/bin/any2odyssey-setup" ]; then
+                PACKAGED=1
+            else
+                PREFIX=${HERE%/share/any2odyssey}
+                PREFIX=${PREFIX:-/}
+            fi
+            ;;
     esac
 fi
 # Desktop entries are line based, and an empty prefix must not select /bin.

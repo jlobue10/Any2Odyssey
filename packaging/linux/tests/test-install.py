@@ -416,6 +416,29 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(f"Removing Any2Odyssey from {installed}\n", result.stdout)
             self.assert_removed(installed)
 
+    def test_a_packages_copy_run_by_its_own_name_removes_nothing_of_the_package(self):
+        # A distribution's package has the script at <prefix>/share/any2odyssey too, and any2odyssey-setup
+        # (which says --packaged) to run it. Run directly it took /usr for its own installation and, as
+        # root, removed the package's program, desktop entry, icon, documents and itself.
+        usr = self.root / "usr"
+        kept = ["bin/any2odyssey", "bin/any2odyssey-setup", "share/any2odyssey/install.sh",
+                "share/any2odyssey/wine-lens/setup.sh", "share/doc/any2odyssey/README.md",
+                "share/applications/any2odyssey.desktop", "share/icons/hicolor/256x256/apps/any2odyssey.png"]
+        for name in kept:
+            (usr / name).parent.mkdir(parents=True, exist_ok=True)
+            (usr / name).write_text("the package's\n")
+        shutil.copyfile(LINUX / "install.sh", usr / "share/any2odyssey/install.sh")
+        home = self.root / "home"
+        home.mkdir()
+        self.env["HOME"] = str(home)
+        result = subprocess.run([*SHELL, str(usr / "share/any2odyssey/install.sh"), "--uninstall"],
+                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30,
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("remove it with the package manager", result.stdout)
+        for name in kept:
+            self.assertTrue((usr / name).is_file(), f"{usr / name} was removed")
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"
