@@ -139,9 +139,38 @@ impl Running {
         };
         // Without a thread to wait on, the helper still sees its input close
         // and leaves by itself; it is only not reaped until this program ends.
-        let _ = std::thread::Builder::new()
+        if let Ok(thread) = std::thread::Builder::new()
             .name("lens-helper-reap".into())
-            .spawn(reap);
+            .spawn(reap)
+        {
+            let mut leaving = leaving();
+            // Those that are through are let go of, or each would keep its
+            // thread's memory until the program ends.
+            leaving.retain(|thread| !thread.is_finished());
+            leaving.push(thread);
+        }
+    }
+}
+
+/// The threads seeing a helper off, for [`see_helpers_off`].
+static LEAVING: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn leaving() -> std::sync::MutexGuard<'static, Vec<std::thread::JoinHandle<()>>> {
+    LEAVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Wait until every helper that has been let go has left or has been ended,
+/// which is [`LEAVE_GRACE`] at the longest. For the end of the program: the
+/// threads that end a helper which does not leave by itself end with the
+/// program, and quitting while the output was on left a helper that hung
+/// (and the window and the lens it held) behind for good.
+pub(crate) fn see_helpers_off() {
+    let leaving = std::mem::take(&mut *leaving());
+    for thread in leaving {
+        let _ = thread.join();
     }
 }
 
@@ -557,6 +586,58 @@ mod tests {
         }
         assert!(is_over(script), "the helper script was left running");
         assert!(is_over(program), "the helper's program was left running");
+    }
+
+    /// What the program does before it ends: by then a helper that does not
+    /// leave has been ended, where the thread that would have done it ended
+    /// with the program.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helpers_let_go_are_seen_off_before_the_program_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let helper = script(
+            dir.path(),
+            &format!(
+                "sleep 300 &\necho $! > '{0}.tmp' && mv '{0}.tmp' '{0}'\necho on\nwait",
+                started.display()
+            ),
+        );
+        let mut running = None;
+        for _ in 0..200 {
+            match start(Command::new(&helper), || {}) {
+                Ok(helper) => {
+                    running = Some(helper);
+                    break;
+                }
+                // (the freshly written script is "busy": see `turn_on`)
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let running = running.expect("the helper script did not start");
+        assert!(wait_for_file(&started));
+        let program: u32 = std::fs::read_to_string(&started)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let script = running.child.id();
+        running.leave_within(Duration::from_millis(500));
+        assert!(!is_over(script), "still within its time to leave");
+        see_helpers_off();
+        // Ended and collected by the time that returns: no polling here.
+        assert!(
+            !Path::new(&format!("/proc/{script}")).exists(),
+            "the helper script outlived the wait"
+        );
+        // What it had started was ended in the same moment.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !is_over(program) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(is_over(program), "the helper's program was left running");
+        // Nothing to wait for any more: returns at once.
+        see_helpers_off();
     }
 
     #[test]

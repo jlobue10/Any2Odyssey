@@ -1543,8 +1543,13 @@ impl ViewerState {
         let output_panel = |ui: &mut Ui, state: &mut ViewerState| {
             section(ui, "OUTPUT", p, |ui| {
                 row(ui, "Output format", |ui| {
+                    // The two Odyssey outputs' names are wider than the box
+                    // in the default window: shortened to fit, where the
+                    // box grew with them and took the panel through the
+                    // window's frame.
                     egui::ComboBox::from_id_salt("viewer-output")
                         .width(ui.available_width())
+                        .truncate()
                         .selected_text(state.options.output.label())
                         .show_ui(ui, |ui| {
                             for output in Output::ALL {
@@ -1906,6 +1911,65 @@ impl ViewerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The right edge of everything the page paints (text, boxes, lines)
+    /// with `output` chosen, laid out `width` points wide.
+    fn painted_right_edge(output: Output, width: f32) -> f32 {
+        fn right(shape: &egui::Shape) -> f32 {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().map(right).fold(0.0, f32::max),
+                egui::Shape::Noop => 0.0,
+                other => other.visual_bounding_rect().right(),
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let logger = any2odyssey_core::log::Logger::new(dir.path().join("test.log"));
+        let mut core = Core::new_preview(logger);
+        let palette = Palette::for_dark(false);
+        let ctx = egui::Context::default();
+        crate::ui::theme::install_fonts(&ctx);
+        crate::ui::theme::apply(&ctx, &palette);
+        let mut state = ViewerState::default();
+        state.options.output = output;
+        let mut edge = 0.0;
+        // A few frames: sizes measured in one are used by the next.
+        for _ in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    pos2(0.0, 0.0),
+                    egui::vec2(width, 780.0),
+                )),
+                ..Default::default()
+            };
+            let painted = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show(ctx, |ui| state.show(ui, &mut core, &palette, None));
+            });
+            edge = painted
+                .shapes
+                .iter()
+                .map(|clipped| right(&clipped.shape))
+                .fold(0.0, f32::max);
+        }
+        edge
+    }
+
+    #[test]
+    fn every_output_format_leaves_its_panel_inside_the_window() {
+        // The page's width in the default window, in the narrowest one
+        // that still has two columns, and in the smallest window.
+        for width in [952.0, 860.0, 672.0] {
+            for output in Output::ALL {
+                let edge = painted_right_edge(output, width);
+                assert!(
+                    edge <= width + 0.5,
+                    "{:?} in {width}: painted up to {edge}",
+                    output.label()
+                );
+            }
+        }
+    }
 
     #[cfg(not(windows))]
     #[test]

@@ -536,4 +536,71 @@ mod tests {
         assert_eq!(entries(dir.path()), [".any2odyssey-fresh", "settings.json"]);
         assert_eq!(remove_stale_temporaries(&dir.path().join("missing")), 0);
     }
+
+    fn age(path: &Path, minutes: u64) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(minutes * 60);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_sweep_spares_a_temporary_under_an_hour_old_and_old_files_of_other_names() {
+        let dir = tempfile::tempdir().unwrap();
+        // A writer may still own a temporary half an hour old; settings two
+        // hours old are not a temporary at all.
+        for (name, minutes) in [
+            (".any2odyssey-half-an-hour", 30),
+            (".overlay-backup-old", 120),
+            (".any2odyssey", 120),
+            ("settings.json", 120),
+            ("settings-recovery-old.json", 120),
+        ] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"x").unwrap();
+            age(&path, minutes);
+        }
+        assert_eq!(remove_stale_temporaries(dir.path()), 1);
+        assert_eq!(
+            entries(dir.path()),
+            [
+                ".any2odyssey",
+                ".any2odyssey-half-an-hour",
+                "settings-recovery-old.json",
+                "settings.json"
+            ]
+        );
+    }
+
+    #[test]
+    fn every_json_writer_publishes_the_value_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"frames": 7, "backend": "test"});
+        type Writer = fn(&Path, &serde_json::Value) -> io::Result<()>;
+        let writers: [(&str, Writer); 3] = [
+            ("retrying.json", write_json_atomic),
+            ("once.json", write_json_atomic_once),
+            ("durable.json", write_json_atomic_durable),
+        ];
+        for (name, write) in writers {
+            let path = dir.path().join(name);
+            write(&path, &value).unwrap();
+            let back: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(back, value, "{name}");
+        }
+        assert_eq!(
+            entries(dir.path()),
+            ["durable.json", "once.json", "retrying.json"]
+        );
+    }
+
+    #[test]
+    fn the_small_file_limit_is_a_mebibyte() {
+        // The tests of its users name it by the constant.
+        assert_eq!(SMALL_FILE_LIMIT, 1_048_576);
+    }
 }

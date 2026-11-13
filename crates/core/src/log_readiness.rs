@@ -566,4 +566,68 @@ mod tests {
         assert!(probe.poll_or_report(|e| reports.push(e.to_string())));
         assert_eq!(reports.len(), 1);
     }
+
+    #[test]
+    fn a_log_nobody_has_written_to_since_the_launch_is_not_ready() {
+        // The cursor is at the end of the file: that is not a file that
+        // shrank, and the marker of the run before stays behind the cursor.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversion.log");
+        for old in [old_log(), format!("{MARKER}\n"), MARKER.to_owned()] {
+            std::fs::write(&path, &old).unwrap();
+            let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+            for _ in 0..3 {
+                assert!(!probe.poll().unwrap(), "{old:?}");
+                assert_eq!(probe.offset as usize, old.len());
+            }
+            append(&path, NEW_READY);
+            assert!(probe.poll().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_carried_tail_exactly_as_long_as_the_marker_is_still_the_old_run() {
+        // The shortest copy rule 3 recognizes: the launch-time file ended
+        // with the marker and the trimmed file is that marker and no more.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversion.log");
+        std::fs::write(&path, format!("2026-11-09 10:00:05 {MARKER}")).unwrap();
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        std::fs::write(&path, MARKER).unwrap();
+        assert!(!probe.poll().unwrap());
+        assert_eq!(probe.offset as usize, MARKER.len());
+        append(&path, "\nmodel failed\n");
+        assert!(!probe.poll().unwrap());
+        append(&path, NEW_READY);
+        assert!(probe.poll().unwrap());
+    }
+
+    #[test]
+    fn a_short_overlap_with_a_long_launch_file_hides_nothing_either() {
+        // As `short_or_coincidental_overlaps_hide_nothing`, with a
+        // launch-time file long enough for its end to be compared at all.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversion.log");
+        std::fs::write(&path, format!("{}First", old_log())).unwrap();
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        std::fs::write(&path, format!("{MARKER}\n")).unwrap();
+        assert!(probe.poll().unwrap());
+    }
+
+    #[test]
+    fn no_more_is_kept_between_polls_than_a_split_marker_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversion.log");
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        std::fs::write(&path, "x".repeat(3 * READ_LIMIT as usize)).unwrap();
+        for _ in 0..4 {
+            assert!(!probe.poll().unwrap());
+            assert!(probe.pending.len() < MARKER.len());
+            assert!(probe.checkpoint.len() <= CHECKPOINT_LEN);
+        }
+        // A marker that was found is not found again in what was kept.
+        append(&path, MARKER);
+        assert!(probe.poll().unwrap());
+        assert!(!probe.poll().unwrap());
+    }
 }

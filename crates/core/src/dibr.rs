@@ -791,4 +791,67 @@ mod tests {
         fill_gaps(&mut colors, &mut nearness);
         assert_eq!(colors, vec![[0; 4]; 3]);
     }
+
+    #[test]
+    fn a_resized_map_of_a_slope_is_that_slope_between_the_outermost_centres() {
+        // Blending between four neighbours gives a plane back exactly, so
+        // the plane itself says what every resized value must be; the other
+        // tests of resizing compare this code with itself.
+        let (sw, sh) = (5u32, 4u32);
+        let (across, down) = (3.0f64, 10.0f64);
+        let top = across * f64::from(sw - 1) + down * f64::from(sh - 1);
+        let raw = (0..sw * sh)
+            .map(|i| (across * f64::from(i % sw) + down * f64::from(i / sw)) as f32)
+            .collect();
+        let map = DepthMap::normalized(sw, sh, raw).unwrap();
+        assert_eq!((map.width(), map.height()), (sw, sh));
+        assert_eq!(map.values().len(), 20);
+        assert_eq!(map.values()[19], 1.0);
+        // Where the centre of pixel `i` of `out` lies among `source` pixels.
+        let centre = |i: u32, out: u32, source: u32| {
+            ((f64::from(i) + 0.5) * f64::from(source) / f64::from(out) - 0.5)
+                .clamp(0.0, f64::from(source - 1))
+        };
+        for (w, h) in [(9, 7), (10, 8), (3, 2), (5, 9), (11, 4), (1, 1), (2, 13)] {
+            let resized = map.resized(w, h).unwrap();
+            assert_eq!((resized.width(), resized.height()), (w, h));
+            assert_eq!(resized.values().len(), (w * h) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let expected = (across * centre(x, w, sw) + down * centre(y, h, sh)) / top;
+                    let value = f64::from(resized.get(x, y));
+                    assert!(
+                        (value - expected).abs() < 1e-5,
+                        "{w}x{h} at ({x}, {y}): {value}, not {expected}"
+                    );
+                    assert_eq!(resized.values()[(y * w + x) as usize], resized.get(x, y));
+                }
+            }
+        }
+        // The upright twin of the row in `resizing_interpolates_between_pixel_centres`.
+        let column = DepthMap::normalized(1, 2, vec![0.0, 1.0]).unwrap();
+        assert_eq!(
+            column.resized(1, 4).unwrap().values(),
+            [0.0, 0.25, 0.75, 1.0]
+        );
+    }
+
+    #[test]
+    fn an_image_with_no_rows_or_no_columns_is_empty_not_a_picture() {
+        let depth = DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap();
+        for (width, height) in [(0, 4), (4, 0)] {
+            for threads in [1, 4] {
+                assert_eq!(
+                    synthesize_on(
+                        &RgbaImage::new(width, height),
+                        &depth,
+                        Params::default(),
+                        threads
+                    ),
+                    Err(DibrError::Empty),
+                    "{width}x{height}"
+                );
+            }
+        }
+    }
 }

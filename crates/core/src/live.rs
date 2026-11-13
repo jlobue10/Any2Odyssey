@@ -1373,4 +1373,211 @@ mod tests {
         assert_eq!(at(4, 1), 100);
         assert!((5..10).all(|x| at(x, 1) == 100), "the flat view stays flat");
     }
+
+    #[test]
+    fn a_frame_without_pixels_or_with_rows_closer_than_their_width_is_refused() {
+        let bytes = [9u8; 64];
+        let frame = |width, height, stride| Source {
+            bytes: &bytes,
+            width,
+            height,
+            stride,
+            order: PixelOrder::Rgb,
+        };
+        assert!(frame(4, 4, 16).is_complete());
+        let mut out = [7u8; 16];
+        assert!(scale_to_rgba(frame(4, 4, 16), &mut out, 2, 2));
+        for (width, height, stride) in [
+            (0, 4, 16),
+            (4, 0, 16),
+            (0, 0, 0),
+            (4, 4, 15),
+            (4, 4, 5),
+            (4, 2, 0),
+        ] {
+            let source = frame(width, height, stride);
+            assert!(!source.is_complete(), "{width}x{height}, stride {stride}");
+            let mut out = [7u8; 16];
+            assert!(!scale_to_rgba(source, &mut out, 2, 2));
+            assert_eq!(out, [7u8; 16]);
+        }
+        // Nor is a frame scaled to no size at all.
+        for (w, h) in [(0, 5), (5, 0)] {
+            assert!(!scale_to_rgba(frame(4, 4, 16), &mut [], w, h));
+        }
+    }
+
+    #[test]
+    fn every_pixel_of_a_scaled_frame_is_the_mean_of_its_own_rows_and_columns() {
+        // The source columns (or rows) an output column (or row) is the
+        // mean of when a length is halved, doubled and quartered.
+        type Samples = fn(usize) -> (usize, usize);
+        let halved: Samples = |i| (2 * i, 2 * i + 1);
+        let doubled: Samples = |i| (i / 2, i / 2);
+        let quartered: Samples = |i| (4 * i + 1, 4 * i + 3);
+        let (sw, sh) = (16usize, 12usize);
+        let stride = sw * 4 + 12;
+        let bytes = noise()(stride * sh);
+        for order in [PixelOrder::Rgb, PixelOrder::Bgr] {
+            let source = Source {
+                bytes: &bytes,
+                width: sw as u32,
+                height: sh as u32,
+                stride,
+                order,
+            };
+            let colour = |x: usize, y: usize, c: usize| {
+                let c = match (order, c) {
+                    (PixelOrder::Bgr, 0) => 2,
+                    (PixelOrder::Bgr, 2) => 0,
+                    _ => c,
+                };
+                u32::from(bytes[y * stride + x * 4 + c])
+            };
+            for ((w, h), across, down) in [
+                ((8usize, 6usize), halved, halved),
+                ((32, 24), doubled, doubled),
+                ((4, 3), quartered, quartered),
+                ((8, 24), halved, doubled),
+                ((32, 3), doubled, quartered),
+                ((4, 6), quartered, halved),
+            ] {
+                let mut out = vec![0u8; w * h * 4];
+                assert!(scale_to_rgba(source, &mut out, w as u32, h as u32));
+                for y in 0..h {
+                    for x in 0..w {
+                        let ((x0, x1), (y0, y1)) = (across(x), down(y));
+                        let mean = |c: usize| {
+                            ((colour(x0, y0, c)
+                                + colour(x1, y0, c)
+                                + colour(x0, y1, c)
+                                + colour(x1, y1, c)
+                                + 2)
+                                / 4) as u8
+                        };
+                        assert_eq!(
+                            out[(y * w + x) * 4..][..4],
+                            [mean(0), mean(1), mean(2), 255],
+                            "{order:?} to {w}x{h} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_range_follows_a_new_scene_slowly_and_settling_ends_on_the_maps_own_range() {
+        assert_eq!(SETTLED, 1.0 / 2048.0);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(2, 1, &[2.0, 6.0], 0.2));
+        assert_eq!(smoother.range, Some((2.0, 6.0)));
+        // Keeping 0.2 of the map keeps 0.7 of the range: 2.6 to 7.2.
+        assert!(smoother.update(2, 1, &[4.0, 10.0], 0.2));
+        let (low, high) = smoother.range.unwrap();
+        assert!(close(low, 2.6) && close(high, 7.2), "{low} {high}");
+        let values = smoother.values();
+        assert!(
+            close(values[0], 0.8 * (4.0 - 2.6) / 4.6) && close(values[1], 1.0),
+            "{values:?}"
+        );
+        // The range is never kept whole, however steady the map.
+        assert!(smoother.update(2, 1, &[4.0, 10.0], 0.9));
+        let (low, high) = smoother.range.unwrap();
+        assert!(
+            close(low, 2.6 * 0.97 + 4.0 * 0.03) && close(high, 7.2 * 0.97 + 10.0 * 0.03),
+            "{low} {high}"
+        );
+
+        // A still picture whose farthest point is not at zero.
+        let mut eased = DepthSmoother::default();
+        assert!(eased.update(2, 2, &[2.0, 6.0, 3.0, 5.0], 0.5));
+        let still = [3.0, 5.0, 4.5, 3.5];
+        let mut steps = 0;
+        while !eased.settle(2, 2, &still, 0.5) {
+            steps += 1;
+            assert!(steps < 2000, "never settled");
+        }
+        assert!(steps > 0, "the map was not there at the first step");
+        assert_eq!(eased.values(), [0.0, 1.0, 0.75, 0.25]);
+        assert_eq!(eased.range, Some((3.0, 5.0)));
+    }
+
+    #[test]
+    fn a_stretched_map_of_a_slope_is_that_slope_between_the_outermost_centres() {
+        // Blending between four neighbours gives a plane back exactly, so
+        // the plane itself says what the nearness of every pixel must be.
+        let (dw, dh) = (5u32, 4u32);
+        let values: Vec<f32> = (0..dw * dh)
+            .map(|i| (3 * (i % dw) + 10 * (i / dw)) as f32 / 42.0)
+            .collect();
+        let map = Depth {
+            values: &values,
+            width: dw,
+            height: dh,
+        };
+        let centre = |i: usize, out: usize, source: u32| {
+            ((i as f64 + 0.5) * f64::from(source) / out as f64 - 0.5)
+                .clamp(0.0, f64::from(source - 1))
+        };
+        for (w, h) in [
+            (9usize, 7usize),
+            (10, 8),
+            (3, 2),
+            (5, 9),
+            (11, 4),
+            (1, 1),
+            (2, 13),
+        ] {
+            let at = DepthAt::new(Some(map), w, h).unwrap();
+            let mut nearness = vec![0.0f32; w];
+            for y in 0..h {
+                at.row(y, &mut nearness);
+                for (x, &near) in nearness.iter().enumerate() {
+                    let expected = (3.0 * centre(x, w, dw) + 10.0 * centre(y, h, dh)) / 42.0;
+                    assert!(
+                        (f64::from(near) - expected).abs() < 1e-5,
+                        "{w}x{h} at ({x}, {y}): {near}, not {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_with_no_rows_or_no_columns_is_refused_everywhere() {
+        let params = Params::default();
+        let place = Placement {
+            view: (4, 4),
+            x: 0,
+            y: 0,
+            swap: false,
+        };
+        let mut canvas = vec![7u8; place.bytes()];
+        for (w, h) in [(0u32, 3u32), (3, 0)] {
+            assert!(!render_pair(&[], w, h, None, params, &mut []));
+            assert!(!render_placed(&[], w, h, None, params, place, &mut canvas));
+            assert!(!place_pair(&[], w, h, 0.5, place, &mut canvas));
+        }
+        assert!(canvas.iter().all(|&byte| byte == 7));
+    }
+
+    #[test]
+    fn views_too_narrow_to_have_an_inside_are_placed_unsharpened() {
+        let mut bytes = noise();
+        for (w, h) in [(1u32, 3u32), (2, 3), (1, 5), (2, 4)] {
+            let pair = bytes((w * h * 8) as usize);
+            let place = Placement {
+                view: (w, h),
+                x: 0,
+                y: 0,
+                swap: false,
+            };
+            let (mut sharp, mut plain) = (vec![0u8; pair.len()], vec![0u8; pair.len()]);
+            assert!(place_pair(&pair, w, h, 1.0, place, &mut sharp));
+            assert!(place_pair(&pair, w, h, 0.0, place, &mut plain));
+            assert!(sharp == plain, "{w}x{h}");
+        }
+    }
 }

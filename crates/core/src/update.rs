@@ -909,6 +909,41 @@ mod tests {
         assert_eq!(request.accept, "application/vnd.github+json");
         assert!(request.user_agent.bytes().all(|b| b.is_ascii_graphic()));
     }
+
+    #[test]
+    fn a_signed_number_is_not_a_version_component() {
+        // `u32::from_str` takes a leading plus sign; a version does not.
+        for invalid in ["+0.8.2", "0.+8.2", "0.8.+2", "v+1.0.0"] {
+            assert_eq!(Version::parse(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn a_response_of_exactly_the_limit_is_read_and_one_byte_more_is_not() {
+        let document = |length: usize| {
+            let empty = r#"{"tag_name":"v0.9.0","body":""}"#;
+            let body = format!(
+                r#"{{"tag_name":"v0.9.0","body":"{}"}}"#,
+                "x".repeat(length - empty.len())
+            );
+            assert_eq!(body.len(), length);
+            body
+        };
+        let release = parse_latest_release(&document(MAX_RESPONSE_BYTES)).unwrap();
+        assert_eq!(release.version, Version::new(0, 9, 0));
+        assert_eq!(
+            parse_latest_release(&document(MAX_RESPONSE_BYTES + 1)),
+            Err(ParseError::TooLarge(MAX_RESPONSE_BYTES + 1))
+        );
+    }
+
+    #[test]
+    fn automatic_checks_are_a_day_apart_by_the_real_clock() {
+        // Every other test names the interval by its constant.
+        assert_eq!(CHECK_INTERVAL_SECONDS, 86_400);
+        // 2023-11-14: a clock that reads zero would make every start due.
+        assert!(now_unix() > 1_700_000_000, "{}", now_unix());
+    }
 }
 
 #[cfg(test)]
