@@ -142,7 +142,11 @@ jobs:
           test -s /usr/lib/udev/rules.d/70-any2odyssey-lens.rules
           test -z "$(find /usr/share/any2odyssey -name __pycache__ -o -name '*.pyc')"
           test ! -e /usr/share/any2odyssey/wine-lens/tests
-          sh scripts/check-doc-links.sh /usr/share/doc/any2odyssey
+          # The documents are read from the package file: the container's pacman.conf has NoExtract for
+          # usr/share/doc, so the installed system has none of them.
+          mkdir pkgdocs
+          bsdtar -xf packaging/arch/any2odyssey-*.pkg.tar.zst -C pkgdocs usr/share/doc/any2odyssey usr/share/licenses/any2odyssey
+          sh scripts/check-doc-links.sh pkgdocs/usr/share/doc/any2odyssey
           any2odyssey-setup --help
           any2odyssey-setup --dry-run --no-deps --no-odyssey < /dev/null
           any2odyssey --help
