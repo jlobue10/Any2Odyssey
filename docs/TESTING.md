@@ -24,6 +24,8 @@ On Linux the Windows crate is only compile-checked: `cargo check --workspace --t
 
 `python3 contrib/wine-lens/tests/test-weaver-watcher.py` runs `any2odyssey-weaver` against stand-ins for the scripts it starts: when the helper is killed outright, the process it left behind still stops eye tracking, and a `flock` without a timed wait (BusyBox) does not turn that process's wait into a busy loop. No Wine, monitor, desktop or root access is needed.
 
+`python3 contrib/wine-lens/tests/test-tracking-stop.py` runs `tools/tracking.sh` against stand-ins for Wine, Leia's service and its eye tracker with chosen delays: a stop waits for a tracker that is slow to leave (so a start right after it really starts one), a stop during a start that is still under way leaves no tracker behind, a tracker that never leaves holds a stop for about 10 s and no longer, and a normal stop is not slowed. `python3 contrib/wine-lens/tests/test-setup-pgrep.py` checks that `setup.sh` stops before creating anything when the only `pgrep` is one without `-u` (BusyBox's). Neither needs Wine, the monitor or root access.
+
 The release workflow runs every test of this section and of the ones below with the same commands as CI, before anything is signed or published.
 
 `python3 packaging/linux/tests/test-install.py` runs the release archive's `install.sh` in temporary folders, with a stand-in for `/` (`A2O_INSTALL_TEST_ROOT`: a mount table, `/sys` block devices and mounted "Windows drives" made of empty files), a fixture program in place of the executable and of `setup.sh`, and no root access (while that variable is set the script uses sudo for nothing). It covers the desktop launcher for awkward prefixes (it needs `gio` and `desktop-file-validate`), `--help`, `--dry-run`, the prefix without GNU `readlink`, and the choice of a Windows drive: the one internal drive used with `--yes`; USB drives, memory cards, flagged-removable disks and mapped volumes over them not used; several candidates listed and none chosen; a network share or a user's FUSE mount refused with `--yes`; a folder without a Windows system folder or with another user's files (that case needs root) passed over; `--windows-root` taken as given. It also covers what `--uninstall` stops and in which Wine prefix. `A2O_INSTALL_TEST_SHELL` runs the same tests under another shell (`dash`, `"busybox sh"`); CI uses the system's `sh`.
@@ -119,13 +121,14 @@ Useful evidence to collect while testing: `companion.log`, `worker-status.json`,
 
 ## Pending hardware verification
 
-The changes made after 0.9.0 (audit rounds 11 to 13) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made after 0.9.0 (audit rounds 11 to 14) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Linux installer:
 
 - With the Windows partition mounted: `./install.sh --dry-run --yes`; step 5 must show `would run: .../setup.sh <drive>`.
 - A USB stick carrying `Program Files/LeiaSR/...` and `Windows/System32`: expect `not used: ... (a removable drive)`. The same on a memory card in a built-in reader, if the PC has one.
 - After the lens stack has run: `install.sh --uninstall`, then `pgrep -f noxon` is empty and Wine programs in other prefixes are still running.
+- Install with `--prefix` to another folder, then run the uninstall command the installer printed: that folder's installation is removed and one in `~/.local` is left alone.
 
 The Wine side (`contrib/wine-lens`):
 
@@ -146,6 +149,7 @@ The live screen:
 4. 2160 lines with video, sharpening on and off: pictures per second; no centre seam; bars and swap correct on a screen that is not 16:9.
 5. `pkill -STOP -f any2odyssey-weaver.exe`, then Stop: wrapper and host gone after about 3 s, lens off, SR service alive, next Start works.
 6. Stop 5 s into a cold start, then Start again.
+   Also Start then Stop within a second: 30 s later `tracking.sh status` shows the tracker and the bridge stopped. And Stop then Start at once: eyes are found in the second session. Note how long `wine sc start` takes to return and how long the tracker takes to leave after `wine sc stop` (the stop waits at most 10 s for it).
 7. Ctrl+C in a terminal: lens off, no host left.
 8. `env -u XDG_RUNTIME_DIR`: the frame file is in `/dev/shm` and Wine opens it.
 9. Cancel the portal dialog: no sharing indicator left; restart works.
@@ -156,6 +160,7 @@ The viewer:
 - Odyssey output in AI mode: open a new image or change depth detail. Expect a black panel with the lens on, then the new picture without pressing Start; repeat with the controls minimised.
 - The first AI conversion still works; alter one byte of the data-folder model and expect the "Install it again" message.
 - `any2odyssey FILE` while an instance runs, including a file name that is not UTF-8.
+- Open the Open... dialog (zenity, and kdialog on KDE), then close the viewer, and separately `kill -9` it: the dialog goes away within a second both times; a normal pick and a cancel still work.
 - With a live screen on the Odyssey, choose another output format: the weaver window closes, capture stops and the page reads "A live screen is shown through the Odyssey 3D output only."; choosing the Odyssey again and pressing Start works.
 - Lens output on an AI-depth image, then make depth fail (rename the model and change Depth detail): the output closes with the reason, and the next lens output shows a correct picture.
 
@@ -168,7 +173,7 @@ Windows (G90XF PC):
 5. An HDR toggle and an SDR-brightness change still restart through recovery.
 6. Turning 3D off by hotkey, Apply and the tray commands act promptly; no 7-second kill lines in the log.
 7. Camera plugged in: starts. Unplugged: the USB message.
-8. Quit then immediate relaunch, `--toggle` / `--show` / `--quit`, an installer upgrade over a running instance: no "Control events unavailable" in the log.
+8. Quit then immediate relaunch, `--toggle` / `--show` / `--quit`, an installer upgrade over a running instance: no "Control events unavailable" in the log. Run `Install.cmd` the moment Any2Odyssey has been started: it closes the app instead of stopping with "Could not request a clean shutdown".
 9. View logs and the release-page button open Explorer and the browser; View logs still opens the data folder with an empty `Any2Odyssey.cmd` placed in `%LOCALAPPDATA%`.
 
 The workflows run only on GitHub. The pull request that brings these changes is the first run of the pinned Arch container's key set-up and of the dependency job; the first tag after it is the first run of the attestation job and of the Linux gates and the dependency job in `release.yml`. Both need watching.

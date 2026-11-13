@@ -220,6 +220,10 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-mkedid.py
       - name: Weaver helper leaving tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
+      - name: Eye tracking stop tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-tracking-stop.py
+      - name: Lens setup tool check tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-setup-pgrep.py
       - name: Third-party list for Linux matches the dependencies
         run: |
           scripts/third-party-linux.py > /tmp/third-party-linux.md
