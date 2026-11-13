@@ -121,7 +121,7 @@ Useful evidence to collect while testing: `companion.log`, `worker-status.json`,
 
 ## Pending hardware verification
 
-The changes made after 0.9.0 (audit rounds 11 to 14) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 (audit rounds 11 to 14) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Linux installer:
 
