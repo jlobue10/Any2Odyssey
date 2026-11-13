@@ -64,18 +64,28 @@ def note_place(real, odyssey):
     places = ["%d %d %d %d" % (x, y, w, h) for name, w, h, x, y in real if is_odyssey_3d(edid_of(name))]
     open(odyssey, "w").write(places[0] + "\n" if len(places) == 1 else "")
 
+def preference(monitor):
+    """Among mirrored monitors, which are at the same place: the Odyssey 3D, then one with an EDID, then by name."""
+    edid = edid_of(monitor[0])
+    return (not is_odyssey_3d(edid), not any(edid), monitor[0])
+
 def main(probe, out, odyssey=None):
     real = xrandr_monitors()
     if odyssey: note_place(real, odyssey)
     pairs = []
     for slot, w, h, x, y in wine_monitors(probe):
-        match = [r for r in real if r[1:] == (w, h, x, y)]
-        if len(match) != 1: sys.exit(f"slot {slot}: no single monitor at {w}x{h}+{x}+{y}")
-        pairs.append((slot, match[0][0], edid_of(match[0][0])))
+        match = [r for r in real if r[1:] == (w, h, x, y) and r[0] not in [p[1] for p in pairs]]
+        if not match: sys.exit(f"slot {slot}: no monitor at {w}x{h}+{x}+{y}")
+        name = min(match, key=preference)[0]
+        pairs.append((slot, name, edid_of(name)))
     # Wine sometimes reports the primary monitor without a usable name; one slot left over can only be it.
-    left = [r[0] for r in real if r[0] not in [p[1] for p in pairs]]
-    free = [s for s in range(len(real)) if s not in [p[0] for p in pairs]]
-    if len(left) == 1 and len(free) == 1: pairs.append((free[0], left[0], edid_of(left[0])))
+    # Mirrored monitors share a place and, when Wine shows them as one, a slot: the others need none.
+    placed = {r[1:] for r in real if r[0] in [p[1] for p in pairs]}
+    left = [r for r in real if r[1:] not in placed]
+    free = [s for s in range(len({r[1:] for r in real})) if s not in [p[0] for p in pairs]]
+    if len({r[1:] for r in left}) == 1 and len(free) == 1:
+        name = min(left, key=preference)[0]
+        pairs.append((free[0], name, edid_of(name)))
     pairs.sort()
     models = {model_of(e) for _, _, e in pairs}
     lines = ["REGEDIT4", ""]
