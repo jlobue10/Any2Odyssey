@@ -439,6 +439,52 @@ class InstallerTests(unittest.TestCase):
         for name in kept:
             self.assertTrue((usr / name).is_file(), f"{usr / name} was removed")
 
+    def test_the_installed_readme_has_everything_it_links_to(self):
+        # 0.9.1 installed README.md with two of the four documents it links to and none of its pictures.
+        linked = ["docs/LENS-SWITCH.md", "docs/TESTING.md", "docs/assets/controls-light.png",
+                  "installer/README.md", "LICENSE"]
+        for name in linked:
+            (self.archive / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.archive / name).write_text("a document\n")
+        (self.archive / "README.md").write_text(
+            "".join(f"[{name}]({name})\n" for name in linked) + "[elsewhere](https://example.org/a.md)\n")
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        documents = prefix / "share/doc/any2odyssey"
+        for name in ["README.md", *linked]:
+            self.assertTrue((documents / name).is_file(), f"{name} was not installed")
+        # The check the package steps run agrees, and notices a link that leads nowhere.
+        check = [*SHELL, str(LINUX.parents[1] / "scripts" / "check-doc-links.sh"), str(documents)]
+        result = subprocess.run(check, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        (documents / "docs/TESTING.md").unlink()
+        result = subprocess.run(check, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("README.md links to docs/TESTING.md", result.stderr)
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_removed(prefix)
+
+    def test_uninstall_refreshes_the_caches_the_installation_wrote(self):
+        # The released 0.9.1 archive left share/applications/mimeinfo.cache naming any2odyssey.desktop
+        # as the program for PNG, JPEG and BMP files after the entry itself was removed.
+        if not shutil.which("update-desktop-database"):
+            self.skipTest("update-desktop-database (desktop-file-utils) is not installed")
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        cache = prefix / "share/applications/mimeinfo.cache"
+        self.assertIn("any2odyssey.desktop", cache.read_text())
+        # A dry run changes nothing.
+        result = self.run_installer("--prefix", str(prefix), "--uninstall", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("any2odyssey.desktop", cache.read_text())
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_removed(prefix)
+        self.assertNotIn("any2odyssey", cache.read_text())
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"

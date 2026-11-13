@@ -70,15 +70,23 @@ package() {
   install -Dm644 "$repo/USER-GUIDE.html" "$pkgdir/usr/share/doc/any2odyssey/USER-GUIDE.html"
   install -Dm644 "$repo/README.md" "$pkgdir/usr/share/doc/any2odyssey/README.md"
   install -Dm644 "$repo/CHANGELOG.md" "$pkgdir/usr/share/doc/any2odyssey/CHANGELOG.md"
-  install -Dm644 "$repo/docs/LENS-SWITCH.md" "$pkgdir/usr/share/doc/any2odyssey/docs/LENS-SWITCH.md"
-  install -Dm644 "$repo/docs/PLATFORMS.md" "$pkgdir/usr/share/doc/any2odyssey/docs/PLATFORMS.md"
+  # README.md links to every document in docs, to its screenshots, to installer/README.md and to the
+  # license files; all of them are beside it under the paths it uses (the license files as links to
+  # where Arch keeps them), and the check fails the package when a link leads nowhere.
+  install -Dm644 -t "$pkgdir/usr/share/doc/any2odyssey/docs" "$repo"/docs/*.md
+  install -Dm644 -t "$pkgdir/usr/share/doc/any2odyssey/docs/assets" "$repo"/docs/assets/*.png
+  install -Dm644 "$repo/installer/README.md" "$pkgdir/usr/share/doc/any2odyssey/installer/README.md"
   for file in LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md; do
     install -Dm644 "$repo/$file" "$pkgdir/usr/share/licenses/any2odyssey/$file"
+    ln -s "../../licenses/any2odyssey/$file" "$pkgdir/usr/share/doc/any2odyssey/$file"
   done
+  sh "$repo/scripts/check-doc-links.sh" "$pkgdir/usr/share/doc/any2odyssey"
   # The setup for the Odyssey 3D's lens, eye tracker and weaver under Wine (MIT). It is run by the user,
   # from here, and builds into their own data folder.
   install -d "$pkgdir/usr/share/any2odyssey"
   cp -R "$repo/contrib/wine-lens" "$pkgdir/usr/share/any2odyssey/wine-lens"
+  # Its tests are for a checkout: nothing in the package runs them (0.9.1 shipped them).
+  rm -rf "$pkgdir/usr/share/any2odyssey/wine-lens/tests"
   # Left in a checkout where contrib/wine-lens/tests/test-mkedid.py has run; no part of the package.
   find "$pkgdir/usr/share/any2odyssey/wine-lens" -name __pycache__ -type d -prune -exec rm -rf {} +
   chmod -R u=rwX,go=rX "$pkgdir/usr/share/any2odyssey/wine-lens"
