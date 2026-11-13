@@ -42,11 +42,20 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "sha256.h"
 
 #define NBUF 4
+#define AUTH_TIMEOUT_MS 5000
+
+static int64_t monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
 
 static int cam = -1, conn = -1, gone;
 static struct { void *start; size_t length; } bufs[NBUF];
@@ -251,13 +260,22 @@ static void serve(const char *camera, const char *secret)
     char line[256], challenge[33] = "", expected[65];
     size_t have = 0;
     int authorised = 0;
+    int64_t now = monotonic_ms();
+    if (now < 0) return;
+    const int64_t deadline = now + AUTH_TIMEOUT_MS;
 
     gone = 0;
     while (!gone) {
         struct pollfd fds[2] = { { conn, POLLIN, 0 }, { cam, POLLIN, 0 } };
-        /* Whoever connects has five seconds to prove itself; a silent connection must not keep the
-         * one place taken. */
-        int ready = poll(fds, streaming ? 2 : 1, authorised ? -1 : 5000);
+        /* One deadline for the whole handshake: partial bytes, the challenge and interrupted polls
+         * must not renew an unauthenticated client's hold on the only connection. */
+        int timeout = -1;
+        if (!authorised) {
+            now = monotonic_ms();
+            if (now < 0 || now >= deadline) return;
+            timeout = (int)(deadline - now);
+        }
+        int ready = poll(fds, streaming ? 2 : 1, timeout);
         if (ready < 0) {
             if (errno == EINTR) continue;
             break;
@@ -270,6 +288,7 @@ static void serve(const char *camera, const char *secret)
             have += n;
             line[have] = 0;
             while ((end = strchr(line, '\n'))) {
+                if (!authorised && ((now = monotonic_ms()) < 0 || now >= deadline)) return;
                 *end = 0;
                 if (end > line && end[-1] == '\r') end[-1] = 0;
                 if (!authorised && !challenge[0]) {

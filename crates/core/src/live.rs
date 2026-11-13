@@ -81,6 +81,25 @@ pub fn scale_to_rgba(source: Source<'_>, out: &mut [u8], width: u32, height: u32
         PixelOrder::Rgb => (0, 2),
         PixelOrder::Bgr => (2, 0),
     };
+    // At native size all four samples below would be the same pixel.
+    // Copy/reorder once instead, keeping padding out and alpha opaque.
+    if (w, h) == (sw, sh) {
+        in_bands(out, w * 4, |first_row, band| {
+            for (row, line) in band.chunks_exact_mut(w * 4).enumerate() {
+                let start = (first_row + row) * source.stride;
+                let input = &source.bytes[start..start + w * 4];
+                for (dst, src) in line
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(input.as_chunks::<4>().0)
+                {
+                    *dst = [src[r], src[1], src[b], 255];
+                }
+            }
+        });
+        return true;
+    }
     // Two sample columns per output column, at 1/4 and 3/4 of its span.
     let columns: Vec<(usize, usize)> = (0..w)
         .map(|x| {
@@ -361,6 +380,46 @@ mod tests {
     use super::*;
     use crate::dibr::{self, DepthMap};
     use image::RgbaImage;
+
+    #[test]
+    fn native_size_conversion_preserves_pixels_and_ignores_row_padding() {
+        for (w, h) in [(1, 1), (3, 7), (64, 40)] {
+            let stride = w * 4 + 13;
+            // The last row need not have trailing padding.
+            let bytes: Vec<u8> = (0..stride * (h - 1) + w * 4)
+                .map(|i| (i % 251) as u8)
+                .collect();
+            for order in [PixelOrder::Rgb, PixelOrder::Bgr] {
+                let source = Source {
+                    bytes: &bytes,
+                    width: w as u32,
+                    height: h as u32,
+                    stride,
+                    order,
+                };
+                let mut out = vec![0; w * h * 4];
+                assert!(scale_to_rgba(source, &mut out, w as u32, h as u32));
+                for y in 0..h {
+                    for x in 0..w {
+                        let p = &bytes[y * stride + x * 4..][..4];
+                        let expected = match order {
+                            PixelOrder::Rgb => [p[0], p[1], p[2], 255],
+                            PixelOrder::Bgr => [p[2], p[1], p[0], 255],
+                        };
+                        assert_eq!(&out[(y * w + x) * 4..][..4], &expected);
+                    }
+                }
+                // Invalid input is rejected before any output is changed.
+                let short = Source {
+                    bytes: &bytes[..bytes.len() - 1],
+                    ..source
+                };
+                let previous = out.clone();
+                assert!(!scale_to_rgba(short, &mut out, w as u32, h as u32));
+                assert_eq!(out, previous);
+            }
+        }
+    }
 
     #[test]
     fn a_frame_is_shrunk_by_averaging_and_its_colours_put_in_order() {
