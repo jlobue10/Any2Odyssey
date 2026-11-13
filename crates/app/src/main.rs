@@ -30,11 +30,25 @@ use any2odyssey_core::log::Logger;
 use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
+    usage_for(cfg!(windows))
+}
+
+/// The help text of the Windows build (`windows`) or of the others. Each
+/// names its own modes only: the conversion worker, the update check and
+/// the capture diagnostics exist on Windows alone, and the viewer's image
+/// argument and the depth model elsewhere.
+fn usage_for(windows: bool) -> String {
     let mut text = format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks",
         any2odyssey_core::VERSION
     );
-    if cfg!(not(windows)) {
+    if windows {
+        text.push_str("\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)");
+    }
+    text.push_str("\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG");
+    if windows {
+        text.push_str("\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen");
+    } else {
         text.push_str("\n  Any2Odyssey [--open] FILE         open an image in the stereo viewer (in the running instance when there is one)");
         text.push_str("\n  Any2Odyssey --install-depth-model  download the AI depth model for 2D → 3D (about 95 MB, needs curl)");
     }
@@ -691,6 +705,44 @@ mod argument_tests {
             assert!(text.contains(word), "{word}");
         }
         assert!(text.contains("or open them when no instance is running"));
+    }
+
+    #[test]
+    fn each_platforms_help_names_its_own_modes_only() {
+        let (windows, others) = (usage_for(true), usage_for(false));
+        let own = if cfg!(windows) { &windows } else { &others };
+        assert_eq!(&usage(), own);
+        let windows_only = [
+            "--worker",
+            "--inspect",
+            "--layout-probe",
+            "--test-capture-exclusion",
+            "--test-offscreen",
+            "--check-updates",
+        ];
+        for word in windows_only {
+            assert!(windows.contains(word), "{word}");
+            assert!(!others.contains(word), "{word}");
+        }
+        for word in ["--open", "--install-depth-model"] {
+            assert!(!windows.contains(word), "{word}");
+            assert!(others.contains(word), "{word}");
+        }
+        for word in [
+            "--toggle",
+            "--show",
+            "--quit",
+            "--help",
+            "--self-test",
+            "--export-guide",
+            "--screenshot",
+        ] {
+            assert!(windows.contains(word) && others.contains(word), "{word}");
+        }
+        // One mode a line, none of them run together.
+        for text in [&windows, &others] {
+            assert!(text.lines().skip(3).all(|l| l.starts_with("  Any2Odyssey")));
+        }
     }
 
     #[test]
