@@ -22,6 +22,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,7 +78,8 @@ int main(int argc, char **argv)
     long seconds = argc > 3 ? atol(argv[3]) : 5;
     int seen = 0, missed = 0;
 
-    if (argc < 3 || argc > 4 || seconds < 1 || !argv[2][0]) {
+    /* (an interval whose count of looks does not fit a long would divide by zero, or by anything, below) */
+    if (argc < 3 || argc > 4 || seconds < 1 || seconds > LONG_MAX / LOOKS_A_SECOND || !argv[2][0]) {
         fprintf(stderr, "usage: %s <tty> <name> [seconds]\n", argv[0]);
         return 2;
     }

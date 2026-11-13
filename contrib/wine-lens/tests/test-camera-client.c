@@ -535,6 +535,7 @@ static void script_frame_then_leave(struct fake *f)
     if (!fake_handshake(f)) return;
     assert(fake_line(f, line, sizeof line) && !strncmp(line, "F ", 2));
     fake_reply(f, "ok");
+    fake_packet(f, 'F', "", 0); /* an empty frame is not handed on: there is no picture in it */
     fake_packet(f, 'F', "abc", 3);
     /* The next command finds the camera unplugged: the bridge closes the connection without a reply. */
     assert(fake_line(f, line, sizeof line) && !strcmp(line, "S"));

@@ -169,7 +169,7 @@ static DWORD WINAPI bridge_thread(void *arg)
                 SetEvent(b->replied);
             }
             LeaveCriticalSection(&b->reply_lock);
-        } else if (head[0] == 'F') {
+        } else if (head[0] == 'F' && length) { /* (an empty frame is no picture, and nothing to copy) */
             EnterCriticalSection(&b->frame_lock);
             if (b->on_frame) b->on_frame(b->frame_ctx, time_us, data, length);
             LeaveCriticalSection(&b->frame_lock);
