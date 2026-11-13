@@ -136,6 +136,36 @@ quoted() {
     esac
 }
 
+# The first folder, from the nearest one that exists at or above $1 up to /, whose entries somebody other
+# than root can change: one that is not root's, or one that others may write to. A sticky folder such as
+# /tmp counts only as that nearest one, where this script would make something itself; further up nobody
+# but root can rename or replace what is root's in it. Prints nothing when every folder is root's alone.
+# A group's write permission is not counted: Debian's /usr/local is the staff group's to write.
+foreign_folder() {
+    at=$1
+    while [ ! -d "$at" ]; do
+        at=${at%/*}
+        [ -n "$at" ] || at=/
+    done
+    at=$(cd "$at" && pwd -P) || { printf '%s\n' "$1"; return 0; }
+    nearest=1
+    while :; do
+        facts=$(stat -c '%u %a' -- "$at" 2>/dev/null) || { printf '%s\n' "$at"; return 0; }
+        mode=${facts#* }
+        case ${mode#"${mode%?}"} in 2 | 3 | 6 | 7) open=1 ;; *) open= ;; esac
+        sticky=
+        [ ${#mode} -lt 4 ] || case ${mode%???} in 1 | 3 | 5 | 7) sticky=1 ;; esac
+        if [ "${facts% *}" != 0 ] || { [ -n "$open" ] && { [ -z "$sticky" ] || [ -n "$nearest" ]; }; }; then
+            printf '%s\n' "$at"
+            return 0
+        fi
+        [ "$at" != / ] || return 0
+        at=${at%/*}
+        [ -n "$at" ] || at=/
+        nearest=
+    done
+}
+
 BIN=$PREFIX/bin
 SHARE=$PREFIX/share
 APPDIR=$SHARE/any2odyssey
@@ -217,55 +247,80 @@ if [ -z "$PACKAGED" ]; then
     for f in any2odyssey any2odyssey.desktop any2odyssey.png wine-lens/setup.sh; do
         [ -e "$HERE/$f" ] || { echo "install: $HERE/$f is missing; run this script from the extracted archive" >&2; exit 1; }
     done
+    # As root, only into folders that are root's alone. Every step below writes by path (install, cp -R,
+    # rm -rf, the desktop entry), and whoever can change a folder on the way can swap what a path names
+    # between two system calls: a root installer in another user's folder writes where that user points it.
+    # No care taken over one file closes that (the desktop entry's private staging below narrows it for that
+    # file only), so such an installation is refused as a whole. Uninstalling is not: its files may have
+    # been put there by a root run of an earlier version, and it removes names, it does not write.
+    if [ "$(id -u)" = 0 ]; then
+        for folder in "$BIN" "$SHARE/applications" "$SHARE/icons/hicolor/256x256/apps" "$APPDIR" "$DOCDIR"; do
+            foreign=$(foreign_folder "$folder")
+            [ -z "$foreign" ] && continue
+            echo "install: not installing to $PREFIX as root: $foreign is not root's alone (it belongs to another user, or others may write to it), and whoever can change it could make a root installer overwrite other files. Run this script as the user it is for (it uses sudo by itself for the steps that need it), or give --prefix a folder that is root's, such as /usr/local." >&2
+            exit 1
+        done
+    fi
     run install -Dm755 "$HERE/any2odyssey" "$BIN/any2odyssey"
     # The desktop entry names the program by its full path: ~/.local/bin is not on every session's PATH.
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
     else
-        mkdir -p "$SHARE/applications"
-        ENTRY=$SHARE/applications/any2odyssey.desktop
-        # Written beside the entry and moved into its place: an entry that is there is whole (not half of
-        # one when this script is interrupted or the disk fills), and an entry that is a link to another
-        # file is replaced like the program and the icon are, not written through.
-        rm -f "$ENTRY.new"
-        # Pass the path as data, never as a sed/awk program or replacement.
-        # Exec arguments undergo both desktop-string and command-line unescaping.
-        if [ -d "$ENTRY" ] || ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
-            function quote_arg(value,    slash, quoted, i, c) {
-                slash = sprintf("%c", 92)
-                quoted = "\""
-                for (i = 1; i <= length(value); i++) {
-                    c = substr(value, i, 1)
-                    if (c == slash) quoted = quoted slash slash slash slash
-                    else if (c == "\"" || c == "$" || c == "`") quoted = quoted slash slash c
-                    else if (c == "%") quoted = quoted "%%"
-                    else quoted = quoted c
+        (
+            mkdir -p "$SHARE/applications"
+            ENTRY=$SHARE/applications/any2odyssey.desktop
+            # Written beside the entry and moved into its place: an entry that is there is whole (not half of
+            # one when this script is interrupted or the disk fills), and an entry that is a link to another
+            # file is replaced like the program and the icon are, not written through.
+            # A private, unique staging directory keeps installs from sharing a temporary path.
+            # Noclobber also rejects a substituted link before awk can truncate its target.
+            # One left by a run that was killed before it could remove its own goes first: nothing else
+            # would ever remove it. A name that is a link is not followed, only removed.
+            for stale in "$ENTRY".??????????; do
+                if [ -d "$stale" ] || [ -L "$stale" ]; then rm -rf -- "$stale"; fi
+            done
+            ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1
+            trap 'rm -f -- "$ENTRY_TMP/entry"; rmdir -- "$ENTRY_TMP"' 0
+            trap 'exit 1' HUP INT TERM
+            set -C
+            # Pass the path as data, never as a sed/awk program or replacement.
+            # Exec arguments undergo both desktop-string and command-line unescaping.
+            if [ -d "$ENTRY" ] || ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
+                function quote_arg(value,    slash, quoted, i, c) {
+                    slash = sprintf("%c", 92)
+                    quoted = "\""
+                    for (i = 1; i <= length(value); i++) {
+                        c = substr(value, i, 1)
+                        if (c == slash) quoted = quoted slash slash slash slash
+                        else if (c == "\"" || c == "$" || c == "`") quoted = quoted slash slash c
+                        else if (c == "%") quoted = quoted "%%"
+                        else quoted = quoted c
+                    }
+                    return quoted "\""
                 }
-                return quoted "\""
-            }
-            BEGIN {
-                path = ENVIRON["A2O_DESKTOP_EXE"]
-                command = quote_arg(path)
-                # Exec forbids = in its executable name; GLib also looks up that
-                # name before expanding %%. Use a fixed script for those paths,
-                # keeping the path and file as data in positional arguments.
-                if (index(path, "=") || index(path, "%"))
-                    command = "/bin/sh -c " quote_arg("exec \"$@\"") " any2odyssey " command
-            }
-            /^Exec=any2odyssey([ \t]|$)/ {
-                sub(/^Exec=any2odyssey/, "")
-                print "Exec=" command $0
-                rewritten++
-                next
-            }
-            { print }
-            # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
-            END { if (rewritten != 1) exit 1 }
-        ' "$HERE/any2odyssey.desktop" >"$ENTRY.new" || ! mv -f "$ENTRY.new" "$ENTRY"; then
-            rm -f "$ENTRY.new"
-            echo "install: could not write the desktop entry $ENTRY: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed, or the entry could not be put in place)" >&2
-            exit 1
-        fi
+                BEGIN {
+                    path = ENVIRON["A2O_DESKTOP_EXE"]
+                    command = quote_arg(path)
+                    # Exec forbids = in its executable name; GLib also looks up that
+                    # name before expanding %%. Use a fixed script for those paths,
+                    # keeping the path and file as data in positional arguments.
+                    if (index(path, "=") || index(path, "%"))
+                        command = "/bin/sh -c " quote_arg("exec \"$@\"") " any2odyssey " command
+                }
+                /^Exec=any2odyssey([ \t]|$)/ {
+                    sub(/^Exec=any2odyssey/, "")
+                    print "Exec=" command $0
+                    rewritten++
+                    next
+                }
+                { print }
+                # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
+                END { if (rewritten != 1) exit 1 }
+            ' "$HERE/any2odyssey.desktop" >"$ENTRY_TMP/entry" || ! mv -fT "$ENTRY_TMP/entry" "$ENTRY"; then
+                echo "install: could not write the desktop entry $ENTRY: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed, or the entry could not be put in place)" >&2
+                exit 1
+            fi
+        )
     fi
     run install -Dm644 "$HERE/any2odyssey.png" "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
     for f in README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md \

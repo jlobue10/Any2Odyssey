@@ -615,6 +615,131 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
         self.assertEqual([path.name for path in entry.parent.glob("any2odyssey.desktop*")], ["any2odyssey.desktop"])
 
+    def test_desktop_staging_does_not_follow_a_link_created_after_unlink(self):
+        prefix = self.root / "prefix"
+        other = self.root / "another file"
+        other.write_text("not the installer's\n")
+        staging = prefix / "share/applications/any2odyssey.desktop.new"
+        tools = self.root / "tools"
+        tools.mkdir()
+        # Deterministically schedule a competing directory writer after unlink and before
+        # the shell's redirection. The wrapper is test instrumentation, not the attack.
+        real_rm = shlex.quote(shutil.which("rm"))
+        (tools / "rm").write_text(
+            f'#!/bin/sh\n{real_rm} "$@" || exit $?\n'
+            f'if [ "$#" = 2 ] && [ "$2" = {shlex.quote(str(staging))} ]; then\n'
+            f'    ln -s {shlex.quote(str(other))} "$2"\nfi\n'
+        )
+        (tools / "rm").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(other.read_text(), "not the installer's\n")
+        entry = staging.with_suffix("")
+        self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
+
+    def test_desktop_staging_rejects_a_substituted_link_and_cleans_up(self):
+        prefix = self.root / "prefix"
+        other = self.root / "another file"
+        other.write_text("not the installer's\n")
+        entry = prefix / "share/applications/any2odyssey.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("previous desktop entry\n")
+        tools = self.root / "tools"
+        tools.mkdir()
+        # Even if the staging directory's name is interfered with before redirection,
+        # the exclusive open must reject an existing file or link.
+        real_mktemp = shlex.quote(shutil.which("mktemp"))
+        called = self.root / "mktemp was called"
+        (tools / "mktemp").write_text(
+            f'#!/bin/sh\nstage=$({real_mktemp} "$@") || exit $?\n'
+            f': > {shlex.quote(str(called))}\n'
+            f'ln -s {shlex.quote(str(other))} "$stage/entry" || exit $?\n'
+            'printf "%s\\n" "$stage"\n'
+        )
+        (tools / "mktemp").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        result = self.install(prefix)
+        if not called.exists():
+            # BusyBox's shell can run its own mktemp without looking on the PATH (Arch's does): nothing
+            # put the link there, and the installation simply succeeded.
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in mktemp, which the test cannot stand in for")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(other.read_text(), "not the installer's\n")
+        self.assertEqual(entry.read_text(), "previous desktop entry\n")
+        self.assertEqual(list(entry.parent.iterdir()), [entry])
+
+    def test_a_staging_folder_left_by_a_killed_run_is_removed_by_the_next(self):
+        prefix = self.root / "prefix"
+        applications = prefix / "share/applications"
+        left = applications / "any2odyssey.desktop.Ab3dE6gh1J"
+        left.mkdir(parents=True)
+        (left / "entry").write_text("half an entry")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "kept").write_text("not the installer's\n")
+        (applications / "any2odyssey.desktop.linkedAway").symlink_to(elsewhere)
+        # Not a staging name (nine characters): left alone.
+        (applications / "any2odyssey.desktop.ninechars").mkdir()
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(path.name for path in applications.glob("any2odyssey.desktop*")),
+                         ["any2odyssey.desktop", "any2odyssey.desktop.ninechars"])
+        self.assertEqual((elsewhere / "kept").read_text(), "not the installer's\n")
+
+    @unittest.skipUnless(os.geteuid() == 0, "needs root: the refusal is for a root installer")
+    def test_root_does_not_install_into_a_folder_that_is_not_roots_alone(self):
+        # A root installer in a folder another user can change writes where that user points it: the
+        # staging above narrows that for the desktop entry and nothing closes it for the other files.
+        def refused(prefix, named):
+            result = self.install(prefix)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(f"{named} is not root's alone", result.stderr)
+            self.assertFalse((prefix / "bin").exists(), "something was installed all the same")
+            self.assertFalse((prefix / "share/any2odyssey").exists())
+            # A dry run says the same instead of listing steps it would refuse.
+            self.assertEqual(self.install(prefix, "--dry-run").returncode, 1)
+
+        # Another user's folder, here or further up (the usual case: root with a user's HOME).
+        theirs = self.root / "theirs"
+        theirs.mkdir()
+        os.chown(theirs, 65534, 65534)
+        refused(theirs, theirs)
+        refused(theirs / "not/there/yet", theirs)
+        inside = theirs / "roots"
+        inside.mkdir()
+        refused(inside, theirs)
+        # Root's folder that anybody may write to, sticky or not, when things would be made right in it.
+        for mode in (0o777, 0o1777):
+            anybodys = self.root / f"anybodys {mode:o}"
+            anybodys.mkdir()
+            anybodys.chmod(mode)
+            refused(anybodys, anybodys)
+        # One folder inside root's prefix that is another user's.
+        prefix = self.root / "prefix"
+        applications = prefix / "share/applications"
+        applications.mkdir(parents=True)
+        os.chown(applications, 65534, 65534)
+        refused(prefix, applications)
+        # Root's folder below a sticky one (as every other test here is, under /tmp), and one the staff
+        # group may write to (Debian's /usr/local), are root's to install into.
+        sticky = self.root / "sticky"
+        sticky.mkdir()
+        sticky.chmod(0o1777)
+        for name, mode in (("plain", 0o755), ("staff", 0o2775)):
+            fine = sticky / name
+            fine.mkdir()
+            fine.chmod(mode)
+            result = self.install(fine)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((fine / "bin/any2odyssey").is_file())
+        # Uninstalling is not refused: a root run of an earlier version may have put the files there.
+        os.chown(sticky / "plain", 65534, 65534)
+        result = self.run_installer("--prefix", str(sticky / "plain"), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_removed(sticky / "plain")
+
     def test_nothing_installed_can_be_written_by_others_whatever_the_umask(self):
         # With umask 000 the menu entry and the Wine setup, which are run as the user later, were
         # writable by everybody (the program itself, the icon and the documents never were).
