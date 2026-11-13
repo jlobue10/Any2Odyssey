@@ -42,7 +42,7 @@ class InstallerTests(unittest.TestCase):
         self.log = self.root / "launched-argv"
         self.setup_log = self.root / "setup-argv"
         # A stand-in for /: the installer looks under it for the lens board, mounted drives, the
-        # mount table and /sys, and for udev rules it would otherwise remove with sudo.
+        # mount table and /sys. While it is set the installer runs nothing with sudo.
         self.system = self.root / "system"
         for folder in ["dev", "proc/self", "sys/class/block", "mnt", "media"]:
             (self.system / folder).mkdir(parents=True)
@@ -67,13 +67,19 @@ class InstallerTests(unittest.TestCase):
     def write_mounts(self):
         (self.system / "proc/self/mounts").write_text("".join(line + "\n" for line in self.mounts))
 
-    def block_device(self, name, bus, removable="0", under=()):
-        """A disk with one partition in the stand-in /sys; returns the partition's kernel name."""
+    def block_device(self, name, bus, removable="0", under=(), card=None):
+        """A disk with one partition in the stand-in /sys; returns the partition's kernel name.
+
+        `card` is what an MMC host says its card is: "SD" for a memory card, "MMC" for soldered eMMC.
+        """
         disk = self.system / "sys/devices" / bus / "block" / name
         partition = disk / (name + "1")
         partition.mkdir(parents=True)
         (partition / "partition").write_text("1\n")
         (disk / "removable").write_text(removable + "\n")
+        if card:
+            (disk / "device").mkdir()
+            (disk / "device" / "type").write_text(card + "\n")
         (disk / "slaves").mkdir()
         for lower in under:
             (disk / "slaves" / lower).symlink_to(self.system / "sys/class/block" / lower)
@@ -81,7 +87,7 @@ class InstallerTests(unittest.TestCase):
         (self.system / "sys/class/block" / partition.name).symlink_to(partition)
         return partition.name
 
-    def windows_drive(self, where, device=None, system_folder="Windows/System32"):
+    def windows_drive(self, where, device=None, system_folder="Windows/System32", fstype="ntfs3"):
         """A mounted drive with Leia's runtime; `device` is the partition the mount table names."""
         drive = self.system / where
         (drive / SERVICE).parent.mkdir(parents=True)
@@ -90,7 +96,7 @@ class InstallerTests(unittest.TestCase):
             (drive / system_folder).mkdir(parents=True)
         if device:
             point = str(drive).replace("\\", "\\134").replace(" ", "\\040")
-            self.mounts.append(f"/dev/{device} {point} ntfs3 ro 0 0")
+            self.mounts.append(f"/dev/{device} {point} {fstype} ro 0 0")
             self.write_mounts()
         return drive
 
@@ -206,7 +212,9 @@ class InstallerTests(unittest.TestCase):
     def test_removable_drives_are_not_used_unasked(self):
         drives = {
             "usb": self.windows_drive("media/usb", self.block_device("a2ostick", "pci0000:00/usb2/2-1")),
-            "card": self.windows_drive("media/card", self.block_device("a2ocard", "pci0000:00/mmc0", removable="1")),
+            "flagged": self.windows_drive("media/flagged", self.block_device("a2oflag", "pci0000:00/ata3", removable="1")),
+            # A card in a built-in reader: the kernel calls the disk fixed, the card says what it is.
+            "card": self.windows_drive("media/card", self.block_device("a2ocard", "pci0000:00/mmc0", card="SD")),
             # An encrypted or mapped volume is what the device under it is.
             "mapped": self.windows_drive("mnt/mapped", self.block_device(
                 "a2omap", "virtual", under=[self.block_device("a2olower", "pci0000:00/usb3/3-2")])),
@@ -217,6 +225,31 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(f"not used: {drive} (a removable drive)", result.stdout)
         self.assertIn("--windows-root", result.stdout)
         self.assertIsNone(self.setup_ran_with())
+
+    def test_windows_on_soldered_emmc_is_a_drive_of_this_machine(self):
+        drive = self.windows_drive("mnt/windows", self.block_device("a2oemmc", "platform/sdhci/mmc0", card="MMC"))
+        result = self.prepare_odyssey("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.setup_ran_with(), [str(drive)], result.stdout + result.stderr)
+
+    def test_ntfs_3g_mount_of_an_internal_drive_is_used(self):
+        drive = self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"), fstype="fuseblk")
+        result = self.prepare_odyssey("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.setup_ran_with(), [str(drive)], result.stdout + result.stderr)
+
+    def test_user_file_system_that_names_an_internal_device_is_not_believed(self):
+        # Any user's FUSE program chooses the source the mount table shows, and the owners of its files.
+        self.block_device("a2ofix", "pci0000:00/nvme0")
+        for fstype in ["fuse.lookalike", "fuse"]:
+            with self.subTest(fstype=fstype):
+                self.mounts = ["rootfs / rootfs rw 0 0"]
+                drive = self.windows_drive(f"mnt/{fstype}", "a2ofix1", fstype=fstype)
+                result = self.prepare_odyssey("--yes")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"--windows-root '{drive}'", result.stdout)
+                self.assertIsNone(self.setup_ran_with())
+                shutil.rmtree(drive)
 
     def test_named_windows_root_is_taken_as_given(self):
         stick = self.windows_drive("media/usb", self.block_device("a2ostick", "pci0000:00/usb2/2-1"))
@@ -265,6 +298,27 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"not used: {drive} (its files belong to another user)", result.stdout)
         self.assertIsNone(self.setup_ran_with())
+
+    def test_stand_in_root_never_reaches_a_command_run_as_root(self):
+        # The variable comes from the environment: what it names must not be handed to sudo.
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "sudo-argv"
+        (tools / "sudo").write_text(f'#!/bin/sh\necho "$*" >> "{called}"\n')
+        (tools / "sudo").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        rules = self.system / "etc/udev/rules.d/70-any2odyssey-lens.rules"
+        rules.parent.mkdir(parents=True)
+        rules.write_text("# somebody else's file\n")
+        (self.archive / "wine-lens" / "70-any2odyssey-lens.rules").write_text("# the rules\n")
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--yes", "--no-model", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("A2O_INSTALL_TEST_ROOT is set", result.stdout)
+        result = self.run_installer("--prefix", str(prefix), "--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(called.exists(), called.read_text() if called.exists() else "")
+        self.assertEqual(rules.read_text(), "# somebody else's file\n")
 
     def test_empty_windows_root_is_rejected(self):
         for root in ["", "/"]:
