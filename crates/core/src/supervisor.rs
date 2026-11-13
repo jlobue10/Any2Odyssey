@@ -151,13 +151,28 @@ impl Supervisor {
         // a recovery attempt: it is made with recovery off too, and charges
         // no failure. A renderer still there the second time is someone
         // else's, and the message below is right.
-        if exit_code == exit_code::ALREADY_RUNNING && self.wanted && !self.waited_for_other {
+        //
+        // A start made while that repeat is still to come (Apply or a tray
+        // mode command relaunches at once, without asking here) meets the
+        // same renderer. It is not the repeat: the wait goes on to its end.
+        let repeat_to_come = self.waited_for_other && self.retry_after.is_some();
+        if exit_code == exit_code::ALREADY_RUNNING
+            && self.wanted
+            && (!self.waited_for_other || repeat_to_come)
+        {
+            let at = match self.retry_after {
+                Some(at) if repeat_to_come => at,
+                _ => now + RECOVERY_DELAY,
+            };
             self.waited_for_other = true;
-            self.retry_after = Some(now + RECOVERY_DELAY);
+            self.retry_after = Some(at);
             self.recovering = true;
             return format!(
                 "{what}. Trying once more in {} seconds.",
-                RECOVERY_DELAY.as_secs()
+                at.saturating_duration_since(now)
+                    .as_secs_f32()
+                    .ceil()
+                    .max(1.0)
             );
         }
         if classify(exit_code) == ExitKind::NotRetryable {
@@ -498,7 +513,11 @@ mod tests {
         let mut s = recovering();
         s.worker_exited(exit_code::ALREADY_RUNNING, None, t0());
         assert!(s.recovering());
-        s.worker_exited(exit_code::ALREADY_RUNNING, None, t0());
+        assert_eq!(
+            s.tick_without_worker(t0() + RECOVERY_DELAY),
+            Action::StartWorker
+        );
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, t0() + RECOVERY_DELAY);
         assert!(!s.recovering());
     }
 
@@ -539,6 +558,37 @@ mod tests {
             s.stop_requested();
             assert_eq!(s.tick_without_worker(later + RECOVERY_DELAY), Action::None);
         }
+    }
+
+    #[test]
+    fn a_relaunch_during_the_wait_for_another_renderer_does_not_end_the_wait() {
+        // Controls started again while their old worker still holds the
+        // engine, and Apply (or a tray mode command) two seconds into the
+        // wait: the controls relaunch at once without asking here, and that
+        // worker meets the same renderer. It used to count as the repeat,
+        // and 3D went off with the advice to close a renderer.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let now = t0();
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        let early = now + Duration::from_secs(2);
+        let msg = s.worker_exited(exit_code::ALREADY_RUNNING, None, early);
+        assert_eq!(
+            msg,
+            "Another renderer is already running. Trying once more in 6 seconds."
+        );
+        assert!(s.wanted && s.retry_pending() && s.recovering());
+        assert_eq!(s.failures(), 0);
+        // The repeat is made when it was due, not eight seconds after this.
+        assert_eq!(
+            s.tick_without_worker(now + RECOVERY_DELAY),
+            Action::StartWorker
+        );
+        // And it is still the only one.
+        let later = now + RECOVERY_DELAY;
+        let msg = s.worker_exited(exit_code::ALREADY_RUNNING, None, later);
+        assert!(msg.ends_with("and turn 3D on again."), "{msg}");
+        assert!(!s.wanted && !s.retry_pending());
     }
 
     #[test]
