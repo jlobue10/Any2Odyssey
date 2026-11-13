@@ -255,7 +255,37 @@ fn screenshot_request(path: &str, rest: &[String]) -> Option<core::ScreenshotReq
     })
 }
 
+/// Allocations of this size and above are given back to the system when
+/// they are freed (see [`return_freed_pictures`]). Pictures and what is
+/// made of them are larger; what a frame of the page or one run of the
+/// depth model allocates is smaller and stays with the allocator.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const RETURNED_WHEN_FREED: std::ffi::c_int = 4 * 1024 * 1024;
+
+/// Have glibc give the memory of a freed picture back to the system.
+///
+/// Left to itself it raises, at the first large buffer freed, the size from
+/// which a buffer is a mapping of its own to that buffer's size (up to
+/// 32 MiB), and with it the amount of free memory an arena keeps. From then
+/// on every thread that has held a picture (the one reading a file, each
+/// conversion worker) keeps its share for good: the viewer, showing a small
+/// image again, stayed about 200 MB larger for every 8K-wide pair it had
+/// opened, and was at 1.7 GB after a thousand images. Naming the size
+/// switches that adjustment off. `false` when the library refused, which
+/// changes nothing else.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn return_freed_pictures() -> bool {
+    extern "C" {
+        fn mallopt(parameter: std::ffi::c_int, value: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    const M_MMAP_THRESHOLD: std::ffi::c_int = -3;
+    // SAFETY: two numbers; sets a field of the allocator under its own lock.
+    unsafe { mallopt(M_MMAP_THRESHOLD, RETURNED_WHEN_FREED) == 1 }
+}
+
 fn main() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    return_freed_pictures();
     // `std::env::args` panics on an argument that is not Unicode.
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // An image for the stereo viewer is the one argument taken as it is.
@@ -727,6 +757,75 @@ mod argument_tests {
         ] {
             assert!(is_terminal_mode(&args(terminal)), "{terminal:?}");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod allocator_tests {
+    use super::*;
+
+    /// Resident memory of this process in bytes.
+    fn resident() -> usize {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+        let kib: usize = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        kib * 1024
+    }
+
+    /// Eight threads each hold a buffer of a picture's size at the same
+    /// time, as the conversion's workers do, and free it. Measured in a
+    /// process of its own (this test, started once more): other tests'
+    /// memory would be in the figure otherwise, and the allocator's setting
+    /// is one per process.
+    #[test]
+    fn memory_of_freed_pictures_goes_back_to_the_system() {
+        const CHILD: &str = "ANY2ODYSSEY_TEST_ALLOCATOR_CHILD";
+        const PICTURE: usize = 24 * 1024 * 1024;
+        const HOLDERS: usize = 8;
+        if std::env::var_os(CHILD).is_some() {
+            assert!(return_freed_pictures());
+            // The first one freed is what sets the sizes when left alone.
+            drop(std::hint::black_box(vec![1u8; PICTURE]));
+            let before = resident();
+            for _ in 0..3 {
+                let barrier = std::sync::Barrier::new(HOLDERS);
+                std::thread::scope(|scope| {
+                    for _ in 0..HOLDERS {
+                        scope.spawn(|| {
+                            let picture = std::hint::black_box(vec![1u8; PICTURE]);
+                            barrier.wait();
+                            drop(picture);
+                        });
+                    }
+                });
+            }
+            let kept = resident().saturating_sub(before);
+            // Left alone, every holder's arena keeps its buffer: 192 MiB.
+            assert!(
+                kept < 2 * PICTURE,
+                "{} MiB of freed pictures stayed with the process",
+                kept / (1024 * 1024)
+            );
+            return;
+        }
+        let this_test = format!(
+            "{}::memory_of_freed_pictures_goes_back_to_the_system",
+            module_path!().split_once("::").unwrap().1
+        );
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &this_test, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+            "the measurement did not run"
+        );
     }
 }
 
