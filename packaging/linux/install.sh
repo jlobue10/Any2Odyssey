@@ -27,14 +27,15 @@
 #   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files");
 #                       needed when it is on a USB drive, a memory card or a network share, or when several
 #                       drives have one
-#   --prefix DIR        install under DIR instead of ~/.local
+#   --prefix DIR        install under DIR instead of ~/.local (the installed copy of this script, which
+#                       --uninstall is run from, knows where it was installed without it)
 #   --packaged          the program is installed already (a distribution package): do steps 2 to 5 only
 #   --dry-run           say what would be done and do none of it
 #   --uninstall         remove the installed files (and, when confirmed, the udev rules and the Wine side)
 set -eu
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-PREFIX=$HOME/.local
+PREFIX=$HOME/.local PREFIX_GIVEN=
 YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
 # For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board
 # and for mounted drives (with the mount table and the /sys entries that describe them). It comes from the
@@ -54,13 +55,21 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY=1 ;;
         --uninstall) UNINSTALL=1 ;;
         --windows-root) [ $# -ge 2 ] && [ -n "${2%/}" ] || { echo "install: --windows-root needs a folder" >&2; exit 2; }; WINROOT=${2%/}; shift ;;
-        --prefix) [ $# -ge 2 ] || { echo "install: --prefix needs a folder" >&2; exit 2; }; PREFIX=$2; shift ;;
+        --prefix) [ $# -ge 2 ] || { echo "install: --prefix needs a folder" >&2; exit 2; }; PREFIX=$2 PREFIX_GIVEN=1; shift ;;
         -h | --help) awk 'NR >= 3 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"; exit 0 ;;
         *) echo "install: unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
 done
 
+# The copy of this script that an installation keeps for --uninstall (<prefix>/share/any2odyssey/install.sh,
+# with no program beside it, unlike the archive) acts on the installation it is part of: after --prefix it
+# would otherwise look in ~/.local, remove nothing of its own and whatever another installation has there.
+if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ]; then
+    case $HERE in
+        */share/any2odyssey) PREFIX=${HERE%/share/any2odyssey}; PREFIX=${PREFIX:-/} ;;
+    esac
+fi
 # Desktop entries are line based, and an empty prefix must not select /bin.
 if [ -z "$PREFIX" ] || [ "$PREFIX" != "$(printf '%s' "$PREFIX" | tr -d '\r\n')" ]; then
     echo "install: --prefix must be a nonempty folder without line breaks" >&2
@@ -106,6 +115,13 @@ ask() {
     case $answer in '' | y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
 }
 have() { command -v "$1" >/dev/null 2>&1; }
+# A word as it can be pasted into a shell.
+quoted() {
+    case $1 in
+        '' | *[!A-Za-z0-9_./+:@%,-]*) printf "'%s'\n" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
 
 BIN=$PREFIX/bin
 SHARE=$PREFIX/share
@@ -521,5 +537,10 @@ fi
 
 say ""
 say "Done. Start Any2Odyssey from the application menu or as: $PROGRAM"
-[ -z "$PACKAGED" ] && say "To remove it later: $APPDIR/install.sh --uninstall"
+if [ -z "$PACKAGED" ]; then
+    # The prefix is named when it is not the usual one, so the command also says where it removes from.
+    REMOVE="$(quoted "$APPDIR/install.sh") --uninstall"
+    [ "$PREFIX" = "$(canonical "$HOME/.local")" ] || REMOVE="$REMOVE --prefix $(quoted "$PREFIX")"
+    say "To remove it later: $REMOVE"
+fi
 exit 0

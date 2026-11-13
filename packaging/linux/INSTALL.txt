@@ -19,6 +19,11 @@ Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use 
 `./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
 knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS only.
 
+To remove it again, run the copy of the installer that the installation keeps; the installer prints the
+command when it finishes (`~/.local/share/any2odyssey/install.sh --uninstall`, or the same under the folder
+given with --prefix). From this archive, `./install.sh --uninstall` removes the installation under ~/.local,
+and one made with `--prefix DIR` when given the same `--prefix DIR`.
+
 The installer uses a Windows drive it finds by itself only when exactly one is mounted and it is not a
 removable one; a drive it cannot place (a network share) it asks about with a warning, and does not use
 with --yes. For Windows on a USB drive, a memory card or a network share, or when several drives have
