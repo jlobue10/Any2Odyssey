@@ -499,7 +499,9 @@ pub fn compose_still(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
     let eye_w = if flat { pair.width() } else { pair.width() / 2 };
     let eye = (eye_w.max(1), pair.height().max(1));
     let (x, y, w, h) = place_view(eye, if flat { 1.0 } else { stretch }, view);
-    for side in 0..2u32 {
+    // A flat picture is identical in both eyes: resize it once and copy the
+    // fitted pixels to both halves instead of running the same filter twice.
+    for side in 0..if flat { 1 } else { 2u32 } {
         let from_x = if flat { 0 } else { side * eye_w };
         let part = imageops::crop_imm(pair, from_x, 0, eye.0, eye.1);
         let fitted = imageops::resize(&*part, w, h, imageops::FilterType::Triangle);
@@ -509,6 +511,9 @@ pub fn compose_still(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
             i64::from(side * view.0 + x),
             i64::from(y),
         );
+        if flat {
+            imageops::replace(&mut canvas, &fitted, i64::from(view.0 + x), i64::from(y));
+        }
     }
     canvas
 }
@@ -558,6 +563,28 @@ mod tests {
             canvas.get_pixel(STILL_VIEW.0 + 5, 5)
         );
         assert_eq!(canvas.get_pixel(5, 5).0, [7, 8, 9, 255]);
+    }
+
+    #[test]
+    fn a_flat_still_duplicates_detail_and_alpha_with_centered_black_borders() {
+        let flat = RgbaImage::from_fn(3, 4, |x, y| {
+            image::Rgba([(x * 70) as u8, (y * 60) as u8, 90, (x * 30 + y * 40) as u8])
+        });
+        // Flat ignores the SBS eye stretch. A 3:4 image fills the panel
+        // height and occupies 810 pixels of each 1920-wide half.
+        let canvas = compose_still(&flat, true, 2.0);
+        let fitted = imageops::resize(&flat, 810, 2160, imageops::FilterType::Triangle);
+        for y in 0..STILL_VIEW.1 {
+            for x in 0..STILL_VIEW.0 {
+                let expected = if (555..1365).contains(&x) {
+                    *fitted.get_pixel(x - 555, y)
+                } else {
+                    image::Rgba([0, 0, 0, 255])
+                };
+                assert_eq!(*canvas.get_pixel(x, y), expected);
+                assert_eq!(*canvas.get_pixel(x + STILL_VIEW.0, y), expected);
+            }
+        }
     }
 
     #[test]
