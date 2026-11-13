@@ -531,8 +531,11 @@ fn stream(
         .map_err(|e| format!("PipeWire: no timer: {e}"))?;
     loop {
         mainloop.run();
-        if ticked.swap(false, Ordering::Relaxed) {
-            // The first frame has arrived: tell the page, then carry on.
+        // The first frame has arrived: tell the page, then carry on, unless
+        // the stream ended in the same turn of the loop as that tick. Its
+        // request to leave was this same return, and going back in would
+        // wait for a stream that is over until the capture is stopped.
+        if ticked.swap(false, Ordering::Relaxed) && lock(&error).is_none() {
             wake();
             continue;
         }
