@@ -364,6 +364,12 @@ impl LensState {
         weave::weave(left, right, &self.lens, origin).ok()
     }
 
+    /// Whether an interleaved picture or the eyes fitted for one are held.
+    #[cfg(test)]
+    pub fn holds_picture(&self) -> bool {
+        self.texture.is_some() || self.woven.is_some() || self.fitted.is_some()
+    }
+
     /// Drop the interleaved picture (the output window has closed).
     pub fn release(&mut self) {
         self.texture = None;
