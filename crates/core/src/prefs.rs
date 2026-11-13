@@ -399,5 +399,61 @@ mod tests {
         let (settings, problem) = UiSettings::load_from(&path);
         assert_eq!(settings, UiSettings::default());
         assert!(problem.is_some());
+        // So does a file that cannot be read at all (here, a folder).
+        let (settings, problem) = UiSettings::load_from(dir.path());
+        assert_eq!(settings, UiSettings::default());
+        assert!(problem.is_some());
+    }
+
+    #[test]
+    fn a_mode_and_its_place_in_the_list_name_each_other() {
+        for (index, mode) in CaptureMode::ALL.into_iter().enumerate() {
+            assert_eq!(mode.index(), index);
+            assert_eq!(CaptureMode::from_index(index), mode);
+        }
+        assert_eq!(CaptureMode::from_index(3), CaptureMode::Desktop);
+        assert_eq!(CaptureMode::from_index(usize::MAX), CaptureMode::Desktop);
+    }
+
+    #[test]
+    fn recovery_backs_up_beside_the_settings_and_needs_no_backup_of_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("data");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("settings.json");
+        let mut prefs = Preferences {
+            recover: false,
+            ..Default::default()
+        };
+        // Nothing to preserve: saved, and no backup is claimed.
+        assert_eq!(prefs.save_recovering_to(&path).unwrap(), None);
+        assert!(!Preferences::load_from(&path).unwrap().recover);
+        std::fs::write(&path, "damaged").unwrap();
+        let backup = prefs.save_recovering_to(&path).unwrap().unwrap();
+        assert_eq!(backup.parent(), Some(folder.as_path()));
+        let name = backup.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("settings-recovery-") && name.ends_with(".json"),
+            "{name}"
+        );
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_does_not_replace_settings_it_could_not_back_up() {
+        // A link to itself cannot be opened, and that is not "missing": the
+        // rename that publishes new settings would still replace it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        let mut prefs = Preferences::default();
+        let error = prefs.save_recovering_to(&path).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }
