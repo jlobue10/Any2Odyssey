@@ -286,7 +286,29 @@ pub fn hide_window(hwnd: isize) {
 }
 
 pub fn open_path(path: &Path) {
-    shell_open_detached(path.as_os_str().to_owned());
+    let path = path.to_owned();
+    // Whether it is a folder is asked on the launch thread too: the caller
+    // holds the shared state inside a GUI frame.
+    std::thread::spawn(move || shell_open_or_fall_back(&shell_target(&path, path.is_dir())));
+}
+
+/// What the shell is handed to open `path`. A folder is named with a
+/// trailing separator. Without one the shell takes the name for a program
+/// first and tries the executable extensions on it: asked to open the folder
+/// `...\Any2Odyssey`, it runs `...\Any2Odyssey.cmd` (or `.exe`, `.bat`,
+/// `.com`) when such a file lies beside the folder, and the folder stays
+/// shut. With the separator the name can only be the folder.
+fn shell_target(path: &Path, is_folder: bool) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStrExt;
+    let mut target = path.as_os_str().to_owned();
+    let separated = target
+        .encode_wide()
+        .last()
+        .is_some_and(|last| last == u16::from(b'\\') || last == u16::from(b'/'));
+    if is_folder && !separated {
+        target.push("\\");
+    }
+    target
 }
 
 /// Open a web page in the default browser. The caller has checked the URL
@@ -304,11 +326,13 @@ pub fn open_url(url: &str) {
 /// PowerShell is restricted by policy. It stays as the fallback, so a
 /// failed shell call still opens what it opened before.
 fn shell_open_detached(target: std::ffi::OsString) {
-    std::thread::spawn(move || {
-        if win::shell_open(&target).is_err() {
-            let _ = open::that_detached(&target);
-        }
-    });
+    std::thread::spawn(move || shell_open_or_fall_back(&target));
+}
+
+fn shell_open_or_fall_back(target: &std::ffi::OsStr) {
+    if win::shell_open(target).is_err() {
+        let _ = open::that_detached(target);
+    }
 }
 
 /// The stereo viewer page is the home page only where Samsung's engine does
@@ -364,6 +388,29 @@ mod tests {
             .spawn()
             .expect("cmd.exe");
         worker
+    }
+
+    #[test]
+    fn a_folder_is_handed_to_the_shell_with_a_trailing_separator() {
+        // Seen on Windows 11: "open" on `...\probe` ran `...\probe.cmd`
+        // lying beside the folder `probe`; on `...\probe\` the folder opened.
+        let folder = Path::new(r"C:\Users\someone\AppData\Local\Any2Odyssey");
+        assert_eq!(
+            shell_target(folder, true),
+            r"C:\Users\someone\AppData\Local\Any2Odyssey\"
+        );
+        // Already unambiguous: nothing is added.
+        for separated in [r"C:\data\", "C:/data/", r"C:\"] {
+            assert_eq!(shell_target(Path::new(separated), true), separated);
+        }
+        // A file keeps its name: with a separator it would not be found.
+        let file = Path::new(r"C:\data\companion.log");
+        assert_eq!(shell_target(file, false), file.as_os_str());
+        // The real data folder of a test run is a folder.
+        let dir = std::env::temp_dir();
+        assert!(shell_target(&dir, dir.is_dir())
+            .to_string_lossy()
+            .ends_with(['\\', '/']));
     }
 
     #[test]
