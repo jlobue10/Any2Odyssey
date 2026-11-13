@@ -1,7 +1,7 @@
 //! Small file helpers shared by every crate.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 /// Write `bytes` to `path` atomically: the content goes to a sibling temporary
@@ -35,6 +35,30 @@ pub fn write_atomic_document(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_inner(path, bytes, false, Audience::Anyone)
 }
 
+/// Stream a document into a sibling temporary file, flush its buffered
+/// bytes, then publish it atomically. Encoding or flush failures leave the
+/// previous destination intact and remove the temporary. New files have the
+/// permissions of [`write_atomic_document`]; existing regular files keep
+/// their Unix permissions. The writer supports seeking as well as writing.
+pub fn write_atomic_document_with(
+    path: &Path,
+    write: impl FnOnce(&mut io::BufWriter<&mut fs::File>) -> io::Result<()>,
+) -> io::Result<()> {
+    write_atomic_with(path, false, Audience::Anyone, |file| {
+        // A private export must stay private. Do not follow a symlink to
+        // copy its target's permissions; the link itself will be replaced.
+        #[cfg(unix)]
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            if metadata.is_file() {
+                file.set_permissions(metadata.permissions())?;
+            }
+        }
+        let mut buffered = io::BufWriter::new(file);
+        write(&mut buffered)?;
+        buffered.flush()
+    })
+}
+
 /// Who may read the published file, where the platform lets us choose.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Audience {
@@ -43,7 +67,15 @@ enum Audience {
 }
 
 fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool, audience: Audience) -> io::Result<()> {
-    use std::io::Write;
+    write_atomic_with(path, sync, audience, |file| file.write_all(bytes))
+}
+
+fn write_atomic_with(
+    path: &Path,
+    sync: bool,
+    audience: Audience,
+    write: impl FnOnce(&mut fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -64,7 +96,7 @@ fn write_atomic_inner(path: &Path, bytes: &[u8], sync: bool, audience: Audience)
     #[cfg(not(unix))]
     let _ = audience;
     let mut tmp = builder.tempfile_in(parent)?;
-    tmp.write_all(bytes)?;
+    write(tmp.as_file_mut())?;
     if sync {
         tmp.as_file().sync_all()?;
     }
@@ -171,6 +203,43 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "two");
         // Whatever name the temporary had, nothing but the published file remains.
         assert_eq!(entries(&nested), ["file.json"]);
+    }
+
+    #[test]
+    fn streamed_document_failure_preserves_the_destination_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("document");
+        fs::write(&path, b"original").unwrap();
+        let failed = write_atomic_document_with(&path, |writer| {
+            writer.write_all(&[7; 16384])?;
+            Err(io::Error::other("encoding failed"))
+        });
+        assert_eq!(failed.unwrap_err().to_string(), "encoding failed");
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(entries(dir.path()), ["document"]);
+        write_atomic_document_with(&path, |writer| writer.write_all(b"new")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(entries(dir.path()), ["document"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_private_document_preserves_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private-document");
+        fs::write(&path, b"original").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic_document_with(&path, |writer| writer.write_all(b"new")).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        write_atomic_document_with(&path, |writer| writer.write_all(b"new again")).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
