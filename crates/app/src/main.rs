@@ -280,7 +280,9 @@ fn main() {
         preview_logger()
     } else {
         let _ = std::fs::create_dir_all(paths::data_dir());
-        Logger::default_location()
+        let logger = Logger::default_location();
+        logger.rotate_if_large();
+        logger
     };
     // Handed to the running instance, or opened in this one. The viewer is
     // the Linux build's home page.
