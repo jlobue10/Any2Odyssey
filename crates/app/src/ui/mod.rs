@@ -754,6 +754,12 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A file dialog still open is ended here with everything it started.
+        // The kernel's signal at this program's end reaches the dialog's own
+        // process only: where that is a wrapper script, the window it had
+        // opened stayed on the desktop.
+        #[cfg(not(windows))]
+        platform::close_dialog();
         self.viewer.save_lens();
         let cleanup = {
             let mut c = self.core.lock().expect("core");

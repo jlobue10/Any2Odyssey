@@ -859,16 +859,23 @@ pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
     eprintln!("The conversion worker runs only on Windows.");
     1
 }
+/// The capture diagnostics look at the Windows worker's windows. Asked for
+/// here they failed without a word.
+const WINDOWS_ONLY_DIAGNOSTIC: &str = "This diagnostic runs only on Windows.";
 pub fn inspect(_: u32) -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn layout_probe(_: u32, _: u32) -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn test_capture_exclusion() -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn test_offscreen() -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn validate() -> Result<(), String> {
@@ -1088,13 +1095,17 @@ mod tests {
         )]
     }
 
-    /// The process numbers a [`hanging_dialog`] noted, once it has.
+    /// The process numbers a [`hanging_dialog`] noted, once it has and once
+    /// `dialogs` holds it. The script writes them as soon as it runs, and on
+    /// a busy machine that is before the thread that started it has put it
+    /// where `close` and the next dialog find it: a `close` in between
+    /// closed nothing, and a dialog started in between was the one ended.
     #[cfg(target_os = "linux")]
-    fn noted_pids(note: &Path) -> Vec<u32> {
+    fn noted_pids(dialogs: &Dialogs, note: &Path) -> Vec<u32> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let text = std::fs::read_to_string(note).unwrap_or_default();
-            if text.ends_with('\n') {
+            if text.ends_with('\n') && dialogs.open().child.is_some() {
                 return text
                     .split_whitespace()
                     .map(|p| p.parse().unwrap())
@@ -1105,11 +1116,33 @@ mod tests {
         }
     }
 
-    /// Still running: listed, and not as ended and waiting to be collected.
+    /// Still running: listed, and not as ended. An ended process is listed
+    /// as waiting to be collected (Z) and then, for the moment in which
+    /// whoever inherited it collects it, as dead (X): one that was Z at one
+    /// look can be X at the next, and that is not a process running again.
     #[cfg(target_os = "linux")]
     fn running(pid: u32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .is_ok_and(|stat| !stat.rsplit(')').next().unwrap().starts_with(" Z"))
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !ended(&stat))
+    }
+
+    /// Whether `stat`, a process's line in `/proc`, is of one that has ended.
+    #[cfg(target_os = "linux")]
+    fn ended(stat: &str) -> bool {
+        // "<pid> (<name>) <state> ...": the name may hold anything.
+        let state = stat.rsplit(')').next().unwrap();
+        state.starts_with(" Z") || state.starts_with(" X")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_being_collected_is_not_taken_for_one_running() {
+        assert!(!ended("71 (sleep) S 1 70 70 0 -1 4194560"));
+        assert!(!ended("71 (sh) R 1 70 70 0 -1 4194560"));
+        assert!(ended("71 (sleep) Z 1 70 70 0 -1 4228108"));
+        assert!(ended("71 (sleep) X 1 70 70 0 -1 4228108"));
+        assert!(ended("71 (a) S (b) X 1 70 70 0 -1 4228108"));
+        // This test itself is running.
+        assert!(running(std::process::id()));
     }
 
     #[cfg(target_os = "linux")]
@@ -1133,7 +1166,7 @@ mod tests {
             let (dialogs, fixture) = (dialogs.clone(), hanging_dialog(&note));
             std::thread::spawn(move || dialogs.run(&fixture))
         };
-        let pids = noted_pids(&note);
+        let pids = noted_pids(&dialogs, &note);
         let (script, started_by_it) = (pids[0], pids[1]);
         assert!(running(script) && running(started_by_it));
         dialogs.close();
@@ -1176,7 +1209,7 @@ mod tests {
             let (dialogs, fixture) = (dialogs.clone(), hanging_dialog(&note));
             std::thread::spawn(move || dialogs.run(&fixture))
         };
-        let pids = noted_pids(&note);
+        let pids = noted_pids(&dialogs, &note);
         let answer = dir.path().join("answer");
         std::fs::write(&answer, "/tmp/second.png\n").unwrap();
         let second = vec![("/bin/cat", vec![answer.to_str().unwrap().to_owned()])];
@@ -1292,15 +1325,11 @@ mod tests {
             .parse()
             .unwrap();
         // Gone, or ended and not yet collected by whoever inherited it.
-        let running = || {
-            std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .is_ok_and(|stat| !stat.rsplit(')').next().unwrap().starts_with(" Z"))
-        };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while running() && Instant::now() < deadline {
+        while running(pid) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        let outlived = running();
+        let outlived = running(pid);
         if outlived {
             let _ = std::process::Command::new("kill")
                 .arg(pid.to_string())

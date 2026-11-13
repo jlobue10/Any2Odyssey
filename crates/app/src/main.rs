@@ -30,15 +30,46 @@ use any2odyssey_core::log::Logger;
 use any2odyssey_core::{ipc, paths, APP_NAME};
 
 fn usage() -> String {
+    usage_for(cfg!(windows))
+}
+
+/// The help text of the Windows build (`windows`) or of the others. Each
+/// names its own modes only: the conversion worker, the update check and
+/// the capture diagnostics exist on Windows alone, and the viewer's image
+/// argument and the depth model elsewhere.
+fn usage_for(windows: bool) -> String {
     let mut text = format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks",
         any2odyssey_core::VERSION
     );
-    if cfg!(not(windows)) {
+    if windows {
+        text.push_str("\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)");
+    }
+    text.push_str("\n  Any2Odyssey --export-guide FILE  write the offline HTML guide\n  Any2Odyssey --screenshot FILE [--dark] [--help-page]   render the controls in an isolated preview to a PNG");
+    if windows {
+        text.push_str("\n  Any2Odyssey --worker EVENT PARENT_PID SOURCE_HWND PREFERENCES_JSON   (used internally)\n  Any2Odyssey --inspect PID | --layout-probe PARENT WORKER | --test-capture-exclusion | --test-offscreen");
+    } else {
         text.push_str("\n  Any2Odyssey [--open] FILE         open an image in the stereo viewer (in the running instance when there is one)");
         text.push_str("\n  Any2Odyssey --install-depth-model  download the AI depth model for 2D → 3D (about 95 MB, needs curl)");
     }
     text
+}
+
+/// Print a line of this program's answer. Unlike `println!` it does not
+/// panic when the line cannot be written: `--help | true` ended with a
+/// panic message and exit code 101 where the reader had gone, and a usage
+/// error with 101 instead of 2 where standard error could not be written.
+fn say(text: &str) {
+    write_line(std::io::stdout().lock(), text);
+}
+
+/// [`say`] for standard error.
+fn complain(text: &str) {
+    write_line(std::io::stderr().lock(), text);
+}
+
+fn write_line(mut to: impl std::io::Write, text: &str) {
+    let _ = writeln!(to, "{text}").and_then(|()| to.flush());
 }
 
 fn self_test(logger: &Logger) -> i32 {
@@ -110,9 +141,9 @@ fn check_updates_cli(logger: &Logger) -> i32 {
     };
     logger.log(&message);
     if code == exit_code::CHECK_FAILED {
-        eprintln!("{message}");
+        complain(&message);
     } else {
-        println!("{message}");
+        say(&message);
     }
     code
 }
@@ -193,7 +224,7 @@ fn quit_running_instance(mut signal: impl FnMut(&str) -> bool) -> i32 {
 /// Attaching twice is harmless: the second call fails and changes nothing.
 fn usage_error() -> i32 {
     attach_parent_console();
-    eprintln!("{}", usage());
+    complain(&usage());
     2
 }
 
@@ -233,6 +264,16 @@ fn image_argument(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
     }
 }
 
+/// Whether the command only answers or asks the running instance, and so
+/// leaves the data folder alone: `--help` and `--quit` made the folder on a
+/// machine the program had never run on.
+fn leaves_the_data_folder_alone(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "--quit" | "--export-guide")
+    )
+}
+
 /// Modes that talk to a terminal rather than to the running instance.
 fn is_terminal_mode(args: &[String]) -> bool {
     !matches!(
@@ -255,7 +296,37 @@ fn screenshot_request(path: &str, rest: &[String]) -> Option<core::ScreenshotReq
     })
 }
 
+/// Allocations of this size and above are given back to the system when
+/// they are freed (see [`return_freed_pictures`]). Pictures and what is
+/// made of them are larger; what a frame of the page or one run of the
+/// depth model allocates is smaller and stays with the allocator.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const RETURNED_WHEN_FREED: std::ffi::c_int = 4 * 1024 * 1024;
+
+/// Have glibc give the memory of a freed picture back to the system.
+///
+/// Left to itself it raises, at the first large buffer freed, the size from
+/// which a buffer is a mapping of its own to that buffer's size (up to
+/// 32 MiB), and with it the amount of free memory an arena keeps. From then
+/// on every thread that has held a picture (the one reading a file, each
+/// conversion worker) keeps its share for good: the viewer, showing a small
+/// image again, stayed about 200 MB larger for every 8K-wide pair it had
+/// opened, and was at 1.7 GB after a thousand images. Naming the size
+/// switches that adjustment off. `false` when the library refused, which
+/// changes nothing else.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn return_freed_pictures() -> bool {
+    extern "C" {
+        fn mallopt(parameter: std::ffi::c_int, value: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    const M_MMAP_THRESHOLD: std::ffi::c_int = -3;
+    // SAFETY: two numbers; sets a field of the allocator under its own lock.
+    unsafe { mallopt(M_MMAP_THRESHOLD, RETURNED_WHEN_FREED) == 1 }
+}
+
 fn main() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    return_freed_pictures();
     // `std::env::args` panics on an argument that is not Unicode.
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     // An image for the stereo viewer is the one argument taken as it is.
@@ -267,7 +338,7 @@ fn main() {
         Ok(args) => args,
         Err(position) => {
             attach_parent_console();
-            eprintln!("Argument {position} is not valid Unicode.\n");
+            complain(&format!("Argument {position} is not valid Unicode.\n"));
             std::process::exit(usage_error());
         }
     };
@@ -278,6 +349,8 @@ fn main() {
     let preview = args.first().is_some_and(|a| a == "--screenshot");
     let logger = if preview {
         preview_logger()
+    } else if leaves_the_data_folder_alone(&args) {
+        Logger::default_location()
     } else {
         let _ = std::fs::create_dir_all(paths::data_dir());
         let logger = Logger::default_location();
@@ -323,7 +396,7 @@ fn main() {
         {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!("{e}");
+                complain(&e.to_string());
                 1
             }
         },
@@ -342,17 +415,17 @@ fn main() {
         #[cfg(not(windows))]
         [flag] if flag == "--install-depth-model" => match depth::install_model() {
             Ok(path) => {
-                println!("Depth model installed: {}", path.display());
+                say(&format!("Depth model installed: {}", path.display()));
                 0
             }
             Err(e) => {
-                eprintln!("{e}");
+                complain(&e);
                 1
             }
         },
         [] => run_gui(false, logger, None),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("{}", usage());
+            say(&usage());
             0
         }
         _ => usage_error(),
@@ -429,20 +502,20 @@ fn run_gui(
         return match (run, outcome) {
             (Ok(()), Some(Ok(()))) => 0,
             (Ok(()), Some(Err(e))) => {
-                eprintln!("{e}");
+                complain(&e);
                 1
             }
             (Ok(()), None) => {
-                eprintln!("Screenshot was not delivered.");
+                complain("Screenshot was not delivered.");
                 1
             }
             (Err(e), _) => {
-                eprintln!("{e}");
+                complain(&e.to_string());
                 1
             }
         };
     }
-    let Some(_guard) = platform::single_instance() else {
+    let Some(guard) = platform::single_instance() else {
         // Another instance owns the controls: hand it the request this launch
         // carried, so `--toggle` losing the race still toggles.
         #[cfg(not(windows))]
@@ -477,10 +550,18 @@ fn run_gui(
         }
     };
     let core = Arc::new(Mutex::new(core::Core::new(logger, events, start_requested)));
-    match ui::run(core) {
+    let run = ui::run(core);
+    // The window is gone and with it the outputs, whose helpers were told
+    // to leave. This program stays until they have, or have been ended: a
+    // helper that hung was otherwise left behind with its window and the
+    // lens on. A launch from here on is the instance and is not kept
+    // waiting for that.
+    drop(guard);
+    lens_switch::see_helpers_off();
+    match run {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{e}");
+            complain(&e.to_string());
             1
         }
     }
@@ -664,6 +745,61 @@ mod argument_tests {
     }
 
     #[test]
+    fn each_platforms_help_names_its_own_modes_only() {
+        let (windows, others) = (usage_for(true), usage_for(false));
+        let own = if cfg!(windows) { &windows } else { &others };
+        assert_eq!(&usage(), own);
+        let windows_only = [
+            "--worker",
+            "--inspect",
+            "--layout-probe",
+            "--test-capture-exclusion",
+            "--test-offscreen",
+            "--check-updates",
+        ];
+        for word in windows_only {
+            assert!(windows.contains(word), "{word}");
+            assert!(!others.contains(word), "{word}");
+        }
+        for word in ["--open", "--install-depth-model"] {
+            assert!(!windows.contains(word), "{word}");
+            assert!(others.contains(word), "{word}");
+        }
+        for word in [
+            "--toggle",
+            "--show",
+            "--quit",
+            "--help",
+            "--self-test",
+            "--export-guide",
+            "--screenshot",
+        ] {
+            assert!(windows.contains(word) && others.contains(word), "{word}");
+        }
+        // One mode a line, none of them run together.
+        for text in [&windows, &others] {
+            assert!(text.lines().skip(3).all(|l| l.starts_with("  Any2Odyssey")));
+        }
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_written_is_not_a_panic() {
+        struct Gone;
+        impl std::io::Write for Gone {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        write_line(Gone, &usage());
+        let mut written = Vec::new();
+        write_line(&mut written, "two\nlines");
+        assert_eq!(written, b"two\nlines\n");
+    }
+
+    #[test]
     fn retry_stops_at_the_first_success_or_after_the_last_attempt() {
         let mut calls = 0;
         assert!(retry(5, Duration::ZERO, || {
@@ -707,6 +843,30 @@ mod argument_tests {
     }
 
     #[test]
+    fn answering_and_asking_commands_leave_the_data_folder_alone() {
+        for quiet in [
+            &["--help"][..],
+            &["-h"],
+            &["--quit"],
+            &["--export-guide", "g.html"],
+        ] {
+            assert!(leaves_the_data_folder_alone(&args(quiet)), "{quiet:?}");
+        }
+        // Everything that logs, keeps settings or becomes the instance.
+        for keeps in [
+            &[][..],
+            &["--show"],
+            &["--toggle"],
+            &["--self-test"],
+            &["--check-updates"],
+            &["--worker", "e", "1", "2", "{}"],
+            &["--install-depth-model"],
+        ] {
+            assert!(!leaves_the_data_folder_alone(&args(keeps)), "{keeps:?}");
+        }
+    }
+
+    #[test]
     fn terminal_modes_exclude_the_gui_and_instance_commands() {
         for gui in [
             &[][..],
@@ -727,6 +887,75 @@ mod argument_tests {
         ] {
             assert!(is_terminal_mode(&args(terminal)), "{terminal:?}");
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod allocator_tests {
+    use super::*;
+
+    /// Resident memory of this process in bytes.
+    fn resident() -> usize {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
+        let kib: usize = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        kib * 1024
+    }
+
+    /// Eight threads each hold a buffer of a picture's size at the same
+    /// time, as the conversion's workers do, and free it. Measured in a
+    /// process of its own (this test, started once more): other tests'
+    /// memory would be in the figure otherwise, and the allocator's setting
+    /// is one per process.
+    #[test]
+    fn memory_of_freed_pictures_goes_back_to_the_system() {
+        const CHILD: &str = "ANY2ODYSSEY_TEST_ALLOCATOR_CHILD";
+        const PICTURE: usize = 24 * 1024 * 1024;
+        const HOLDERS: usize = 8;
+        if std::env::var_os(CHILD).is_some() {
+            assert!(return_freed_pictures());
+            // The first one freed is what sets the sizes when left alone.
+            drop(std::hint::black_box(vec![1u8; PICTURE]));
+            let before = resident();
+            for _ in 0..3 {
+                let barrier = std::sync::Barrier::new(HOLDERS);
+                std::thread::scope(|scope| {
+                    for _ in 0..HOLDERS {
+                        scope.spawn(|| {
+                            let picture = std::hint::black_box(vec![1u8; PICTURE]);
+                            barrier.wait();
+                            drop(picture);
+                        });
+                    }
+                });
+            }
+            let kept = resident().saturating_sub(before);
+            // Left alone, every holder's arena keeps its buffer: 192 MiB.
+            assert!(
+                kept < 2 * PICTURE,
+                "{} MiB of freed pictures stayed with the process",
+                kept / (1024 * 1024)
+            );
+            return;
+        }
+        let this_test = format!(
+            "{}::memory_of_freed_pictures_goes_back_to_the_system",
+            module_path!().split_once("::").unwrap().1
+        );
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &this_test, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains("1 passed"),
+            "the measurement did not run"
+        );
     }
 }
 
