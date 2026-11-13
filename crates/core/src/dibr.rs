@@ -528,6 +528,43 @@ mod tests {
     }
 
     #[test]
+    fn bands_give_every_row_once_under_its_own_number_however_they_are_shared_out() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Every count of rows up to more than the most threads there are,
+        // with more threads than rows, none at all, and rows that do not
+        // divide into the bands.
+        for row_bytes in [1usize, 4, 12] {
+            for rows in 0..=40usize {
+                for threads in [0usize, 1, 2, 3, 5, 7, 8, 16, 39, 40, 41, 64, 1000] {
+                    let mut out = vec![0u8; rows * row_bytes];
+                    let (calls, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+                    in_bands(&mut out, row_bytes, threads, |first_row, band| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(band.len() % row_bytes, 0, "whole rows only");
+                        most.fetch_max(band.len() / row_bytes, Ordering::Relaxed);
+                        for (index, row) in band.chunks_exact_mut(row_bytes).enumerate() {
+                            // Written once: a row given out twice would not
+                            // be at zero any more.
+                            assert!(row.iter().all(|&byte| byte == 0));
+                            row.fill((first_row + index + 1) as u8);
+                        }
+                    });
+                    let what = format!("{rows} rows of {row_bytes}, {threads} threads");
+                    for (y, row) in out.chunks_exact(row_bytes).enumerate() {
+                        assert!(row.iter().all(|&byte| byte == (y + 1) as u8), "{what}");
+                    }
+                    let calls = calls.into_inner();
+                    let at_most = threads.clamp(1, rows.max(1));
+                    assert!((1..=at_most).contains(&calls), "{what}");
+                    // The rows are shared out evenly: no band is more than
+                    // a row longer than an equal share.
+                    assert!(most.into_inner() <= rows.div_ceil(calls), "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_picture_large_enough_for_threads_is_the_same_picture() {
         // Above the size `threads_for` keeps on one thread, so the public
         // entry point itself runs in bands where there are cores for it.
