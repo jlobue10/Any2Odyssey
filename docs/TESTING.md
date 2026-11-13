@@ -40,6 +40,16 @@ ASAN_OPTIONS=detect_leaks=0 /tmp/test-camera-stream
 
 This compiles the production camera reader start/stop paths with a simulated bridge. It checks a late frame after a failed start and reader release, failed-start retry, repeated start/stop, and restart after stopping. AddressSanitizer detects a retained callback into the freed reader. It does not exercise Media Foundation, bridge threading, or the physical camera; startup, failure recovery, and camera release on the target Wine installation remain hardware checks. Both Linux CI architectures run the native test.
 
+### Camera reader threaded shutdown
+
+```sh
+cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
+  contrib/wine-lens/tests/test-camera-reader.c -o /tmp/test-camera-reader
+ASAN_OPTIONS=detect_leaks=0 timeout 30 /tmp/test-camera-reader
+```
+
+This runs the production reader thread, final release and cleanup paths with pthread-backed handle mocks. A barrier keeps a callback active while the simulated five-second shutdown wait times out or fails, then lets it return; the reader must remain alive until then and be freed exactly once. Other cases cover duplicate-handle failure, release from read/flush callbacks, an idle reader, nonfinal references, and event/thread creation failure. The timeout is simulated so the test does not sleep five seconds. Media Foundation, Winsock and physical Wine/camera behavior still need target-system validation.
+
 ## Windows diagnostics (provided by the Windows crate)
 
 Run these with conversion stopped. They are GUI executables; use `Start-Process -Wait -PassThru` to read the exit code.
