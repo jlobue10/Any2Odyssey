@@ -264,6 +264,16 @@ fn image_argument(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
     }
 }
 
+/// Whether the command only answers or asks the running instance, and so
+/// leaves the data folder alone: `--help` and `--quit` made the folder on a
+/// machine the program had never run on.
+fn leaves_the_data_folder_alone(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some("--help" | "-h" | "--quit" | "--export-guide")
+    )
+}
+
 /// Modes that talk to a terminal rather than to the running instance.
 fn is_terminal_mode(args: &[String]) -> bool {
     !matches!(
@@ -339,6 +349,8 @@ fn main() {
     let preview = args.first().is_some_and(|a| a == "--screenshot");
     let logger = if preview {
         preview_logger()
+    } else if leaves_the_data_folder_alone(&args) {
+        Logger::default_location()
     } else {
         let _ = std::fs::create_dir_all(paths::data_dir());
         let logger = Logger::default_location();
@@ -820,6 +832,30 @@ mod argument_tests {
             1
         );
         assert_eq!(attempts, SIGNAL_ATTEMPTS);
+    }
+
+    #[test]
+    fn answering_and_asking_commands_leave_the_data_folder_alone() {
+        for quiet in [
+            &["--help"][..],
+            &["-h"],
+            &["--quit"],
+            &["--export-guide", "g.html"],
+        ] {
+            assert!(leaves_the_data_folder_alone(&args(quiet)), "{quiet:?}");
+        }
+        // Everything that logs, keeps settings or becomes the instance.
+        for keeps in [
+            &[][..],
+            &["--show"],
+            &["--toggle"],
+            &["--self-test"],
+            &["--check-updates"],
+            &["--worker", "e", "1", "2", "{}"],
+            &["--install-depth-model"],
+        ] {
+            assert!(!leaves_the_data_folder_alone(&args(keeps)), "{keeps:?}");
+        }
     }
 
     #[test]
