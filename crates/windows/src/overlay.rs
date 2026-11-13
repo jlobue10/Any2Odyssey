@@ -14,8 +14,8 @@ use crate::win::{
 };
 
 /// With Keep 3D above apps (the default) every foreground change raises the
-/// output. One log line each would grow `companion.log`, which is never
-/// trimmed, with every Alt+Tab and click on another window; these raises are
+/// output. One log line each would fill `companion.log`, which is only moved
+/// aside when a process starts, with every Alt+Tab and click on another window; these raises are
 /// summarised at most this often. A requested restore is always logged.
 const RAISE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 

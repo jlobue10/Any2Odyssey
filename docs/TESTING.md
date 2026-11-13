@@ -117,7 +117,7 @@ Not automated. On the Windows PC with the G90XF, Odyssey 3D Hub 1.5.1 and the RT
 
 Results so far: 0.8.0 passed full install, preference import, automatic start, whole-desktop AI conversion, click-through overlay and Keep 3D above apps on a G90XF with an RTX 5090 (2026-11-08; details in the CHANGELOG). The remaining items in the list above are still to be recorded.
 
-Useful evidence to collect while testing: `companion.log`, `worker-status.json`, `desktop-capture-status.json` (frame count, fps, average capture time) and `install-result.json`, all in `%LOCALAPPDATA%\Any2Odyssey`.
+Useful evidence to collect while testing: `companion.log` (with `companion.old.log`, if there is one), `worker-status.json`, `desktop-capture-status.json` (frame count, fps, average capture time) and `install-result.json`, all in `%LOCALAPPDATA%\Any2Odyssey`.
 
 ## Pending hardware verification
 
