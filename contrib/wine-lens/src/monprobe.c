@@ -10,7 +10,9 @@ static BOOL CALLBACK each(HMONITOR m, HDC dc, RECT *r, LPARAM p)
     mi.cbSize = sizeof mi;
     md.cb = sizeof md;
     md.DeviceID[0] = 0;
-    GetMonitorInfoA(m, (MONITORINFO *)&mi);
+    /* Wine can list a monitor it has lost track of, with a null handle: there is nothing to print for it, and
+     * what was printed came from memory nobody had filled in. */
+    if (!GetMonitorInfoA(m, (MONITORINFO *)&mi)) return TRUE;
     EnumDisplayDevicesA(mi.szDevice, 0, &md, 0);
     printf("%p %s %ldx%ld at %ld,%ld id=[%s]\n", (void *)m, mi.szDevice, mi.rcMonitor.right - mi.rcMonitor.left,
            mi.rcMonitor.bottom - mi.rcMonitor.top, mi.rcMonitor.left, mi.rcMonitor.top, md.DeviceID);
