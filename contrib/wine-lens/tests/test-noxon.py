@@ -103,6 +103,11 @@ class NoxonTests(unittest.TestCase):
     def test_usage(self):
         self.assertEqual(subprocess.run([self.binary], stderr=subprocess.DEVNULL).returncode, 2)
         self.assertEqual(subprocess.run([self.binary, "/dev/null", "x", "0"], stderr=subprocess.DEVNULL).returncode, 2)
+        # An interval too long to count in looks is refused too: 2^62 seconds times twenty looks comes to
+        # zero in a long, and the keeper then died dividing by it.
+        for seconds in ("4611686018427387904", "9223372036854775807"):
+            keeper = subprocess.run([self.binary, "/dev/null", "x", seconds], stderr=subprocess.DEVNULL, timeout=5)
+            self.assertEqual(keeper.returncode, 2)
 
 
 if __name__ == "__main__":
