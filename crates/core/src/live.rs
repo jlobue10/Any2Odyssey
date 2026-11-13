@@ -610,15 +610,26 @@ fn sharpen_row(above: &[u8], here: &[u8], below: &[u8], k: i32, out: &mut [u8]) 
     let end = here.len() - 4;
     out[..4].copy_from_slice(&here[..4]);
     out[end..].copy_from_slice(&here[end..]);
-    for x in (4..end).step_by(4) {
-        for i in x..x + 3 {
-            let centre = here[i] as i32;
-            let around =
-                above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
-            let value = centre + (((centre * 4 - around) * k) >> 10);
-            out[i] = value.clamp(0, 255) as u8;
-        }
-        out[x + 3] = here[x + 3];
+    // Byte by byte over rows cut to one length, alpha like a colour: with
+    // nothing to check against the end of a row and no byte treated
+    // differently from the next, the compiler does several at a time.
+    let bytes = out[4..end]
+        .iter_mut()
+        .zip(&here[4..end])
+        .zip(&above[4..end])
+        .zip(&below[4..end])
+        .zip(&here[..end - 4])
+        .zip(&here[8..]);
+    for (((((out, &centre), &above), &below), &before), &after) in bytes {
+        let centre = centre as i32;
+        let around = above as i32 + below as i32 + before as i32 + after as i32;
+        let value = centre + (((centre * 4 - around) * k) >> 10);
+        *out = value.clamp(0, 255) as u8;
+    }
+    // Alpha is not a colour: it is put back as it was.
+    let pixels = out.as_chunks_mut::<4>().0.iter_mut();
+    for (out, here) in pixels.zip(here.as_chunks::<4>().0) {
+        out[3] = here[3];
     }
 }
 
@@ -932,9 +943,10 @@ mod tests {
         }
     }
 
-    /// A row of the views as it was made before: a byte at a time, each
-    /// looked up by its place and checked against the end of its row, the
-    /// column through the C library's `round`. Kept as its definition.
+    /// A row of the views and a sharpened row as they were made before:
+    /// a byte at a time, each looked up by its place and checked against
+    /// the end of its row, the column through the C library's `round`.
+    /// Kept as the definition of both.
     mod a_byte_at_a_time {
         use super::super::*;
 
@@ -963,6 +975,22 @@ mod tests {
                     }
                 }
                 fill_gaps(view, placed);
+            }
+        }
+
+        pub fn sharpen_row(above: &[u8], here: &[u8], below: &[u8], k: i32, out: &mut [u8]) {
+            let end = here.len() - 4;
+            out[..4].copy_from_slice(&here[..4]);
+            out[end..].copy_from_slice(&here[end..]);
+            for x in (4..end).step_by(4) {
+                for i in x..x + 3 {
+                    let centre = here[i] as i32;
+                    let around =
+                        above[i] as i32 + below[i] as i32 + here[i - 4] as i32 + here[i + 4] as i32;
+                    let value = centre + (((centre * 4 - around) * k) >> 10);
+                    out[i] = value.clamp(0, 255) as u8;
+                }
+                out[x + 3] = here[x + 3];
             }
         }
     }
@@ -1036,6 +1064,24 @@ mod tests {
                         "{w} wide, {params:?}, nearness {nearness:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_sharpened_several_bytes_at_a_time_is_the_row_sharpened_a_byte_at_a_time() {
+        let mut bytes = noise();
+        // Every width up to past several of the compiler's steps, and rows
+        // as long as a screen's. Alpha is noise too: it must come through.
+        for w in (3..=70usize).chain([97, 333, 1021, 3840]) {
+            let (above, here, below) = (bytes(w * 4), bytes(w * 4), bytes(w * 4));
+            // None, hardly any, the page's range and the most there is.
+            for k in [0, 1, 90, 256, 511, 512] {
+                // Stale bytes show a byte that was not written.
+                let (mut now, mut before) = (vec![0xa5u8; w * 4], vec![0xa5u8; w * 4]);
+                sharpen_row(&above, &here, &below, k, &mut now);
+                a_byte_at_a_time::sharpen_row(&above, &here, &below, k, &mut before);
+                assert!(now == before, "{w} wide, sharpened by {k}");
             }
         }
     }
