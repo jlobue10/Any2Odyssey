@@ -55,6 +55,23 @@ fn usage_for(windows: bool) -> String {
     text
 }
 
+/// Print a line of this program's answer. Unlike `println!` it does not
+/// panic when the line cannot be written: `--help | true` ended with a
+/// panic message and exit code 101 where the reader had gone, and a usage
+/// error with 101 instead of 2 where standard error could not be written.
+fn say(text: &str) {
+    write_line(std::io::stdout().lock(), text);
+}
+
+/// [`say`] for standard error.
+fn complain(text: &str) {
+    write_line(std::io::stderr().lock(), text);
+}
+
+fn write_line(mut to: impl std::io::Write, text: &str) {
+    let _ = writeln!(to, "{text}").and_then(|()| to.flush());
+}
+
 fn self_test(logger: &Logger) -> i32 {
     let fitted = fit(Rect::new(0, 0, 1920, 1080), Rect::new(0, 0, 3840, 2160));
     if fitted != Rect::new(0, 0, 3840, 2160) {
@@ -124,9 +141,9 @@ fn check_updates_cli(logger: &Logger) -> i32 {
     };
     logger.log(&message);
     if code == exit_code::CHECK_FAILED {
-        eprintln!("{message}");
+        complain(&message);
     } else {
-        println!("{message}");
+        say(&message);
     }
     code
 }
@@ -207,7 +224,7 @@ fn quit_running_instance(mut signal: impl FnMut(&str) -> bool) -> i32 {
 /// Attaching twice is harmless: the second call fails and changes nothing.
 fn usage_error() -> i32 {
     attach_parent_console();
-    eprintln!("{}", usage());
+    complain(&usage());
     2
 }
 
@@ -311,7 +328,7 @@ fn main() {
         Ok(args) => args,
         Err(position) => {
             attach_parent_console();
-            eprintln!("Argument {position} is not valid Unicode.\n");
+            complain(&format!("Argument {position} is not valid Unicode.\n"));
             std::process::exit(usage_error());
         }
     };
@@ -367,7 +384,7 @@ fn main() {
         {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!("{e}");
+                complain(&e.to_string());
                 1
             }
         },
@@ -386,17 +403,17 @@ fn main() {
         #[cfg(not(windows))]
         [flag] if flag == "--install-depth-model" => match depth::install_model() {
             Ok(path) => {
-                println!("Depth model installed: {}", path.display());
+                say(&format!("Depth model installed: {}", path.display()));
                 0
             }
             Err(e) => {
-                eprintln!("{e}");
+                complain(&e);
                 1
             }
         },
         [] => run_gui(false, logger, None),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("{}", usage());
+            say(&usage());
             0
         }
         _ => usage_error(),
@@ -473,15 +490,15 @@ fn run_gui(
         return match (run, outcome) {
             (Ok(()), Some(Ok(()))) => 0,
             (Ok(()), Some(Err(e))) => {
-                eprintln!("{e}");
+                complain(&e);
                 1
             }
             (Ok(()), None) => {
-                eprintln!("Screenshot was not delivered.");
+                complain("Screenshot was not delivered.");
                 1
             }
             (Err(e), _) => {
-                eprintln!("{e}");
+                complain(&e.to_string());
                 1
             }
         };
@@ -524,7 +541,7 @@ fn run_gui(
     match ui::run(core) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{e}");
+            complain(&e.to_string());
             1
         }
     }
@@ -743,6 +760,23 @@ mod argument_tests {
         for text in [&windows, &others] {
             assert!(text.lines().skip(3).all(|l| l.starts_with("  Any2Odyssey")));
         }
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_written_is_not_a_panic() {
+        struct Gone;
+        impl std::io::Write for Gone {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        write_line(Gone, &usage());
+        let mut written = Vec::new();
+        write_line(&mut written, "two\nlines");
+        assert_eq!(written, b"two\nlines\n");
     }
 
     #[test]
