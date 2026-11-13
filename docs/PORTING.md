@@ -11,8 +11,8 @@ crates/app       any2odyssey           the GUI executable (controls, tray, worke
 tools/iconmaker  any2odyssey-iconmaker brand asset generator
 contrib/         Linux helpers for Leia's runtime: wine-lens (lens, eye tracker and weaver under Wine), lens-helper (MIT)
 installer/       PowerShell installer family
-scripts/         packaging (Windows ZIP)
-packaging/       Linux desktop entry and the Arch Linux PKGBUILD
+scripts/         packaging (Windows ZIP, Linux archive and its third-party list)
+packaging/       Linux desktop entry, the release archive's installer and the Arch Linux PKGBUILD
 ```
 
 ## C# (Windows application)
@@ -58,8 +58,8 @@ packaging/       Linux desktop entry and the Arch Linux PKGBUILD
 | Upstream | Any2Odyssey | Status |
 | --- | --- | --- |
 | `portable/stereo.py` | `core::stereo` | done |
-| — (new; upstream's portable edition has no depth) | `core::dibr` (stereo pair from an image and its depth map), `app::depth` (Depth Anything V2 Small through ONNX Runtime) | in progress: still images, run on the CPU under WSL 2 |
-| `portable/app.py` | `app::ui::viewer` (image source, input and output formats, half-width, swap, preview, output window, PNG export), `app::platform::unix` (single instance, hand-over, file dialogs) | in progress: the image viewer is done and run under WSL 2; the tray icon and the live screen source are not started |
+| — (new; upstream's portable edition has no depth) | `core::dibr` (stereo pair from an image and its depth map), `app::depth` (Depth Anything V2 Small through ONNX Runtime) | in progress: still images and a live screen; run on the CPU under WSL 2 and on a GPU on a CachyOS desktop (`docs/PLATFORMS.md`) |
+| `portable/app.py` | `app::ui::viewer` (image source, input and output formats, half-width, swap, preview, output window, PNG export), `app::platform::unix` (single instance, hand-over, file dialogs), `app::capture` and `app::live` (the live screen source, experimental) | in progress: the image viewer is done and run under WSL 2; the live screen source is there from 0.9.0 (`docs/LENS-SWITCH.md`); the tray icon is not started |
 | `tests/test_portable.py` (stereo assertions) | `core::stereo` tests | done |
 | `portable/run.sh`, `launch-linux.sh`, `Launch-macOS.command`, `requirements.txt`, `START-HERE.md` | — | dropped (native build replaces the Python bundles) |
 | `tools/package-portable.py` | — | dropped |
