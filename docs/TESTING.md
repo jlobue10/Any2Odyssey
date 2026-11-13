@@ -121,7 +121,19 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 (audit rounds 11 to 14) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 and 0.9.2 (audit rounds 11 to 16) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+
+New in 0.9.2:
+
+- Linux, the usual installation (no `--prefix`): `./install.sh --yes` with the monitor awake and the Windows drive mounted ends with "setup: done", and `~/.local/share/any2odyssey/any2odyssey-lens-helper` works. Run `./install.sh --no-odyssey` again: the lens still works and the Wine prefix is still there. `./install.sh --uninstall`: `settings.json` and the depth model are still in the data folder.
+- Linux: `sudo ./install.sh` (as root with your own home folder) stops with "not installing to ... as root" and writes nothing.
+- Linux: after `install.sh --uninstall`, `grep any2odyssey ~/.local/share/applications/mimeinfo.cache` prints nothing; the installed `README.md` shows its screenshots in a Markdown viewer.
+- Arch package: `/usr/share/any2odyssey/install.sh --uninstall`, as yourself and with sudo, prints "remove it with the package manager" and leaves `/usr` alone.
+- Linux, mirrored outputs with the Odyssey: `start-stack.sh` runs, `edid.pairs` names the Odyssey's connector for the slot and `odyssey.place` is filled.
+- Linux, live screen through the weaver: pictures per second and depth rate are what 0.9.1 gave (large allocations are now mapped one by one). Quit with the output on: the lens goes off, the process is gone within about 3 s and an immediate start works.
+- Linux viewer, real zenity and kdialog: open a dialog, press Open... again; the old window goes and a new one appears.
+- Windows: kill the controls while converting, start them again with automatic conversion, press Apply within 8 s of "Trying once more": the line counts down and 3D comes on.
+- Windows: with `companion.log` over 4 MiB, start Any2Odyssey: `companion.old.log` appears and both processes keep logging.
 
 Linux installer:
 
