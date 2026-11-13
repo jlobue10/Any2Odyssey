@@ -101,7 +101,10 @@ if(-not $ControlsOnly){
 }
 $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'assets\Any2Odyssey.ico';Destination=Join-Path $app 'Any2Odyssey.ico'}
 $record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionText;PreviousVersion=$(if($installed){$installed.Version.ToString()}else{$null});Action=$action;App=$app;ControlsOnly=[bool]$ControlsOnly;Worker=$(if(-not $ControlsOnly){Join-Path $engine $workerName}else{$null});Hash=(Get-FileHash -LiteralPath $binary).Hash}
-$record | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stage 'version.json') -Encoding UTF8
+# UTF-8 with a byte-order mark under every PowerShell: Windows PowerShell's -Encoding UTF8 writes one,
+# PowerShell 7's does not, and the uninstaller (Windows PowerShell) reads a file without one in the
+# ANSI code page, where a profile folder with other letters can make the record unreadable.
+[IO.File]::WriteAllText((Join-Path $stage 'version.json'),($record | ConvertTo-Json),[Text.UTF8Encoding]::new($true))
 $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destination=Join-Path $app 'version.json'}
 $operations+=[pscustomobject]@{Source=Join-Path $stage 'version.json';Destination=Join-Path $data 'install-result.json'}
 $shortcutSource=Join-Path $stage 'Any2Odyssey.lnk'

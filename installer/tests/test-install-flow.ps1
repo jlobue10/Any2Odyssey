@@ -75,6 +75,15 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayVersion -eq (Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()) 'Full install registers the packaged version'
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayName -eq 'Any2Odyssey') 'Installed apps entry is named Any2Odyssey'
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq $expectedAction) "Install record reports $expectedAction"
+ # The record names the application folder, here with letters outside the ANSI code page. Windows
+ # PowerShell (the registered uninstaller) reads a file without a byte-order mark in that code page,
+ # and in the Japanese, Chinese and Korean ones a UTF-8 letter can swallow the backslash after it,
+ # which leaves JSON that does not parse. PowerShell 7's -Encoding UTF8 writes no mark.
+ foreach($recordFile in @((Join-Path $app 'version.json'),(Join-Path $data 'install-result.json'))){
+  $recordBytes=[IO.File]::ReadAllBytes($recordFile)
+  Assert ($recordBytes[0] -eq 0xEF -and $recordBytes[1] -eq 0xBB -and $recordBytes[2] -eq 0xBF) "$(Split-Path -Leaf $recordFile) starts with a UTF-8 byte-order mark under every PowerShell"
+  Assert ((Get-Content -LiteralPath $recordFile -Raw | ConvertFrom-Json).App -eq $app) "$(Split-Path -Leaf $recordFile) keeps the application folder's letters"
+ }
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Full installer preserves existing user preferences'
  Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $repo 'build\Any2Odyssey.exe')).Hash) 'Worker beside the engine is the packaged executable'
  Assert (Test-Path -LiteralPath (Join-Path $root 'programfiles\Any2Odyssey\UninstallWorker.ps1')) 'Full install places the privileged helper outside per-user app data'
