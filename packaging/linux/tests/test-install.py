@@ -485,6 +485,90 @@ class InstallerTests(unittest.TestCase):
         self.assert_removed(prefix)
         self.assertNotIn("any2odyssey", cache.read_text())
 
+    def usual_place(self):
+        """A stand-in home with nothing naming another data folder: ~/.local/share/any2odyssey is then
+        both where the installer keeps its own files and the program's data folder."""
+        home = self.root / "home"
+        home.mkdir()
+        self.env["HOME"] = str(home)
+        for name in ["ANY2ODYSSEY_DATA_DIR", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"]:
+            self.env.pop(name, None)
+        return home, home / ".local/share/any2odyssey"
+
+    def wine_side(self, data):
+        """What setup.sh and the program leave in the data folder; returns the files that must stay."""
+        kept = [data / "settings.json", data / "models/depth-anything-v2-small.onnx",
+                data / "wine-lens/prefix/system.reg", data / "wine-lens/build/a2ousb.sys",
+                data / "wine-lens/camera.secret", data / "wine-lens/tools/tracking.sh"]
+        for file in kept:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("kept\n")
+        return kept
+
+    def test_in_the_usual_place_the_setup_is_not_kept_where_the_wine_side_is_built(self):
+        # 0.9.1 kept its copy of wine-lens in <data folder>/wine-lens, which is where setup.sh builds:
+        # setup.sh then failed at the end copying its tools onto themselves, installing again (an update)
+        # removed the Wine prefix with the copy of Leia's runtime, and --uninstall removed the whole data
+        # folder while saying that the settings and the depth model stay.
+        home, data = self.usual_place()
+        self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        (self.system / "dev/odyssey-lens").touch()
+        flags = ["--no-deps", "--no-udev", "--no-model"]
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNotNone(self.setup_ran_with(), result.stdout + result.stderr)
+        self.assertTrue((data / "wine-lens-setup/setup.sh").is_file())
+        self.assertFalse((data / "wine-lens").exists(), "the setup's files are where the Wine side is built")
+        self.assertIn(f"{data}/install.sh --uninstall", result.stdout)
+        kept = self.wine_side(data)
+        # An update: the same again from a newer archive, here without the Odyssey 3D step.
+        result = self.run_installer(*flags, "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"installing again removed {file}")
+        # Nobody answers the question about the Wine side: it stays, and so does the rest of the data.
+        result = subprocess.run([*SHELL, str(data / "install.sh"), "--uninstall"], cwd=self.root, env=self.env,
+                                text=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"--uninstall removed {file}")
+        self.assertFalse((data / "install.sh").exists())
+        self.assertFalse((data / "wine-lens-setup").exists())
+        self.assertFalse((home / ".local/bin/any2odyssey").exists())
+        # Answered with yes, the Wine side goes and nothing else of the data does.
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((data / "wine-lens").exists())
+        for file in kept[:2]:
+            self.assertTrue(file.is_file(), f"--uninstall --yes removed {file}")
+
+    def test_the_setup_0_9_1_left_in_the_data_folder_goes_and_a_wine_side_built_there_stays(self):
+        home, data = self.usual_place()
+        old = data / "wine-lens"
+        (old / "tools").mkdir(parents=True)
+        (old / "setup.sh").write_text("#!/bin/sh\n")
+        (old / "tools/tracking.sh").write_text("#!/bin/sh\n")
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(old.exists(), "the earlier version's copy of the setup is still there")
+        # The same with a Wine side that 0.9.1's setup.sh built before it failed.
+        (old / "prefix").mkdir(parents=True)
+        (old / "setup.sh").write_text("#!/bin/sh\n")
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((old / "prefix").is_dir())
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((old / "prefix").is_dir())
+        # Without anything else in it, the folder itself goes with the installation.
+        shutil.rmtree(old)
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(data.exists())
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"

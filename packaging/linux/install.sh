@@ -144,8 +144,17 @@ if [ -n "$PACKAGED" ]; then
     PROGRAM=$(command -v any2odyssey || echo /usr/bin/any2odyssey)
 else
     WINE_LENS=$APPDIR/wine-lens
+    # Installed to ~/.local with the data folder in its usual place, share/any2odyssey is the program's data
+    # folder as well, and wine-lens in it is what setup.sh builds there: the Wine prefix with the copy of
+    # Leia's runtime, the stand-ins and the camera secret. The setup's own files go beside that, under
+    # another name: as one folder, installing again removed the Wine side, and setup.sh could not copy its
+    # tools onto themselves.
+    [ "$(canonical "$APPDIR")" != "$(canonical "$DATA")" ] || WINE_LENS=$APPDIR/wine-lens-setup
     PROGRAM=$BIN/any2odyssey
 fi
+# share/any2odyssey/wine-lens is the setup's files and nothing else (as every installation outside the data
+# folder has it, and 0.9.1 left it in the data folder too) when no Wine side was built in it.
+only_the_setup() { [ -f "$APPDIR/wine-lens/setup.sh" ] && [ ! -e "$APPDIR/wine-lens/prefix" ] && [ ! -e "$APPDIR/wine-lens/build" ]; }
 
 # ---------------------------------------------------------------------------------------------------------
 if [ -n "$UNINSTALL" ]; then
@@ -153,8 +162,13 @@ if [ -n "$UNINSTALL" ]; then
     if [ -z "$PACKAGED" ]; then
         run rm -f "$BIN/any2odyssey" "$SHARE/applications/any2odyssey.desktop" \
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
-        # Only folders this script made, named in full.
-        [ -d "$PREFIX/share/any2odyssey" ] && run rm -rf "$PREFIX/share/any2odyssey"
+        # Only what this script put there, named in full. share/any2odyssey can be the program's data
+        # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
+        # as the last lines say; the Wine side is asked about below.
+        run rm -f "$APPDIR/install.sh"
+        [ -d "$APPDIR/wine-lens-setup" ] && run rm -rf "$APPDIR/wine-lens-setup"
+        if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; fi
+        if [ -z "$DRY" ] && [ -d "$APPDIR" ]; then rmdir "$APPDIR" 2>/dev/null || true; fi
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
         # The caches the installation refreshed still name the entry and the icon that are gone now.
         [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
@@ -259,8 +273,10 @@ if [ -z "$PACKAGED" ]; then
         say "   would copy: wine-lens -> $WINE_LENS"
     else
         mkdir -p "$APPDIR"
-        rm -rf "$APPDIR/wine-lens"
-        cp -R "$HERE/wine-lens" "$APPDIR/wine-lens"
+        # (the setup an earlier version left in wine-lens goes; a Wine side built there does not)
+        if only_the_setup; then rm -rf "$APPDIR/wine-lens"; fi
+        rm -rf "$WINE_LENS"
+        cp -R "$HERE/wine-lens" "$WINE_LENS"
         install -m755 "$HERE/install.sh" "$APPDIR/install.sh"
     fi
     have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
