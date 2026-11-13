@@ -2,11 +2,74 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## Unreleased
+## 0.9.1 (2026-11-12)
+
+An audit release for both editions: 44 pull requests (#71 to #114) from a series of security, performance and correctness reviews of 0.9.0, the later rounds by fuzzing, measurement and a walkthrough across components. No new features. Built and tested in CI on Windows and Linux (x86_64 and aarch64) and in an Arch Linux container; almost none of it has been run on the monitor yet, see Hardware verification.
+
+**Linux: run `setup.sh` (or `any2odyssey-setup`) again after updating.** The camera bridge and Leia's tracker now prove themselves to each other with a secret that setup creates; an old setup's bridge is refused.
+
+### Security
+
+- **Linux: the camera bridge and its client authenticate each other.** Any local program could connect to the bridge's loopback port and read the webcam, or stand in for the bridge towards Leia's tracker. Both sides now prove knowledge of a per-user secret (fresh random numbers per connection, constant-time comparison, one second for the whole exchange) before a picture or a command is accepted. (#96)
+- **Linux: the instance socket accepts only the same user**, under a lock, with bounded messages and a time limit for a whole line; a file that is not the instance's own socket is no longer removed. (#75, #85, #95)
+- **Linux: the installer no longer takes a Windows drive it was not given from removable or foreign media.** With `--yes` it ran `setup.sh` on the first mount that looked like Windows, a USB stick included. Only one internal drive owned by the user or root is used unasked; USB drives, memory cards, network shares and a user's FUSE mounts are named and passed over. (#92, #101)
+- **Linux: the depth model is checked again when it is loaded**, and downloaded from a pinned revision; the screen-cast token is written privately and never through a link. (#71, #79, #95)
+- **Linux: images are decoded with size limits, off the UI thread** (16384 pixels a side, 2^26 pixels). (#95)
+- **Windows: "View logs" always opens the data folder.** The shell could run a program of the same name lying beside the folder instead. (#104)
+- **Windows: named events are owned by the instance**, and files the controls read are capped at 1 MiB. (#93)
+- **A malformed answer to the update check can no longer put the whole response into the About page and the log**; the error text is cut at 200 characters. (#112)
+- **Releases carry build provenance.** Each published file has a Sigstore attestation that it was built by this repository's release workflow from the tag (`gh attestation verify`, see the README). The release workflow runs every test CI runs, pins the Arch container by digest, and refuses to sign or publish when the dependency policy (`cargo-deny`, new in CI) fails. (#92, #101, #108)
+
+### Fixed
+
+Linux, the live screen:
+
+- **A still screen costs almost nothing.** The live loop rendered at full rate whether or not anything had changed; it now idles until the picture, the depth or a control changes. (#94, #102)
+- **Helpers that hang are ended**, with their whole process group, three seconds after a stop; the picture file lives in the runtime folder (with a check for room) instead of `/tmp`, and is released on exit. (#94, #102)
+- A capture that ended just as its first frame arrived stayed "running" with a frozen picture; choosing another output format during a live screen left stale rates on the page; a failing depth model now returns the output to a flat picture and recovers; queued model work for a stopped session is skipped. (#77, #90, #106, #107)
+- **Starting 3D right after stopping it no longer leaves the picture without eye tracking, and stopping within a moment of starting no longer leaves Leia's tracker running.** (#110)
+
+Linux, the viewer:
+
+- **Odyssey output survives a pending depth estimate** and shows the page's messages; stale results of an earlier image are ignored; a worker thread that panics wakes the page with an error instead of leaving it waiting. (#72, #91, #95, #99)
+- **PNG export** confirms a replacement after the extension is added, writes through a temporary file, reports a failed write, and keeps file names that are not UTF-8, as does handing a file to the running instance. (#76, #86, #87)
+- Calibration edits are saved after a pause and on exit instead of at every step; lens output that ends by itself frees its panel-sized pictures; a file dialog left open ends with the viewer. (#88, #107, #109)
+
+Linux, the Wine side:
+
+- **Camera reader lifetimes.** A callback after a failed stream start, a use after free when shutdown timed out, a reader consuming a reused socket, an unanswered read after a flush, and driver buffers left allocated when a capture start failed early. (#83, #84, #97, #100, #103)
+- The UDP shim no longer keeps completed receive buffers; the camera timeout and the model download no longer race; the weaver helper's watcher no longer spins where `flock` cannot wait (BusyBox); paired port keepers no longer hold each other; a malformed EDID's maker letters cannot break the registry file; an empty camera frame is dropped; the port keeper refuses an interval it cannot count. (#71, #73, #100, #113)
+- The port keeper is a small native program that leaves with Leia's service, instead of a shell loop forking every 50 ms. (#96)
+- `setup.sh` stops with a clear message when `pgrep` is BusyBox's, which made every lens-helper start restart Leia's service. (#109)
+
+Linux, installing:
+
+- Desktop launchers work for prefixes with spaces and other awkward characters; the uninstall command the installer prints removes the installation it was printed for, also after `--prefix` (it looked in `~/.local`); `--uninstall` stops the port keeper and leaves other Wine prefixes alone. (#80, #101, #110)
+- The Linux archive and the Arch package no longer pick up Python cache files from the test run. (#108)
+
+Windows:
+
+- **A worker that panics says so and exits** (log line, status file, exit code 1) instead of dying silently with the overlay possibly left up. (#93)
+- **The capture interval follows the display's refresh rate** instead of a fixed 16 ms that beat against it (57 pictures a second at 120 Hz). (#93)
+- **Stops are quicker**, overlay raises no longer block the capture thread, and tray events wake the poller only when it acts on them. (#93, #98)
+- **Controls started again within a few seconds of dying** found their old worker still holding the engine, turned 3D off and asked the user to close a renderer that had no window. The start is repeated once after 8 seconds. (#112)
+- **The installer no longer stops with "Could not request a clean shutdown"** when Any2Odyssey had only just been started: `--quit` retries briefly, like `--toggle` and `--show`. (#109)
+- The installation record is written the same way under PowerShell 7 as under Windows PowerShell; from PowerShell 7 on a Japanese, Chinese or Korean system with a non-ASCII profile folder the uninstaller could report it unreadable. (#105)
+- Numbers in Samsung's `OverlaySettings.json` that Any2Odyssey does not set come back digit for digit; about one in thirteen was rewritten a unit in the last place off. (#112)
+
+### Performance
+
+- **Linux, live screen: the two views are rendered about 1.5 times faster and sharpened about 1.9 times faster**, with the same picture byte for byte. Measured on the processor alone (Ryzen 9950X3D under WSL 2, 4K screen, sharpening on): 8.9 to 6.7 ms a picture at 1080 lines, 15.3 to 11.8 ms at 1440, 32.4 to 23.5 ms at 2160 (about 55 pictures a second instead of 44; still short of 60). (#114)
+- **Linux, live screen: fewer copies of each frame**, native-size frames taken without a resize. (#71, #94)
+- **Linux, still images:** stereo rendering streams rows instead of holding whole intermediate images, flat stills are resized once, side-by-side conversion and frame preparation copy rows in bulk, and half-width pairs, eye fitting and the lens interleave run on several threads. (#74, #78, #81, #82, #89, #99)
 
 ### Changed
 
 - **Docs: the pointer on the Odyssey's own screen.** 0.9.0's notes list the desktop's real pointer looking doubled over the 3D picture as a known issue. It looked right by the end of the same session on the G90XF, after the eye tracking's timing had been corrected; `docs/LENS-SWITCH.md` and `docs/PLATFORMS.md` now say so. Nothing in the program changed.
+
+### Hardware verification
+
+Pending for nearly everything in this release: the changes were made and tested without the monitor, Wine, the camera or the lens. `docs/TESTING.md`, "Pending hardware verification", lists the checks for the Linux installer, the Wine side, the live screen, the viewer and Windows; each pull request names its own. Most in need of a run: the camera bridge's authentication after a fresh `setup.sh`; the UDP shim under the tracker's pause and resume (#73); stop and start of eye tracking in quick succession (#110, whose timings for Leia's service are assumed); the live screen's idling and its rates at 1080, 1440 and 2160 lines; on Windows, a steady 60 pictures a second at 120 Hz in `desktop-capture-status.json`, and a relaunch right after the controls are killed. The first tag is also the first run of the attestation job, the dependency job and the Linux gates in the release workflow.
 
 ## 0.9.0 (2026-11-11)
 
@@ -30,7 +93,7 @@ The Linux edition: a stereo viewer that, on an Odyssey 3D, shows images and a li
 
 ### Hardware verification
 
-Partly done for Linux. Otherwise run only on Arch Linux under WSL 2 (X11, virtual display, Openbox, software OpenGL; AI depth on the CPU). The lens interleave was checked there only as pixels (the full-screen pattern matches the expected subpixel assignment exactly). The lens switch through Wine was run on a G90XF (CachyOS, x86_64, KDE Wayland, NVIDIA, Wine 11.21, SR runtime 1.36.4): from the viewer, full-screen lens output switched the lens on within about half a minute of a cold start and at once afterwards, and leaving full screen switched it off; the interleaved picture looked reasonable after tuning by hand, with display scaling at 125 %. The helper for Leia's Linux runtime has been neither compiled against that SDK nor run, because the runtime could not be obtained. Leia's eye tracker, the weaver helper and the tracker's pause were run on that machine as recorded in `docs/LENS-SWITCH.md`, and AI depth ran on its GPU (RTX 5090, `onnxruntime-cuda` 1.29). On the same machine the Odyssey 3D output was seen from the viewer on the panel: a still image with AI depth (upright, depth the right way round, following the viewer), and the live screen with the Odyssey's own desktop as the screen on KDE Plasma 6.8, including video playing. Known there: the desktop's real pointer is drawn flat over the 3D picture and looked doubled through the lens (it looked right later in the same session; see Unreleased above); some flicker while the head moves remained after the camera's time stamps were corrected (which reduced it); the repeated stop and start and the 2160-line detail were fixed afterwards and checked by measurement only. Also to check: the anaglyph and side-by-side results viewed with glasses or on a side-by-side display. To check on a physical Arch-based desktop: Wayland and X11 sessions, the Open and Save dialogs with zenity and with kdialog, drag and drop, the output window made full screen on a second display, an image opened from the file manager's "Open with".
+Partly done for Linux. Otherwise run only on Arch Linux under WSL 2 (X11, virtual display, Openbox, software OpenGL; AI depth on the CPU). The lens interleave was checked there only as pixels (the full-screen pattern matches the expected subpixel assignment exactly). The lens switch through Wine was run on a G90XF (CachyOS, x86_64, KDE Wayland, NVIDIA, Wine 11.21, SR runtime 1.36.4): from the viewer, full-screen lens output switched the lens on within about half a minute of a cold start and at once afterwards, and leaving full screen switched it off; the interleaved picture looked reasonable after tuning by hand, with display scaling at 125 %. The helper for Leia's Linux runtime has been neither compiled against that SDK nor run, because the runtime could not be obtained. Leia's eye tracker, the weaver helper and the tracker's pause were run on that machine as recorded in `docs/LENS-SWITCH.md`, and AI depth ran on its GPU (RTX 5090, `onnxruntime-cuda` 1.29). On the same machine the Odyssey 3D output was seen from the viewer on the panel: a still image with AI depth (upright, depth the right way round, following the viewer), and the live screen with the Odyssey's own desktop as the screen on KDE Plasma 6.8, including video playing. Known there: the desktop's real pointer is drawn flat over the 3D picture and looked doubled through the lens (it looked right later in the same session; see 0.9.1 above); some flicker while the head moves remained after the camera's time stamps were corrected (which reduced it); the repeated stop and start and the 2160-line detail were fixed afterwards and checked by measurement only. Also to check: the anaglyph and side-by-side results viewed with glasses or on a side-by-side display. To check on a physical Arch-based desktop: Wayland and X11 sessions, the Open and Save dialogs with zenity and with kdialog, drag and drop, the output window made full screen on a second display, an image opened from the file manager's "Open with".
 
 ## 0.8.7 (2026-11-10)
 
