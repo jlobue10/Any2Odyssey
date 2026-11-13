@@ -207,6 +207,38 @@ mod tests {
     }
 
     #[test]
+    fn samsungs_numbers_survive_the_rewrite_digit_for_digit() {
+        // Single-precision values written as doubles, as a C++ program
+        // prints them. serde_json's default parser read the first of these
+        // one unit in the last place off, so it came back as ...382.
+        // (Each is the shortest spelling of its value: a longer one comes
+        // back shortened, with the value unchanged.)
+        let numbers = [
+            "3.7760119438171387",
+            "0.10000000149011612",
+            "2.200000047683716",
+            "1e-7",
+            "123456789.12345679",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("OverlaySettings.json");
+        let backup = dir.path().join("backup.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"Calibration":[{}],"StandardVideo":{{}}}}"#,
+                numbers.join(",")
+            ),
+        )
+        .unwrap();
+        update_file(&path, &backup, false, 0.5, 0.1).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for number in numbers {
+            assert!(text.contains(number), "{number} was rewritten in {text}");
+        }
+    }
+
+    #[test]
     fn non_object_document_is_replaced() {
         let mut doc = json!([1, 2, 3]);
         apply(&mut doc, false, 0.9, 0.0);

@@ -16,7 +16,10 @@ any2odyssey-windows = { path = "crates/windows", version = "0.9.0" }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: Samsung's OverlaySettings.json is read, edited and written
 # back, and its keys must come back in the order Samsung wrote them.
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip: and its numbers as Samsung wrote them. The default number
+# parser is off by a unit in the last place for about one value in thirteen,
+# which rewrote settings of Samsung's that nothing here had touched.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.10"
 thiserror = "2"
 anyhow = "1"

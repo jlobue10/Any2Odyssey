@@ -23,6 +23,8 @@ pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const MAX_NOTES_CHARS: usize = 4000;
 /// Longest unrecognized tag echoed back in an error message, in characters.
 pub const MAX_TAG_CHARS: usize = 64;
+/// Longest JSON parser message kept in an error, in characters.
+pub const MAX_ERROR_CHARS: usize = 200;
 /// Automatic checks run at most this often.
 pub const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 /// Hosts whose HTTPS URLs may be opened from an update result.
@@ -234,8 +236,11 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
     if body.len() > MAX_RESPONSE_BYTES {
         return Err(ParseError::TooLarge(body.len()));
     }
-    let document: Document =
-        serde_json::from_str(body).map_err(|e| ParseError::Json(e.to_string()))?;
+    // serde quotes an unexpected string in full ("invalid type: string
+    // \"...\", expected a boolean"), so the message can be as long as the
+    // response; it is shown on the About page and written to the log.
+    let document: Document = serde_json::from_str(body)
+        .map_err(|e| ParseError::Json(bounded(&e.to_string(), MAX_ERROR_CHARS)))?;
     if document.draft {
         return Err(ParseError::Draft);
     }
@@ -722,6 +727,37 @@ mod tests {
         let release =
             parse_latest_release(r#"{"tag_name":"v0.9.0","published_at":"<b>soon</b>"}"#).unwrap();
         assert_eq!(release.published_at, None);
+    }
+
+    #[test]
+    fn a_parser_message_that_quotes_the_response_is_bounded() {
+        // Found by fuzzing: a response that is one JSON string, or that
+        // carries a long string where a flag belongs, came back whole inside
+        // the error text (megabytes at the response limit).
+        for body in [
+            format!("\"{}\"", "\u{7f}".repeat(100_000)),
+            format!(
+                r#"{{"tag_name":"v0.9.0","draft":"{}"}}"#,
+                "x".repeat(100_000)
+            ),
+        ] {
+            match parse_latest_release(&body) {
+                Err(ParseError::Json(message)) => {
+                    assert!(message.starts_with("invalid type: string"), "{message}");
+                    assert_eq!(message.chars().count(), MAX_ERROR_CHARS + 1);
+                    assert!(message.ends_with('…'));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // An ordinary message is kept whole, position included.
+        match parse_latest_release("not json") {
+            Err(ParseError::Json(message)) => {
+                assert!(message.contains(" at line 1 column "), "{message}");
+                assert!(!message.ends_with('…'), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
