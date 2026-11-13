@@ -193,14 +193,18 @@ pub fn fit(image: &RgbaImage, width: u32, height: u32, stretch_x: f64) -> RgbaIm
     let scale = (width as f64 / shown_w).min(height as f64 / shown_h);
     let w = ((shown_w * scale).round() as u32).clamp(1, width);
     let h = ((shown_h * scale).round() as u32).clamp(1, height);
+    // Copy native-size pixels straight into the canvas; only a resize needs
+    // its own temporary image.
+    let resized;
     let scaled = if (w, h) == image.dimensions() {
-        image.clone()
+        image
     } else {
-        imageops::resize(image, w, h, imageops::FilterType::Triangle)
+        resized = imageops::resize(image, w, h, imageops::FilterType::Triangle);
+        &resized
     };
     imageops::replace(
         &mut canvas,
-        &scaled,
+        scaled,
         ((width - w) / 2) as i64,
         ((height - h) / 2) as i64,
     );
