@@ -35,9 +35,10 @@ const LOCK_PATIENCE: Duration = Duration::from_secs(2);
 /// its socket's name behind for the next launch to clear away.
 const EXIT_PATIENCE: Duration = Duration::from_millis(500);
 
-/// The three calls into the C library this module makes. The standard
-/// library has no stable way to ask who is at the other end of a socket, and
-/// its file locks are newer than the oldest compiler this crate builds with.
+/// The four calls into the C library this module makes. The standard
+/// library has no stable way to ask who is at the other end of a socket or
+/// to tie a child's life to this process, and its file locks are newer than
+/// the oldest compiler this crate builds with.
 mod sys {
     use std::ffi::c_int;
     use std::os::fd::AsRawFd;
@@ -51,6 +52,25 @@ mod sys {
     /// The same numbers on Linux, the BSDs and macOS.
     const LOCK_EX: c_int = 2;
     const LOCK_NB: c_int = 4;
+
+    /// Ask the kernel to end this process (SIGTERM) when the thread that
+    /// started it ends, which is at the latest when its program does. For
+    /// the child side of a fork, before it becomes another program; the
+    /// request stays across that. Without it (not Linux, or refused) the
+    /// child is simply left to itself, as before.
+    pub fn end_with_parent() {
+        #[cfg(target_os = "linux")]
+        {
+            extern "C" {
+                fn prctl(option: c_int, ...) -> c_int;
+            }
+            const PR_SET_PDEATHSIG: c_int = 1;
+            const SIGTERM: std::ffi::c_ulong = 15;
+            // SAFETY: a system call on two numbers that touches no memory
+            // of this process; safe between fork and exec.
+            let _ = unsafe { prctl(PR_SET_PDEATHSIG, SIGTERM) };
+        }
+    }
 
     /// The user this process acts as.
     pub fn own_uid() -> u32 {
@@ -607,14 +627,26 @@ fn bind_private(path: &Path) -> std::io::Result<UnixListener> {
 
 /// Run the first of `candidates` that is installed and return its filename from
 /// standard output. `None` when the dialog was cancelled or none exists.
+///
+/// A dialog still open when this program ends is ended with it: nothing
+/// would read its answer, and its window would stay on the desktop.
 fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::process::CommandExt;
     for (program, arguments) in candidates {
-        match std::process::Command::new(program)
+        let mut command = std::process::Command::new(program);
+        command
             .args(arguments)
             .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
+            .stderr(std::process::Stdio::null());
+        // SAFETY: runs in the child between fork and exec and makes one
+        // system call there: no allocation, no lock, nothing of the parent's.
+        unsafe {
+            command.pre_exec(|| {
+                sys::end_with_parent();
+                Ok(())
+            });
+        }
+        match command.output() {
             Ok(mut output) => {
                 // Zenity and kdialog append one LF after the filename. Any
                 // other line breaks belong to that name, including a CR
@@ -961,6 +993,74 @@ mod tests {
                 None
             );
         }
+    }
+
+    /// The viewer runs a dialog on a thread that waits for it. This test
+    /// starts itself once more as the program with such a thread, has that
+    /// program end while its "dialog" (a sleep) is open, and looks whether
+    /// the sleep went with it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dialog_left_open_ends_with_the_program() {
+        const NOTE: &str = "ANY2ODYSSEY_TEST_DIALOG_PID_FILE";
+        let written = |note: &Path| {
+            std::fs::read_to_string(note)
+                .ok()
+                .filter(|text| text.ends_with('\n'))
+        };
+        if let Some(note) = std::env::var_os(NOTE).map(PathBuf::from) {
+            let fixture = vec![(
+                "/bin/sh",
+                vec![
+                    "-c".into(),
+                    "echo $$ >\"$1\"; exec sleep 600".into(),
+                    "dialog-fixture".into(),
+                    note.to_str().unwrap().into(),
+                ],
+            )];
+            std::thread::spawn(move || dialog(&fixture));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while written(&note).is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::process::exit(0);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("dialog-pid");
+        let this_test = format!(
+            "{}::a_dialog_left_open_ends_with_the_program",
+            module_path!().split_once("::").unwrap().1
+        );
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &this_test])
+            .env(NOTE, &note)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let pid: u32 = written(&note)
+            .expect("the dialog was started")
+            .trim()
+            .parse()
+            .unwrap();
+        // Gone, or ended and not yet collected by whoever inherited it.
+        let running = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| !stat.rsplit(')').next().unwrap().starts_with(" Z"))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let outlived = running();
+        if outlived {
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
+        }
+        assert!(!outlived, "the dialog outlived the program that opened it");
     }
 
     #[test]
