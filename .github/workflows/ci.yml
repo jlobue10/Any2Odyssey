@@ -137,6 +137,7 @@ jobs:
           test -x /usr/share/any2odyssey/wine-lens/setup.sh
           test -s /usr/share/licenses/any2odyssey/THIRD-PARTY-LICENSES-LINUX.md
           test -s /usr/lib/udev/rules.d/70-any2odyssey-lens.rules
+          test -z "$(find /usr/share/any2odyssey -name __pycache__ -o -name '*.pyc')"
           any2odyssey-setup --help
           any2odyssey-setup --dry-run --no-deps --no-odyssey < /dev/null
           any2odyssey --help
@@ -250,6 +251,8 @@ jobs:
           sh -n check/wine-lens/setup.sh
           test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh
           test -s check/THIRD-PARTY-LICENSES-LINUX.md -a -s check/wine-lens/LICENSE-MIT
+          # Nothing the test steps above left in the tree (Python's compiled copy of tools/mkedid.py).
+          test -z "$(find check -name __pycache__ -o -name '*.pyc')"
           # The installer: into a folder of its own, without the steps that need root or hardware.
           check/install.sh --prefix "$PWD/prefix" --no-deps --no-udev --no-model --no-odyssey
           prefix/bin/any2odyssey --help
