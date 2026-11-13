@@ -34,8 +34,16 @@
 #define MISSES_ONCE_SEEN 2 /* the program was there and is not, twice in a row: it has gone */
 #define MISSES_AT_START 24 /* it never came (two minutes at the default; a start takes about half a minute) */
 
-/* Whether another process of this user has `name` in its command line. */
-static int running(const char *name)
+static const char *base_name(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+/* Whether another process of this user has `name` in its command line. Another copy of this program
+ * (`self` is how this one was started) has, as one of its arguments, and is not what is looked for: two
+ * keepers would each take the other for the program and neither would ever leave. */
+static int running(const char *name, const char *self)
 {
     DIR *proc = opendir("/proc");
     struct dirent *e;
@@ -53,8 +61,10 @@ static int running(const char *name)
         if (!isdigit((unsigned char)e->d_name[0]) || atol(e->d_name) == (long)getpid()) continue;
         snprintf(path, sizeof path, "/proc/%.20s/cmdline", e->d_name);
         if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0) continue;
-        if (!fstat(fd, &st) && st.st_uid == me && (n = read(fd, line, sizeof line)) > 0)
-            found = memmem(line, (size_t)n, name, length) != NULL;
+        if (!fstat(fd, &st) && st.st_uid == me && (n = read(fd, line, sizeof line - 1)) > 0) {
+            line[n] = 0; /* (the program's own name ends at the first zero in any case) */
+            found = strcmp(base_name(line), base_name(self)) && memmem(line, (size_t)n, name, length) != NULL;
+        }
         close(fd);
     }
     closedir(proc);
@@ -85,7 +95,7 @@ int main(int argc, char **argv)
         }
         nanosleep(&tick, NULL);
         if (look % (seconds * LOOKS_A_SECOND)) continue;
-        if (running(argv[2])) {
+        if (running(argv[2], argv[0])) {
             seen = 1;
             missed = 0;
         } else if (++missed >= (seen ? MISSES_ONCE_SEEN : MISSES_AT_START)) {

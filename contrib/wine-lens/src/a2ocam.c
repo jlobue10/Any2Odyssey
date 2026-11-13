@@ -895,6 +895,10 @@ static DWORD WINAPI reader_thread(void *arg)
             } else {
                 sample = reader_take_sample(r, &time);
             }
+        } else if (flushed && r->pending > 0) {
+            /* A sample was asked for between the flush and this turn, and the one wake-up served both. The
+             * request gets a turn of its own: once the camera has gone no frame comes to give it one. */
+            SetEvent(r->wake);
         }
         LeaveCriticalSection(&r->lock);
         if (flushed) IMFSourceReaderCallback_OnFlush(r->callback, 0);

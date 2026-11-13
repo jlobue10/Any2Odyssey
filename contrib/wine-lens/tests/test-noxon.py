@@ -84,6 +84,16 @@ class NoxonTests(unittest.TestCase):
         self.end(self.service)
         self.assertEqual(keeper.wait(timeout=6), 0)
 
+    def test_two_keepers_do_not_hold_each_other(self):
+        # A keeper has the service's name among its own arguments. One left over from an earlier start must
+        # not pass for the service, or the two would keep each other running for good.
+        keepers = [self.keeper(self.name), self.keeper(self.name)]
+        time.sleep(2.5)
+        self.assertEqual([keeper.poll() for keeper in keepers], [None, None])
+        self.end(self.service)
+        for keeper in keepers:
+            self.assertEqual(keeper.wait(timeout=6), 0)
+
     def test_a_missing_port_is_waited_for(self):
         keeper = subprocess.Popen([self.binary, "/nonexistent/odyssey-lens", self.name, "1"])
         self.addCleanup(self.end, keeper)

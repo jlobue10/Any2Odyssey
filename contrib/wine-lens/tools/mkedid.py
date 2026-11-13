@@ -44,7 +44,9 @@ def edid_of(connector):
 
 def model_of(edid):
     v = (edid[8] << 8) | edid[9]
-    pnp = "".join(chr(64 + ((v >> s) & 31)) for s in (10, 5, 0))
+    # Three letters of five bits each, 1 to 26 for A to Z. The model goes into registry key names and
+    # strings: the values past Z, which a malformed EDID can hold, would put "[", "\" or "]" there.
+    pnp = "".join(chr(64 + n) if n <= 26 else "_" for n in ((v >> s) & 31 for s in (10, 5, 0)))
     return "%s%02X%02X" % (pnp, edid[11], edid[10])
 
 def name_of(edid):

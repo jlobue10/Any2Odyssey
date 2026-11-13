@@ -37,8 +37,11 @@ ME=$$ T=$T setsid sh -c '
     # over while the picture shows. The wait gives up every few seconds to look at the process itself, in
     # case something else holds the lock; and should the lock be had with the script still there, the
     # script never held it: then the process is looked at three times a second, as before there was a lock.
+    # So it is when the wait itself fails at once (BusyBox has a flock without -w): a loop with no pause
+    # in it would start programs as fast as it can for as long as the picture shows.
     while alive; do
-        flock -w 5 "$T/weaver.alive" true 2>/dev/null && alive && sleep 0.3
+        flock -w 5 "$T/weaver.alive" true 2>/dev/null
+        alive && sleep 0.3
     done
     command -v busctl >/dev/null &&
         busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s any2odyssey-overlay >/dev/null 2>&1
