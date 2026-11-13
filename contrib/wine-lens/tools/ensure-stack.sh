@@ -23,10 +23,11 @@ exec 9>"$T/stack.lock"
 flock 9
 if ! stack_ok; then
     # The serial port's keeper from an earlier start is ended, if the process of the noted number still is
-    # that keeper (a number left over from before a restart can belong to anything).
+    # that keeper (a number left over from before a restart can belong to anything). It is the script or the
+    # program the script becomes; left alone it ends by itself some seconds after Leia's service has gone.
     NOXON=${XDG_RUNTIME_DIR:-$T}/any2odyssey-noxon.pid
     old=$(cat "$NOXON" 2>/dev/null)
-    case $old in '' | *[!0-9]*) ;; *) grep -q -a 'noxon\.sh' "/proc/$old/cmdline" 2>/dev/null && kill "$old" 2>/dev/null ;; esac
+    case $old in '' | *[!0-9]*) ;; *) grep -q -a -e 'noxon\.sh' -e 'any2odyssey-noxon' "/proc/$old/cmdline" 2>/dev/null && kill "$old" 2>/dev/null ;; esac
     setsid "$T/tools/noxon.sh" </dev/null >/dev/null 2>&1 9>&- &
     echo $! >"$NOXON"
     "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- ||

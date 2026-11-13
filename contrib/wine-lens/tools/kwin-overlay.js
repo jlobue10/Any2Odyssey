@@ -16,11 +16,28 @@ function arrange(window) {
 function arrangeAll() {
     workspace.windowList().forEach(arrange);
 }
-arrangeAll();
-workspace.windowAdded.connect(arrange);
-// A window of a Wine program can be announced before it has its class, and is then not recognized above;
-// so the list is looked over again twice a second for as long as this script is loaded.
+// A window of a Wine program can be announced before it has its class, and is then not recognized by
+// arrange(). So the list is looked over again twice a second for ten seconds after this script is loaded and
+// after every window that appears, and then left alone: looking for as long as the script is loaded kept the
+// desktop busy for a window that had been found long before.
+var LOOKS = 20;
+var looksLeft = 0;
 var again = new QTimer();
 again.interval = 500;
-again.timeout.connect(arrangeAll);
-again.start();
+again.timeout.connect(function () {
+    arrangeAll();
+    looksLeft -= 1;
+    if (looksLeft <= 0) {
+        again.stop();
+    }
+});
+function lookForAWhile() {
+    looksLeft = LOOKS;
+    again.start();
+}
+arrangeAll();
+workspace.windowAdded.connect(function (window) {
+    arrange(window);
+    lookForAWhile();
+});
+lookForAWhile();

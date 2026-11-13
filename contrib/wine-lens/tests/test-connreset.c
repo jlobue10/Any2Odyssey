@@ -161,6 +161,42 @@ int main(void)
         assert(closesocket_forgetting(s) == 0);
     }
     assert(closes == SOCKETS * 6);
+
+    /* Sockets that only receive take no entry: any number of them leaves room for one that sends. */
+    for (SOCKET s = 1000; s < 1000 + SOCKETS * 3; s++) {
+        struct sockaddr_in from = {0};
+        receive_into(s, &from);
+        assert(!memcmp(&from, &unchanged, sizeof from));
+    }
+    send_to(600, 43000);
+    struct sockaddr_in from = {0}, expected = destination(43000);
+    receive_into(600, &from);
+    assert(!memcmp(&from, &expected, sizeof from));
+
+    /* Senders that are never closed here (closed by other code, say) cannot fill the table for good: the
+     * one whose destination was noted longest ago makes room, and one that keeps sending stays. */
+    for (SOCKET s = 2000; s < 2000 + SOCKETS * 3; s++) {
+        send_to(s, 44000 + (unsigned)(s - 2000));
+        send_to(600, 43001);
+    }
+    for (SOCKET s = 2000; s < 2000 + SOCKETS * 3; s++) {
+        BOOL kept = s >= 2000 + SOCKETS * 3 - (SOCKETS - 1); /* the newest, less the one that kept sending */
+        memset(&from, 0, sizeof from);
+        expected = destination(44000 + (unsigned)(s - 2000));
+        receive_into(s, &from);
+        assert(!memcmp(&from, kept ? &expected : &unchanged, sizeof from));
+    }
+    memset(&from, 0, sizeof from);
+    expected = destination(43001);
+    receive_into(600, &from);
+    assert(!memcmp(&from, &expected, sizeof from));
+    /* A handle that comes back for a new socket after such a silent close starts without the old
+     * destination once its entry has gone, and takes its own with its first send. */
+    send_to(2000, 45000);
+    memset(&from, 0, sizeof from);
+    expected = destination(45000);
+    receive_into(2000, &from);
+    assert(!memcmp(&from, &expected, sizeof from));
 #endif
     assert(sends && receives);
     puts("UDP shim buffer lifetime and socket lifecycle tests passed");

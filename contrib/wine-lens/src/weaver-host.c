@@ -144,7 +144,8 @@ int main(int argc, char **argv)
     DWORD last_eye_check = 0;
     GLuint texture;
     FILE *stats;
-    LARGE_INTEGER qpf, last_turn, stats_since, before_upload, after_upload;
+    LARGE_INTEGER qpf, last_turn, stats_since, before_upload, after_upload, after_swap;
+    BOOL (WINAPI *swap_interval)(int);
     double worst_ms = 0, worst_upload_ms = 0;
     unsigned turns = 0, uploads = 0;
     bool uploaded;
@@ -199,6 +200,10 @@ int main(int argc, char **argv)
     dc = GetDC(window);
     if (!SetPixelFormat(dc, ChoosePixelFormat(dc, &pfd), &pfd) || !wglMakeCurrent(dc, wglCreateContext(dc)))
         fail("cannot start OpenGL in the output window");
+    /* The loop below is paced by SwapBuffers waiting for the display. Ask for that wait where it can be
+     * asked for, rather than rely on it being the default. */
+    swap_interval = (BOOL (WINAPI *)(int))(void *)wglGetProcAddress("wglSwapIntervalEXT");
+    if (swap_interval) swap_interval(1);
 
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
@@ -264,6 +269,12 @@ int main(int argc, char **argv)
         glClear(GL_COLOR_BUFFER_BIT);
         if (tex_w) a2o_weaver_weave(weaver);
         SwapBuffers(dc);
+        /* Where the swap does not wait (no such extension, or a driver told to ignore it) nothing paces the
+         * loop, and it would keep a processor core and the GPU busy weaving the same picture thousands of
+         * times a second. A turn that took under two milliseconds was not paced by a display, none
+         * refreshes that fast: it gives a millisecond back. A paced turn is left as it is. */
+        QueryPerformanceCounter(&after_swap);
+        if (tex_w && (after_swap.QuadPart - before_upload.QuadPart) * 500 < qpf.QuadPart) Sleep(1);
         if (stats) { /* a diagnostic: how often the picture is woven, and the longest wait between two */
             LARGE_INTEGER t;
             double ms, upload_ms = (double)(after_upload.QuadPart - before_upload.QuadPart) * 1000.0 / qpf.QuadPart;
