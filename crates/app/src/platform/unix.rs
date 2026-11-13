@@ -1088,13 +1088,17 @@ mod tests {
         )]
     }
 
-    /// The process numbers a [`hanging_dialog`] noted, once it has.
+    /// The process numbers a [`hanging_dialog`] noted, once it has and once
+    /// `dialogs` holds it. The script writes them as soon as it runs, and on
+    /// a busy machine that is before the thread that started it has put it
+    /// where `close` and the next dialog find it: a `close` in between
+    /// closed nothing, and a dialog started in between was the one ended.
     #[cfg(target_os = "linux")]
-    fn noted_pids(note: &Path) -> Vec<u32> {
+    fn noted_pids(dialogs: &Dialogs, note: &Path) -> Vec<u32> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let text = std::fs::read_to_string(note).unwrap_or_default();
-            if text.ends_with('\n') {
+            if text.ends_with('\n') && dialogs.open().child.is_some() {
                 return text
                     .split_whitespace()
                     .map(|p| p.parse().unwrap())
@@ -1133,7 +1137,7 @@ mod tests {
             let (dialogs, fixture) = (dialogs.clone(), hanging_dialog(&note));
             std::thread::spawn(move || dialogs.run(&fixture))
         };
-        let pids = noted_pids(&note);
+        let pids = noted_pids(&dialogs, &note);
         let (script, started_by_it) = (pids[0], pids[1]);
         assert!(running(script) && running(started_by_it));
         dialogs.close();
@@ -1176,7 +1180,7 @@ mod tests {
             let (dialogs, fixture) = (dialogs.clone(), hanging_dialog(&note));
             std::thread::spawn(move || dialogs.run(&fixture))
         };
-        let pids = noted_pids(&note);
+        let pids = noted_pids(&dialogs, &note);
         let answer = dir.path().join("answer");
         std::fs::write(&answer, "/tmp/second.png\n").unwrap();
         let second = vec![("/bin/cat", vec![answer.to_str().unwrap().to_owned()])];
