@@ -220,9 +220,14 @@ if [ -z "$PACKAGED" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
     else
         mkdir -p "$SHARE/applications"
+        ENTRY=$SHARE/applications/any2odyssey.desktop
+        # Written beside the entry and moved into its place: an entry that is there is whole (not half of
+        # one when this script is interrupted or the disk fills), and an entry that is a link to another
+        # file is replaced like the program and the icon are, not written through.
+        rm -f "$ENTRY.new"
         # Pass the path as data, never as a sed/awk program or replacement.
         # Exec arguments undergo both desktop-string and command-line unescaping.
-        if ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
+        if [ -d "$ENTRY" ] || ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
             function quote_arg(value,    slash, quoted, i, c) {
                 slash = sprintf("%c", 92)
                 quoted = "\""
@@ -253,9 +258,9 @@ if [ -z "$PACKAGED" ]; then
             { print }
             # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
             END { if (rewritten != 1) exit 1 }
-        ' "$HERE/any2odyssey.desktop" >"$SHARE/applications/any2odyssey.desktop"; then
-            rm -f "$SHARE/applications/any2odyssey.desktop"
-            echo "install: could not write the desktop entry: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed)" >&2
+        ' "$HERE/any2odyssey.desktop" >"$ENTRY.new" || ! mv -f "$ENTRY.new" "$ENTRY"; then
+            rm -f "$ENTRY.new"
+            echo "install: could not write the desktop entry $ENTRY: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed, or the entry could not be put in place)" >&2
             exit 1
         fi
     fi
