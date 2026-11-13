@@ -33,7 +33,14 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+/// Read and held in memory at a time.
 const READ_LIMIT: u64 = 64 * 1024;
+/// Scanned by one poll at most, so that a poll stays short on the thread
+/// that makes it. It was one [`READ_LIMIT`]: at the worker's two polls a
+/// second, a log restarted with more than 3.8 MB before the marker (rule 2)
+/// was not read to its end within the 30 s the engine is given to become
+/// ready, and a working conversion was stopped.
+const POLL_LIMIT: u64 = 16 * 1024 * 1024;
 const CHECKPOINT_LEN: usize = 64;
 /// How much of the end of the launch-time file is remembered for rule 3.
 const LAUNCH_TAIL_LIMIT: u64 = 1024 * 1024;
@@ -118,6 +125,12 @@ impl LogReadiness {
     /// start, after any copy of the launch-time file's end it begins with
     /// (see the module documentation).
     pub fn poll(&mut self) -> io::Result<bool> {
+        self.poll_within(POLL_LIMIT)
+    }
+
+    /// [`poll`](Self::poll) reading at most `limit` bytes, rounded up to
+    /// whole chunks of [`READ_LIMIT`].
+    fn poll_within(&mut self, limit: u64) -> io::Result<bool> {
         let Some(mut file) = self.open()? else {
             return Ok(false);
         };
@@ -138,24 +151,38 @@ impl LogReadiness {
         }
         self.identity = Some(identity);
         file.seek(SeekFrom::Start(self.offset))?;
+        // One chunk at a time, so the memory held does not depend on how
+        // far behind the cursor is; the state is whole after each chunk, so
+        // a read that fails later loses nothing.
         let mut bytes = Vec::new();
-        file.take(READ_LIMIT).read_to_end(&mut bytes)?;
-        self.offset += bytes.len() as u64;
-        self.checkpoint.extend_from_slice(&bytes);
-        if self.checkpoint.len() > CHECKPOINT_LEN {
-            self.checkpoint
-                .drain(..self.checkpoint.len() - CHECKPOINT_LEN);
+        let mut scanned = 0;
+        while scanned < limit {
+            bytes.clear();
+            (&mut file).take(READ_LIMIT).read_to_end(&mut bytes)?;
+            if bytes.is_empty() {
+                break;
+            }
+            scanned += bytes.len() as u64;
+            self.offset += bytes.len() as u64;
+            self.checkpoint.extend_from_slice(&bytes);
+            if self.checkpoint.len() > CHECKPOINT_LEN {
+                self.checkpoint
+                    .drain(..self.checkpoint.len() - CHECKPOINT_LEN);
+            }
+            self.pending.extend_from_slice(&bytes);
+            let found = self
+                .pending
+                .windows(self.marker.len())
+                .any(|w| w == self.marker);
+            let keep = self.marker.len() - 1;
+            if self.pending.len() > keep {
+                self.pending.drain(..self.pending.len() - keep);
+            }
+            if found {
+                return Ok(true);
+            }
         }
-        self.pending.extend_from_slice(&bytes);
-        let found = self
-            .pending
-            .windows(self.marker.len())
-            .any(|w| w == self.marker);
-        let keep = self.marker.len() - 1;
-        if self.pending.len() > keep {
-            self.pending.drain(..self.pending.len() - keep);
-        }
-        Ok(found)
+        Ok(false)
     }
 }
 
@@ -307,8 +334,65 @@ mod tests {
             format!("{}{MARKER}", "x".repeat(READ_LIMIT as usize - 4)),
         )
         .unwrap();
-        assert!(!probe.poll().unwrap());
+        assert!(!probe.poll_within(READ_LIMIT).unwrap());
         assert_eq!(probe.offset, READ_LIMIT);
+        assert!(probe.poll_within(READ_LIMIT).unwrap());
+        // The same split between two chunks of one poll.
+        let text = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        assert!(probe.poll().unwrap());
+        assert_eq!(probe.offset, text.len() as u64);
+    }
+
+    /// The worker polls twice a second for the 30 s of
+    /// `engine::ENGINE_READY_TIMEOUT_SECS`: sixty polls.
+    const POLLS_BEFORE_THE_TIMEOUT: usize = 60;
+
+    #[test]
+    fn a_marker_behind_megabytes_of_new_log_is_found_before_the_timeout() {
+        // The log was replaced by one that already holds 5 MB of this run's
+        // lines when it is first looked at (rule 2: all of it is new), and
+        // the marker comes after them. With one 64 KiB read per poll the
+        // sixty polls ended 1.2 MB short of it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversion.log");
+        std::fs::write(&path, "previous run\n").unwrap();
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        let line = "2026-11-10 09:00:01 frame converted, nothing to see\n";
+        let backlog = line.repeat(5 * 1024 * 1024 / line.len());
+        std::fs::write(&path, format!("{backlog}{NEW_READY}")).unwrap();
+        let polls = (1..=POLLS_BEFORE_THE_TIMEOUT).find(|_| probe.poll().unwrap());
+        assert_eq!(polls, Some(1));
+        assert_eq!(probe.offset as usize, backlog.len() + NEW_READY.len());
+        // Appended to since the last poll by more than one chunk: the same.
+        append(&path, &format!("{backlog}{NEW_READY}"));
+        assert!(probe.poll().unwrap());
+    }
+
+    #[test]
+    fn a_backlog_larger_than_one_poll_is_resumed_without_a_gap() {
+        // Three chunks and a marker across the end of the second one, read
+        // two chunks at a time: the cursor neither skips nor re-reads.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversion.log");
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        let chunk = READ_LIMIT as usize;
+        let text = format!("{}{MARKER}{}", "x".repeat(2 * chunk - 7), "y".repeat(chunk));
+        std::fs::write(&path, &text).unwrap();
+        assert!(!probe.poll_within(2 * READ_LIMIT).unwrap());
+        assert_eq!(probe.offset, 2 * READ_LIMIT);
+        assert!(probe.poll_within(2 * READ_LIMIT).unwrap());
+        assert_eq!(probe.offset, 3 * READ_LIMIT);
+        // Found once: what follows the marker holds no second one.
+        assert!(!probe.poll().unwrap());
+        assert_eq!(probe.offset as usize, text.len());
+        // Truncated and rewritten while the cursor was mid-file.
+        let mut probe = LogReadiness::snapshot(&path, MARKER).unwrap();
+        append(&path, &"z".repeat(3 * chunk));
+        assert!(!probe.poll_within(READ_LIMIT).unwrap());
+        std::fs::write(&path, format!("{}{MARKER}", "w".repeat(chunk + 5))).unwrap();
         assert!(probe.poll().unwrap());
     }
 

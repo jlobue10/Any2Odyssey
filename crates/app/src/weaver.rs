@@ -610,22 +610,33 @@ pub fn compose_still(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
     let eye_w = if flat { pair.width() } else { pair.width() / 2 };
     let eye = (eye_w.max(1), pair.height().max(1));
     let (x, y, w, h) = place_view(eye, if flat { 1.0 } else { stretch }, view);
+    let fit = |side: u32| {
+        let part = imageops::crop_imm(pair, side * eye_w, 0, eye.0, eye.1);
+        imageops::resize(&*part, w, h, imageops::FilterType::Triangle)
+    };
     // A flat picture is identical in both eyes: resize it once and copy the
     // fitted pixels to both halves instead of running the same filter twice.
-    for side in 0..if flat { 1 } else { 2u32 } {
-        let from_x = if flat { 0 } else { side * eye_w };
-        let part = imageops::crop_imm(pair, from_x, 0, eye.0, eye.1);
-        let fitted = imageops::resize(&*part, w, h, imageops::FilterType::Triangle);
-        imageops::replace(
-            &mut canvas,
-            &fitted,
-            i64::from(side * view.0 + x),
-            i64::from(y),
-        );
-        if flat {
-            imageops::replace(&mut canvas, &fitted, i64::from(view.0 + x), i64::from(y));
-        }
-    }
+    // The two views of a pair share nothing: the right one is resized on a
+    // thread of its own while this one resizes the left (here, if that
+    // thread cannot be had).
+    let (left, right) = if flat {
+        (fit(0), None)
+    } else {
+        std::thread::scope(|scope| {
+            let right = std::thread::Builder::new().spawn_scoped(scope, || fit(1));
+            let left = fit(0);
+            let right = match right {
+                Ok(right) => right
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(_) => fit(1),
+            };
+            (left, Some(right))
+        })
+    };
+    imageops::replace(&mut canvas, &left, i64::from(x), i64::from(y));
+    let right = right.as_ref().unwrap_or(&left);
+    imageops::replace(&mut canvas, right, i64::from(view.0 + x), i64::from(y));
     canvas
 }
 
@@ -674,6 +685,55 @@ mod tests {
             canvas.get_pixel(STILL_VIEW.0 + 5, 5)
         );
         assert_eq!(canvas.get_pixel(5, 5).0, [7, 8, 9, 255]);
+    }
+
+    /// `compose_still` as it was while it resized one view after the other.
+    fn compose_still_in_turn(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
+        let view = STILL_VIEW;
+        let mut canvas = RgbaImage::from_pixel(view.0 * 2, view.1, image::Rgba([0, 0, 0, 255]));
+        let eye_w = if flat { pair.width() } else { pair.width() / 2 };
+        let eye = (eye_w.max(1), pair.height().max(1));
+        let (x, y, w, h) = place_view(eye, if flat { 1.0 } else { stretch }, view);
+        for side in 0..if flat { 1 } else { 2u32 } {
+            let from_x = if flat { 0 } else { side * eye_w };
+            let part = imageops::crop_imm(pair, from_x, 0, eye.0, eye.1);
+            let fitted = imageops::resize(&*part, w, h, imageops::FilterType::Triangle);
+            imageops::replace(
+                &mut canvas,
+                &fitted,
+                i64::from(side * view.0 + x),
+                i64::from(y),
+            );
+            if flat {
+                imageops::replace(&mut canvas, &fitted, i64::from(view.0 + x), i64::from(y));
+            }
+        }
+        canvas
+    }
+
+    #[test]
+    fn views_resized_side_by_side_give_the_same_bytes_as_one_after_the_other() {
+        // Every pixel differs from its neighbours and the two views differ.
+        let noisy = |w: u32, h: u32| {
+            RgbaImage::from_fn(w, h, |x, y| {
+                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).to_le_bytes();
+                image::Rgba([v[0], v[1], v[2] ^ v[3], 255 - v[1] / 3])
+            })
+        };
+        for (w, h, flat, stretch) in [
+            (641, 181, false, 1.0),
+            (640, 180, false, 2.0),
+            (300, 400, false, 0.5),
+            (1, 1, false, 1.0),
+            (641, 181, true, 1.0),
+        ] {
+            let pair = noisy(w, h);
+            assert!(
+                compose_still(&pair, flat, stretch).as_raw()
+                    == compose_still_in_turn(&pair, flat, stretch).as_raw(),
+                "{w}x{h} flat={flat} stretch={stretch}"
+            );
+        }
     }
 
     #[test]

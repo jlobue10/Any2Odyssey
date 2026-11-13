@@ -1251,8 +1251,29 @@ impl ViewerState {
     /// Run a blocking file dialog off the UI thread; `poll_dialog` collects
     /// the answer. One dialog at a time.
     fn pick(&mut self, ctx: &egui::Context, save: bool) {
-        if self.picking.is_some() || self.pending_save.is_some() {
+        self.pick_with(ctx, move || {
+            if save {
+                Picked::Save(platform::pick_save_png(DEFAULT_EXPORT_NAME))
+            } else {
+                Picked::Open(platform::pick_image())
+            }
+        });
+    }
+
+    /// [`pick`](Self::pick) with the dialog given as `ask`.
+    ///
+    /// Asking while a dialog is open closes that one and opens the new one.
+    /// The dialog is another program: when it hangs, or its window is lost
+    /// behind a full-screen output, ignoring the buttons until it answered
+    /// left Open and Save dead for the rest of the session.
+    fn pick_with(&mut self, ctx: &egui::Context, ask: impl FnOnce() -> Picked + Send + 'static) {
+        if self.pending_save.is_some() {
             return;
+        }
+        // Whatever the dialog given up still answers has no receiver.
+        if self.picking.take().is_some() {
+            #[cfg(not(windows))]
+            platform::close_dialog();
         }
         let (tx, rx) = mpsc::channel();
         let wake = Wake(ctx.clone());
@@ -1260,12 +1281,7 @@ impl ViewerState {
             .name("file-dialog".into())
             .spawn(move || {
                 let (_wake, tx) = (wake, tx);
-                let picked = if save {
-                    Picked::Save(platform::pick_save_png(DEFAULT_EXPORT_NAME))
-                } else {
-                    Picked::Open(platform::pick_image())
-                };
-                let _ = tx.send(picked);
+                let _ = tx.send(ask());
             });
         match spawned {
             Ok(_) => self.picking = Some((rx, self.document.source_id)),
@@ -1510,7 +1526,7 @@ impl ViewerState {
                         state.pick(ui.ctx(), false);
                     }
                 })
-                .on_hover_text("Open… uses zenity or kdialog. Without either, type the path and press Enter, or drop the file on this window.");
+                .on_hover_text("Open… uses zenity or kdialog. Without either, type the path and press Enter, or drop the file on this window. Pressed while a file dialog is still open, it closes that dialog and opens a new one.");
                 row(ui, "Input format", |ui| {
                     egui::ComboBox::from_id_salt("viewer-input")
                         .width(ui.available_width())
@@ -1968,6 +1984,50 @@ mod tests {
         options.input = Input::Flat;
         document.reconvert(options).unwrap();
         assert!(document.result().is_some());
+    }
+
+    #[test]
+    fn asking_again_replaces_a_dialog_that_never_answers() {
+        fn answered(state: &mut ViewerState, ctx: &egui::Context) -> bool {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while state.picking.is_some() && std::time::Instant::now() < deadline {
+                state.poll_dialog(ctx);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            state.picking.is_none()
+        }
+        let ctx = egui::Context::default();
+        let mut state = ViewerState::default();
+        // The first dialog hangs until this test lets it go.
+        let (release, held) = mpsc::channel::<()>();
+        let (left, done) = mpsc::channel();
+        state.pick_with(&ctx, move || {
+            let _ = held.recv();
+            let _ = left.send(());
+            Picked::Open(Err("the answer of the dialog given up".into()))
+        });
+        state.poll_dialog(&ctx);
+        assert!(state.picking.is_some());
+        // Open… or Save… pressed again: a new dialog, and its answer counts.
+        state.pick_with(&ctx, || {
+            Picked::Open(Err("the answer of the second dialog".into()))
+        });
+        assert!(answered(&mut state, &ctx), "the page still waits");
+        assert_eq!(state.status, "the answer of the second dialog");
+        // What the first one says when it ends at last reaches nobody.
+        release.send(()).unwrap();
+        done.recv().unwrap();
+        state.poll_dialog(&ctx);
+        assert_eq!(state.status, "the answer of the second dialog");
+        assert!(state.picking.is_none());
+        // The page's own question about replacing a file is not a dialog
+        // to give up: nothing is asked while it is open.
+        state.pending_save = Some(PendingSave {
+            path: PathBuf::from("/tmp/out.png"),
+            generation: state.document.generation,
+        });
+        state.pick_with(&ctx, || unreachable!("asked during the question"));
+        assert!(state.picking.is_none());
     }
 
     #[test]

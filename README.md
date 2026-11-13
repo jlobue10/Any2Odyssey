@@ -124,7 +124,7 @@ An installed Any2Odd is separate and keeps its own entry in Installed apps; unin
 | About, version and update check | **About** button, right-click or tray menu; `Any2Odyssey --check-updates` from a terminal |
 | Apply capture / input / depth / overlay changes | **Apply settings / restart conversion** |
 
-Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice and the time of the last update check in `ui-settings.json`; `companion.log` and the JSON status files in the same folder. Review and redact window titles, user names and paths before sharing logs.
+Preferences live in `%LOCALAPPDATA%\Any2Odyssey\settings.json`; the theme choice and the time of the last update check in `ui-settings.json`; `companion.log` (and `companion.old.log`, the previous log once it has passed 4 MiB) and the JSON status files in the same folder. Review and redact window titles, user names and paths before sharing logs.
 
 ## Linux
 

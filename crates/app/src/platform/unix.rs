@@ -35,7 +35,7 @@ const LOCK_PATIENCE: Duration = Duration::from_secs(2);
 /// its socket's name behind for the next launch to clear away.
 const EXIT_PATIENCE: Duration = Duration::from_millis(500);
 
-/// The four calls into the C library this module makes. The standard
+/// The five calls into the C library this module makes. The standard
 /// library has no stable way to ask who is at the other end of a socket or
 /// to tie a child's life to this process, and its file locks are newer than
 /// the oldest compiler this crate builds with.
@@ -47,6 +47,20 @@ mod sys {
     extern "C" {
         fn geteuid() -> u32;
         fn flock(fd: c_int, operation: c_int) -> c_int;
+        fn kill(pid: i32, signal: c_int) -> c_int;
+    }
+
+    /// End (SIGKILL) every process of the group that `leader` started as
+    /// its first member. Only for a child of this process that has not been
+    /// waited for: until then the number cannot have gone to another group.
+    pub fn end_group(leader: u32) {
+        const SIGKILL: c_int = 9;
+        // Zero and one are not groups of ours, and their negatives mean
+        // "every process" to this call.
+        if let Some(group) = i32::try_from(leader).ok().filter(|&group| group > 1) {
+            // SAFETY: two numbers; touches no memory of this process.
+            let _ = unsafe { kill(-group, SIGKILL) };
+        }
     }
 
     /// The same numbers on Linux, the BSDs and macOS.
@@ -625,43 +639,150 @@ fn bind_private(path: &Path) -> std::io::Result<UnixListener> {
     }
 }
 
-/// Run the first of `candidates` that is installed and return its filename from
-/// standard output. `None` when the dialog was cancelled or none exists.
-///
-/// A dialog still open when this program ends is ended with it: nothing
-/// would read its answer, and its window would stay on the desktop.
-fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String> {
-    use std::os::unix::process::CommandExt;
-    for (program, arguments) in candidates {
-        let mut command = std::process::Command::new(program);
-        command
-            .args(arguments)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        // SAFETY: runs in the child between fork and exec and makes one
-        // system call there: no allocation, no lock, nothing of the parent's.
-        unsafe {
-            command.pre_exec(|| {
-                sys::end_with_parent();
-                Ok(())
-            });
-        }
-        match command.output() {
-            Ok(mut output) => {
-                // Zenity and kdialog append one LF after the filename. Any
-                // other line breaks belong to that name, including a CR
-                // immediately before the delimiter. Keep the OS bytes too.
-                if output.stdout.last() == Some(&b'\n') {
-                    output.stdout.pop();
-                }
-                return Ok((output.status.success() && !output.stdout.is_empty())
-                    .then(|| std::ffi::OsString::from_vec(output.stdout).into()));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("{program}: {e}")),
+/// The file dialogs, which are other programs. One is open at a time:
+/// [`Dialogs::close`] ends it, and so does starting another. Either way it
+/// has no answer (`None`).
+struct Dialogs {
+    open: Mutex<OpenDialog>,
+}
+
+#[derive(Default)]
+struct OpenDialog {
+    /// Tells the dialogs apart: the thread waiting for one must not take
+    /// another's for its own.
+    started: u64,
+    /// Kept here until its end has been collected, so that whoever ends it
+    /// holds the process itself and not a number that may be another's.
+    child: Option<(u64, std::process::Child)>,
+}
+
+/// The dialogs of [`pick_image`] and [`pick_save_png`].
+static DIALOGS: Dialogs = Dialogs::new();
+
+impl Dialogs {
+    const fn new() -> Self {
+        Self {
+            open: Mutex::new(OpenDialog {
+                started: 0,
+                child: None,
+            }),
         }
     }
-    Err(NO_DIALOG.into())
+
+    fn open(&self) -> std::sync::MutexGuard<'_, OpenDialog> {
+        self.open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// End the dialog that is open, if one is, and collect it. The call
+    /// waiting for its answer returns `None`.
+    fn close(&self) {
+        let ended = self.open().child.take();
+        if let Some((_, child)) = ended {
+            end(child);
+        }
+    }
+
+    /// Run the first of `candidates` that is installed and return its filename from
+    /// standard output. `None` when the dialog was cancelled or none exists.
+    ///
+    /// A dialog still open when this program ends is ended with it: nothing
+    /// would read its answer, and its window would stay on the desktop.
+    fn run(&self, candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String> {
+        use std::os::unix::process::CommandExt;
+        for (program, arguments) in candidates {
+            let mut command = std::process::Command::new(program);
+            command
+                .args(arguments)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                // A group of its own, so that it can be ended together with
+                // whatever it started (a dialog that is a wrapper script).
+                .process_group(0);
+            // SAFETY: runs in the child between fork and exec and makes one
+            // system call there: no allocation, no lock, nothing of the parent's.
+            unsafe {
+                command.pre_exec(|| {
+                    sys::end_with_parent();
+                    Ok(())
+                });
+            }
+            let mut child = match command.spawn() {
+                Ok(child) => child,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{program}: {e}")),
+            };
+            let mut stdout = child.stdout.take().expect("asked for above");
+            let id = {
+                let mut open = self.open();
+                open.started += 1;
+                let id = open.started;
+                let before = open.child.replace((id, child));
+                drop(open);
+                if let Some((_, before)) = before {
+                    end(before);
+                }
+                id
+            };
+            let mut answer = Vec::new();
+            let read = stdout.read_to_end(&mut answer);
+            drop(stdout);
+            // Its end is collected here unless it was ended from elsewhere
+            // meanwhile; until then it stays where `close` finds it.
+            let status = loop {
+                let mut open = self.open();
+                match &mut open.child {
+                    Some((owner, child)) if *owner == id => match child.try_wait() {
+                        Ok(None) => {}
+                        Ok(Some(status)) => {
+                            open.child = None;
+                            break status;
+                        }
+                        Err(e) => {
+                            open.child = None;
+                            return Err(format!("{program}: {e}"));
+                        }
+                    },
+                    _ => return Ok(None),
+                }
+                drop(open);
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            if let Err(e) = read {
+                return Err(format!("{program}: {e}"));
+            }
+            // Zenity and kdialog append one LF after the filename. Any
+            // other line breaks belong to that name, including a CR
+            // immediately before the delimiter. Keep the OS bytes too.
+            if answer.last() == Some(&b'\n') {
+                answer.pop();
+            }
+            return Ok((status.success() && !answer.is_empty())
+                .then(|| std::ffi::OsString::from_vec(answer).into()));
+        }
+        Err(NO_DIALOG.into())
+    }
+}
+
+/// End a dialog nobody waits for any more and collect it, so that it is not
+/// left as a process that has ended but is still listed.
+fn end(mut child: std::process::Child) {
+    // Not collected yet, so its number, which is also its group's, is still
+    // its own: nothing else can be hit.
+    if matches!(child.try_wait(), Ok(None)) {
+        sys::end_group(child.id());
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+/// Close the file dialog that is open, if one is: the [`pick_image`] or
+/// [`pick_save_png`] waiting for it returns `None`. For a dialog that hangs
+/// or whose window cannot be found any more.
+pub fn close_dialog() {
+    DIALOGS.close();
 }
 
 pub const NO_DIALOG: &str =
@@ -670,7 +791,7 @@ pub const NO_DIALOG: &str =
 /// Ask for an image to open. Blocks until the dialog closes; call it off the
 /// UI thread.
 pub fn pick_image() -> Result<Option<PathBuf>, String> {
-    dialog(&[
+    DIALOGS.run(&[
         (
             "zenity",
             vec![
@@ -695,7 +816,7 @@ pub fn pick_image() -> Result<Option<PathBuf>, String> {
 
 /// Ask where to save a PNG, suggesting `name`. Blocks like [`pick_image`].
 pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
-    dialog(&[
+    DIALOGS.run(&[
         (
             "zenity",
             vec![
@@ -943,6 +1064,131 @@ mod tests {
         let ordinary = Request::Open(PathBuf::from("/tmp/caf\u{e9} \"pair\".png"));
         assert_eq!(ordinary.line(), "open /tmp/caf\u{e9} \"pair\".png\n");
         assert_eq!(Request::parse(&ordinary.line()), Some(ordinary));
+    }
+
+    /// A dialog of this test's own: the program's one is shared by every
+    /// test running at the same time.
+    fn dialog(candidates: &[(&str, Vec<String>)]) -> Result<Option<PathBuf>, String> {
+        Dialogs::new().run(candidates)
+    }
+
+    /// A "dialog" that never answers: a script that waits for a program it
+    /// started, which holds the dialog's output open like the real window
+    /// of a wrapper script would. Both write their process numbers to `note`.
+    #[cfg(target_os = "linux")]
+    fn hanging_dialog(note: &Path) -> Vec<(&'static str, Vec<String>)> {
+        vec![(
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "sleep 600 & echo $$ $! >\"$1\"; wait; echo /tmp/never.png".into(),
+                "dialog-fixture".into(),
+                note.to_str().unwrap().into(),
+            ],
+        )]
+    }
+
+    /// The process numbers a [`hanging_dialog`] noted, once it has.
+    #[cfg(target_os = "linux")]
+    fn noted_pids(note: &Path) -> Vec<u32> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let text = std::fs::read_to_string(note).unwrap_or_default();
+            if text.ends_with('\n') {
+                return text
+                    .split_whitespace()
+                    .map(|p| p.parse().unwrap())
+                    .collect();
+            }
+            assert!(Instant::now() < deadline, "the dialog was not started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Still running: listed, and not as ended and waiting to be collected.
+    #[cfg(target_os = "linux")]
+    fn running(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.rsplit(')').next().unwrap().starts_with(" Z"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn gone_within(pid: u32, patience: Duration) -> bool {
+        let deadline = Instant::now() + patience;
+        while running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !running(pid)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_dialog_that_never_answers_can_be_closed_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("pids");
+        let dialogs = Arc::new(Dialogs::new());
+        // Nothing open: nothing happens.
+        dialogs.close();
+        let waiting = {
+            let (dialogs, fixture) = (dialogs.clone(), hanging_dialog(&note));
+            std::thread::spawn(move || dialogs.run(&fixture))
+        };
+        let pids = noted_pids(&note);
+        let (script, started_by_it) = (pids[0], pids[1]);
+        assert!(running(script) && running(started_by_it));
+        dialogs.close();
+        // Collected by the time `close` returns: not even listed as ended,
+        // which a child that nobody waited for stays until this test ends.
+        assert!(
+            !Path::new(&format!("/proc/{script}")).exists(),
+            "the closed dialog was left uncollected"
+        );
+        // What it started went with it and no longer holds its output open,
+        // so the thread waiting for the answer is released, without one.
+        assert!(gone_within(started_by_it, Duration::from_secs(5)));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !waiting.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            waiting.is_finished(),
+            "the closed dialog is still waited for"
+        );
+        assert_eq!(waiting.join().unwrap(), Ok(None));
+        assert!(dialogs.open().child.is_none());
+        // And the next dialog is an ordinary one.
+        let answer = dir.path().join("answer");
+        std::fs::write(&answer, "/tmp/chosen.png\n").unwrap();
+        let next = vec![("/bin/cat", vec![answer.to_str().unwrap().to_owned()])];
+        assert_eq!(
+            dialogs.run(&next),
+            Ok(Some(PathBuf::from("/tmp/chosen.png")))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_new_dialog_ends_the_one_still_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("pids");
+        let dialogs = Arc::new(Dialogs::new());
+        let waiting = {
+            let (dialogs, fixture) = (dialogs.clone(), hanging_dialog(&note));
+            std::thread::spawn(move || dialogs.run(&fixture))
+        };
+        let pids = noted_pids(&note);
+        let answer = dir.path().join("answer");
+        std::fs::write(&answer, "/tmp/second.png\n").unwrap();
+        let second = vec![("/bin/cat", vec![answer.to_str().unwrap().to_owned()])];
+        assert_eq!(
+            dialogs.run(&second),
+            Ok(Some(PathBuf::from("/tmp/second.png")))
+        );
+        assert!(!Path::new(&format!("/proc/{}", pids[0])).exists());
+        assert!(gone_within(pids[1], Duration::from_secs(5)));
+        // The first one's caller gets no answer, and not the second one's.
+        assert_eq!(waiting.join().unwrap(), Ok(None));
+        assert!(dialogs.open().child.is_none());
     }
 
     #[test]
