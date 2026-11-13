@@ -615,6 +615,54 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
         self.assertEqual([path.name for path in entry.parent.glob("any2odyssey.desktop*")], ["any2odyssey.desktop"])
 
+    def test_desktop_staging_does_not_follow_a_link_created_after_unlink(self):
+        prefix = self.root / "prefix"
+        other = self.root / "another file"
+        other.write_text("not the installer's\n")
+        staging = prefix / "share/applications/any2odyssey.desktop.new"
+        tools = self.root / "tools"
+        tools.mkdir()
+        # Deterministically schedule a competing directory writer after unlink and before
+        # the shell's redirection. The wrapper is test instrumentation, not the attack.
+        real_rm = shlex.quote(shutil.which("rm"))
+        (tools / "rm").write_text(
+            f'#!/bin/sh\n{real_rm} "$@" || exit $?\n'
+            f'if [ "$#" = 2 ] && [ "$2" = {shlex.quote(str(staging))} ]; then\n'
+            f'    ln -s {shlex.quote(str(other))} "$2"\nfi\n'
+        )
+        (tools / "rm").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(other.read_text(), "not the installer's\n")
+        entry = staging.with_suffix("")
+        self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
+
+    def test_desktop_staging_rejects_a_substituted_link_and_cleans_up(self):
+        prefix = self.root / "prefix"
+        other = self.root / "another file"
+        other.write_text("not the installer's\n")
+        entry = prefix / "share/applications/any2odyssey.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("previous desktop entry\n")
+        tools = self.root / "tools"
+        tools.mkdir()
+        # Even if the staging directory's name is interfered with before redirection,
+        # the exclusive open must reject an existing file or link.
+        real_mktemp = shlex.quote(shutil.which("mktemp"))
+        (tools / "mktemp").write_text(
+            f'#!/bin/sh\nstage=$({real_mktemp} "$@") || exit $?\n'
+            f'ln -s {shlex.quote(str(other))} "$stage/entry" || exit $?\n'
+            'printf "%s\\n" "$stage"\n'
+        )
+        (tools / "mktemp").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        result = self.install(prefix)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(other.read_text(), "not the installer's\n")
+        self.assertEqual(entry.read_text(), "previous desktop entry\n")
+        self.assertEqual(list(entry.parent.iterdir()), [entry])
+
     def test_nothing_installed_can_be_written_by_others_whatever_the_umask(self):
         # With umask 000 the menu entry and the Wine setup, which are run as the user later, were
         # writable by everybody (the program itself, the icon and the documents never were).

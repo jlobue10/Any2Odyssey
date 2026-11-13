@@ -222,50 +222,56 @@ if [ -z "$PACKAGED" ]; then
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
     else
-        mkdir -p "$SHARE/applications"
-        ENTRY=$SHARE/applications/any2odyssey.desktop
-        # Written beside the entry and moved into its place: an entry that is there is whole (not half of
-        # one when this script is interrupted or the disk fills), and an entry that is a link to another
-        # file is replaced like the program and the icon are, not written through.
-        rm -f "$ENTRY.new"
-        # Pass the path as data, never as a sed/awk program or replacement.
-        # Exec arguments undergo both desktop-string and command-line unescaping.
-        if [ -d "$ENTRY" ] || ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
-            function quote_arg(value,    slash, quoted, i, c) {
-                slash = sprintf("%c", 92)
-                quoted = "\""
-                for (i = 1; i <= length(value); i++) {
-                    c = substr(value, i, 1)
-                    if (c == slash) quoted = quoted slash slash slash slash
-                    else if (c == "\"" || c == "$" || c == "`") quoted = quoted slash slash c
-                    else if (c == "%") quoted = quoted "%%"
-                    else quoted = quoted c
+        (
+            mkdir -p "$SHARE/applications"
+            ENTRY=$SHARE/applications/any2odyssey.desktop
+            # Written beside the entry and moved into its place: an entry that is there is whole (not half of
+            # one when this script is interrupted or the disk fills), and an entry that is a link to another
+            # file is replaced like the program and the icon are, not written through.
+            # A private, unique staging directory keeps installs from sharing a temporary path.
+            # Noclobber also rejects a substituted link before awk can truncate its target.
+            ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1
+            trap 'rm -f -- "$ENTRY_TMP/entry"; rmdir -- "$ENTRY_TMP"' 0
+            trap 'exit 1' HUP INT TERM
+            set -C
+            # Pass the path as data, never as a sed/awk program or replacement.
+            # Exec arguments undergo both desktop-string and command-line unescaping.
+            if [ -d "$ENTRY" ] || ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
+                function quote_arg(value,    slash, quoted, i, c) {
+                    slash = sprintf("%c", 92)
+                    quoted = "\""
+                    for (i = 1; i <= length(value); i++) {
+                        c = substr(value, i, 1)
+                        if (c == slash) quoted = quoted slash slash slash slash
+                        else if (c == "\"" || c == "$" || c == "`") quoted = quoted slash slash c
+                        else if (c == "%") quoted = quoted "%%"
+                        else quoted = quoted c
+                    }
+                    return quoted "\""
                 }
-                return quoted "\""
-            }
-            BEGIN {
-                path = ENVIRON["A2O_DESKTOP_EXE"]
-                command = quote_arg(path)
-                # Exec forbids = in its executable name; GLib also looks up that
-                # name before expanding %%. Use a fixed script for those paths,
-                # keeping the path and file as data in positional arguments.
-                if (index(path, "=") || index(path, "%"))
-                    command = "/bin/sh -c " quote_arg("exec \"$@\"") " any2odyssey " command
-            }
-            /^Exec=any2odyssey([ \t]|$)/ {
-                sub(/^Exec=any2odyssey/, "")
-                print "Exec=" command $0
-                rewritten++
-                next
-            }
-            { print }
-            # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
-            END { if (rewritten != 1) exit 1 }
-        ' "$HERE/any2odyssey.desktop" >"$ENTRY.new" || ! mv -f "$ENTRY.new" "$ENTRY"; then
-            rm -f "$ENTRY.new"
-            echo "install: could not write the desktop entry $ENTRY: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed, or the entry could not be put in place)" >&2
-            exit 1
-        fi
+                BEGIN {
+                    path = ENVIRON["A2O_DESKTOP_EXE"]
+                    command = quote_arg(path)
+                    # Exec forbids = in its executable name; GLib also looks up that
+                    # name before expanding %%. Use a fixed script for those paths,
+                    # keeping the path and file as data in positional arguments.
+                    if (index(path, "=") || index(path, "%"))
+                        command = "/bin/sh -c " quote_arg("exec \"$@\"") " any2odyssey " command
+                }
+                /^Exec=any2odyssey([ \t]|$)/ {
+                    sub(/^Exec=any2odyssey/, "")
+                    print "Exec=" command $0
+                    rewritten++
+                    next
+                }
+                { print }
+                # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
+                END { if (rewritten != 1) exit 1 }
+            ' "$HERE/any2odyssey.desktop" >"$ENTRY_TMP/entry" || ! mv -fT "$ENTRY_TMP/entry" "$ENTRY"; then
+                echo "install: could not write the desktop entry $ENTRY: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed, or the entry could not be put in place)" >&2
+                exit 1
+            fi
+        )
     fi
     run install -Dm644 "$HERE/any2odyssey.png" "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
     for f in README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md \
