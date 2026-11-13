@@ -1,4 +1,4 @@
-# cargo-deny policy, checked by the "Dependency policy" job in .github/workflows/ci.yml:
+# cargo-deny policy, checked by the "Dependency policy" job in .github/workflows/ci.yml and release.yml:
 #
 #   cargo deny --locked check advisories bans sources
 #
