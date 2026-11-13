@@ -20,9 +20,15 @@ On Linux the Windows crate is only compile-checked: `cargo check --workspace --t
 
 `python3 contrib/wine-lens/tests/test-noxon.py` builds the serial port's keeper (`src/noxon.c`) and runs it against a pseudo-terminal, with a process of a made-up name standing in for Leia's service: flow control is switched off again each time it is switched on, no other line setting is touched, the keeper leaves when that process has gone and waits for a port that is not there. No lens board, Wine or root access is needed. `NOXON_TEST_BINARY` names an already built keeper to test instead.
 
+`python3 contrib/wine-lens/tests/test-mkedid.py` loads `tools/mkedid.py` and checks the monitor name it writes into the registry file for an EDID: a real maker keeps its three letters, and no maker code, including the malformed ones that used to come out as `[`, `\` and `]`, can break the file's syntax. No monitor, Wine or `xrandr` is needed. (Python leaves `tools/__pycache__` behind in the checkout; the packaging scripts leave it out and CI refuses a package that has it.)
+
+`python3 contrib/wine-lens/tests/test-weaver-watcher.py` runs `any2odyssey-weaver` against stand-ins for the scripts it starts: when the helper is killed outright, the process it left behind still stops eye tracking, and a `flock` without a timed wait (BusyBox) does not turn that process's wait into a busy loop. No Wine, monitor, desktop or root access is needed.
+
+The release workflow runs every test of this section and of the ones below with the same commands as CI, before anything is signed or published.
+
 `python3 packaging/linux/tests/test-install.py` runs the release archive's `install.sh` in temporary folders, with a stand-in for `/` (`A2O_INSTALL_TEST_ROOT`: a mount table, `/sys` block devices and mounted "Windows drives" made of empty files), a fixture program in place of the executable and of `setup.sh`, and no root access (while that variable is set the script uses sudo for nothing). It covers the desktop launcher for awkward prefixes (it needs `gio` and `desktop-file-validate`), `--help`, `--dry-run`, the prefix without GNU `readlink`, and the choice of a Windows drive: the one internal drive used with `--yes`; USB drives, memory cards, flagged-removable disks and mapped volumes over them not used; several candidates listed and none chosen; a network share or a user's FUSE mount refused with `--yes`; a folder without a Windows system folder or with another user's files (that case needs root) passed over; `--windows-root` taken as given. It also covers what `--uninstall` stops and in which Wine prefix. `A2O_INSTALL_TEST_SHELL` runs the same tests under another shell (`dash`, `"busybox sh"`); CI uses the system's `sh`.
 
-`cargo deny --locked check advisories bans sources` (cargo-deny 0.20, policy in `deny.toml`) checks `Cargo.lock` against the RustSec advisory database (vulnerabilities, unsound code and yanked versions anywhere in the tree; unmaintained crates only among direct dependencies), refuses wildcard version requirements and any source but crates.io. CI runs it as its own job. It fetches the advisory database, so a new advisory fails it without any change here: update the crate, or list the advisory under `ignore` in `deny.toml` with the reason.
+`cargo deny --locked check advisories bans sources` (cargo-deny 0.20, policy in `deny.toml`) checks `Cargo.lock` against the RustSec advisory database (vulnerabilities, unsound code and yanked versions anywhere in the tree; unmaintained crates only among direct dependencies), refuses wildcard version requirements and any source but crates.io. CI runs it as its own job, and so does the release workflow, where the signing and publishing jobs wait for it. It fetches the advisory database, so a new advisory fails it without any change here (on a tag too, before anything is published): update the crate, or list the advisory under `ignore` in `deny.toml` with the reason.
 
 The UDP shim's wrappers can also be checked without Wine or hardware:
 
@@ -64,7 +70,17 @@ cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -pthread \
 ASAN_OPTIONS=detect_leaks=0 timeout 60 /tmp/test-camera-client
 ```
 
-This runs the production bridge client of `a2ocam.c` (the handshake, commands and replies, the reading thread and its shutdown) against a simulated bridge on the other end of a socket pair, with pthread-backed Windows handles. It checks commands and an orderly close, a wrong secret, impostors on the port (no proof, a wrong one, the client's own answer handed back, a proof made without its label, a picture sent before the proof), fresh random numbers for each connection, a reply that arrives after its command timed out (the connection is closed instead of the reply answering the next command), a bridge that goes away, a close while the reading thread is busy, that the end of the connection and a timeout are reported, and that nothing is left behind when the thread or its event cannot be made. Timeouts are shortened and a stuck thread is simulated. It needs no Wine, camera or Media Foundation; the same behaviour under Wine with the real tracker is a hardware check. Both Linux CI architectures run it, and so does the release workflow.
+This runs the production bridge client of `a2ocam.c` (the handshake, commands and replies, the reading thread and its shutdown) against a simulated bridge on the other end of a socket pair, with pthread-backed Windows handles. It checks commands and an orderly close, a wrong secret, impostors on the port (no proof, a wrong one, the client's own answer handed back, a proof made without its label, a picture sent before the proof), fresh random numbers for each connection, a reply that arrives after its command timed out (the connection is closed instead of the reply answering the next command), a bridge that goes away, a close while the reading thread is busy, that the end of the connection and a timeout are reported, and that nothing is left behind when the thread or its event cannot be made. Timeouts are shortened and a stuck thread is simulated. It needs no Wine, camera or Media Foundation; the same behaviour under Wine with the real tracker is a hardware check. Both Linux CI architectures run it.
+
+### Camera bridge buffers
+
+```sh
+cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+  contrib/wine-lens/tests/test-camera-buffers.c -o /tmp/test-camera-buffers
+ASAN_OPTIONS=detect_leaks=0 /tmp/test-camera-buffers
+```
+
+This compiles the production camera bridge (`src/camera-bridge.c`) with a stand-in for the V4L2 calls and makes its capture start fail at each step (too few buffers, the allocation, and for every buffer the query, the mapping and the queueing, then the stream start). After each failure nothing may stay allocated or mapped, stopping again must be harmless, and a second start on the same open camera must work. It needs no camera; that the real driver accepts a second start after a failed one is a hardware check.
 
 ## Windows diagnostics (provided by the Windows crate)
 
@@ -103,7 +119,7 @@ Useful evidence to collect while testing: `companion.log`, `worker-status.json`,
 
 ## Pending hardware verification
 
-The changes made after 0.9.0 (audit rounds 11 and 12) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made after 0.9.0 (audit rounds 11 to 13) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Linux installer:
 
@@ -120,6 +136,7 @@ The Wine side (`contrib/wine-lens`):
 5. `pgrep -a any2odyssey-noxon` while the stack is up; the lens switches; `stty -F /dev/odyssey-lens -a` shows `-ixon`; the keeper is gone within about 10 s of `wineserver -k`.
 6. `A2O_WEAVER_STATS`: weaves per second match the refresh rate.
 7. Live screen on KDE: "capture: excluded" still works; killing Any2Odyssey stops tracking at once and the next start works.
+8. With another program holding the webcam's stream (for example `ffplay /dev/videoN`), `tracking.sh start`: the camera does not start and nothing hangs. Close the other program while the bridge stays up: the tracker's next attempt reaches "reader: streaming" (the capture start that failed part-way left the camera usable).
 
 The live screen:
 
@@ -132,12 +149,15 @@ The live screen:
 7. Ctrl+C in a terminal: lens off, no host left.
 8. `env -u XDG_RUNTIME_DIR`: the frame file is in `/dev/shm` and Wine opens it.
 9. Cancel the portal dialog: no sharing indicator left; restart works.
+10. While live, disable or unplug the captured screen: the page reads "Live capture ended: the screen cast was ended by the desktop." instead of staying on a frozen picture; a normal start still reports "Live: ..." after its first frame.
 
 The viewer:
 
 - Odyssey output in AI mode: open a new image or change depth detail. Expect a black panel with the lens on, then the new picture without pressing Start; repeat with the controls minimised.
 - The first AI conversion still works; alter one byte of the data-folder model and expect the "Install it again" message.
 - `any2odyssey FILE` while an instance runs, including a file name that is not UTF-8.
+- With a live screen on the Odyssey, choose another output format: the weaver window closes, capture stops and the page reads "A live screen is shown through the Odyssey 3D output only."; choosing the Odyssey again and pressing Start works.
+- Lens output on an AI-depth image, then make depth fail (rename the model and change Depth detail): the output closes with the reason, and the next lens output shows a correct picture.
 
 Windows (G90XF PC):
 
@@ -149,9 +169,9 @@ Windows (G90XF PC):
 6. Turning 3D off by hotkey, Apply and the tray commands act promptly; no 7-second kill lines in the log.
 7. Camera plugged in: starts. Unplugged: the USB message.
 8. Quit then immediate relaunch, `--toggle` / `--show` / `--quit`, an installer upgrade over a running instance: no "Control events unavailable" in the log.
-9. View logs and the release-page button open Explorer and the browser.
+9. View logs and the release-page button open Explorer and the browser; View logs still opens the data folder with an empty `Any2Odyssey.cmd` placed in `%LOCALAPPDATA%`.
 
-The workflows run only on GitHub. The pull request that brings these changes is the first run of the pinned Arch container's key set-up and of the dependency job; the first tag after it is the first run of the attestation job and of the Linux gates in `release.yml`. Both need watching.
+The workflows run only on GitHub. The pull request that brings these changes is the first run of the pinned Arch container's key set-up and of the dependency job; the first tag after it is the first run of the attestation job and of the Linux gates and the dependency job in `release.yml`. Both need watching.
 
 ## UI previews
 

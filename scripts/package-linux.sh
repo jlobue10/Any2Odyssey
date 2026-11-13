@@ -30,6 +30,9 @@ install -m644 packaging/linux/INSTALL.txt "$STAGE/INSTALL.txt"
 install -m755 packaging/linux/install.sh "$STAGE/install.sh"
 # The Wine setup, with its file modes (some of it is scripts).
 cp -R contrib/wine-lens "$STAGE/wine-lens"
+# Python leaves its compiled copy of tools/mkedid.py beside it when tests/test-mkedid.py has run in this
+# tree (CI runs it before this script); that is no part of the archive.
+find "$STAGE/wine-lens" -name __pycache__ -type d -prune -exec rm -rf {} +
 install -m644 contrib/LICENSE-MIT "$STAGE/wine-lens/LICENSE-MIT"
 
 # The same archive from the same files: fixed order, owner and times.
