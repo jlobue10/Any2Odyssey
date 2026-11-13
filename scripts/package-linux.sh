@@ -30,6 +30,8 @@ install -m644 packaging/linux/INSTALL.txt "$STAGE/INSTALL.txt"
 install -m755 packaging/linux/install.sh "$STAGE/install.sh"
 # The Wine setup, with its file modes (some of it is scripts).
 cp -R contrib/wine-lens "$STAGE/wine-lens"
+# Its tests are for a checkout: nothing in the archive runs them (0.9.1 shipped them).
+rm -rf "$STAGE/wine-lens/tests"
 # Python leaves its compiled copy of tools/mkedid.py beside it when tests/test-mkedid.py has run in this
 # tree (CI runs it before this script); that is no part of the archive.
 find "$STAGE/wine-lens" -name __pycache__ -type d -prune -exec rm -rf {} +

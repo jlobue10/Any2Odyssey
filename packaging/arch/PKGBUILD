@@ -79,6 +79,8 @@ package() {
   # from here, and builds into their own data folder.
   install -d "$pkgdir/usr/share/any2odyssey"
   cp -R "$repo/contrib/wine-lens" "$pkgdir/usr/share/any2odyssey/wine-lens"
+  # Its tests are for a checkout: nothing in the package runs them (0.9.1 shipped them).
+  rm -rf "$pkgdir/usr/share/any2odyssey/wine-lens/tests"
   # Left in a checkout where contrib/wine-lens/tests/test-mkedid.py has run; no part of the package.
   find "$pkgdir/usr/share/any2odyssey/wine-lens" -name __pycache__ -type d -prune -exec rm -rf {} +
   chmod -R u=rwX,go=rX "$pkgdir/usr/share/any2odyssey/wine-lens"
