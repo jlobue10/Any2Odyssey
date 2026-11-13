@@ -515,7 +515,7 @@ fn run_gui(
             }
         };
     }
-    let Some(_guard) = platform::single_instance() else {
+    let Some(guard) = platform::single_instance() else {
         // Another instance owns the controls: hand it the request this launch
         // carried, so `--toggle` losing the race still toggles.
         #[cfg(not(windows))]
@@ -550,7 +550,15 @@ fn run_gui(
         }
     };
     let core = Arc::new(Mutex::new(core::Core::new(logger, events, start_requested)));
-    match ui::run(core) {
+    let run = ui::run(core);
+    // The window is gone and with it the outputs, whose helpers were told
+    // to leave. This program stays until they have, or have been ended: a
+    // helper that hung was otherwise left behind with its window and the
+    // lens on. A launch from here on is the instance and is not kept
+    // waiting for that.
+    drop(guard);
+    lens_switch::see_helpers_off();
+    match run {
         Ok(()) => 0,
         Err(e) => {
             complain(&e.to_string());
