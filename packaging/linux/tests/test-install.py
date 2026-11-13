@@ -416,6 +416,25 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(f"Removing Any2Odyssey from {installed}\n", result.stdout)
             self.assert_removed(installed)
 
+    def test_uninstall_refreshes_the_caches_the_installation_wrote(self):
+        # The released 0.9.1 archive left share/applications/mimeinfo.cache naming any2odyssey.desktop
+        # as the program for PNG, JPEG and BMP files after the entry itself was removed.
+        if not shutil.which("update-desktop-database"):
+            self.skipTest("update-desktop-database (desktop-file-utils) is not installed")
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        cache = prefix / "share/applications/mimeinfo.cache"
+        self.assertIn("any2odyssey.desktop", cache.read_text())
+        # A dry run changes nothing.
+        result = self.run_installer("--prefix", str(prefix), "--uninstall", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("any2odyssey.desktop", cache.read_text())
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_removed(prefix)
+        self.assertNotIn("any2odyssey", cache.read_text())
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"

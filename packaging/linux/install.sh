@@ -146,6 +146,9 @@ if [ -n "$UNINSTALL" ]; then
         # Only folders this script made, named in full.
         [ -d "$PREFIX/share/any2odyssey" ] && run rm -rf "$PREFIX/share/any2odyssey"
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
+        # The caches the installation refreshed still name the entry and the icon that are gone now.
+        [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
+        [ -d "$SHARE/icons/hicolor" ] && have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
