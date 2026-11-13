@@ -649,4 +649,78 @@ mod tests {
         assert_eq!(woven.get_pixel(0, 0).0, [255, 255, 255, 255]);
         assert_eq!(woven.get_pixel(1, 0).0, [0, 0, 0, 255]);
     }
+
+    /// The rectangle of `image` that is `colour`, as (left, top, width,
+    /// height), every pixel outside it being opaque black.
+    fn coloured(image: &RgbaImage, colour: [u8; 4]) -> (u32, u32, u32, u32) {
+        let inside: Vec<(u32, u32)> = image
+            .enumerate_pixels()
+            .filter(|(_, _, pixel)| pixel.0 == colour)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        let left = inside.iter().map(|p| p.0).min().unwrap();
+        let top = inside.iter().map(|p| p.1).min().unwrap();
+        let width = inside.iter().map(|p| p.0).max().unwrap() - left + 1;
+        let height = inside.iter().map(|p| p.1).max().unwrap() - top + 1;
+        assert_eq!(inside.len() as u32, width * height, "one full rectangle");
+        let black = image.pixels().filter(|p| p.0 == [0, 0, 0, 255]).count();
+        assert_eq!(black + inside.len(), image.pixels().count());
+        (left, top, width, height)
+    }
+
+    #[test]
+    fn a_fitted_image_is_scaled_by_the_tighter_side_and_centred_on_both() {
+        let red = [255, 0, 0, 255];
+        let image = |w, h| RgbaImage::from_pixel(w, h, Rgba(red));
+        // Enlarged three times to the area's width, bars above and below.
+        assert_eq!(coloured(&fit(&image(3, 2), 9, 10, 1.0), red), (0, 2, 9, 6));
+        // Enlarged to the area's height, bars at the sides.
+        assert_eq!(coloured(&fit(&image(2, 3), 10, 9, 1.0), red), (2, 0, 6, 9));
+        // Shrunk, by the width and by the height.
+        assert_eq!(coloured(&fit(&image(12, 4), 6, 8, 1.0), red), (0, 3, 6, 2));
+        assert_eq!(coloured(&fit(&image(4, 12), 8, 6, 1.0), red), (3, 0, 2, 6));
+        // Native size in a larger area is only centred.
+        assert_eq!(coloured(&fit(&image(4, 4), 4, 8, 1.0), red), (0, 2, 4, 4));
+        // A half-width eye is twice as wide as its pixels say.
+        assert_eq!(
+            coloured(&fit(&image(3, 4), 12, 10, 2.0), red),
+            (0, 1, 12, 8)
+        );
+    }
+
+    #[test]
+    fn a_stretch_that_is_no_width_at_all_counts_as_none() {
+        let image = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]));
+        let plain = fit(&image, 8, 4, 1.0);
+        for stretch in [0.0, -2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(fit(&image, 8, 4, stretch) == plain, "{stretch}");
+        }
+    }
+
+    #[test]
+    fn nothing_to_draw_or_nowhere_to_draw_it_is_black_or_refused_not_a_panic() {
+        let image = RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255]));
+        let black = |image: &RgbaImage| image.pixels().all(|p| p.0 == [0, 0, 0, 255]);
+        for (w, h) in [(0, 5), (5, 0)] {
+            let fitted = fit(&RgbaImage::new(w, h), 3, 2, 1.0);
+            assert_eq!(fitted.dimensions(), (3, 2));
+            assert!(black(&fitted));
+            assert_eq!(fit(&image, w, h, 1.0).dimensions(), (w, h));
+            assert_eq!(fit_pair(&image, w, h, 1.0), Err(WeaveError::Empty));
+            let empty = RgbaImage::new(w, h);
+            assert_eq!(
+                weave(&empty, &empty, &Lens::default(), (0, 0)),
+                Err(WeaveError::Empty)
+            );
+        }
+        assert_eq!(
+            fit_pair(&RgbaImage::new(4, 0), 8, 8, 1.0),
+            Err(WeaveError::Empty)
+        );
+        // The narrowest pair there is has one column for each eye.
+        let pair = RgbaImage::from_fn(2, 1, |x, _| Rgba([x as u8 * 255, 0, 0, 255]));
+        let (left, right) = fit_pair(&pair, 2, 2, 1.0).unwrap();
+        assert!(black(&left));
+        assert!(right.pixels().all(|p| p.0 == [255, 0, 0, 255]));
+    }
 }

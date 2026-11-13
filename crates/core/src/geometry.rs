@@ -379,4 +379,36 @@ mod tests {
         assert!(a.contains_rect(&Rect::new(2, 2, 8, 8)));
         assert!(!a.contains_rect(&Rect::new(2, 2, 9, 8)));
     }
+
+    #[test]
+    fn rectangles_that_touch_or_miss_on_one_axis_share_no_area() {
+        let a = Rect::new(10, 10, 10, 10);
+        // Touching each of the four edges, then clear of each.
+        for other in [
+            Rect::new(0, 10, 10, 10),
+            Rect::new(20, 10, 10, 10),
+            Rect::new(10, 0, 10, 10),
+            Rect::new(10, 20, 10, 10),
+            Rect::new(-5, 12, 10, 5),
+            Rect::new(25, 12, 10, 5),
+            Rect::new(12, -5, 5, 10),
+            Rect::new(12, 25, 5, 10),
+        ] {
+            assert!(!a.intersects(&other), "{other:?}");
+            assert!(!other.intersects(&a), "{other:?}");
+            assert_eq!(a.intersect(&other), Rect::EMPTY, "{other:?}");
+            assert_eq!(other.intersect(&a), Rect::EMPTY, "{other:?}");
+        }
+        // One pixel in from each edge is shared.
+        for (other, shared) in [
+            (Rect::new(0, 10, 11, 10), Rect::new(10, 10, 1, 10)),
+            (Rect::new(19, 10, 10, 10), Rect::new(19, 10, 1, 10)),
+            (Rect::new(10, 0, 10, 11), Rect::new(10, 10, 10, 1)),
+            (Rect::new(10, 19, 10, 10), Rect::new(10, 19, 10, 1)),
+        ] {
+            assert!(a.intersects(&other) && other.intersects(&a), "{other:?}");
+            assert_eq!(a.intersect(&other), shared);
+            assert_eq!(other.intersect(&a), shared);
+        }
+    }
 }

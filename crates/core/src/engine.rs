@@ -121,4 +121,16 @@ mod tests {
             "Set Odyssey as the primary display at 3840 x 2160."
         );
     }
+
+    #[test]
+    fn one_right_dimension_is_not_the_right_resolution() {
+        // Ultrawide and portrait displays share one number with the panel.
+        for (width, height) in [(3840, 1080), (3840, 1600), (5120, 2160), (2160, 3840)] {
+            assert_eq!(
+                check_resolution(width, height),
+                Err(EngineError::WrongResolution),
+                "{width} x {height}"
+            );
+        }
+    }
 }

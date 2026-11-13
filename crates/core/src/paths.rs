@@ -307,4 +307,55 @@ mod tests {
         let padded = data_dir_from(Some("  data \n".into()));
         assert_eq!(padded, relative, "surrounding whitespace is not a name");
     }
+
+    #[test]
+    fn every_data_file_has_its_own_name_in_the_data_folder() {
+        let dir = data_dir();
+        assert!(dir.is_absolute(), "{dir:?}");
+        let files = [
+            (settings_file(), "settings.json"),
+            (ui_settings_file(), "ui-settings.json"),
+            (lens_file(), "lens.json"),
+            (capture_token_file(), "capture-token"),
+            (log_file(), "companion.log"),
+            (worker_status_file(), "worker-status.json"),
+            (desktop_capture_status_file(), "desktop-capture-status.json"),
+            (capture_border_status_file(), "capture-border-status.json"),
+            (window_diagnostics_file(), "window-diagnostics.json"),
+            (projection_diagnostics_file(), "projection-diagnostics.json"),
+            (overlay_backup_file(), "Samsung-OverlaySettings-before.json"),
+        ];
+        for (path, name) in files {
+            assert_eq!(path, dir.join(name));
+        }
+    }
+
+    #[test]
+    fn engine_and_samsung_files_are_where_samsung_keeps_them() {
+        let engine = std::path::Path::new(ENGINE_DIR);
+        assert_eq!(engine_dir(), engine);
+        assert_eq!(engine_dll(), engine.join("ConversionWrapper.dll"));
+        assert_eq!(worker_exe(), engine.join("Any2OdysseyWorker.exe"));
+        let hub: PathBuf = ["AppData", "LocalLow", "Samsung", "Odyssey3DHubUI"]
+            .iter()
+            .collect();
+        let overlay = samsung_overlay_settings_file();
+        assert!(overlay.is_absolute(), "{overlay:?}");
+        assert!(
+            overlay.ends_with(hub.join("SettingsData").join("OverlaySettings.json")),
+            "{overlay:?}"
+        );
+        let log = samsung_conversion_log_file();
+        assert!(log.is_absolute(), "{log:?}");
+        assert!(log.ends_with(hub.join("Conversion.log")), "{log:?}");
+        // Any2Odd only ever ran on Windows: nothing is imported elsewhere.
+        let legacy = legacy_any2odd_settings_file();
+        assert_eq!(legacy.is_some(), cfg!(windows), "{legacy:?}");
+        if let Some(legacy) = legacy {
+            assert!(
+                legacy.ends_with(std::path::Path::new("Odyssey3DCompanion").join("settings.json")),
+                "{legacy:?}"
+            );
+        }
+    }
 }
