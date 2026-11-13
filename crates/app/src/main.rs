@@ -172,6 +172,20 @@ fn signal_running_instance(event: &str, logger: &Logger) -> i32 {
     }
 }
 
+/// `--quit`: ask the instance that owns the controls to leave. It may hold
+/// its mutex and not yet own its control events (it was started a moment
+/// ago), so this knocks as often as a launch that lost the race does. Exit 1
+/// when nobody accepted the request: nothing is running.
+fn quit_running_instance(mut signal: impl FnMut(&str) -> bool) -> i32 {
+    if retry(SIGNAL_ATTEMPTS, SIGNAL_RETRY_PAUSE, || {
+        signal(ipc::QUIT_EVENT)
+    }) {
+        0
+    } else {
+        1
+    }
+}
+
 /// A usage error: say what was expected and exit 2. The instance commands
 /// (`--toggle`, `--show`, `--quit`) and `--worker` are not terminal modes, so
 /// a release build has no console yet when one of them is misspelled or given
@@ -313,13 +327,7 @@ fn main() {
         },
         // Exit 1 when nothing was running to receive the request, so scripts
         // can tell "quit delivered" from "no instance".
-        [flag] if flag == "--quit" => {
-            if platform::signal(ipc::QUIT_EVENT) {
-                0
-            } else {
-                1
-            }
-        }
+        [flag] if flag == "--quit" => quit_running_instance(platform::signal),
         [flag] if flag == "--show" && platform::signal(ipc::SHOW_EVENT) => 0,
         [flag] if flag == "--toggle" && platform::signal(ipc::TOGGLE_EVENT) => 0,
         [flag] if flag == "--toggle" || flag == "--show" => {
@@ -670,6 +678,30 @@ mod argument_tests {
         assert!(!retry(0, Duration::ZERO, || panic!(
             "no attempt was asked for"
         )));
+    }
+
+    #[test]
+    fn quit_knocks_again_while_the_instance_is_not_yet_listening() {
+        // The instance owns its control events from the third knock on.
+        let mut knocks = Vec::new();
+        assert_eq!(
+            quit_running_instance(|event| {
+                knocks.push(event.to_owned());
+                knocks.len() == 3
+            }),
+            0
+        );
+        assert_eq!(knocks, [ipc::QUIT_EVENT; 3]);
+        // Nothing is running: said so, after the usual number of attempts.
+        let mut attempts = 0;
+        assert_eq!(
+            quit_running_instance(|_| {
+                attempts += 1;
+                false
+            }),
+            1
+        );
+        assert_eq!(attempts, SIGNAL_ATTEMPTS);
     }
 
     #[test]
