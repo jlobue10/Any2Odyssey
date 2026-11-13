@@ -30,7 +30,10 @@ unmaintained = "workspace"
 ignore = [
     # glib 0.18, under the GTK 3 bindings that tray-icon and muda use on Linux; the fix is in glib 0.20,
     # which those bindings do not take. The fault is in glib::VariantStrIter, and nothing in the tree
-    # outside glib itself uses that type or Variant::array_iter_str.
+    # outside glib itself uses that type or Variant::array_iter_str. The application depends on tray-icon
+    # and muda on Windows only, so glib is in Cargo.lock and in no build (`cargo tree --target
+    # x86_64-unknown-linux-gnu -i glib` prints nothing); cargo-deny reports it all the same, because it
+    # follows tray-icon's Linux dependencies once tray-icon is in the graph for any of the targets above.
     { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter is not used by any crate in the tree; the GTK 3 bindings under tray-icon and muda hold glib at 0.18" },
 ]
 
