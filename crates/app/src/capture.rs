@@ -566,6 +566,15 @@ impl Fed {
         Frames(self.0.clone())
     }
 
+    /// The capture itself, for what owns one: no desktop is asked and no
+    /// thread runs, its frames are the ones fed here.
+    pub fn capture(&self) -> Capture {
+        Capture {
+            shared: self.0.clone(),
+            thread: None,
+        }
+    }
+
     /// A frame of `width` x `height` BGRx pixels, as the stream delivers one.
     pub fn feed(&self, width: u32, height: u32, bytes: &[u8]) {
         let mut slot = lock(&self.0.slot);

@@ -67,13 +67,50 @@ impl Default for Controls {
 /// How it is going, for the page.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
-    /// Pictures written to the weaver per second, and depth maps per second.
+    /// Pictures written to the weaver per second, and depth maps per second,
+    /// over the last second in which there were any.
     pub picture_rate: f32,
     pub depth_rate: f32,
+    /// The screen has not changed for a while and its picture is up to
+    /// date, so none is being made: the rates are those of earlier work.
+    pub still: bool,
     /// Why depth is missing, when the model cannot run.
     pub depth_error: Option<String>,
     /// Why no picture can be written, when that fails.
     pub output_error: Option<String>,
+}
+
+impl Stats {
+    /// How the pictures are coming, for the status line (it goes after
+    /// "a ... screen, "): the rates while there is work, and that there is
+    /// none while the screen is still. The rates are not told then, being
+    /// those of the last work, however long ago and however short; only a
+    /// model that has not answered yet, or cannot, is still mentioned.
+    pub fn describe(&self) -> String {
+        let depth = match &self.depth_error {
+            Some(e) => Some(format!("no depth: {e}")),
+            None if self.still && self.depth_rate > 0.0 => None,
+            None if self.depth_rate >= 0.95 => {
+                Some(format!("depth {:.0} times a second", self.depth_rate))
+            }
+            // A slow model (on the processor, at a fine detail) would read
+            // as "0 times a second".
+            None if self.depth_rate > 0.0 => Some(format!(
+                "depth once every {:.1} seconds",
+                1.0 / self.depth_rate
+            )),
+            None => Some("depth starting".into()),
+        };
+        let pictures = if self.still {
+            "not changing, so nothing is redrawn".to_owned()
+        } else {
+            format!("{:.0} pictures a second", self.picture_rate)
+        };
+        match depth {
+            Some(depth) => format!("{pictures}, {depth}"),
+            None => pictures,
+        }
+    }
 }
 
 /// The controls that change the picture by themselves (the others work
@@ -183,6 +220,21 @@ struct DepthState {
     settled: bool,
 }
 
+impl DepthState {
+    /// Throw the map away (the model has failed): pictures are flat until
+    /// it answers again. Without a map there is nothing to throw away and
+    /// nothing changes, so a model that goes on failing does not have the
+    /// same flat picture made again at every attempt.
+    fn forget(&mut self) {
+        if self.latest.is_some() || !self.smoother.values().is_empty() {
+            *self = DepthState {
+                version: self.version + 1,
+                ..DepthState::default()
+            };
+        }
+    }
+}
+
 struct Shared {
     stop: AtomicBool,
     depth_pos: AtomicI32,
@@ -227,6 +279,13 @@ impl Shared {
     /// would go.
     fn find(&self, serial: u64) -> (Found, Option<FrameSink>) {
         let (output, sink) = lock(&self.sink).clone();
+        // The depth thread takes its frame from `for_model` and says when
+        // it is done with it; a frame is made for it only then. This is
+        // looked at before the depth map: the thread publishes its answer
+        // first and frees its place after, so a model seen free here has
+        // its answer in what is read next. Read the other way round, the
+        // answer could come between the two and its frame be sent again.
+        let model_free = !lock(&self.for_model).busy;
         let (depth, mapped, settled) = {
             let depth = lock(&self.depth);
             let mapped = depth.latest.as_ref().map(|(s, d, _)| (*s, *d));
@@ -245,9 +304,7 @@ impl Shared {
             depth,
             mapped,
             settled,
-            // The depth thread takes its frame from `for_model` and says
-            // when it is done with it; a frame is made for it only then.
-            model_free: !lock(&self.for_model).busy,
+            model_free,
             output,
         };
         (found, sink)
@@ -352,6 +409,12 @@ impl Drop for Live {
                 let _ = thread.join();
             }
         }
+        // The depth thread keeps what is shared for as long as it runs, and
+        // the output's picture file is held open (and kept from being
+        // removed) by whoever has the output: it is let go of here. Left
+        // with the thread, the file would stay until the model had finished,
+        // and for good when the program ends before that.
+        lock(&self.shared.sink).1 = None;
     }
 }
 
@@ -367,6 +430,10 @@ fn layout(screen: (u32, u32), lines: i32) -> ((u32, u32), (u32, u32, u32, u32)) 
 /// How long a rate is measured over before it is told.
 const RATE_TIME: Duration = Duration::from_secs(1);
 
+/// How long there has to be nothing to do before the screen is said to be
+/// still: longer than a blinking cursor or a clock leaves between frames.
+const STILL_TIME: Duration = Duration::from_secs(2);
+
 fn render_loop(frames: &Frames, shared: &Shared) {
     let mut seen = 0u64;
     let (mut picture, mut pair, mut canvas, mut small) =
@@ -375,6 +442,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let mut blank = None;
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
+    // Since when there has been no picture to make, and whether the page
+    // has been told that the screen is still.
+    let (mut resting, mut still) = (None::<Instant>, false);
     let mut started = Instant::now();
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // Sixty pictures a second at most: a faster screen (the Odyssey
@@ -449,7 +519,16 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                 lock(&shared.stats).picture_rate = counted as f32 / since.elapsed().as_secs_f32();
                 (counted, since) = (0, Instant::now());
             }
+            if !still && resting.get_or_insert_with(Instant::now).elapsed() >= STILL_TIME {
+                lock(&shared.stats).still = true;
+                still = true;
+            }
             continue;
+        }
+        resting = None;
+        if still {
+            lock(&shared.stats).still = false;
+            still = false;
         }
         let Some(sink) = sink else {
             // Nowhere to show it yet. It is made when there is: the output
@@ -631,13 +710,7 @@ fn depth_loop(shared: &Shared) {
             Err(e) => {
                 // New frames must not use the previous scene's depth while
                 // inference is failing. Recovery starts a fresh smoother too.
-                {
-                    let mut depth = lock(&shared.depth);
-                    *depth = DepthState {
-                        version: depth.version + 1,
-                        ..DepthState::default()
-                    };
-                }
+                lock(&shared.depth).forget();
                 lock(&shared.for_model).busy = false;
                 {
                     let mut stats = lock(&shared.stats);
@@ -1042,6 +1115,452 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// Every state `plan` tells apart: two frames, two looks (the second
+    /// with other lines), two details, two depth maps, two outputs.
+    fn every_state() -> Vec<(Option<Shown>, Found)> {
+        let looks = [
+            a_look(),
+            Look {
+                lines: 1440,
+                ..a_look()
+            },
+        ];
+        let mut shown = vec![None];
+        let mut found = Vec::new();
+        for serial in [5, 6] {
+            for look in looks {
+                for depth in [9, 10] {
+                    for output in [0, 1] {
+                        shown.push(Some(Shown {
+                            serial,
+                            look,
+                            depth,
+                            output,
+                        }));
+                        for detail in [518, 770] {
+                            let mapped = [(5, 518), (6, 518), (5, 770), (6, 770)].map(Some);
+                            for mapped in mapped.into_iter().chain([None]) {
+                                for (settled, model_free) in
+                                    [(false, false), (false, true), (true, false), (true, true)]
+                                {
+                                    found.push(Found {
+                                        serial,
+                                        look,
+                                        detail,
+                                        depth,
+                                        mapped,
+                                        settled,
+                                        model_free,
+                                        output,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut states = Vec::new();
+        for shown in &shown {
+            for found in &found {
+                states.push((*shown, *found));
+            }
+        }
+        states
+    }
+
+    fn up_to_date(shown: Option<&Shown>, found: &Found) -> bool {
+        shown
+            == Some(&Shown {
+                serial: found.serial,
+                look: found.look,
+                depth: found.depth,
+                output: found.output,
+            })
+    }
+
+    #[test]
+    fn a_turn_is_idle_only_when_nothing_is_out_of_date_and_nothing_is_left_to_ask_or_ease() {
+        let states = every_state();
+        assert_eq!(states.len(), 17 * 640);
+        let mut idle = 0;
+        for (shown, found) in states {
+            let turn = plan(shown.as_ref(), &found);
+            let state = format!("{shown:?} {found:?}");
+            let current = up_to_date(shown.as_ref(), &found);
+            let mapped = found.mapped == Some((found.serial, found.detail));
+            // A picture is made exactly when the last one is out of date in
+            // any respect, or the depth map takes a step.
+            assert_eq!(turn.render, !current || turn.settle, "{state}");
+            // A step is taken only from a picture that showed the step
+            // before, and never past the end.
+            let eased_from = shown
+                .is_some_and(|shown| (shown.serial, shown.depth) == (found.serial, found.depth));
+            assert_eq!(
+                turn.settle,
+                eased_from && mapped && !found.settled,
+                "{state}"
+            );
+            // The frame is shrunk whenever it or the view's size is new,
+            // and what is shrunk is shown.
+            assert!(!turn.scale || turn.render, "{state}");
+            let same_view = shown.is_some_and(|shown| {
+                (shown.serial, shown.look.lines) == (found.serial, found.look.lines)
+            });
+            assert_eq!(turn.scale, !same_view, "{state}");
+            // The model gets a frame only when it is free and has not
+            // answered for this frame at this detail.
+            assert_eq!(turn.submit, found.model_free && !mapped, "{state}");
+            if turn == IDLE {
+                idle += 1;
+                // Nothing stale is left alone: the picture is the one that
+                // would be made now; the frame's map is there and has
+                // arrived, or the model is at work and its answer (or its
+                // failure) will be another depth map than the one shown.
+                assert!(current, "{state}");
+                let nothing_left = if mapped {
+                    found.settled
+                } else {
+                    !found.model_free
+                };
+                assert!(nothing_left, "{state}");
+            }
+        }
+        assert!(idle > 0);
+    }
+
+    /// A screen that does not change, the model and the loop's turns, with
+    /// the model and the output played by the test.
+    struct Still {
+        shown: Option<Shown>,
+        found: Found,
+        /// The frame and detail the model is at work on, and the turns it
+        /// still takes.
+        in_work: Option<((u64, u32), u32)>,
+        /// The steps until the newest answer has been eased in.
+        to_ease: u32,
+        submitted: Vec<(u64, u32)>,
+    }
+
+    impl Still {
+        /// One turn as `render_loop` takes it, then what the depth thread
+        /// does meanwhile. `eases` is how many steps an answer takes to
+        /// arrive, `written` whether the picture could be written.
+        fn turn(&mut self, model_takes: u32, eases: u32, written: bool) -> Turn {
+            let turn = plan(self.shown.as_ref(), &self.found);
+            if turn.submit {
+                assert!(self.in_work.is_none(), "a frame for a model at work");
+                let frame = (self.found.serial, self.found.detail);
+                self.in_work = Some((frame, model_takes));
+                self.found.model_free = false;
+                self.submitted.push(frame);
+            }
+            if turn.settle {
+                self.to_ease -= 1;
+                self.found.settled = self.to_ease == 0;
+                self.found.depth += 1;
+            }
+            if turn.render {
+                self.shown = written.then_some(Shown {
+                    serial: self.found.serial,
+                    look: self.found.look,
+                    depth: self.found.depth,
+                    output: self.found.output,
+                });
+            }
+            match self.in_work {
+                Some((frame, 0)) => {
+                    self.in_work = None;
+                    self.found.depth += 1;
+                    self.found.mapped = Some(frame);
+                    self.found.settled = false;
+                    self.to_ease = eases;
+                    self.found.model_free = true;
+                }
+                Some((frame, turns)) => self.in_work = Some((frame, turns - 1)),
+                None => {}
+            }
+            turn
+        }
+    }
+
+    #[test]
+    fn a_still_screen_comes_to_rest_from_every_state_with_its_frame_asked_about_once() {
+        let mut rested = 0;
+        for (shown, found) in every_state() {
+            let frame = (found.serial, found.detail);
+            // A model that is not free is at work on this frame or on one
+            // the screen has replaced since.
+            let at_work = if found.model_free {
+                vec![None]
+            } else {
+                vec![Some(frame), Some((4, found.detail))]
+            };
+            for at_work in at_work {
+                for (model_takes, eases, fails) in
+                    [(0, 1, false), (3, 1, true), (0, 4, true), (3, 4, false)]
+                {
+                    let state = format!("{shown:?} {found:?} {at_work:?} {model_takes} {eases}");
+                    let mapped = found.mapped == Some(frame);
+                    let mut still = Still {
+                        shown,
+                        found,
+                        in_work: at_work.map(|frame| (frame, model_takes)),
+                        to_ease: if mapped && !found.settled { eases } else { 0 },
+                        submitted: Vec::new(),
+                    };
+                    // The first picture cannot be written, if `fails`.
+                    let mut written = !fails;
+                    let mut turns = 0;
+                    loop {
+                        turns += 1;
+                        assert!(turns < 100, "never at rest: {state}");
+                        let on_its_way = still.in_work.is_some();
+                        let turn = still.turn(model_takes, eases, written);
+                        written |= turn.render;
+                        // Nothing to do and nothing on its way: from here
+                        // on no turn can find anything else.
+                        if turn == IDLE && !on_its_way {
+                            break;
+                        }
+                    }
+                    assert!(still.in_work.is_none(), "{state}");
+                    // At rest the picture is the frame's, with the frame's
+                    // own depth map, eased in all the way.
+                    assert!(up_to_date(still.shown.as_ref(), &still.found), "{state}");
+                    assert_eq!(still.found.mapped, Some(frame), "{state}");
+                    assert!(still.found.settled && still.found.model_free, "{state}");
+                    // The model was given the frame once, unless it had it
+                    // already or had answered for it.
+                    let asked = match at_work {
+                        Some(at_work) => at_work != frame,
+                        None => !mapped,
+                    };
+                    let expected = if asked { vec![frame] } else { Vec::new() };
+                    assert_eq!(still.submitted, expected, "{state}");
+                    rested += 1;
+                }
+            }
+        }
+        assert!(rested > 17 * 640 * 4);
+    }
+
+    #[test]
+    fn a_model_that_fails_again_leaves_the_flat_picture_as_it_is() {
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(2, 1, &[0.0, 1.0], 0.0));
+        let mut depth = DepthState {
+            smoother,
+            version: 3,
+            latest: Some((6, 518, DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap())),
+            settled: true,
+        };
+        // The first failure takes the map away: another picture, flat.
+        depth.forget();
+        assert_eq!(depth.version, 4);
+        assert!(depth.latest.is_none() && !depth.settled);
+        assert!(depth.smoother.values().is_empty());
+        // The next attempts fail as well, and nothing has changed: the
+        // loop only gives the frame to the model again, and rests.
+        depth.forget();
+        depth.forget();
+        assert_eq!(depth.version, 4);
+        let (shown, found) = at_rest();
+        let (shown, flat) = (
+            Shown { depth: 4, ..shown },
+            Found {
+                depth: depth.version,
+                mapped: None,
+                settled: false,
+                ..found
+            },
+        );
+        let only_submit = Turn {
+            submit: true,
+            ..IDLE
+        };
+        assert_eq!(plan(Some(&shown), &flat), only_submit);
+    }
+
+    #[test]
+    fn a_model_seen_free_has_its_answer_seen_with_it() {
+        // The model is at work on frame 5 of a screen that has stopped
+        // changing; the picture of that frame is up.
+        let shared = Arc::new(Shared::new());
+        {
+            let mut slot = lock(&shared.for_model);
+            (slot.serial, slot.detail, slot.busy) = (5, 518, true);
+        }
+        let turn_state = shared.clone();
+        // A turn looks at what there is while the depth thread is about to
+        // answer: the model's place is kept from it here until the answer
+        // has been published and the place freed, in that order, as the
+        // depth thread does it.
+        let mut place = lock(&shared.for_model);
+        let turn = std::thread::spawn(move || turn_state.find(5).0);
+        std::thread::sleep(Duration::from_millis(100));
+        {
+            let mut depth = lock(&shared.depth);
+            depth.version += 1;
+            depth.latest = Some((5, 518, DepthMap::normalized(1, 1, vec![0.0]).unwrap()));
+        }
+        place.busy = false;
+        drop(place);
+        let found = turn.join().unwrap();
+        // A model seen free has answered, and that answer is what the turn
+        // must go by. With the map looked at first and the place after, the
+        // turn had the map from before the answer and a free model: frame 5
+        // went to the model a second time.
+        assert!(found.model_free);
+        assert_eq!(found.mapped, Some((5, 518)));
+        let shown = Shown {
+            serial: 5,
+            look: found.look,
+            depth: found.depth - 1,
+            output: found.output,
+        };
+        assert!(!plan(Some(&shown), &found).submit);
+    }
+
+    #[test]
+    fn the_output_is_let_go_of_with_the_live_screen_whatever_the_model_is_doing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        let files = || std::fs::read_dir(dir.path()).unwrap().count();
+        let fed = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        let (frames, render_state) = (fed.frames(), shared.clone());
+        let render = std::thread::Builder::new()
+            .name("live-render".into())
+            .spawn(move || render_loop(&frames, &render_state))
+            .unwrap();
+        // The depth thread, inside the model for as long as the test says.
+        let (finish, finished) = std::sync::mpsc::channel::<()>();
+        let depth_state = shared.clone();
+        let depth = std::thread::Builder::new()
+            .name("live-depth".into())
+            .spawn(move || {
+                let _ = finished.recv();
+                drop(depth_state);
+            })
+            .unwrap();
+        let mut live = Live {
+            capture: fed.capture(),
+            shared,
+            threads: vec![render],
+        };
+        live.show_on(sink.clone());
+        fed.feed(16, 9, &[90; 16 * 9 * 4]);
+        eventually("a picture", || sink.written().0 == 1);
+        // The output ends (its session lets go of the file), then the live
+        // screen: the file is removed although the model is still at work.
+        // The program may end before the model has finished, and nothing
+        // would remove the file then.
+        drop(sink);
+        assert_eq!(files(), 1);
+        drop(live);
+        assert_eq!(files(), 0, "the picture file outlived the live screen");
+        finish.send(()).unwrap();
+        depth.join().unwrap();
+    }
+
+    #[test]
+    fn the_page_is_told_when_the_screen_is_still_and_when_it_changes_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        let capture = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        *lock(&shared.sink) = (1, Some(sink.clone()));
+        let (frames, worker_state) = (capture.frames(), shared.clone());
+        let worker = std::thread::spawn(move || render_loop(&frames, &worker_state));
+        let still = || lock(&shared.stats).still;
+
+        let first = Instant::now();
+        capture.feed(16, 9, &[90; 16 * 9 * 4]);
+        eventually("the first picture", || sink.written().0 == 1);
+        assert!(!still());
+        // No model here, so the frame waits for one for ever; the picture
+        // is up to date all the same, and nothing is made.
+        eventually("the screen is said to be still", still);
+        assert!(first.elapsed() >= STILL_TIME, "{:?}", first.elapsed());
+        assert_eq!(sink.written().0, 1);
+        // A slider: one picture, and with it the screen is no longer said
+        // to be still (the page is told before the picture is written).
+        shared.depth_pos.store(3, Ordering::Relaxed);
+        eventually("the picture with the control", || sink.written().0 == 2);
+        assert!(!still());
+
+        shared.stop.store(true, Ordering::Relaxed);
+        drop(capture);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn the_status_tells_the_rates_of_work_and_says_when_there_is_none() {
+        let working = Stats {
+            picture_rate: 59.6,
+            depth_rate: 29.6,
+            ..Stats::default()
+        };
+        assert_eq!(
+            working.describe(),
+            "60 pictures a second, depth 30 times a second"
+        );
+        // Before the model's first answer, and when it cannot answer.
+        let starting = Stats {
+            depth_rate: 0.0,
+            ..working.clone()
+        };
+        assert_eq!(starting.describe(), "60 pictures a second, depth starting");
+        let failing = Stats {
+            depth_rate: 0.0,
+            depth_error: Some("no model".into()),
+            ..working.clone()
+        };
+        assert_eq!(
+            failing.describe(),
+            "60 pictures a second, no depth: no model"
+        );
+        // A model slower than once a second is not "0 times a second".
+        let slow = Stats {
+            depth_rate: 0.25,
+            ..working
+        };
+        assert_eq!(
+            slow.describe(),
+            "60 pictures a second, depth once every 4.0 seconds"
+        );
+        // A still screen: the rates are those of the last work (here one
+        // picture and a first depth map that took three seconds), and are
+        // not told as if they were going on.
+        let still = Stats {
+            picture_rate: 1.0,
+            depth_rate: 0.33,
+            still: true,
+            ..Stats::default()
+        };
+        assert_eq!(still.describe(), "not changing, so nothing is redrawn");
+        // What the model has not done yet or cannot do is still said.
+        let waiting = Stats {
+            depth_rate: 0.0,
+            ..still.clone()
+        };
+        assert_eq!(
+            waiting.describe(),
+            "not changing, so nothing is redrawn, depth starting"
+        );
+        let flat = Stats {
+            depth_error: Some("no model".into()),
+            ..still
+        };
+        assert_eq!(
+            flat.describe(),
+            "not changing, so nothing is redrawn, no depth: no model"
+        );
     }
 
     /// Wait until `done` says so, at most ten seconds.

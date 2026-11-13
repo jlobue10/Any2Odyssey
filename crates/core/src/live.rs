@@ -43,7 +43,11 @@ impl Source<'_> {
 /// is light and the cores have other things to do while a picture is live
 /// (the depth model, the eye tracker, the desktop).
 fn threads_for(rows: usize) -> usize {
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    // Asked once: on Linux the answer is put together from the scheduler
+    // and several files of the control groups at every call, and this is
+    // called for each stage of each frame.
+    static CORES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let cores = *CORES.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
     threads_on(cores).min(rows.max(1))
 }
 
