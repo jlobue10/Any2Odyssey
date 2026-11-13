@@ -15,7 +15,8 @@ Installing it
 
 installs the program for your user (under ~/.local) and then asks about each further step: the packages it
 needs, the udev rules for the Odyssey 3D, the depth model, and the Wine side of the Odyssey 3D (from a mounted
-Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use sudo for that step only.
+Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use sudo for that step only. Run it as
+yourself, not with sudo: started as root it refuses to install into a folder that is not root's alone.
 `./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
 knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS only.
 
