@@ -19,9 +19,13 @@ Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use 
 `./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
 knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS only.
 
-The installer uses a Windows drive it finds by itself only when exactly one is mounted and it is a drive
-inside this machine. For Windows on a USB drive or a network share, or when several drives have one, name
-it: `./install.sh --windows-root /path/to/that/drive`.
+The installer uses a Windows drive it finds by itself only when exactly one is mounted and it is not a
+removable one; a drive it cannot place (a network share) it asks about with a warning, and does not use
+with --yes. For Windows on a USB drive, a memory card or a network share, or when several drives have
+one, name it: `./install.sh --windows-root /path/to/that/drive`.
+
+When you update Any2Odyssey, run `./install.sh` from the new archive and let it prepare the Odyssey 3D
+again: the Wine side stays as the earlier version built it until then.
 
 It was built on Ubuntu 24.04 and needs a system at least that new (glibc 2.39). To try it without
 installing, run `./any2odyssey` here.
@@ -35,6 +39,9 @@ What the installer sets up, if you would rather do it by hand
 
 - 2D to 3D (AI depth): your distribution's ONNX Runtime (onnxruntime, with its CUDA provider and cuDNN for an
   NVIDIA GPU), then `./any2odyssey --install-depth-model` (downloads the open depth model, about 95 MB).
+  The model in your data folder is checked against a fixed SHA-256, at the download and again before the
+  program loads it; to use another model, give its path in the environment variable
+  ANY2ODYSSEY_DEPTH_MODEL.
 - Open and Save dialogs: zenity or kdialog.
 - A live screen: a desktop with the screen-cast portal (KDE Plasma and GNOME have it).
 - The Odyssey 3D's lens, eye tracker and weaver: these are Leia's, and they come from a Windows

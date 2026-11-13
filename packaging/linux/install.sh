@@ -25,7 +25,8 @@
 #   --no-model          do not download the depth model
 #   --no-odyssey        do not prepare the Wine side
 #   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files");
-#                       needed when it is on a USB drive or a network share, or when several drives have one
+#                       needed when it is on a USB drive, a memory card or a network share, or when several
+#                       drives have one
 #   --prefix DIR        install under DIR instead of ~/.local
 #   --packaged          the program is installed already (a distribution package): do steps 2 to 5 only
 #   --dry-run           say what would be done and do none of it
@@ -35,11 +36,12 @@ set -eu
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local
 YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
-# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board,
-# for mounted drives (with the mount table and the /sys entries that describe them) and for its udev rules.
+# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board
+# and for mounted drives (with the mount table and the /sys entries that describe them). It comes from the
+# environment, so nothing it names reaches a command run as root: while it is set no step uses sudo.
 TEST_ROOT=${A2O_INSTALL_TEST_ROOT:-}
 RULES_NAME=70-any2odyssey-lens.rules
-RULES_DIR=$TEST_ROOT/etc/udev/rules.d
+RULES_DIR=/etc/udev/rules.d
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -82,6 +84,11 @@ canonical() {
     printf '%s\n' "${path:-/}"
 }
 PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
+if [ -n "$TEST_ROOT" ]; then
+    echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives are looked for under $TEST_ROOT, and no packages or udev rules are installed or removed"
+    DEPS=
+    UDEV=
+fi
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
@@ -126,7 +133,7 @@ if [ -n "$UNINSTALL" ]; then
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
-    if [ -f "$RULES_DIR/$RULES_NAME" ] && ask "Remove the udev rules ($RULES_DIR/$RULES_NAME, needs sudo)?"; then
+    if [ -z "$TEST_ROOT" ] && [ -f "$RULES_DIR/$RULES_NAME" ] && ask "Remove the udev rules ($RULES_DIR/$RULES_NAME, needs sudo)?"; then
         run sudo rm -f "$RULES_DIR/$RULES_NAME"
         run sudo udevadm control --reload
     fi
@@ -270,7 +277,9 @@ mount_source() { # <folder, absolute and without symbolic links>
             point = plain($2)
             if (point != "/" && folder != point && substr(folder, 1, length(point) + 1) != point "/") next
             # A later line for the same mount point lies on top of the earlier one.
-            if (length(point) >= longest) { longest = length(point); source = plain($1) }
+            # A FUSE file system names its own source, and a program of any user can call itself /dev/sda2.
+            # Only fuseblk is believed: root sets that up over a real device (ntfs-3g).
+            if (length(point) >= longest) { longest = length(point); source = ($3 == "fuse" || $3 ~ /^fuse\./) ? "" : plain($1) }
         }
         END { if (longest >= 0) print source }
     ' "$TEST_ROOT/proc/self/mounts" 2>/dev/null
@@ -297,6 +306,8 @@ block_kind() { # <kernel name>
         case ${node#"$TEST_ROOT"} in */virtual/*) echo unknown; return 0 ;; esac # a loop device, a RAM disk
         [ -r "$node/removable" ] || { echo unknown; return 0; }
         [ "$(cat "$node/removable")" = 0 ] || { echo removable; return 0; }
+        # A memory card in a built-in reader says 0 there; the card's type tells it from soldered eMMC.
+        [ "$(cat "$node/device/type" 2>/dev/null)" != SD ] || { echo removable; return 0; }
         case ${node#"$TEST_ROOT"} in */usb[0-9]*) echo removable; return 0 ;; esac
     done
     echo fixed
