@@ -43,6 +43,26 @@ pub fn convert(
     if image.width() < 2 || !image.width().is_multiple_of(2) {
         return Err(StereoError::OddWidth);
     }
+    if layout == Layout::Sbs {
+        if !swap {
+            return Ok(image.clone());
+        }
+        let mut out = RgbaImage::new(image.width(), image.height());
+        // Copy each eye directly into its destination, preserving every
+        // channel without allocating two intermediate eye images.
+        let row_bytes = image.width() as usize * 4;
+        for (src, dst) in image
+            .as_raw()
+            .chunks_exact(row_bytes)
+            .zip(out.as_mut().chunks_exact_mut(row_bytes))
+        {
+            let (left, right) = src.split_at(row_bytes / 2);
+            let (dst_left, dst_right) = dst.split_at_mut(row_bytes / 2);
+            dst_left.copy_from_slice(right);
+            dst_right.copy_from_slice(left);
+        }
+        return Ok(out);
+    }
     let eye = image.width() / 2;
     let mut left = imageops::crop_imm(image, 0, 0, eye, image.height()).to_image();
     let mut right = imageops::crop_imm(image, eye, 0, eye, image.height()).to_image();
@@ -50,13 +70,7 @@ pub fn convert(
         std::mem::swap(&mut left, &mut right);
     }
     match layout {
-        Layout::Flat => unreachable!(),
-        Layout::Sbs => {
-            let mut out = RgbaImage::new(image.width(), image.height());
-            imageops::replace(&mut out, &left, 0, 0);
-            imageops::replace(&mut out, &right, eye as i64, 0);
-            Ok(out)
-        }
+        Layout::Flat | Layout::Sbs => unreachable!(),
         Layout::Anaglyph => {
             if half_width {
                 left = imageops::resize(
@@ -151,5 +165,28 @@ mod tests {
         let img = RgbaImage::from_pixel(6, 2, Rgba([1, 2, 3, 0]));
         let out = convert(&img, Layout::Anaglyph, false, false).unwrap();
         assert!(out.pixels().all(|p| p.0[3] == 255));
+    }
+
+    #[test]
+    fn sbs_preserves_all_pixels_and_alpha_when_swapping_rows() {
+        for width in [2, 6, 16] {
+            let source = RgbaImage::from_fn(width, 3, |x, y| {
+                Rgba([x as u8, y as u8, (x + y) as u8, (x * 13 + y) as u8])
+            });
+            for half_width in [false, true] {
+                assert_eq!(
+                    convert(&source, Layout::Sbs, half_width, false).unwrap(),
+                    source
+                );
+                let swapped = convert(&source, Layout::Sbs, half_width, true).unwrap();
+                for (x, y, pixel) in swapped.enumerate_pixels() {
+                    assert_eq!(pixel, source.get_pixel((x + width / 2) % width, y));
+                }
+                assert_eq!(
+                    convert(&swapped, Layout::Sbs, half_width, true).unwrap(),
+                    source
+                );
+            }
+        }
     }
 }
