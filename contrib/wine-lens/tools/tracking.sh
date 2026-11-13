@@ -16,6 +16,9 @@ CAMERA=04e8:20d7
 # process of that number is the bridge: a number left over from before can belong to anything.
 RUN=${XDG_RUNTIME_DIR:-$T}
 PIDFILE=$RUN/any2odyssey-camera-bridge.pid
+# Locked for as long as a request to start the tracker is on its way to Leia's service, whatever becomes of
+# the "start" that made it: "stop" waits for that request before it decides what there is to stop.
+STARTING=$RUN/any2odyssey-tracker.starting
 
 bridge_pid() {
     pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
@@ -49,7 +52,13 @@ start)
         bridge_running || { rm -f "$PIDFILE"; echo "error: the camera bridge could not start (is port $(cat "$T/camera.port") taken?)"; exit 1; }
     fi
     if ! tracker_running; then
-        (setsid wine sc start "SR Eye Tracker" >/dev/null 2>&1 </dev/null &)
+        # The request outlives this script when Any2Odyssey ends it (a Stop right after a Start), and the
+        # tracker it starts would then stay with nobody to stop it. So it holds a lock (file descriptor 9,
+        # kept by the shell around it and not handed to Wine, whose programs stay) that "stop" looks at.
+        {
+            flock 9
+            (setsid sh -c 'timeout 25 wine sc start "SR Eye Tracker" 9>&-; :' >/dev/null 2>&1 </dev/null &)
+        } 9>"$STARTING"
         i=0
         until tracker_running; do
             i=$((i + 1))
@@ -60,7 +69,29 @@ start)
     echo on
     ;;
 stop)
-    tracker_running && setsid timeout 30 wine sc stop "SR Eye Tracker" >/dev/null 2>&1 </dev/null
+    # A request to start the tracker may still be on its way (see "start"): it is waited for, for as long
+    # as it can take, and the tracker it was for is then stopped whether or not its process shows yet.
+    # Only looked at, never waited on: a lock that cannot be had for another reason holds nothing up.
+    asked=
+    i=0
+    while [ -e "$STARTING" ] && [ $i -lt 150 ]; do
+        flock -n "$STARTING" true 2>/dev/null
+        [ $? -eq 1 ] || break
+        asked=1
+        i=$((i + 1))
+        sleep 0.2
+    done
+    if [ -n "$asked" ] || tracker_running; then
+        setsid timeout 30 wine sc stop "SR Eye Tracker" >/dev/null 2>&1 </dev/null
+        # Leia's service may answer before the tracker has gone. A "start" that came now would find the
+        # tracker, start none and be left without one, so this waits (about ten seconds at most) until it
+        # has gone.
+        i=0
+        while [ $i -lt 50 ] && tracker_running; do
+            i=$((i + 1))
+            sleep 0.2
+        done
+    fi
     pid=$(bridge_pid) && kill "$pid" 2>/dev/null
     rm -f "$PIDFILE"
     ;;

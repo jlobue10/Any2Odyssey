@@ -8,6 +8,7 @@ The installed fixture only records its argv; it never opens an image or a UI.
 import os
 from pathlib import Path
 import pwd
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -358,6 +359,76 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse((runtime / "any2odyssey-noxon.pid").exists())
         self.assertFalse(wine_lens.exists())
         self.assertEqual(served.read_text(), f"{wine_lens / 'prefix'} -k")
+
+    def two_installations(self, prefix):
+        """One under `prefix` and one in the usual place of a stand-in home; returns the two outputs."""
+        home = self.root / "home"
+        home.mkdir()
+        self.env["HOME"] = str(home)
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        usual = self.run_installer(*flags)
+        self.assertEqual(usual.returncode, 0, usual.stdout + usual.stderr)
+        self.assertTrue((home / ".local/bin/any2odyssey").is_file())
+        named = self.run_installer("--prefix", str(prefix), *flags)
+        self.assertEqual(named.returncode, 0, named.stdout + named.stderr)
+        self.assertTrue((prefix / "bin/any2odyssey").is_file())
+        return named, usual
+
+    def removal_command(self, result):
+        lines = [line for line in result.stdout.splitlines() if line.startswith("To remove it later: ")]
+        self.assertEqual(len(lines), 1, result.stdout)
+        return lines[0].removeprefix("To remove it later: ")
+
+    def assert_removed(self, prefix):
+        for left in ["bin/any2odyssey", "share/any2odyssey", "share/doc/any2odyssey",
+                     "share/applications/any2odyssey.desktop", "share/icons/hicolor/256x256/apps/any2odyssey.png"]:
+            self.assertFalse((prefix / left).exists(), f"{prefix / left} is still there")
+
+    def test_the_removal_command_it_prints_removes_the_installation_it_made(self):
+        for name in ["opt", "apps & games with 'quotes\" $cash`and\\slashes"]:
+            with self.subTest(prefix=name):
+                prefix = self.root / name
+                named, usual = self.two_installations(prefix)
+                home = Path(self.env["HOME"])
+                self.assertEqual(self.removal_command(usual), f"{home}/.local/share/any2odyssey/install.sh --uninstall")
+                # As a shell reads the line, whatever the prefix has in it.
+                words = shlex.split(self.removal_command(named))
+                self.assertEqual(words, [f"{prefix}/share/any2odyssey/install.sh", "--uninstall", "--prefix", str(prefix)])
+                result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
+                                        capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_removed(prefix)
+                self.assertTrue((home / ".local/bin/any2odyssey").is_file(), "the other installation was removed")
+                shutil.rmtree(home)
+
+    def test_the_installed_copy_removes_the_installation_it_is_part_of(self):
+        # Without --prefix it used to look in ~/.local wherever it was: nothing of its own was removed,
+        # and an installation there was.
+        prefix = self.root / "opt with space"
+        self.two_installations(prefix)
+        home = Path(self.env["HOME"])
+        for installed in [prefix, home / ".local"]:
+            self.assertTrue((home / ".local/bin/any2odyssey").is_file(), "the other installation was removed")
+            result = subprocess.run([*SHELL, str(installed / "share/any2odyssey/install.sh"), "--uninstall"],
+                                    cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30,
+                                    stdin=subprocess.DEVNULL)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"Removing Any2Odyssey from {installed}\n", result.stdout)
+            self.assert_removed(installed)
+
+    def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
+        # Only the installed copy, which has no program beside it, takes the prefix from where it is.
+        archive = self.root / "share" / "any2odyssey"
+        archive.parent.mkdir()
+        self.archive.rename(archive)
+        self.archive = archive
+        home = self.root / "home"
+        home.mkdir()
+        self.env["HOME"] = str(home)
+        result = self.run_installer("--no-deps", "--no-udev", "--no-model", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / ".local/bin/any2odyssey").is_file())
+        self.assertFalse((self.root / "bin").exists())
 
     def test_help_lists_every_option(self):
         result = self.run_installer("--help")
