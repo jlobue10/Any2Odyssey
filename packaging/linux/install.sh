@@ -33,6 +33,9 @@
 #   --dry-run           say what would be done and do none of it
 #   --uninstall         remove the installed files (and, when confirmed, the udev rules and the Wine side)
 set -eu
+# Nothing this script makes is writable by others, whatever the shell's umask is: the program's entry in the
+# menu and the Wine setup are run as the user later. A stricter umask is kept.
+umask go-w
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local PREFIX_GIVEN=
@@ -144,8 +147,17 @@ if [ -n "$PACKAGED" ]; then
     PROGRAM=$(command -v any2odyssey || echo /usr/bin/any2odyssey)
 else
     WINE_LENS=$APPDIR/wine-lens
+    # Installed to ~/.local with the data folder in its usual place, share/any2odyssey is the program's data
+    # folder as well, and wine-lens in it is what setup.sh builds there: the Wine prefix with the copy of
+    # Leia's runtime, the stand-ins and the camera secret. The setup's own files go beside that, under
+    # another name: as one folder, installing again removed the Wine side, and setup.sh could not copy its
+    # tools onto themselves.
+    [ "$(canonical "$APPDIR")" != "$(canonical "$DATA")" ] || WINE_LENS=$APPDIR/wine-lens-setup
     PROGRAM=$BIN/any2odyssey
 fi
+# share/any2odyssey/wine-lens is the setup's files and nothing else (as every installation outside the data
+# folder has it, and 0.9.1 left it in the data folder too) when no Wine side was built in it.
+only_the_setup() { [ -f "$APPDIR/wine-lens/setup.sh" ] && [ ! -e "$APPDIR/wine-lens/prefix" ] && [ ! -e "$APPDIR/wine-lens/build" ]; }
 
 # ---------------------------------------------------------------------------------------------------------
 if [ -n "$UNINSTALL" ]; then
@@ -153,8 +165,13 @@ if [ -n "$UNINSTALL" ]; then
     if [ -z "$PACKAGED" ]; then
         run rm -f "$BIN/any2odyssey" "$SHARE/applications/any2odyssey.desktop" \
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
-        # Only folders this script made, named in full.
-        [ -d "$PREFIX/share/any2odyssey" ] && run rm -rf "$PREFIX/share/any2odyssey"
+        # Only what this script put there, named in full. share/any2odyssey can be the program's data
+        # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
+        # as the last lines say; the Wine side is asked about below.
+        run rm -f "$APPDIR/install.sh"
+        [ -d "$APPDIR/wine-lens-setup" ] && run rm -rf "$APPDIR/wine-lens-setup"
+        if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; fi
+        if [ -z "$DRY" ] && [ -d "$APPDIR" ]; then rmdir "$APPDIR" 2>/dev/null || true; fi
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
         # The caches the installation refreshed still name the entry and the icon that are gone now.
         [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
@@ -206,9 +223,14 @@ if [ -z "$PACKAGED" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
     else
         mkdir -p "$SHARE/applications"
+        ENTRY=$SHARE/applications/any2odyssey.desktop
+        # Written beside the entry and moved into its place: an entry that is there is whole (not half of
+        # one when this script is interrupted or the disk fills), and an entry that is a link to another
+        # file is replaced like the program and the icon are, not written through.
+        rm -f "$ENTRY.new"
         # Pass the path as data, never as a sed/awk program or replacement.
         # Exec arguments undergo both desktop-string and command-line unescaping.
-        if ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
+        if [ -d "$ENTRY" ] || ! A2O_DESKTOP_EXE="$BIN/any2odyssey" awk '
             function quote_arg(value,    slash, quoted, i, c) {
                 slash = sprintf("%c", 92)
                 quoted = "\""
@@ -239,9 +261,9 @@ if [ -z "$PACKAGED" ]; then
             { print }
             # An entry left with the bare name starts nothing where ~/.local/bin is not on the PATH.
             END { if (rewritten != 1) exit 1 }
-        ' "$HERE/any2odyssey.desktop" >"$SHARE/applications/any2odyssey.desktop"; then
-            rm -f "$SHARE/applications/any2odyssey.desktop"
-            echo "install: could not write the desktop entry: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed)" >&2
+        ' "$HERE/any2odyssey.desktop" >"$ENTRY.new" || ! mv -f "$ENTRY.new" "$ENTRY"; then
+            rm -f "$ENTRY.new"
+            echo "install: could not write the desktop entry $ENTRY: $HERE/any2odyssey.desktop has no 'Exec=any2odyssey' line to point at $BIN/any2odyssey (or awk failed, or the entry could not be put in place)" >&2
             exit 1
         fi
     fi
@@ -259,8 +281,10 @@ if [ -z "$PACKAGED" ]; then
         say "   would copy: wine-lens -> $WINE_LENS"
     else
         mkdir -p "$APPDIR"
-        rm -rf "$APPDIR/wine-lens"
-        cp -R "$HERE/wine-lens" "$APPDIR/wine-lens"
+        # (the setup an earlier version left in wine-lens goes; a Wine side built there does not)
+        if only_the_setup; then rm -rf "$APPDIR/wine-lens"; fi
+        rm -rf "$WINE_LENS"
+        cp -R "$HERE/wine-lens" "$WINE_LENS"
         install -m755 "$HERE/install.sh" "$APPDIR/install.sh"
     fi
     have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
@@ -462,7 +486,16 @@ else FAMILY= INSTALL=; fi
 present() {
     case $1 in
         cmd:*) have "${1#cmd:}" ;;
-        lib:*) ldconfig -p 2>/dev/null | grep -q -F "${1#lib:}" || ls /usr/lib*/"${1#lib:}"* /usr/lib/*/"${1#lib:}"* >/dev/null 2>&1 ;;
+        lib:*)
+            # The linker's list where there is one to ask (ldconfig is not on an ordinary user's PATH
+            # on Debian), then the usual folders, each pattern by itself: ls fails for all of them when
+            # one matches nothing, which reported every installed library as missing.
+            if [ -z "$TEST_ROOT" ] && ldconfig -p 2>/dev/null | grep -q -F "${1#lib:}"; then return 0; fi
+            for found in "$TEST_ROOT"/usr/lib*/"${1#lib:}"* "$TEST_ROOT"/usr/lib/*/"${1#lib:}"*; do
+                [ -e "$found" ] && return 0
+            done
+            return 1
+            ;;
     esac
 }
 MISSING= UNNAMED=

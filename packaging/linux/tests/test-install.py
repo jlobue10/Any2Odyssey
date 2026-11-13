@@ -485,6 +485,90 @@ class InstallerTests(unittest.TestCase):
         self.assert_removed(prefix)
         self.assertNotIn("any2odyssey", cache.read_text())
 
+    def usual_place(self):
+        """A stand-in home with nothing naming another data folder: ~/.local/share/any2odyssey is then
+        both where the installer keeps its own files and the program's data folder."""
+        home = self.root / "home"
+        home.mkdir()
+        self.env["HOME"] = str(home)
+        for name in ["ANY2ODYSSEY_DATA_DIR", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"]:
+            self.env.pop(name, None)
+        return home, home / ".local/share/any2odyssey"
+
+    def wine_side(self, data):
+        """What setup.sh and the program leave in the data folder; returns the files that must stay."""
+        kept = [data / "settings.json", data / "models/depth-anything-v2-small.onnx",
+                data / "wine-lens/prefix/system.reg", data / "wine-lens/build/a2ousb.sys",
+                data / "wine-lens/camera.secret", data / "wine-lens/tools/tracking.sh"]
+        for file in kept:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_text("kept\n")
+        return kept
+
+    def test_in_the_usual_place_the_setup_is_not_kept_where_the_wine_side_is_built(self):
+        # 0.9.1 kept its copy of wine-lens in <data folder>/wine-lens, which is where setup.sh builds:
+        # setup.sh then failed at the end copying its tools onto themselves, installing again (an update)
+        # removed the Wine prefix with the copy of Leia's runtime, and --uninstall removed the whole data
+        # folder while saying that the settings and the depth model stay.
+        home, data = self.usual_place()
+        self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        (self.system / "dev/odyssey-lens").touch()
+        flags = ["--no-deps", "--no-udev", "--no-model"]
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNotNone(self.setup_ran_with(), result.stdout + result.stderr)
+        self.assertTrue((data / "wine-lens-setup/setup.sh").is_file())
+        self.assertFalse((data / "wine-lens").exists(), "the setup's files are where the Wine side is built")
+        self.assertIn(f"{data}/install.sh --uninstall", result.stdout)
+        kept = self.wine_side(data)
+        # An update: the same again from a newer archive, here without the Odyssey 3D step.
+        result = self.run_installer(*flags, "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"installing again removed {file}")
+        # Nobody answers the question about the Wine side: it stays, and so does the rest of the data.
+        result = subprocess.run([*SHELL, str(data / "install.sh"), "--uninstall"], cwd=self.root, env=self.env,
+                                text=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"--uninstall removed {file}")
+        self.assertFalse((data / "install.sh").exists())
+        self.assertFalse((data / "wine-lens-setup").exists())
+        self.assertFalse((home / ".local/bin/any2odyssey").exists())
+        # Answered with yes, the Wine side goes and nothing else of the data does.
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((data / "wine-lens").exists())
+        for file in kept[:2]:
+            self.assertTrue(file.is_file(), f"--uninstall --yes removed {file}")
+
+    def test_the_setup_0_9_1_left_in_the_data_folder_goes_and_a_wine_side_built_there_stays(self):
+        home, data = self.usual_place()
+        old = data / "wine-lens"
+        (old / "tools").mkdir(parents=True)
+        (old / "setup.sh").write_text("#!/bin/sh\n")
+        (old / "tools/tracking.sh").write_text("#!/bin/sh\n")
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(old.exists(), "the earlier version's copy of the setup is still there")
+        # The same with a Wine side that 0.9.1's setup.sh built before it failed.
+        (old / "prefix").mkdir(parents=True)
+        (old / "setup.sh").write_text("#!/bin/sh\n")
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((old / "prefix").is_dir())
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((old / "prefix").is_dir())
+        # Without anything else in it, the folder itself goes with the installation.
+        shutil.rmtree(old)
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_installer("--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(data.exists())
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"
@@ -514,6 +598,55 @@ class InstallerTests(unittest.TestCase):
                 result = self.install(prefix, "--dry-run")
                 self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertIn("prefix", result.stderr)
+
+    def test_a_desktop_entry_that_is_a_link_is_replaced_and_not_written_through(self):
+        # The program and the icon replaced a link; the entry was written into whatever the link named
+        # (as root in a user's home: any file of the system).
+        prefix = self.root / "prefix"
+        other = self.root / "another file"
+        other.write_text("not the installer's\n")
+        entry = prefix / "share/applications/any2odyssey.desktop"
+        entry.parent.mkdir(parents=True)
+        entry.symlink_to(other)
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(other.read_text(), "not the installer's\n")
+        self.assertFalse(entry.is_symlink())
+        self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
+        self.assertEqual([path.name for path in entry.parent.glob("any2odyssey.desktop*")], ["any2odyssey.desktop"])
+
+    def test_nothing_installed_can_be_written_by_others_whatever_the_umask(self):
+        # With umask 000 the menu entry and the Wine setup, which are run as the user later, were
+        # writable by everybody (the program itself, the icon and the documents never were).
+        previous = os.umask(0)
+        self.addCleanup(os.umask, previous)
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        writable = [str(path) for path in [prefix, *prefix.rglob("*")]
+                    if not path.is_symlink() and path.stat().st_mode & 0o022]
+        self.assertEqual(writable, [])
+        self.assertTrue((prefix / "share/applications/any2odyssey.desktop").is_file())
+
+    def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
+        # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
+        # one ls, which fails when either pattern matches nothing: every library was reported missing.
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "pacman").write_text("#!/bin/sh\nexit 0\n")  # the Arch names, on any system
+        (tools / "pacman").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        for library in ["usr/lib/x86_64-linux-gnu/libxkbcommon.so.0", "usr/lib64/libGL.so.1.7.0"]:
+            (self.system / library).parent.mkdir(parents=True, exist_ok=True)
+            (self.system / library).touch()
+        result = self.install(self.root / "prefix")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+        self.assertEqual(len(lines), 1, result.stdout)
+        missing = lines[0].removeprefix("   missing packages: ").split()
+        self.assertIn("libpipewire", missing)
+        self.assertNotIn("libxkbcommon", missing)
+        self.assertNotIn("libglvnd", missing)
 
 
 if __name__ == "__main__":
