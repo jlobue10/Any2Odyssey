@@ -859,16 +859,23 @@ pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
     eprintln!("The conversion worker runs only on Windows.");
     1
 }
+/// The capture diagnostics look at the Windows worker's windows. Asked for
+/// here they failed without a word.
+const WINDOWS_ONLY_DIAGNOSTIC: &str = "This diagnostic runs only on Windows.";
 pub fn inspect(_: u32) -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn layout_probe(_: u32, _: u32) -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn test_capture_exclusion() -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn test_offscreen() -> i32 {
+    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
     1
 }
 pub fn validate() -> Result<(), String> {
