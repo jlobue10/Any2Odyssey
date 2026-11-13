@@ -10,6 +10,7 @@ import tempfile
 import unittest
 import warnings
 
+sys.dont_write_bytecode = True  # loading the tool would leave tools/__pycache__ in the checkout
 TOOL = Path(__file__).resolve().parents[1] / "tools/mkedid.py"
 
 

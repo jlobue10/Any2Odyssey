@@ -48,6 +48,10 @@ fi
 for tool in wine wineserver $CC x86_64-w64-mingw32-objdump python3 xrandr rsync stty flock setsid; do
     command -v "$tool" >/dev/null || die "'$tool' is needed (Arch: wine mingw-w64-gcc python xorg-xrandr rsync)"
 done
+# The tools tell whether Leia's service runs by looking among this user's own processes. BusyBox's pgrep
+# cannot (it has no -u) and fails instead: every start of the lens helper would restart the service.
+pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
+    die "a pgrep that takes -u is needed: the one of procps (procps-ng), not BusyBox's"
 [ -e "$BOARD" ] || die "$BOARD is missing. Install the udev rule and wake the monitor:
     sudo cp '$HERE/70-any2odyssey-lens.rules' /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger"
 
