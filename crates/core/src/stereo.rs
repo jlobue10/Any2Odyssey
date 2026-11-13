@@ -341,4 +341,22 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn an_image_with_no_rows_or_no_columns_is_empty_whatever_the_layout() {
+        for (width, height) in [(0, 0), (4, 0), (0, 4)] {
+            let image = RgbaImage::new(width, height);
+            for layout in [Layout::Flat, Layout::Sbs, Layout::Anaglyph] {
+                for (half_width, swap) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    assert_eq!(
+                        convert(&image, layout, half_width, swap),
+                        Err(StereoError::Empty),
+                        "{width}x{height} {layout:?}"
+                    );
+                }
+            }
+        }
+    }
 }
