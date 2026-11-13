@@ -51,6 +51,43 @@ const PLACES: u32 = 3;
 const HEADER_BYTES: u64 = 4096;
 /// Room for a pair of views at the panel's full size.
 const CAPACITY: u32 = PANEL.0 * 2 * PANEL.1 * 4;
+/// The frame file's whole length. It is made at that length without the
+/// room being taken, so a folder must be known to have the room.
+const FILE_BYTES: u64 = HEADER_BYTES + CAPACITY as u64 * PLACES as u64;
+
+/// The bytes this user may still write in the file system `folder` is on;
+/// `None` where that cannot be asked.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn room_in(folder: &Path) -> Option<u64> {
+    use std::ffi::{c_char, c_int, CString};
+    use std::os::unix::ffi::OsStrExt;
+    extern "C" {
+        fn statvfs(path: *const c_char, answer: *mut [u64; 32]) -> c_int;
+    }
+    let path = CString::new(folder.as_os_str().as_bytes()).ok()?;
+    let mut answer = [0u64; 32];
+    // SAFETY: `path` ends in a zero byte and lives across the call. The
+    // answer is a `struct statvfs`, which on 64-bit Linux (glibc and musl)
+    // is eleven 8-byte numbers and 24 spare bytes, 112 in all: it fits the
+    // 256 bytes given with room to spare.
+    if unsafe { statvfs(path.as_ptr(), &mut answer) } != 0 {
+        return None;
+    }
+    // The second number is the size of a block (f_frsize), the fifth the
+    // blocks free to this user (f_bavail).
+    answer[1].checked_mul(answer[4])
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn room_in(_: &Path) -> Option<u64> {
+    None
+}
+
+/// Whether a folder with `room` bytes left can take the frame file. A
+/// folder that does not say is tried.
+fn has_room(room: Option<u64>) -> bool {
+    room.is_none_or(|room| room >= FILE_BYTES)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WeaverStatus {
@@ -116,8 +153,30 @@ pub fn locate() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The file the pictures go through. It lives in memory (the session's
-/// runtime folder) and only this user can read it.
+/// A frame file's name: this, the number of the process that made it, a
+/// hyphen, a part that cannot be guessed (a running number in earlier
+/// versions) and the ending.
+const FRAME_PREFIX: &str = "any2odyssey-weaver-";
+const FRAME_ENDING: &str = ".frames";
+
+/// The folders a frame file may go to, best first: the session's runtime
+/// folder (memory, and this user's alone), the system's shared memory
+/// (memory, but everybody's: what keeps another user from taking the name
+/// first is that it cannot be guessed), and the program's own data folder
+/// (the disk, where every picture is so much writing: the last resort). A
+/// runtime folder that is not a whole path could be anywhere and is not
+/// believed.
+fn frame_folders(runtime: Option<PathBuf>, shared: &Path, data: PathBuf) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = runtime.into_iter().filter(|d| d.is_absolute()).collect();
+    if shared.is_dir() {
+        folders.push(shared.to_owned());
+    }
+    folders.push(data);
+    folders
+}
+
+/// The file the pictures go through. It lives in memory where it can (the
+/// session's runtime folder) and only this user can read it.
 struct FrameFile {
     file: File,
     path: PathBuf,
@@ -130,37 +189,60 @@ struct FrameFile {
 
 impl FrameFile {
     fn create() -> std::io::Result<FrameFile> {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        remove_orphans(&dir);
-        // One file per session: a new one never takes a file still in use.
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = dir.join(format!(
-            "any2odyssey-weaver-{}-{number}.frames",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let data = any2odyssey_core::paths::data_dir();
+        if !runtime.as_ref().is_some_and(|dir| dir.is_absolute()) {
+            // Where earlier versions put the file without a runtime
+            // folder; one of them may have left its file there.
+            remove_orphans(&std::env::temp_dir());
         }
-        let mut file = options.open(&path)?;
+        let mut failed = None;
+        for folder in frame_folders(runtime, Path::new("/dev/shm"), data.clone()) {
+            if folder == data {
+                let _ = std::fs::create_dir_all(&folder);
+            }
+            remove_orphans(&folder);
+            // The file is made at its whole length without the room being
+            // taken. In a folder too small for it (shared memory of 64 MB
+            // in a container, a small runtime folder) the making works and
+            // the second or third picture cannot be written, which ends
+            // the output: such a folder is passed over while there is
+            // another to try.
+            if !has_room(room_in(&folder)) {
+                failed = Some(std::io::Error::other(format!(
+                    "{} has less than the {} MB the pictures need",
+                    folder.display(),
+                    FILE_BYTES.div_ceil(1 << 20)
+                )));
+                continue;
+            }
+            match FrameFile::create_in(&folder) {
+                Ok(file) => return Ok(file),
+                // Full, or not to be written to: the next folder may do.
+                Err(e) => failed = Some(e),
+            }
+        }
+        Err(failed.unwrap_or_else(|| std::io::Error::other("no folder for the frame file")))
+    }
+
+    fn create_in(folder: &Path) -> std::io::Result<FrameFile> {
+        // One file per session, made new, for this user only, under a name
+        // of which a part is drawn at random: a file or a link somebody
+        // put there first is never taken or followed, only passed over for
+        // another name.
+        let mut named = tempfile::Builder::new()
+            .prefix(&format!("{FRAME_PREFIX}{}-", std::process::id()))
+            .suffix(FRAME_ENDING)
+            .rand_bytes(16)
+            .tempfile_in(folder)?;
         let mut header = [0u8; 24];
         header[..8].copy_from_slice(MAGIC);
         header[8..12].copy_from_slice(&CAPACITY.to_le_bytes());
-        let written = file
-            .set_len(HEADER_BYTES + u64::from(CAPACITY) * u64::from(PLACES))
-            .and_then(|()| file.write_all(&header));
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
-        }
+        let file = named.as_file_mut();
+        file.set_len(FILE_BYTES)?;
+        file.write_all(&header)?;
+        // From here on the file is removed with the `FrameFile`.
+        let (file, path) = named.keep().map_err(|e| e.error)?;
         Ok(FrameFile {
             file,
             path,
@@ -228,8 +310,8 @@ fn remove_orphans(dir: &Path) {
         let name = entry.file_name();
         let Some(pid) = name
             .to_str()
-            .and_then(|name| name.strip_prefix("any2odyssey-weaver-"))
-            .and_then(|rest| rest.strip_suffix(".frames"))
+            .and_then(|name| name.strip_prefix(FRAME_PREFIX))
+            .and_then(|rest| rest.strip_suffix(FRAME_ENDING))
             .and_then(|rest| rest.split('-').next())
             .and_then(|pid| pid.parse::<u32>().ok())
         else {
@@ -280,6 +362,32 @@ impl FrameSink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .show_bottom_up(width, height, rgba)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl FrameSink {
+    /// A picture file in `folder` that nobody reads.
+    pub(crate) fn in_folder(folder: &Path) -> std::io::Result<FrameSink> {
+        Ok(FrameSink(Arc::new(Mutex::new(FrameFile::create_in(
+            folder,
+        )?))))
+    }
+
+    /// How many pictures have been written, and the newest as a reader
+    /// finds it: width, height and the bytes.
+    pub(crate) fn written(&self) -> (u32, u32, u32, Vec<u8>) {
+        use std::os::unix::fs::FileExt;
+        let frames = self.0.lock().unwrap();
+        let mut header = [0u8; 28];
+        frames.file.read_exact_at(&mut header, 0).unwrap();
+        let field = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        let (sequence, width, height, place) = (field(12), field(16), field(20), field(24));
+        assert_eq!(sequence % 2, 0, "a finished picture");
+        let mut bytes = vec![0u8; width as usize * height as usize * 4];
+        let at = HEADER_BYTES + u64::from(place) * u64::from(CAPACITY);
+        frames.file.read_exact_at(&mut bytes, at).unwrap();
+        (sequence / 2, width, height, bytes)
     }
 }
 
@@ -588,6 +696,133 @@ mod tests {
                 assert_eq!(*canvas.get_pixel(x + STILL_VIEW.0, y), expected);
             }
         }
+    }
+
+    #[test]
+    fn a_folder_too_small_for_the_frame_file_is_passed_over() {
+        assert_eq!(
+            FILE_BYTES,
+            HEADER_BYTES + u64::from(CAPACITY) * u64::from(PLACES)
+        );
+        // A container's 64 MB of shared memory takes the first picture and
+        // not the second; a folder that does not say is tried.
+        assert!(!has_room(Some(64 << 20)));
+        assert!(!has_room(Some(FILE_BYTES - 1)));
+        assert!(has_room(Some(FILE_BYTES)));
+        assert!(has_room(None));
+        // Where the question can be asked, a real folder answers it.
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(room_in(dir.path()).is_some_and(|room| room > 0));
+            assert_eq!(room_in(&dir.path().join("none")), None);
+        }
+    }
+
+    #[test]
+    fn the_frame_file_goes_to_memory_that_is_the_users_own_before_anywhere_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, shared, data) = (
+            dir.path().join("run"),
+            dir.path().join("shm"),
+            dir.path().join("data"),
+        );
+        let missing = dir.path().join("none");
+        std::fs::create_dir(&shared).unwrap();
+        // (The runtime folder is believed without looking: the session made it.)
+        assert_eq!(
+            frame_folders(Some(runtime.clone()), &shared, data.clone()),
+            [runtime.clone(), shared.clone(), data.clone()]
+        );
+        // No runtime folder, an empty one or one that is not a whole path:
+        // shared memory under a name nobody can guess, never a folder that
+        // depends on where the program was started.
+        for runtime in [None, Some(PathBuf::new()), Some(PathBuf::from("run/user"))] {
+            assert_eq!(
+                frame_folders(runtime, &shared, data.clone()),
+                [shared.clone(), data.clone()]
+            );
+        }
+        // Without shared memory either, the program's own folder.
+        assert_eq!(
+            frame_folders(None, &missing, data.clone()),
+            std::slice::from_ref(&data)
+        );
+        assert_eq!(
+            frame_folders(Some(runtime.clone()), &missing, data.clone()),
+            [runtime, data]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_frame_file_is_new_private_and_under_a_name_that_cannot_be_guessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = FrameFile::create_in(dir.path()).unwrap();
+        let second = FrameFile::create_in(dir.path()).unwrap();
+        assert_ne!(first.path, second.path);
+        let own = format!("{FRAME_PREFIX}{}-", std::process::id());
+        for file in [&first, &second] {
+            assert_eq!(file.path.parent(), Some(dir.path()));
+            let name = file.path.file_name().unwrap().to_str().unwrap();
+            let drawn = name
+                .strip_prefix(&own)
+                .and_then(|rest| rest.strip_suffix(FRAME_ENDING))
+                .unwrap_or_else(|| panic!("{name}"));
+            // The part between is the drawn one: long, and without a hyphen
+            // (the number before the first hyphen is the process's).
+            assert!(drawn.len() >= 16 && !drawn.contains('-'), "{name}");
+            let bytes = std::fs::metadata(&file.path).unwrap().len();
+            assert_eq!(
+                bytes,
+                HEADER_BYTES + u64::from(CAPACITY) * u64::from(PLACES)
+            );
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file.path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
+        let (kept, gone) = (second.path.clone(), first.path.clone());
+        drop(first);
+        assert!(!gone.exists() && kept.exists());
+        // A folder that is not there is an error, not a file somewhere else.
+        assert!(FrameFile::create_in(&dir.path().join("none")).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn frame_files_of_processes_that_are_gone_are_removed_under_old_and_new_names() {
+        let dir = tempfile::tempdir().unwrap();
+        // No process has this number: it is above the largest there can be.
+        let gone = u32::MAX - 1;
+        let (me, init) = (std::process::id(), 1);
+        let name = |pid: u32, rest: &str| format!("{FRAME_PREFIX}{pid}-{rest}{FRAME_ENDING}");
+        let orphans = [
+            name(gone, "0"),
+            name(gone, "17"),
+            name(gone, "aB3dE6gH9jK2mN5p"),
+        ];
+        let kept = [
+            name(me, "0"),
+            name(me, "aB3dE6gH9jK2mN5p"),
+            name(init, "3"),
+            format!("{FRAME_PREFIX}{gone}-0.other"),
+            format!("{FRAME_PREFIX}x-0{FRAME_ENDING}"),
+            format!("other-{gone}-0{FRAME_ENDING}"),
+        ];
+        for file in orphans.iter().chain(&kept) {
+            std::fs::write(dir.path().join(file), b"").unwrap();
+        }
+        remove_orphans(dir.path());
+        for file in &orphans {
+            assert!(!dir.path().join(file).exists(), "{file} stayed");
+        }
+        for file in &kept {
+            assert!(dir.path().join(file).exists(), "{file} was removed");
+        }
+        // This process's own file from `create_in` stays as well.
+        let own = FrameFile::create_in(dir.path()).unwrap();
+        remove_orphans(dir.path());
+        assert!(own.path.exists());
     }
 
     #[test]
