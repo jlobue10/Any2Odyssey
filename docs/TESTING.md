@@ -149,12 +149,15 @@ The live screen:
 7. Ctrl+C in a terminal: lens off, no host left.
 8. `env -u XDG_RUNTIME_DIR`: the frame file is in `/dev/shm` and Wine opens it.
 9. Cancel the portal dialog: no sharing indicator left; restart works.
+10. While live, disable or unplug the captured screen: the page reads "Live capture ended: the screen cast was ended by the desktop." instead of staying on a frozen picture; a normal start still reports "Live: ..." after its first frame.
 
 The viewer:
 
 - Odyssey output in AI mode: open a new image or change depth detail. Expect a black panel with the lens on, then the new picture without pressing Start; repeat with the controls minimised.
 - The first AI conversion still works; alter one byte of the data-folder model and expect the "Install it again" message.
 - `any2odyssey FILE` while an instance runs, including a file name that is not UTF-8.
+- With a live screen on the Odyssey, choose another output format: the weaver window closes, capture stops and the page reads "A live screen is shown through the Odyssey 3D output only."; choosing the Odyssey again and pressing Start works.
+- Lens output on an AI-depth image, then make depth fail (rename the model and change Depth detail): the output closes with the reason, and the next lens output shows a correct picture.
 
 Windows (G90XF PC):
 
@@ -166,7 +169,7 @@ Windows (G90XF PC):
 6. Turning 3D off by hotkey, Apply and the tray commands act promptly; no 7-second kill lines in the log.
 7. Camera plugged in: starts. Unplugged: the USB message.
 8. Quit then immediate relaunch, `--toggle` / `--show` / `--quit`, an installer upgrade over a running instance: no "Control events unavailable" in the log.
-9. View logs and the release-page button open Explorer and the browser.
+9. View logs and the release-page button open Explorer and the browser; View logs still opens the data folder with an empty `Any2Odyssey.cmd` placed in `%LOCALAPPDATA%`.
 
 The workflows run only on GitHub. The pull request that brings these changes is the first run of the pinned Arch container's key set-up and of the dependency job; the first tag after it is the first run of the attestation job and of the Linux gates and the dependency job in `release.yml`. Both need watching.
 
