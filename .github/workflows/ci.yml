@@ -289,14 +289,30 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-tracking-stop.py
       - name: Lens setup tool check tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-setup-pgrep.py
+      # The stand-ins that setup.sh compiles on the user's PC, with the MinGW of this Ubuntu release: its
+      # headers are older than Arch's, and wtsshim.c did not compile with them up to 0.9.3, which ended the
+      # whole Odyssey 3D set-up there. Compiled only (setup.sh links them against files it generates), and
+      # only the sources that are for Windows; a2ousb.c needs a header setup.sh generates.
+      - name: Wine stand-ins compile with this Ubuntu's MinGW
+        if: matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          for source in a2ocam a2otoast cfgshim connreset dxvashim lens-helper-win monprobe powernotify weaver-host wtsshim; do
+            x86_64-w64-mingw32-gcc -O2 -c -o /dev/null "contrib/wine-lens/src/$source.c"
+          done
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
           rustup target add x86_64-pc-windows-msvc
           cargo check --locked --workspace --target x86_64-pc-windows-msvc
       # The archive release.yml publishes, made the same way, so a change that breaks it shows here.
+      # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
       - name: Third-party list for Linux matches the dependencies
         if: matrix.arch == 'x86_64'
+        env:
+          LC_ALL: C
+          PYTHONUTF8: '0'
+          PYTHONCOERCECLOCALE: '0'
         run: |
           scripts/third-party-linux.py > /tmp/third-party-linux.md
           diff -u THIRD-PARTY-LICENSES-LINUX.md /tmp/third-party-linux.md

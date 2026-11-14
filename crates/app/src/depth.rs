@@ -405,7 +405,7 @@ fn runtime() -> Result<&'static Environment, String> {
             preload_cudnn();
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
-                    "ONNX Runtime could not be loaded ({}): {e}. Install your distribution's onnxruntime package (Arch: onnxruntime-cpu or onnxruntime-cuda).",
+                    "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.22 or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
                     library.display()
                 )
             })?;
