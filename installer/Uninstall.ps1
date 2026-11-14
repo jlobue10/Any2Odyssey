@@ -59,7 +59,7 @@ $helperIsForeign=$helperPresent -and $ownerSid -ne '' -and $ownerSid -ne $identi
 $needsHelper=(-not $controlsOnly) -and ((Test-Path -LiteralPath $worker) -or $helperPresent) -and -not $helperIsForeign
 if($helperPresent -and ($controlsOnly -or $helperIsForeign)){$notices++;Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
 if($needsHelper){
- if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
+ if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation (run the setup program or Install.cmd again), then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'" -ExpectedUserSid "'+$identity.User.Value+'"'
  # The helper itself checks the approving account, its own Program Files path and the fixed worker path.
