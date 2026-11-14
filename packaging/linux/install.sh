@@ -114,6 +114,7 @@ canonical() {
     printf '%s\n' "${path:-/}"
 }
 PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
+WANT_DEPS=$DEPS # as asked for: a test run still looks which of the packages exist
 if [ -n "$TEST_ROOT" ]; then
     echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives are looked for under $TEST_ROOT, and no packages or udev rules are installed or removed"
     DEPS=
@@ -597,7 +598,7 @@ present() {
             ;;
     esac
 }
-MISSING= UNNAMED=
+MISSING= UNNAMED= ABSENT=
 check() { # <list> : adds the packages of what is missing to MISSING
     for line in $1; do
         what=${line%%|*}
@@ -620,10 +621,25 @@ if [ -n "$MODEL" ]; then
 fi
 [ -n "$WANT_ODYSSEY" ] && check "$WINE_SIDE"
 MISSING=${MISSING# }
-if [ -z "$MISSING$UNNAMED" ]; then
+# One name that the release's package lists do not have makes apt-get refuse the whole list: Ubuntu 24.04
+# has no ONNX Runtime package, and with libonnxruntime-dev among the names neither PipeWire's library nor
+# curl was installed. A simulated installation (it needs no root) names them; they are set apart.
+if [ "$FAMILY" = 3 ] && [ -n "$WANT_DEPS" ] && [ -n "$MISSING" ]; then
+    # shellcheck disable=SC2086  # a list of package names
+    ABSENT=$(LC_ALL=C apt-get install -s $MISSING 2>&1 |
+        sed -n -e 's/^E: Unable to locate package //p' -e "s/^E: Package '\\(.*\\)' has no installation candidate\$/\\1/p" | tr '\n' ' ')
+    KNOWN=
+    for package in $MISSING; do
+        case " $ABSENT " in *" $package "*) ;; *) KNOWN="$KNOWN $package" ;; esac
+    done
+    MISSING=${KNOWN# }
+    ABSENT=${ABSENT% }
+fi
+if [ -z "$MISSING$UNNAMED$ABSENT" ]; then
     say "   everything needed is installed"
 else
     [ -n "$MISSING" ] && say "   missing packages: $MISSING"
+    [ -n "$ABSENT" ] && say "   missing, and not in this system's package lists (see INSTALL.txt for what needs them): $ABSENT"
     [ -n "$UNNAMED" ] && say "   also missing, under a name this script does not know for your distribution:$UNNAMED"
     if [ -z "$DEPS" ] || [ -z "$INSTALL" ] || [ -z "$MISSING" ]; then
         [ -n "$MISSING" ] && say "   install them with your package manager, then run this script again"

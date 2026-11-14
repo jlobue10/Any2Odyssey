@@ -977,6 +977,53 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(writable, [])
         self.assertTrue((prefix / "share/applications/any2odyssey.desktop").is_file())
 
+    def only_package_manager(self, name, body):
+        """Make `name` the one package manager on the PATH, whatever this machine has (pacman is asked first)."""
+        tools = self.root / "tools"
+        tools.mkdir()
+        for folder in reversed(os.get_exec_path(self.env)):  # an earlier folder's program wins
+            for tool in (Path(folder).iterdir() if Path(folder).is_dir() else []):
+                if tool.name not in ("pacman", "apt-get", "dnf"):
+                    (tools / tool.name).unlink(missing_ok=True)
+                    (tools / tool.name).symlink_to(tool)
+        (tools / name).write_text(f"#!/bin/sh\n{body}\n")
+        (tools / name).chmod(0o755)
+        self.env["PATH"] = str(tools)
+
+    def missing_packages(self, *arguments):
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey", *arguments)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+        self.assertLessEqual(len(lines), 1, result.stdout)
+        return lines[0].removeprefix("   missing packages: ").split() if lines else [], result.stdout
+
+    def test_a_package_the_release_does_not_have_does_not_stop_the_others(self):
+        # Ubuntu 24.04 has no ONNX Runtime package. With libonnxruntime-dev in its list apt-get installed
+        # nothing ("E: Unable to locate package"): not PipeWire's library, without which the program does
+        # not start, and not curl.
+        called = self.root / "apt-argv"
+        self.only_package_manager("apt-get", f'''echo "$*" >> "{called}"
+[ "$1 $2" = "install -s" ] || exit 1
+for name in "$@"; do
+    case $name in
+        libonnxruntime-dev) echo "E: Unable to locate package $name"; failed=1 ;;
+        zenity) echo "E: Package '$name' has no installation candidate"; failed=1 ;;
+    esac
+done
+[ -z "$failed" ] || exit 100''')
+        missing, output = self.missing_packages()
+        self.assertIn("libpipewire-0.3-0", missing)
+        self.assertNotIn("libonnxruntime-dev", missing)
+        self.assertNotIn("zenity", missing)
+        absent = [line for line in output.splitlines() if "not in this system's package lists" in line]
+        self.assertEqual(len(absent), 1, output)
+        self.assertIn("libonnxruntime-dev", absent[0].split())
+        # Asked for --no-deps the package manager is not run at all, and the names are listed as before.
+        called.unlink()
+        missing, output = self.missing_packages("--no-deps")
+        self.assertIn("libonnxruntime-dev", missing)
+        self.assertFalse(called.exists())
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.
