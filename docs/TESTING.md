@@ -132,6 +132,9 @@ New in 0.9.2:
 - Linux, mirrored outputs with the Odyssey: `start-stack.sh` runs, `edid.pairs` names the Odyssey's connector for the slot and `odyssey.place` is filled.
 - Linux, live screen through the weaver: pictures per second and depth rate are what 0.9.1 gave (large allocations are now mapped one by one). Quit with the output on: the lens goes off, the process is gone within about 3 s and an immediate start works.
 - Linux viewer, real zenity and kdialog: open a dialog, press Open... again; the old window goes and a new one appears.
+- Linux viewer on KDE Plasma (Wayland), anaglyph or side-by-side output: start the output, make it full screen on the display the controls are on (they are now covered), then press F11 and Esc: it leaves full screen and closes. Again with the controls minimized. Until this was fixed after 0.9.2 the output window stopped answering while the controls could not be seen (checked under sway only).
+- Linux viewer on KDE Plasma (Wayland): with the controls behind another window or minimized, run `any2odyssey --show`: the task bar entry asks for attention (a Wayland window cannot raise itself). Moving the pointer over the controls for a while does not keep a processor core busy (`top`).
+- Linux viewer on KDE Plasma (Wayland): the task bar and the window switcher show the Any2Odyssey icon for the controls and the output window, grouped; drop an image file from Dolphin on the controls.
 - Windows: kill the controls while converting, start them again with automatic conversion, press Apply within 8 s of "Trying once more": the line counts down and 3D comes on.
 - Windows: with `companion.log` over 4 MiB, start Any2Odyssey: `companion.old.log` appears and both processes keep logging.
 
