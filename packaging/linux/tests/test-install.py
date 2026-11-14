@@ -635,6 +635,25 @@ class InstallerTests(unittest.TestCase):
         self.assert_removed(home / ".local")
         self.assertEqual((elsewhere / "bin/any2odyssey").read_text(), "not this installation's\n")
 
+    def test_the_installed_copy_called_from_where_the_link_leads_removes_the_program(self):
+        # The same from inside the folder in a shell that follows links (cd -P, zsh's CHASE_LINKS): the
+        # script's own name is then where the link leads too, and 0.9.3 still left the program behind.
+        home, data = self.usual_place()
+        elsewhere = self.root / "other drive"
+        (elsewhere / "share").mkdir(parents=True)
+        (home / ".local").mkdir()
+        (home / ".local/share").symlink_to(elsewhere / "share")
+        result = self.run_installer("--no-deps", "--no-udev", "--no-model", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / ".local/bin/any2odyssey").is_file())
+        environment = {name: value for name, value in self.env.items() if name != "PWD"}
+        result = subprocess.run([*SHELL, "./install.sh", "--uninstall"], cwd=elsewhere / "share/any2odyssey",
+                                env=environment, text=True, capture_output=True, timeout=30,
+                                stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Removing Any2Odyssey from {home}/.local\n", result.stdout)
+        self.assert_removed(home / ".local")
+
     def test_an_update_that_cannot_copy_the_program_leaves_the_one_that_is_there(self):
         # Updating 0.9.1 on a full disk: `install` had removed the old program and written 14 of 15 MB of
         # the new one, mode 600, at ~/.local/bin/any2odyssey. Here `install` fails the same way for the

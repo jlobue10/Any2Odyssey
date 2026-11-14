@@ -77,6 +77,14 @@ if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ];
     case $CALLED in
         */share/any2odyssey) [ ! -e "${CALLED%/share/any2odyssey}/bin/any2odyssey" ] || AT=$CALLED ;;
     esac
+    # Called from the folder itself in a shell that follows links (cd -P, set -P, zsh's CHASE_LINKS), the
+    # name it was called by is where the link leads as well. The usual place is then asked whether it
+    # leads here: without this the program in ~/.local/bin stayed, and the run reported success.
+    USUAL=$HOME/.local/share/any2odyssey
+    if [ "$AT" = "$HERE" ] && [ ! -e "${HERE%/share/any2odyssey}/bin/any2odyssey" ] && [ -e "$HOME/.local/bin/any2odyssey" ] &&
+        [ "$(cd "$USUAL" 2>/dev/null && pwd -P)" = "$HERE" ]; then
+        AT=$USUAL
+    fi
     case $AT in
         */share/any2odyssey)
             # A distribution's package keeps this script in the same place and runs it through
