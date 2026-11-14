@@ -203,6 +203,14 @@ fn peer_is_this_user(stream: &UnixStream) -> bool {
     same_user(sys::peer_uid(stream), sys::own_uid())
 }
 
+/// Take the whole-file lock on `file` if no other open file holds it. The
+/// lock is kept by every copy of this handle, a child's inherited one too,
+/// and goes when the last of them is closed, however those processes end.
+/// `Err` where the folder has no locks.
+pub fn try_lock_file(file: &std::fs::File) -> std::io::Result<bool> {
+    sys::try_lock(file)
+}
+
 /// Where the instance socket lives: the data folder when one was set
 /// explicitly (an isolated run must not find or disturb the real instance),
 /// otherwise the per-user runtime folder, otherwise the data folder.
