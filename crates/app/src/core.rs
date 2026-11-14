@@ -272,6 +272,7 @@ impl Core {
             }
             ui
         };
+        let saved_prefs = settings_taken_as_saved(&prefs, settings_load_error.is_some());
         let mut core = Core {
             supervisor: Supervisor::new(prefs.recover),
             prefs,
@@ -284,7 +285,7 @@ impl Core {
             worker_state: None,
             held_status: None,
             settings_load_error,
-            saved_prefs: None,
+            saved_prefs,
             worker: None,
             operation: None,
             generation: 0,
@@ -899,6 +900,27 @@ fn load_preferences(logger: &Logger) -> Result<Preferences, String> {
     )
 }
 
+/// What `settings.json` is taken to hold when the program starts.
+///
+/// Where conversion runs (Windows) nothing: the first save of a session
+/// writes, which proves once that the file can be written. Elsewhere the
+/// preferences as loaded: every one of them steers Samsung's conversion,
+/// nothing in those builds changes them, and the save on the way out wrote
+/// a `settings.json` of Windows defaults (automatic conversion, the tray,
+/// the update check) into a Linux profile the first time the viewer was
+/// closed. A file that could not be read is never taken as saved.
+fn settings_taken_as_saved(loaded: &Preferences, load_failed: bool) -> Option<Preferences> {
+    settings_taken_as_saved_on(cfg!(windows), loaded, load_failed)
+}
+
+fn settings_taken_as_saved_on(
+    converts: bool,
+    loaded: &Preferences,
+    load_failed: bool,
+) -> Option<Preferences> {
+    (!converts && !load_failed).then(|| loaded.clone())
+}
+
 /// Only damage to our own file is an error (and gates automatic start and
 /// the saves until Apply, see `Core::initialize`). Any2Odd's file is a
 /// courtesy import: failures are logged without blocking the controls, but
@@ -1292,6 +1314,47 @@ mod tests {
             assert!(core.status.starts_with("Could not save preferences:"));
             core.take_shutdown()();
         }
+    }
+
+    #[test]
+    fn a_build_without_conversion_writes_no_settings_it_did_not_change() {
+        let _guard = SETTINGS_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _restore = RestoreDataDir(std::env::var_os(paths::DATA_DIR_ENV));
+        std::env::set_var(paths::DATA_DIR_ENV, dir.path());
+        let settings = dir.path().join("settings.json");
+        let defaults = Preferences::default();
+        // Windows: nothing is taken as saved, the first save writes.
+        assert_eq!(settings_taken_as_saved_on(true, &defaults, false), None);
+        // Elsewhere what was loaded is, unless the file could not be read.
+        assert_eq!(
+            settings_taken_as_saved_on(false, &defaults, false),
+            Some(defaults.clone())
+        );
+        assert_eq!(settings_taken_as_saved_on(false, &defaults, true), None);
+
+        // A first start and a quit, as the program does them.
+        let mut core = Core::new(Logger::new(dir.path().join("test.log")), None, false);
+        core.quit();
+        assert_eq!(
+            settings.exists(),
+            cfg!(windows),
+            "settings.json after a start and a quit that changed nothing"
+        );
+        // A file from an earlier version is read and left as it is.
+        let earlier = br#"{"Mode":"Active","AutoConvert":false,"Depth":1.5}"#;
+        std::fs::write(&settings, earlier).unwrap();
+        let mut core = Core::new(Logger::new(dir.path().join("test.log")), None, false);
+        assert_eq!(core.prefs.depth, 1.5);
+        if !cfg!(windows) {
+            core.quit();
+            assert_eq!(std::fs::read(&settings).unwrap(), earlier);
+        }
+        // A change is still written everywhere.
+        let mut core = Core::new(Logger::new(dir.path().join("test.log")), None, false);
+        core.prefs.depth = 1.25;
+        assert!(core.save_preferences());
+        assert_eq!(Preferences::load_from(&settings).unwrap().depth, 1.25);
     }
 
     #[test]
