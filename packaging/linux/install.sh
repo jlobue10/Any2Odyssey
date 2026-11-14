@@ -69,15 +69,23 @@ done
 # with no program beside it, unlike the archive) acts on the installation it is part of: after --prefix it
 # would otherwise look in ~/.local, remove nothing of its own and whatever another installation has there.
 if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ]; then
-    case $HERE in
+    # Where share is a link to another place (~/.local/share kept on another drive), the installation is
+    # where this script was called, with its program in bin there; where the link leads there is no bin,
+    # and the program would be left behind.
+    AT=$HERE
+    CALLED=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || CALLED=
+    case $CALLED in
+        */share/any2odyssey) [ ! -e "${CALLED%/share/any2odyssey}/bin/any2odyssey" ] || AT=$CALLED ;;
+    esac
+    case $AT in
         */share/any2odyssey)
             # A distribution's package keeps this script in the same place and runs it through
             # any2odyssey-setup, which says --packaged. Run by its own name it is still the package's copy:
             # the files beside it are the package manager's to remove, not this script's.
-            if [ -e "${HERE%/share/any2odyssey}/bin/any2odyssey-setup" ]; then
+            if [ -e "${AT%/share/any2odyssey}/bin/any2odyssey-setup" ]; then
                 PACKAGED=1
             else
-                PREFIX=${HERE%/share/any2odyssey}
+                PREFIX=${AT%/share/any2odyssey}
                 PREFIX=${PREFIX:-/}
             fi
             ;;

@@ -569,6 +569,28 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(data.exists())
 
+    def test_the_installed_copy_removes_the_program_when_share_is_a_link_to_another_place(self):
+        # ~/.local/share kept on another drive: the script found itself where the link leads, took the
+        # folder above that for the installation and left ~/.local/bin/any2odyssey behind, saying nothing.
+        home, data = self.usual_place()
+        elsewhere = self.root / "other drive"
+        (elsewhere / "share").mkdir(parents=True)
+        (elsewhere / "bin").mkdir()
+        (elsewhere / "bin/any2odyssey").write_text("not this installation's\n")
+        (home / ".local").mkdir()
+        (home / ".local/share").symlink_to(elsewhere / "share")
+        result = self.run_installer("--no-deps", "--no-udev", "--no-model", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / ".local/bin/any2odyssey").is_file())
+        words = shlex.split(self.removal_command(result))
+        self.assertEqual(words, [f"{home}/.local/share/any2odyssey/install.sh", "--uninstall"])
+        result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
+                                capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Removing Any2Odyssey from {home}/.local\n", result.stdout)
+        self.assert_removed(home / ".local")
+        self.assertEqual((elsewhere / "bin/any2odyssey").read_text(), "not this installation's\n")
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"
