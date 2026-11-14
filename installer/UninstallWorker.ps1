@@ -17,14 +17,15 @@ function Remove-Any2OdysseyInstalledWorker {
  # Elevated, this sees every signed-in session, and the worker is one file for all of them.
  $running=@(Get-Process Any2Odyssey,Any2OdysseyWorker -ErrorAction SilentlyContinue)
  if($running.Count){throw "Any2Odyssey is still running on this PC (Windows session $((@($running | ForEach-Object {$_.SessionId} | Sort-Object -Unique)) -join ', ')). The conversion worker cannot be removed while any account uses it: quit Any2Odyssey from its tray menu in every signed-in account, then uninstall again."}
- if(Test-Path -LiteralPath $worker){Remove-Item -LiteralPath $worker}
- Remove-Item -LiteralPath $HelperPath
+ # -Force: installers up to 0.9.2 copied a read-only attribute from the package onto these files.
+ if(Test-Path -LiteralPath $worker){Remove-Item -LiteralPath $worker -Force}
+ Remove-Item -LiteralPath $HelperPath -Force
  $folder=Split-Path -Parent $HelperPath
  # Beside the helper live the installer's ownership marker (the installing account's SID) and,
  # after a run that failed, the note that told the uninstaller why.
  foreach($name in @('UninstallWorker.owner','UninstallWorker.result')){
   $leftover=Join-Path $folder $name
-  if(Test-Path -LiteralPath $leftover -PathType Leaf){Remove-Item -LiteralPath $leftover}
+  if(Test-Path -LiteralPath $leftover -PathType Leaf){Remove-Item -LiteralPath $leftover -Force}
  }
  if((Split-Path -Leaf $folder) -eq 'Any2Odyssey' -and -not (Get-ChildItem -LiteralPath $folder -Force | Select-Object -First 1)){Remove-Item -LiteralPath $folder}
 }

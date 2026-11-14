@@ -38,6 +38,16 @@ Copy-Item -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') -Destination 
 $output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -Raw).Contains('AllowDowngrade=True')) 'Install-GUI.cmd passes -AllowDowngrade on to the installer'
 Remove-Item -LiteralPath $marker
+# An exclamation mark in the folder name, in a console with delayed expansion switched on (cmd /V:ON,
+# or the DelayedExpansion registry value): cmd then drops every ! from %~dp0, and the launcher looked
+# for the package in a folder that does not exist.
+$bang=Join-Path $root 'new!folder!';New-Item -ItemType Directory -Path $bang | Out-Null
+foreach($name in @('Install-GUI.cmd','Install-Launcher.ps1','install.ps1')){Copy-Item -LiteralPath (Join-Path $root $name) -Destination $bang}
+$output='' | & $env:ComSpec /d /v:on /c (Join-Path $bang 'Install-GUI.cmd') 2>&1 | Out-String
+Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $bang 'marker.txt'))) 'Install-GUI.cmd finds its package in a folder with ! in its name while delayed expansion is on'
+foreach($name in @('Install.cmd','Install-GUI.cmd')){
+ Assert (@(Get-Content -LiteralPath (Join-Path $installerDir $name) | Where-Object {$_ -match '^setlocal'}) -join '|' -eq 'setlocal DisableDelayedExpansion') "$name switches delayed expansion off before it uses its own path"
+}
 # Double-clicked inside the ZIP preview, Windows extracts only the .cmd file to a temporary folder.
 # Nothing is beside it then, so no launcher runs and this is safe for Install.cmd as well.
 $alone=Join-Path $root 'zip-preview';New-Item -ItemType Directory -Path $alone | Out-Null

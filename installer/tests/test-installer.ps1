@@ -84,6 +84,21 @@ Assert ($failureMessage.Contains('nothing was changed') -and $failureMessage.Con
 Assert ((& $backupNames) -eq $backupsBefore) 'A clean rollback removes its backup copies'
 Invoke-Any2OdysseyFileTransaction $operations
 Assert ((& $backupNames) -eq $backupsBefore) 'A successful transaction removes its backup copies'
+# A package file with the read-only attribute (kept by some unpackers, or set by read-only media):
+# Copy-Item carries it over, and an installed file with it stopped the uninstaller and a rollback.
+$readOnlySource=Join-Path $root 'read-only-package-file.txt';Set-Content -LiteralPath $readOnlySource -Value 'packaged'
+(Get-Item -LiteralPath $readOnlySource).IsReadOnly=$true
+$readOnlyTarget=Join-Path $root 'read-only-target\installed.txt'
+$readOnlyOperations=@([pscustomobject]@{Source=$readOnlySource;Destination=$readOnlyTarget})
+$readOnlyMessage='';try{Invoke-Any2OdysseyFileTransaction $readOnlyOperations -AfterCopy {throw 'Simulated registration failure'}}catch{$readOnlyMessage=$_.Exception.Message}
+Assert ($readOnlyMessage.Contains('nothing was changed') -and -not $readOnlyMessage.Contains('Rollback needs attention') -and -not (Test-Path -LiteralPath (Split-Path -Parent $readOnlyTarget))) 'A rollback removes a file that was copied from a read-only package file'
+Invoke-Any2OdysseyFileTransaction $readOnlyOperations
+Assert ((Get-Content -LiteralPath $readOnlyTarget -Raw).Trim() -eq 'packaged' -and -not (Get-Item -LiteralPath $readOnlyTarget).IsReadOnly) 'A file installed from a read-only package file is not read-only'
+Set-Content -LiteralPath (Join-Path $root 'newer-package-file.txt') -Value 'newer'
+(Get-Item -LiteralPath $readOnlyTarget).IsReadOnly=$true
+Invoke-Any2OdysseyFileTransaction @([pscustomobject]@{Source=Join-Path $root 'newer-package-file.txt';Destination=$readOnlyTarget})
+Assert ((Get-Content -LiteralPath $readOnlyTarget -Raw).Trim() -eq 'newer') 'An installed file that was made read-only is still replaced'
+Assert ((& $backupNames) -eq $backupsBefore) 'Read-only files leave no backup copies behind'
 Assert ((Get-FileHash -LiteralPath (Join-Path $app 'Any2Odyssey.exe')).Hash -eq (Get-FileHash -LiteralPath $current).Hash) 'Successful upgrade installs the new executable'
 Assert ((Get-FileHash -LiteralPath (Join-Path $engine 'Any2OdysseyWorker.exe')).Hash -eq (Get-FileHash -LiteralPath $current).Hash) 'App and worker match after upgrade'
 Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Preferences preserved byte-for-byte'

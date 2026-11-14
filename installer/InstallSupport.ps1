@@ -126,7 +126,15 @@ function Copy-Any2OdysseyFile {
  # The program that was asked to quit a moment ago, or a scanner reading a new file, can hold a
  # file for an instant. A few short retries cover that; any other failure is reported at once.
  for($attempt=1;$true;$attempt++){
-  try{Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop;return}
+  try{
+   Copy-Item -LiteralPath $Source -Destination $Destination -Force -ErrorAction Stop
+   # Copy-Item carries the source's read-only attribute over (a package unpacked by a tool that
+   # keeps it, or copied from read-only media). An installed file must not keep it: a rollback
+   # could not remove the file again, and the uninstallers up to 0.9.2 stopped at it.
+   $copied=Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+   if($copied -is [IO.FileInfo] -and $copied.IsReadOnly){$copied.IsReadOnly=$false}
+   return
+  }
   catch{
    if($attempt -ge 5 -or -not (Test-Any2OdysseyFileInUse $_.Exception)){throw}
    Start-Sleep -Milliseconds 400
