@@ -16,8 +16,13 @@ permissions:
 # own: its cancelled run can be re-run from the Actions page once main is quiet (a re-run joins
 # the same group). A run started by hand (workflow_dispatch) gets a group of its own and is never
 # cancelled.
+#
+# A pull request's group is named by its number, not by github.ref: that is refs/pull/N/merge only
+# while the pull request is open. A pull_request run created after the merge (a push to the branch
+# seconds before merging: its run for #122 was created 58 s after the merge) has no merge ref
+# left, gets refs/heads/main, and with the ref as its group cancelled main's own run for that merge.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ (github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')) && github.ref || github.run_id }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || (github.event_name == 'push' && github.ref == 'refs/heads/main') && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 env:
