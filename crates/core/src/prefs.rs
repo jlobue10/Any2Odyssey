@@ -193,7 +193,16 @@ impl Preferences {
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             Err(e) => return Err(e),
         };
-        self.save_to(path)?;
+        if let Err(error) = self.save_to(path) {
+            // The original is still in place, so the copy preserves nothing:
+            // without this, every Apply against a settings file that cannot
+            // be replaced (read-only, or held open by another program) left
+            // one more `settings-recovery-*.json` behind.
+            if let Some(backup) = &backup {
+                let _ = std::fs::remove_file(backup);
+            }
+            return Err(error);
+        }
         Ok(backup)
     }
 }
@@ -469,6 +478,36 @@ mod tests {
         // Leading whitespace and a byte-order mark before an object are fine.
         std::fs::write(&path, "\u{FEFF} \r\n{\"AutoConvert\":false}").unwrap();
         assert!(!Preferences::load_from(&path).unwrap().auto_convert);
+    }
+
+    /// A program that keeps the settings open without sharing them for
+    /// deletion (an editor, a backup tool) lets them be read but not
+    /// replaced, so the save after the backup fails; pressing Apply again
+    /// must not pile up backups.
+    #[cfg(windows)]
+    #[test]
+    fn a_recovery_that_cannot_replace_the_settings_leaves_no_backup_behind() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "damaged").unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE, without FILE_SHARE_DELETE.
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .open(&path)
+            .unwrap();
+        let mut prefs = Preferences::default();
+        for _ in 0..2 {
+            assert!(prefs.save_recovering_to(&path).is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "damaged");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // Once the file can be replaced, the recovery keeps its one backup.
+        drop(held);
+        let backup = prefs.save_recovering_to(&path).unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), "damaged");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[cfg(unix)]
