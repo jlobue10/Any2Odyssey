@@ -36,8 +36,10 @@ try{
  $failed=$false;try{Remove-Any2OdysseyInstalledWorker -HelperPath $helper}catch{$failed=$true}
  Assert ($failed -and (Test-Path -LiteralPath $worker) -and (Test-Path -LiteralPath $helper) -and (Test-Path -LiteralPath $owner)) 'Running app blocks deletion without killing processes'
  $script:running=$false
+ # Installers up to 0.9.2 copied a read-only attribute from the package onto the worker and the helper.
+ foreach($file in @($worker,$helper,$owner,$result)){(Get-Item -LiteralPath $file).IsReadOnly=$true}
  Remove-Any2OdysseyInstalledWorker -HelperPath $helper
- Assert (-not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $owner) -and -not (Test-Path -LiteralPath $result)) 'Helper removes only the owned worker, itself, its owner marker and its result note'
+ Assert (-not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper) -and -not (Test-Path -LiteralPath $owner) -and -not (Test-Path -LiteralPath $result)) 'Helper removes only the owned worker, itself, its owner marker and its result note, read-only or not'
  Assert ((Test-Path -LiteralPath $sentinel) -and (Test-Path -LiteralPath $userExe)) 'Samsung and per-user files remain untouched'
  $errors=$null;$tokens=$null;$uninstallAst=$null
  foreach($file in @('Uninstall.ps1','UninstallWorker.ps1','install.ps1','InstallSupport.ps1','Install-Launcher.ps1')){

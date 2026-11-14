@@ -102,6 +102,14 @@ try{
  Assert (-not (Test-Path -LiteralPath $registration)) 'Installed-apps registration is removed'
  Assert ((Test-Path -LiteralPath (Join-Path $engine 'ConversionWrapper.dll')) -and (Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Samsung engine and user preferences are untouched'
 
+ # Read-only installed files: installers up to 0.9.2 copied the attribute from the package when it
+ # was set there, and a user or a tool can set it later. The uninstall must not stop halfway.
+ $launches.Clear()
+ New-Fixture -Elevated $false
+ foreach($name in $ownedNames+@('version.json')){(Get-Item -LiteralPath (Join-Path $app $name)).IsReadOnly=$true}
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert (-not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration)) 'Read-only installed files are removed like any others'
+
  $launches.Clear()
  New-Fixture -Elevated $true
  & (Join-Path $app 'Uninstall.ps1')

@@ -98,13 +98,15 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
  $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
  if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){Remove-Item -LiteralPath $link}
 }
-# Exact file list only: leave Samsung files, personal settings and logs intact.
+# Exact file list only: leave Samsung files, personal settings and logs intact. -Force, because a
+# read-only attribute (copied from the package by installers up to 0.9.2, or set since) must not
+# stop the uninstall halfway, after the worker and the shortcuts are already gone.
 $ownedFiles=@($exe,(Join-Path $app 'Any2Odyssey.ico'),(Join-Path $app 'LICENSE'),(Join-Path $app 'NOTICE'),(Join-Path $app 'THIRD-PARTY-LICENSES.md'),(Join-Path $app 'USER-GUIDE.html'),(Join-Path $app 'Uninstall.ps1'))
 foreach($file in $ownedFiles){
- if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}
+ if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force}
 }
 $registration='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Any2Odyssey'
-if(Test-Path -LiteralPath $versionFile){Remove-Item -LiteralPath $versionFile}
+if(Test-Path -LiteralPath $versionFile){Remove-Item -LiteralPath $versionFile -Force}
 if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration}
 # The program folder held only the files above; it stays if anything else was placed in it.
 if((Test-Path -LiteralPath $app -PathType Container) -and -not (Get-ChildItem -LiteralPath $app -Force | Select-Object -First 1)){Remove-Item -LiteralPath $app -ErrorAction SilentlyContinue}
