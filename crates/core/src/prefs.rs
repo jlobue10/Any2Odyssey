@@ -132,7 +132,17 @@ impl Preferences {
         };
         // A file hand-edited in Notepad ("UTF-8 with BOM") or written by
         // Windows PowerShell must not count as damaged.
-        let mut prefs: Self = serde_json::from_str(crate::fsutil::strip_utf8_bom_str(&text))
+        let text = crate::fsutil::strip_utf8_bom_str(&text);
+        // serde reads a JSON array as a struct's fields in order, so `[]`
+        // would load as first-run defaults (desktop capture on) and the next
+        // save would overwrite the file. Only an object is a settings file.
+        if !text.trim_start().starts_with('{') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "settings must be a JSON object",
+            ));
+        }
+        let mut prefs: Self = serde_json::from_str(text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         prefs.sanitize();
         Ok(prefs)
@@ -437,6 +447,28 @@ mod tests {
             "{name}"
         );
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn settings_that_are_json_but_not_an_object_are_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for text in [
+            "[]",
+            " [true]",
+            "\u{FEFF}[]",
+            "null",
+            "0",
+            "\"Desktop\"",
+            "",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            let error = Preferences::load_from(&path).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{text:?}");
+        }
+        // Leading whitespace and a byte-order mark before an object are fine.
+        std::fs::write(&path, "\u{FEFF} \r\n{\"AutoConvert\":false}").unwrap();
+        assert!(!Preferences::load_from(&path).unwrap().auto_convert);
     }
 
     #[cfg(unix)]
