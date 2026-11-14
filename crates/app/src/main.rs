@@ -486,6 +486,11 @@ fn run_gui(
     logger: Logger,
     screenshot: Option<core::ScreenshotRequest>,
 ) -> i32 {
+    // Before the first thread: this changes the environment.
+    #[cfg(not(windows))]
+    if let Some(note) = platform::leave_dead_wayland() {
+        logger.log(&note);
+    }
     if let Some(request) = screenshot {
         // Isolated preview: no single-instance guard, no events, no worker, no saved preferences.
         let mut core = core::Core::new_preview(logger);
@@ -510,7 +515,7 @@ fn run_gui(
                 1
             }
             (Err(e), _) => {
-                complain(&e.to_string());
+                complain(&window_failure(&e));
                 1
             }
         };
@@ -549,6 +554,7 @@ fn run_gui(
             None
         }
     };
+    let log = logger.path().to_owned();
     let core = Arc::new(Mutex::new(core::Core::new(logger, events, start_requested)));
     let run = ui::run(core);
     // The window is gone and with it the outputs, whose helpers were told
@@ -561,9 +567,29 @@ fn run_gui(
     match run {
         Ok(()) => 0,
         Err(e) => {
-            complain(&e.to_string());
+            // Started from a menu there is no terminal to read this on.
+            let said = window_failure(&e);
+            Logger::new(log).log(&said);
+            complain(&said);
             1
         }
+    }
+}
+
+/// What to say when the window system refused the window or took it away.
+/// The window library's own text names one of its source files and, of the
+/// display variables, at most the one it tried.
+fn window_failure(error: &anyhow::Error) -> String {
+    #[cfg(not(windows))]
+    {
+        format!(
+            "{APP_NAME} has no window system to run in ({}): {error}",
+            platform::display_settings()
+        )
+    }
+    #[cfg(windows)]
+    {
+        format!("{APP_NAME} could not keep its window: {error}")
     }
 }
 
@@ -797,6 +823,15 @@ mod argument_tests {
         let mut written = Vec::new();
         write_line(&mut written, "two\nlines");
         assert_eq!(written, b"two\nlines\n");
+    }
+
+    #[test]
+    fn a_window_that_could_not_be_opened_is_reported_with_the_cause() {
+        let said = window_failure(&anyhow::anyhow!("Could not find wayland compositor"));
+        assert!(said.starts_with(APP_NAME), "{said}");
+        assert!(said.ends_with(": Could not find wayland compositor"));
+        #[cfg(not(windows))]
+        assert!(said.contains("WAYLAND_DISPLAY") && said.contains("DISPLAY"));
     }
 
     #[test]

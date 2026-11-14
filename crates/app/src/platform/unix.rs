@@ -7,7 +7,7 @@
 //! the guard, and a later launch that finds it answered writes its request
 //! there instead of opening a second window.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -919,6 +919,84 @@ fn names_wayland(display: Option<OsString>, socket: Option<OsString>) -> bool {
     named(display) || named(socket)
 }
 
+/// The socket `WAYLAND_DISPLAY` names, as the Wayland library reads it: a
+/// path of its own, or a name in the runtime folder.
+fn wayland_socket(display: &OsStr, runtime: Option<&OsStr>) -> Option<PathBuf> {
+    let name = Path::new(display);
+    if name.is_absolute() {
+        return Some(name.into());
+    }
+    let runtime = runtime.filter(|runtime| !runtime.is_empty())?;
+    Some(Path::new(runtime).join(name))
+}
+
+/// What to say when `WAYLAND_DISPLAY` names a compositor that is not there
+/// while an X11 display is named too; `None` everywhere else. `answers`
+/// tells whether somebody listens at a socket.
+fn dead_wayland(
+    display: Option<OsString>,
+    socket: Option<OsString>,
+    runtime: Option<OsString>,
+    x11: Option<OsString>,
+    answers: impl FnOnce(&Path) -> bool,
+) -> Option<String> {
+    let display = display.filter(|display| !display.is_empty())?;
+    let x11 = x11.filter(|x11| !x11.is_empty())?;
+    // A connection handed over by the parent is used instead of the name.
+    if socket.is_some_and(|socket| !socket.is_empty()) {
+        return None;
+    }
+    let at = wayland_socket(&display, runtime.as_deref());
+    if at.as_deref().is_some_and(answers) {
+        return None;
+    }
+    Some(format!(
+        "No Wayland compositor answers at WAYLAND_DISPLAY={}: using X11 (DISPLAY={}).",
+        display.to_string_lossy(),
+        x11.to_string_lossy()
+    ))
+}
+
+/// Use X11 where `WAYLAND_DISPLAY` is left over from a session that is
+/// gone (a terminal multiplexer or a service started in it, `sudo -E`) and
+/// an X11 display is named as well. The window library takes Wayland
+/// whenever the variable is set and gives up when nobody answers, so the
+/// program did not start although it could have. Returns what to log.
+///
+/// Call before any thread is started: it takes the variable out of this
+/// process's environment.
+pub fn leave_dead_wayland() -> Option<String> {
+    let said = dead_wayland(
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("WAYLAND_SOCKET"),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("DISPLAY"),
+        |socket| UnixStream::connect(socket).is_ok(),
+    )?;
+    std::env::remove_var("WAYLAND_DISPLAY");
+    Some(said)
+}
+
+/// The display variables, for the message when no window could be opened.
+pub fn display_settings() -> String {
+    describe_displays(
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("DISPLAY"),
+    )
+}
+
+fn describe_displays(wayland: Option<OsString>, x11: Option<OsString>) -> String {
+    let show = |name: &str, value: Option<OsString>| match value {
+        Some(value) if !value.is_empty() => format!("{name}={}", value.to_string_lossy()),
+        _ => format!("{name} is not set"),
+    };
+    format!(
+        "{}, {}",
+        show("WAYLAND_DISPLAY", wayland),
+        show("DISPLAY", x11)
+    )
+}
+
 pub fn show_window(_: isize) {}
 pub fn hide_window(_: isize) {}
 pub fn open_path(path: &Path) {
@@ -1603,5 +1681,91 @@ mod tests {
         // Empty counts as unset, as it does for the window library.
         assert!(!names_wayland(None, None));
         assert!(!names_wayland(os(""), os("")));
+    }
+
+    #[test]
+    fn a_wayland_display_nobody_answers_at_gives_way_to_x11() {
+        let os = |text: &str| Some(OsString::from(text));
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Some(dir.path().as_os_str().to_owned());
+        let alive = dir.path().join("wayland-7");
+        let _compositor = UnixListener::bind(&alive).unwrap();
+        let connects = |socket: &Path| UnixStream::connect(socket).is_ok();
+
+        // The name is looked up in the runtime folder; a path is itself.
+        assert_eq!(
+            wayland_socket(OsStr::new("wayland-7"), runtime.as_deref()),
+            Some(alive.clone())
+        );
+        assert_eq!(wayland_socket(alive.as_os_str(), None), Some(alive.clone()));
+        assert_eq!(wayland_socket(OsStr::new("wayland-7"), None), None);
+        assert_eq!(
+            wayland_socket(OsStr::new("wayland-7"), Some(OsStr::new(""))),
+            None
+        );
+
+        // A compositor that answers is used, with or without X11 beside it.
+        assert_eq!(
+            dead_wayland(os("wayland-7"), None, runtime.clone(), os(":0"), connects),
+            None
+        );
+        assert_eq!(
+            dead_wayland(
+                Some(alive.clone().into_os_string()),
+                None,
+                None,
+                os(":0"),
+                connects
+            ),
+            None
+        );
+        // Nobody there (no socket, a file nobody listens at, no runtime
+        // folder to look in) and X11 named: X11.
+        std::fs::write(dir.path().join("wayland-8"), b"").unwrap();
+        for (name, runtime) in [
+            ("wayland-gone", runtime.clone()),
+            ("wayland-8", runtime.clone()),
+            ("wayland-7", None),
+        ] {
+            let said = dead_wayland(os(name), None, runtime, os(":1"), connects)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert!(said.contains(name) && said.contains("DISPLAY=:1"), "{said}");
+        }
+        // Nothing to fall back on, nothing named, or a connection handed
+        // over by the parent: left to the window library, sockets unasked.
+        let unasked = |_: &Path| -> bool { panic!("no socket is tried") };
+        assert_eq!(
+            dead_wayland(os("wayland-gone"), None, runtime.clone(), None, unasked),
+            None
+        );
+        assert_eq!(
+            dead_wayland(os("wayland-gone"), None, runtime.clone(), os(""), unasked),
+            None
+        );
+        assert_eq!(
+            dead_wayland(None, None, runtime.clone(), os(":0"), unasked),
+            None
+        );
+        assert_eq!(
+            dead_wayland(os(""), None, runtime.clone(), os(":0"), unasked),
+            None
+        );
+        assert_eq!(
+            dead_wayland(os("wayland-gone"), os("5"), runtime, os(":0"), unasked),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_start_names_both_display_variables() {
+        let os = |text: &str| Some(OsString::from(text));
+        assert_eq!(
+            describe_displays(os("wayland-0"), None),
+            "WAYLAND_DISPLAY=wayland-0, DISPLAY is not set"
+        );
+        assert_eq!(
+            describe_displays(os(""), os(":0")),
+            "WAYLAND_DISPLAY is not set, DISPLAY=:0"
+        );
     }
 }
