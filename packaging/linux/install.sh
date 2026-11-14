@@ -369,6 +369,13 @@ if [ -z "$PACKAGED" ]; then
     case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; start the program from the application menu, or as $BIN/any2odyssey" ;; esac
 else
     step "1. The program is installed by your distribution's package"
+    # An installation from the release archive that is still in ~/.local comes first in the menu and, where
+    # ~/.local/bin is on the PATH, by name: the older program went on being started, and nothing said so.
+    # Removed through this script, whatever version made it: the --uninstall of 0.9.0 and 0.9.1 removes the
+    # settings and the depth model with it.
+    if [ -e "$HOME/.local/share/applications/any2odyssey.desktop" ] || [ -e "$HOME/.local/bin/any2odyssey" ]; then
+        warn "an installation from the release archive is still in $HOME/.local: its menu entry and its program are used instead of the package's. To remove it (your settings and the depth model stay): $(quoted "$HERE/install.sh") --uninstall --prefix $(quoted "$HOME/.local")"
+    fi
 fi
 
 # ---------------------------------------------------------------------------------------------------------

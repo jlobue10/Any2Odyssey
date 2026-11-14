@@ -662,6 +662,35 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(program.read_bytes(), (self.archive / "any2odyssey").read_bytes())
         self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
 
+    def test_the_packages_setup_says_that_an_installation_from_the_archive_is_still_in_the_way(self):
+        # Seen with the published Arch package over a 0.9.1 installation in ~/.local: the old menu entry and
+        # program went on being used, and any2odyssey-setup named the old program as the one to start.
+        home, data = self.usual_place()
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        result = self.run_installer("--packaged", *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("is still in", result.stdout)
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        kept = self.wine_side(data)[:2]
+        result = self.run_installer("--packaged", *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if "is still in" in line]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn(f"from the release archive is still in {home}/.local:", lines[0])
+        words = shlex.split(lines[0].split("stay): ", 1)[1])
+        self.assertEqual(words, [str(self.archive / "install.sh"), "--uninstall", "--prefix", f"{home}/.local"])
+        result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
+                                capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for left in ["bin/any2odyssey", "share/applications/any2odyssey.desktop", "share/any2odyssey/install.sh"]:
+            self.assertFalse((home / ".local" / left).exists(), f"{left} is still there")
+        for file in kept:
+            self.assertTrue(file.is_file(), f"removing the earlier installation removed {file}")
+        result = self.run_installer("--packaged", *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("is still in", result.stdout)
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"
