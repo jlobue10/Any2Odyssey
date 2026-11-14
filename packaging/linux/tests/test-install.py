@@ -580,6 +580,128 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(data.exists())
 
+    def test_the_setup_files_0_9_1_left_among_a_wine_side_it_built_go_by_name(self):
+        # Seen on a real 0.9.1 installation updated to 0.9.2: setup.sh, src and tests of 0.9.1 stayed in
+        # the Wine side for good. That setup.sh, run again, rebuilds the old stand-ins into the prefix and
+        # stops where it always did.
+        home, data = self.usual_place()
+        old = data / "wine-lens"
+        kept = self.wine_side(data) + [old / "tools/ensure-stack.sh", old / "any2odyssey-lens-helper",
+                                       old / "stack.lock"]
+        gone = [old / "setup.sh", old / "src/a2ocam.c", old / "tests/test-noxon.py", old / "README.md",
+                old / "LICENSE-MIT", old / "70-any2odyssey-lens.rules", old / "tools/mkboard.py"]
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+
+        def as_0_9_1_left_it():
+            for file in kept + gone:
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("#!/bin/sh\n")
+
+        for arguments in [flags, ["--uninstall"]]:
+            with self.subTest(arguments=arguments):
+                as_0_9_1_left_it()
+                result = self.run_installer(*arguments, "--dry-run")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for file in kept + gone:
+                    self.assertTrue(file.is_file(), f"--dry-run removed {file}")
+                result = self.run_installer(*arguments)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for file in kept:
+                    self.assertTrue(file.is_file(), f"{file} is the Wine side's and was removed")
+                for file in gone:
+                    self.assertFalse(file.exists(), f"{file} of the earlier version is still there")
+                self.assertFalse((old / "src").exists())
+                self.assertFalse((old / "tests").exists())
+
+    def test_the_installed_copy_removes_the_program_when_share_is_a_link_to_another_place(self):
+        # ~/.local/share kept on another drive: the script found itself where the link leads, took the
+        # folder above that for the installation and left ~/.local/bin/any2odyssey behind, saying nothing.
+        home, data = self.usual_place()
+        elsewhere = self.root / "other drive"
+        (elsewhere / "share").mkdir(parents=True)
+        (elsewhere / "bin").mkdir()
+        (elsewhere / "bin/any2odyssey").write_text("not this installation's\n")
+        (home / ".local").mkdir()
+        (home / ".local/share").symlink_to(elsewhere / "share")
+        result = self.run_installer("--no-deps", "--no-udev", "--no-model", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / ".local/bin/any2odyssey").is_file())
+        words = shlex.split(self.removal_command(result))
+        self.assertEqual(words, [f"{home}/.local/share/any2odyssey/install.sh", "--uninstall"])
+        result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
+                                capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"Removing Any2Odyssey from {home}/.local\n", result.stdout)
+        self.assert_removed(home / ".local")
+        self.assertEqual((elsewhere / "bin/any2odyssey").read_text(), "not this installation's\n")
+
+    def test_an_update_that_cannot_copy_the_program_leaves_the_one_that_is_there(self):
+        # Updating 0.9.1 on a full disk: `install` had removed the old program and written 14 of 15 MB of
+        # the new one, mode 600, at ~/.local/bin/any2odyssey. Here `install` fails the same way for the
+        # program and for nothing else.
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        program = prefix / "bin/any2odyssey"
+        before = program.read_bytes()
+        (self.archive / "any2odyssey").write_text("#!/bin/sh\n# the next version\n" + "#" * 4096 + "\n")
+        real = shutil.which("install")
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "install").write_text(
+            '#!/bin/sh\nfor last; do :; done\n'
+            f'case $last in */bin/*any2odyssey*) : >"{self.root}/called"; rm -f "$last"\n'
+            '    head -c 100 "$2" >"$last"; chmod 600 "$last"\n'
+            '    echo "install: error writing: No space left on device" >&2; exit 1 ;; esac\n'
+            f'exec "{real}" "$@"\n')
+        (tools / "install").chmod(0o755)
+        path = self.env["PATH"]
+        self.env["PATH"] = f"{tools}{os.pathsep}{path}"
+        result = self.install(prefix)
+        if not (self.root / "called").exists():
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in install, which the test cannot stand in for")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No space left on device", result.stderr)
+        self.assertEqual(program.read_bytes(), before, "the program that was installed is damaged")
+        self.assertTrue(os.access(program, os.X_OK))
+        self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
+        # With room again the update goes through and leaves nothing beside the program.
+        self.env["PATH"] = path
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(program.read_bytes(), (self.archive / "any2odyssey").read_bytes())
+        self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
+
+    def test_the_packages_setup_says_that_an_installation_from_the_archive_is_still_in_the_way(self):
+        # Seen with the published Arch package over a 0.9.1 installation in ~/.local: the old menu entry and
+        # program went on being used, and any2odyssey-setup named the old program as the one to start.
+        home, data = self.usual_place()
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        result = self.run_installer("--packaged", *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("is still in", result.stdout)
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        kept = self.wine_side(data)[:2]
+        result = self.run_installer("--packaged", *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if "is still in" in line]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn(f"from the release archive is still in {home}/.local:", lines[0])
+        words = shlex.split(lines[0].split("stay): ", 1)[1])
+        self.assertEqual(words, [str(self.archive / "install.sh"), "--uninstall", "--prefix", f"{home}/.local"])
+        result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
+                                capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for left in ["bin/any2odyssey", "share/applications/any2odyssey.desktop", "share/any2odyssey/install.sh"]:
+            self.assertFalse((home / ".local" / left).exists(), f"{left} is still there")
+        for file in kept:
+            self.assertTrue(file.is_file(), f"removing the earlier installation removed {file}")
+        result = self.run_installer("--packaged", *flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("is still in", result.stdout)
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"

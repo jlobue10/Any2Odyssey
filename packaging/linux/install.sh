@@ -69,15 +69,23 @@ done
 # with no program beside it, unlike the archive) acts on the installation it is part of: after --prefix it
 # would otherwise look in ~/.local, remove nothing of its own and whatever another installation has there.
 if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ]; then
-    case $HERE in
+    # Where share is a link to another place (~/.local/share kept on another drive), the installation is
+    # where this script was called, with its program in bin there; where the link leads there is no bin,
+    # and the program would be left behind.
+    AT=$HERE
+    CALLED=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || CALLED=
+    case $CALLED in
+        */share/any2odyssey) [ ! -e "${CALLED%/share/any2odyssey}/bin/any2odyssey" ] || AT=$CALLED ;;
+    esac
+    case $AT in
         */share/any2odyssey)
             # A distribution's package keeps this script in the same place and runs it through
             # any2odyssey-setup, which says --packaged. Run by its own name it is still the package's copy:
             # the files beside it are the package manager's to remove, not this script's.
-            if [ -e "${HERE%/share/any2odyssey}/bin/any2odyssey-setup" ]; then
+            if [ -e "${AT%/share/any2odyssey}/bin/any2odyssey-setup" ]; then
                 PACKAGED=1
             else
-                PREFIX=${HERE%/share/any2odyssey}
+                PREFIX=${AT%/share/any2odyssey}
                 PREFIX=${PREFIX:-/}
             fi
             ;;
@@ -192,12 +200,21 @@ fi
 # share/any2odyssey/wine-lens is the setup's files and nothing else (as every installation outside the data
 # folder has it, and 0.9.1 left it in the data folder too) when no Wine side was built in it.
 only_the_setup() { [ -f "$APPDIR/wine-lens/setup.sh" ] && [ ! -e "$APPDIR/wine-lens/prefix" ] && [ ! -e "$APPDIR/wine-lens/build" ]; }
+# Where 0.9.0 or 0.9.1 built a Wine side in it, their setup's own files are still among it: they go, by
+# name. That setup.sh, run again, puts the old stand-ins into the prefix and stops as it did then. What
+# setup.sh keeps there under the same names (tools/*.sh, the two helpers) is the Wine side's and stays.
+drop_the_old_setup() {
+    [ "$WINE_LENS" != "$APPDIR/wine-lens" ] && [ -f "$APPDIR/wine-lens/setup.sh" ] || return 0
+    for old in setup.sh src tests README.md LICENSE-MIT "$RULES_NAME" tools/mkboard.py; do
+        run rm -rf "$APPDIR/wine-lens/$old"
+    done
+}
 
 # ---------------------------------------------------------------------------------------------------------
 if [ -n "$UNINSTALL" ]; then
     step "Removing Any2Odyssey from $PREFIX"
     if [ -z "$PACKAGED" ]; then
-        run rm -f "$BIN/any2odyssey" "$SHARE/applications/any2odyssey.desktop" \
+        run rm -f "$BIN/any2odyssey" "$BIN/.any2odyssey.new" "$SHARE/applications/any2odyssey.desktop" \
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
         # The desktop entry's staging folder, where a run that was killed left one (a link is only a name).
         for stale in "$SHARE/applications/any2odyssey.desktop".??????????; do
@@ -208,7 +225,7 @@ if [ -n "$UNINSTALL" ]; then
         # as the last lines say; the Wine side is asked about below.
         run rm -f "$APPDIR/install.sh"
         [ -d "$APPDIR/wine-lens-setup" ] && run rm -rf "$APPDIR/wine-lens-setup"
-        if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; fi
+        if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; else drop_the_old_setup; fi
         if [ -z "$DRY" ] && [ -d "$APPDIR" ]; then rmdir "$APPDIR" 2>/dev/null || true; fi
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
         # The caches the installation refreshed still name the entry and the icon that are gone now.
@@ -269,7 +286,15 @@ if [ -z "$PACKAGED" ]; then
             exit 1
         done
     fi
-    run install -Dm755 "$HERE/any2odyssey" "$BIN/any2odyssey"
+    # Written beside the program and moved into its place: when the copy stops half-way (a full disk, a
+    # kill) the program of the installation that is there stays whole. Written over it, an update that
+    # ran out of space left 14 of its 15 MB there, not executable, where a working program had been.
+    if ! run install -Dm755 "$HERE/any2odyssey" "$BIN/.any2odyssey.new"; then
+        rm -f "$BIN/.any2odyssey.new"
+        echo "install: could not copy the program to $BIN (see the message above); an installation that was there is unchanged" >&2
+        exit 1
+    fi
+    run mv -fT "$BIN/.any2odyssey.new" "$BIN/any2odyssey"
     # The desktop entry names the program by its full path: ~/.local/bin is not on every session's PATH.
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
@@ -349,7 +374,7 @@ if [ -z "$PACKAGED" ]; then
     else
         mkdir -p "$APPDIR"
         # (the setup an earlier version left in wine-lens goes; a Wine side built there does not)
-        if only_the_setup; then rm -rf "$APPDIR/wine-lens"; fi
+        if only_the_setup; then rm -rf "$APPDIR/wine-lens"; else drop_the_old_setup; fi
         rm -rf "$WINE_LENS"
         cp -R "$HERE/wine-lens" "$WINE_LENS"
         install -m755 "$HERE/install.sh" "$APPDIR/install.sh"
@@ -359,6 +384,13 @@ if [ -z "$PACKAGED" ]; then
     case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; start the program from the application menu, or as $BIN/any2odyssey" ;; esac
 else
     step "1. The program is installed by your distribution's package"
+    # An installation from the release archive that is still in ~/.local comes first in the menu and, where
+    # ~/.local/bin is on the PATH, by name: the older program went on being started, and nothing said so.
+    # Removed through this script, whatever version made it: the --uninstall of 0.9.0 and 0.9.1 removes the
+    # settings and the depth model with it.
+    if [ -e "$HOME/.local/share/applications/any2odyssey.desktop" ] || [ -e "$HOME/.local/bin/any2odyssey" ]; then
+        warn "an installation from the release archive is still in $HOME/.local: its menu entry and its program are used instead of the package's. To remove it (your settings and the depth model stay): $(quoted "$HERE/install.sh") --uninstall --prefix $(quoted "$HOME/.local")"
+    fi
 fi
 
 # ---------------------------------------------------------------------------------------------------------
