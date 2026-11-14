@@ -274,11 +274,8 @@ if [ -z "$PACKAGED" ]; then
             # file is replaced like the program and the icon are, not written through.
             # A private, unique staging directory keeps installs from sharing a temporary path.
             # Noclobber also rejects a substituted link before awk can truncate its target.
-            # One left by a run that was killed before it could remove its own goes first: nothing else
-            # would ever remove it. A name that is a link is not followed, only removed.
-            for stale in "$ENTRY".??????????; do
-                if [ -d "$stale" ] || [ -L "$stale" ]; then rm -rf -- "$stale"; fi
-            done
+            # Only remove this run's staging directory. A matching name may belong to an
+            # install still running; its name alone cannot show that it was abandoned.
             ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1
             trap 'rm -f -- "$ENTRY_TMP/entry"; rmdir -- "$ENTRY_TMP"' 0
             trap 'exit 1' HUP INT TERM

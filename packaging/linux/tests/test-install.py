@@ -670,7 +670,37 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(entry.read_text(), "previous desktop entry\n")
         self.assertEqual(list(entry.parent.iterdir()), [entry])
 
-    def test_a_staging_folder_left_by_a_killed_run_is_removed_by_the_next(self):
+    def test_overlapping_installs_do_not_remove_each_others_staging(self):
+        prefix = self.root / "prefix"
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "nested install completed"
+        nested_log = self.root / "nested install.log"
+        real_mktemp = shlex.quote(shutil.which("mktemp"))
+        nested = shlex.join([*SHELL, str(self.archive / "install.sh"), "--prefix", str(prefix),
+                             "--no-deps", "--no-udev", "--no-model", "--no-odyssey"])
+        # Pause the first install just after it creates its staging directory. Run the
+        # second to completion before letting the first open its staged entry.
+        (tools / "mktemp").write_text(
+            f'#!/bin/sh\nstage=$({real_mktemp} "$@") || exit $?\n'
+            'if [ -z "${A2O_NESTED_INSTALL:-}" ]; then\n'
+            f'    A2O_NESTED_INSTALL=1 {nested} > {shlex.quote(str(nested_log))} 2>&1 || exit $?\n'
+            f'    : > {shlex.quote(str(called))}\nfi\n'
+            'printf "%s\\n" "$stage"\n'
+        )
+        (tools / "mktemp").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        result = self.install(prefix)
+        if not called.exists() and not nested_log.exists():
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in mktemp, which the test cannot stand in for")
+        self.assertTrue(called.exists(), nested_log.read_text())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        entry = prefix / "share/applications/any2odyssey.desktop"
+        self.assertIn(f'Exec="{prefix}/bin/any2odyssey" %f\n', entry.read_text())
+        self.assertEqual(list(entry.parent.glob("any2odyssey.desktop*")), [entry])
+
+    def test_other_staging_names_are_left_alone(self):
         prefix = self.root / "prefix"
         applications = prefix / "share/applications"
         left = applications / "any2odyssey.desktop.Ab3dE6gh1J"
@@ -685,7 +715,10 @@ class InstallerTests(unittest.TestCase):
         result = self.install(prefix)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sorted(path.name for path in applications.glob("any2odyssey.desktop*")),
-                         ["any2odyssey.desktop", "any2odyssey.desktop.ninechars"])
+                         ["any2odyssey.desktop", "any2odyssey.desktop.Ab3dE6gh1J",
+                          "any2odyssey.desktop.linkedAway", "any2odyssey.desktop.ninechars"])
+        self.assertEqual((left / "entry").read_text(), "half an entry")
+        self.assertTrue((applications / "any2odyssey.desktop.linkedAway").is_symlink())
         self.assertEqual((elsewhere / "kept").read_text(), "not the installer's\n")
 
     @unittest.skipUnless(os.geteuid() == 0, "needs root: the refusal is for a root installer")
