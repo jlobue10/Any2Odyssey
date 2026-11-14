@@ -218,7 +218,10 @@ if [ -n "$UNINSTALL" ]; then
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
         # The desktop entry's staging folder, where a run that was killed left one (a link is only a name).
         for stale in "$SHARE/applications/any2odyssey.desktop".??????????; do
-            if [ -d "$stale" ] && [ ! -L "$stale" ]; then run rm -rf -- "$stale"; fi
+            if [ -d "$stale" ] && [ ! -L "$stale" ]; then
+                run rm -f -- "$stale/entry"
+                run rmdir -- "$stale" 2>/dev/null || true
+            fi
         done
         # The same for the copy of the program that such a run was writing.
         for stale in "$BIN"/.any2odyssey.new.??????????; do
@@ -331,8 +334,11 @@ if [ -z "$PACKAGED" ]; then
             # Its age can: a run has its own for a moment, so one untouched for more than a day was left
             # by a run that was killed, and nothing else would ever remove it. A link is not followed.
             for stale in "$ENTRY".??????????; do
-                if [ -d "$stale" ] && [ ! -L "$stale" ]; then
-                    find "$stale" -prune -type d -mtime +0 -exec rm -rf -- {} + 2>/dev/null || true
+                # Only what a run leaves in one goes, and the folder when that was all: a folder of the
+                # user's own that merely has such a name (any2odyssey.desktop.2026-11-14) keeps its files.
+                if [ -d "$stale" ] && [ ! -L "$stale" ] && [ -n "$(find "$stale" -prune -type d -mtime +0 2>/dev/null)" ]; then
+                    rm -f -- "$stale/entry"
+                    rmdir -- "$stale" 2>/dev/null || true
                 fi
             done
             ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1

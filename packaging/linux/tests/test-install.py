@@ -941,6 +941,25 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual([path.name for path in applications.glob("any2odyssey.desktop*")], [link.name])
         self.assertEqual((elsewhere / "entry").read_text(), "not the installer's\n")
 
+    def test_a_folder_of_the_users_named_like_a_staging_folder_keeps_its_files(self):
+        # Ten characters after "any2odyssey.desktop." is all a staging folder's name says: a folder of the
+        # user's own with such a name (a dated copy, say) was removed with everything in it, by an
+        # installation once it was a day old and by --uninstall at any age.
+        prefix = self.root / "prefix"
+        applications = prefix / "share/applications"
+        dated = applications / "any2odyssey.desktop.2026-11-14"
+        dated.mkdir(parents=True)
+        (dated / "notes.txt").write_text("the user's\n")
+        long_ago = time.time() - 3 * 24 * 3600
+        os.utime(dated, (long_ago, long_ago))
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((dated / "notes.txt").read_text(), "the user's\n")
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((dated / "notes.txt").read_text(), "the user's\n")
+        self.assertFalse((applications / "any2odyssey.desktop").exists())
+
     def test_a_wine_side_built_in_the_usual_place_survives_a_run_told_of_another_data_folder(self):
         # Installed and prepared with the data folder in its usual place, then installed again (an update)
         # from a shell whose XDG_DATA_HOME names another folder, as a sandboxed terminal's does: the
