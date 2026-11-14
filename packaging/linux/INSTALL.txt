@@ -18,7 +18,8 @@ needs, the udev rules for the Odyssey 3D, the depth model, and the Wine side of 
 Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use sudo for that step only. Run it as
 yourself, not with sudo: started as root it refuses to install into a folder that is not root's alone.
 `./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
-knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS only.
+knows the package names of the Arch, Debian/Ubuntu and Fedora families; it has been run on CachyOS and,
+without an Odyssey 3D, on Ubuntu 24.04. A package that your release does not have is named and left out.
 
 To remove it again, run the copy of the installer that the installation keeps; the installer prints the
 command when it finishes (`~/.local/share/any2odyssey/install.sh --uninstall`, or the same under the folder
@@ -41,10 +42,16 @@ What the installer sets up, if you would rather do it by hand
 
 - The program: `any2odyssey` to ~/.local/bin, `any2odyssey.desktop` to ~/.local/share/applications,
   `any2odyssey.png` to ~/.local/share/icons/hicolor/256x256/apps. It needs PipeWire (libpipewire-0.3),
-  libxkbcommon, OpenGL (libglvnd / Mesa or the NVIDIA driver), and Wayland or X11 client libraries.
+  libxkbcommon (in an X11 session libxkbcommon-x11 as well: Debian and Ubuntu call it libxkbcommon-x11-0),
+  OpenGL (libglvnd / Mesa or the NVIDIA driver), and Wayland or X11 client libraries.
 
-- 2D to 3D (AI depth): your distribution's ONNX Runtime (onnxruntime, with its CUDA provider and cuDNN for an
-  NVIDIA GPU), then `./any2odyssey --install-depth-model` (downloads the open depth model, about 95 MB).
+- 2D to 3D (AI depth): your distribution's ONNX Runtime, 1.22 or newer, under the name libonnxruntime.so
+  (Arch: onnxruntime-cpu, or onnxruntime-cuda with cudnn for an NVIDIA GPU; Debian and Ubuntu:
+  libonnxruntime-dev; Fedora: onnxruntime-devel), then `./any2odyssey --install-depth-model` (needs curl;
+  downloads the open depth model, about 95 MB). Not every release has one: Ubuntu 24.04 has no ONNX
+  Runtime package, and the 1.21 of Debian 13 and Ubuntu 25.04 and 25.10 is older than the program accepts
+  (Ubuntu 26.04 has 1.23, Fedora 45 has 1.26). There this mode needs a libonnxruntime.so from elsewhere,
+  named in the environment variable ORT_DYLIB_PATH; everything else works without it.
   The model in your data folder is checked against a fixed SHA-256, at the download and again before the
   program loads it; to use another model, give its path in the environment variable
   ANY2ODYSSEY_DEPTH_MODEL.
@@ -58,8 +65,9 @@ What the installer sets up, if you would rather do it by hand
   partition must be unlocked or have BitLocker suspended first. The drive is needed only during set-up:
   about 1 GB is copied to your data folder. Without a Windows installation this part is not available;
   everything else works.
-  Also needed: Wine, mingw-w64-gcc, clang, a C compiler, Python 3, xrandr and rsync. Then, as
-  docs/LENS-SWITCH.md explains:
+  Also needed: Wine, mingw-w64-gcc, clang, a C compiler, Python 3, xrandr and rsync (Debian and Ubuntu:
+  wine gcc-mingw-w64-x86-64 clang gcc python3 x11-xserver-utils rsync; Fedora: wine mingw64-gcc clang gcc
+  python3 xrandr rsync). Then, as docs/LENS-SWITCH.md explains:
 
       sudo cp wine-lens/70-any2odyssey-lens.rules /etc/udev/rules.d/
       sudo udevadm control --reload && sudo udevadm trigger
