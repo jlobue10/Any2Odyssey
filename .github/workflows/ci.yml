@@ -71,6 +71,32 @@ jobs:
         env:
           ANY2ODYSSEY_SKIP_OS_CHECK: '1'
         run: ./scripts/verify-package.ps1
+      # The setup program is compiled by Inno Setup, pinned like the other tools here: by version and by
+      # the SHA-256 of its installer (the digest GitHub lists for that release asset of jrsoftware/issrc).
+      # To bump: change both values together, here and in release.yml. Installed for the runner's account
+      # into a folder of its own, so whatever Inno Setup the image may bring plays no part.
+      - name: Install Inno Setup
+        shell: pwsh
+        env:
+          INNO_SETUP_VERSION: 6.7.4
+          INNO_SETUP_SHA256: a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
+        run: |
+          $name="innosetup-$env:INNO_SETUP_VERSION.exe"
+          $installer=Join-Path $env:RUNNER_TEMP $name
+          curl.exe --proto '=https' --tlsv1.2 -fsSL --retry 3 -o $installer "https://github.com/jrsoftware/issrc/releases/download/is-$($env:INNO_SETUP_VERSION.Replace('.','_'))/$name"
+          if ($LASTEXITCODE -ne 0) { throw "Downloading $name failed (curl exit $LASTEXITCODE)" }
+          $hash=(Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+          if ($hash -ne $env:INNO_SETUP_SHA256) { throw "$name has SHA-256 $hash, expected $env:INNO_SETUP_SHA256" }
+          $folder=Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          $install=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS',('/DIR="'+$folder+'"') -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "The Inno Setup installer exited $($install.ExitCode)" }
+          $iscc=Join-Path $folder 'ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw "ISCC.exe is not in $folder" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+      # From the ZIP just verified, so the setup program carries the files of the ZIP published beside it.
+      - name: Build the setup program from the packaged ZIP
+        shell: pwsh
+        run: ./scripts/build-setup.ps1
       - name: Stage the built executable for the installer tests
         shell: pwsh
         run: |
@@ -92,6 +118,14 @@ jobs:
           ANY2ODYSSEY_SKIP_OS_CHECK: '1'
         run: |
           foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      # The one check that runs a published program for real: on this disposable runner the setup program
+      # is refused a full installation (no Odyssey 3D Hub here), installs the desktop controls for the
+      # runner's account, repairs them, and the installed uninstaller removes them again.
+      - name: Setup program, run for real (refusal, install, repair, uninstall)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: ./installer/tests/live/test-setup-program.ps1 -AllowRealInstall
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Any2Odyssey-windows-x64-exe
@@ -103,7 +137,15 @@ jobs:
           retention-days: 14
           path: |
             dist/*.zip
-            dist/*.sha256
+            dist/*.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Any2Odyssey-windows-x64-setup
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*-setup.exe
+            dist/*-setup.exe.sha256
 
   # The Linux edition as Arch-based distributions install it: the in-tree PKGBUILD
   # builds, runs the tests and packages as an unprivileged user, then the package
