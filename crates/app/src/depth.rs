@@ -213,8 +213,9 @@ const DOWNLOAD_PREFIX: &str = ".depth-download-";
 fn start_download(folder: &Path) -> Result<(tempfile::NamedTempFile, std::fs::File), String> {
     let mut failed = String::from("another installer removed it");
     // Tried again when an installer that is clearing up took the new file
-    // for an abandoned one in the moment before its lock was taken.
-    for _ in 0..4 {
+    // for an abandoned one in the moment before its lock was taken: once
+    // for each installer starting at that moment, at the very most.
+    for _ in 0..16 {
         let partial = tempfile::Builder::new()
             .prefix(DOWNLOAD_PREFIX)
             .tempfile_in(folder)
@@ -930,8 +931,25 @@ mod tests {
         remove_stale_downloads(&dir.path().join("missing"), day);
         // Given up now (its installer is gone): cleared without waiting.
         drop(writing);
-        remove_stale_downloads(dir.path(), day);
-        assert!(!running.exists());
+        assert!(cleared(dir.path(), &running));
+    }
+
+    /// Whether clearing `folder` up removes the download at `path`, whose
+    /// lock was let go of just now. Tried for a moment: a program that
+    /// another test's thread is starting holds every open file of this
+    /// process, this lock with it, until it has become that program.
+    fn cleared(folder: &Path, path: &Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            remove_stale_downloads(folder, STALE_DOWNLOAD);
+            if !path.exists() {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// The download a killed installer leaves: its file, no longer locked.
@@ -958,7 +976,10 @@ mod tests {
         // Minutes later, not a day: the next attempt, here one that fails.
         assert!(install_model_in(dir.path(), download_command("printf wrong"), &expected).is_err());
         for path in &left {
-            assert!(!path.exists(), "{path:?} was left for another day");
+            assert!(
+                cleared(dir.path(), path),
+                "{path:?} was left for another day"
+            );
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         assert_eq!(std::fs::read(&target).unwrap(), b"installed");
@@ -1027,8 +1048,7 @@ mod tests {
         curl.kill().unwrap();
         curl.wait().unwrap();
         assert!(kept, "removed under a curl that was still writing");
-        remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
-        assert!(!path.exists());
+        assert!(cleared(dir.path(), &path));
     }
 
     #[test]
