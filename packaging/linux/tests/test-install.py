@@ -446,13 +446,19 @@ class InstallerTests(unittest.TestCase):
         for name in linked:
             (self.archive / name).parent.mkdir(parents=True, exist_ok=True)
             (self.archive / name).write_text("a document\n")
+        # README.md's first picture is written as HTML, and 0.9.2 still installed the page without it.
+        pictured = "assets/Any2Odyssey-wordmark.png"
+        (self.archive / pictured).parent.mkdir()
+        (self.archive / pictured).write_bytes(b"a picture")
         (self.archive / "README.md").write_text(
-            "".join(f"[{name}]({name})\n" for name in linked) + "[elsewhere](https://example.org/a.md)\n")
+            f'<p align="center"><img src="{pictured}" alt="Any2Odyssey" width="520" /></p>\n'
+            '<a href="https://example.org/">elsewhere</a> <a href="#usage">below</a>\n'
+            + "".join(f"[{name}]({name})\n" for name in linked) + "[elsewhere](https://example.org/a.md)\n")
         prefix = self.root / "prefix"
         result = self.install(prefix)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         documents = prefix / "share/doc/any2odyssey"
-        for name in ["README.md", *linked]:
+        for name in ["README.md", pictured, *linked]:
             self.assertTrue((documents / name).is_file(), f"{name} was not installed")
         # The check the package steps run agrees, and notices a link that leads nowhere.
         check = [*SHELL, str(LINUX.parents[1] / "scripts" / "check-doc-links.sh"), str(documents)]
@@ -462,6 +468,11 @@ class InstallerTests(unittest.TestCase):
         result = subprocess.run(check, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("README.md links to docs/TESTING.md", result.stderr)
+        (documents / "docs/TESTING.md").write_text("a document\n")
+        (documents / pictured).unlink()
+        result = subprocess.run(check, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"README.md links to {pictured}", result.stderr)
         result = self.run_installer("--prefix", str(prefix), "--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_removed(prefix)

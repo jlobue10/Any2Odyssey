@@ -340,7 +340,7 @@ if [ -z "$PACKAGED" ]; then
         [ -f "$HERE/$f" ] && run install -Dm644 "$HERE/$f" "$DOCDIR/$f"
     done
     # Everything README.md links to goes with it: the other documents and its screenshots.
-    for f in "$HERE"/docs/*.md "$HERE"/docs/assets/*.png; do
+    for f in "$HERE"/docs/*.md "$HERE"/docs/assets/*.png "$HERE"/assets/*.png; do
         [ -f "$f" ] && run install -Dm644 "$f" "$DOCDIR/${f#"$HERE"/}"
     done
     # The Wine setup and this script (for --uninstall later), replaced as a whole.
