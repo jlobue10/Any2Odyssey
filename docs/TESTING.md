@@ -121,7 +121,19 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 and 0.9.2 (audit rounds 11 to 16) are covered by the tests above and have not been run with Wine, the camera, the lens or the monitor. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 0.9.3 (audit rounds 11 to 17) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+
+New in 0.9.3:
+
+- Linux viewer on KDE Plasma (Wayland), anaglyph or side-by-side output: start the output, make it full screen on the display the controls are on (they are now covered), then press F11 and Esc: it leaves full screen and closes. Again with the controls minimized. Up to 0.9.2 the output window stopped answering while the controls could not be seen (checked under sway only).
+- Linux viewer on KDE Plasma (Wayland): with the controls behind another window or minimized, run `any2odyssey --show`: the task bar entry asks for attention (a Wayland window cannot raise itself). Moving the pointer over the controls for a while does not keep a processor core busy (`top`).
+- Linux viewer on KDE Plasma (Wayland): the task bar and the window switcher show the Any2Odyssey icon for the controls and the output window, grouped; drop an image file from Dolphin on the controls.
+- Linux, an installation of 0.9.0 or 0.9.1 made the usual way whose Odyssey 3D setup had run (also one since updated to 0.9.2): install 0.9.3 with `./install.sh --yes`. It ends with "setup: done", the lens helper works, `~/.local/share/any2odyssey/wine-lens/` no longer holds `setup.sh`, `src` or `tests`, and the settings and the depth model are still there.
+- Linux: with the Odyssey 3D prepared, run `XDG_DATA_HOME=/tmp/elsewhere ./install.sh --no-odyssey`: `~/.local/share/any2odyssey/wine-lens/prefix` is still there.
+- Arch package with an installation from the release archive still in `~/.local`: `any2odyssey-setup` names it and prints the command that removes it; after that command the menu starts `/usr/bin/any2odyssey`, and the settings and the depth model are still there.
+- Linux: `any2odyssey --toggle` prints that it switches the Windows conversion and exits 1; a first start and `any2odyssey --quit` leave no `settings.json` in a new data folder.
+- Windows: from a console started as administrator, run `installer/tests/test-uninstall-helper-elevated.ps1` (it leaves itself out otherwise): it passes.
+- Windows: set the read-only attribute on the files in `C:\Program Files\Any2Odyssey`, then uninstall from Settings > Apps: everything is removed and the entry is gone.
 
 New in 0.9.2:
 
@@ -132,9 +144,6 @@ New in 0.9.2:
 - Linux, mirrored outputs with the Odyssey: `start-stack.sh` runs, `edid.pairs` names the Odyssey's connector for the slot and `odyssey.place` is filled.
 - Linux, live screen through the weaver: pictures per second and depth rate are what 0.9.1 gave (large allocations are now mapped one by one). Quit with the output on: the lens goes off, the process is gone within about 3 s and an immediate start works.
 - Linux viewer, real zenity and kdialog: open a dialog, press Open... again; the old window goes and a new one appears.
-- Linux viewer on KDE Plasma (Wayland), anaglyph or side-by-side output: start the output, make it full screen on the display the controls are on (they are now covered), then press F11 and Esc: it leaves full screen and closes. Again with the controls minimized. Until this was fixed after 0.9.2 the output window stopped answering while the controls could not be seen (checked under sway only).
-- Linux viewer on KDE Plasma (Wayland): with the controls behind another window or minimized, run `any2odyssey --show`: the task bar entry asks for attention (a Wayland window cannot raise itself). Moving the pointer over the controls for a while does not keep a processor core busy (`top`).
-- Linux viewer on KDE Plasma (Wayland): the task bar and the window switcher show the Any2Odyssey icon for the controls and the output window, grouped; drop an image file from Dolphin on the controls.
 - Windows: kill the controls while converting, start them again with automatic conversion, press Apply within 8 s of "Trying once more": the line counts down and 3D comes on.
 - Windows: with `companion.log` over 4 MiB, start Any2Odyssey: `companion.old.log` appears and both processes keep logging.
 
