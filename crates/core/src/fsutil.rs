@@ -179,7 +179,11 @@ fn write_atomic_retrying(
     loop {
         match tmp.persist(path) {
             Ok(_) => return Ok(()),
-            Err(e) if attempt < retries && is_transient_replace_error(&e.error) => {
+            Err(e)
+                if attempt < retries
+                    && is_transient_replace_error(&e.error)
+                    && !is_read_only(path) =>
+            {
                 attempt += 1;
                 tmp = e.file;
                 #[cfg(test)]
@@ -223,6 +227,15 @@ pub(crate) fn long_form(folder: &Path, longest_name: usize) -> Option<std::path:
         return None;
     }
     fs::canonicalize(folder).ok()
+}
+
+/// Whether the file at `path` is marked read-only. Windows refuses to
+/// replace such a file with the same "access denied" it gives while a
+/// reader holds it, but for as long as the mark is there: trying again for
+/// a tenth of a second only made whoever saves wait, which for the settings
+/// is the window's own thread at every Apply.
+fn is_read_only(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.permissions().readonly())
 }
 
 fn is_transient_replace_error(e: &io::Error) -> bool {
@@ -353,6 +366,30 @@ mod tests {
         assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 1"));
         write_json_atomic_once(&path, &serde_json::json!({"frames": 4})).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 4"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_file_is_refused_at_once_and_replaced_when_it_no_longer_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_atomic(&path, b"one").unwrap();
+        let read_only = |yes: bool| {
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(yes);
+            fs::set_permissions(&path, permissions).unwrap();
+        };
+        read_only(true);
+        let retries = || REPLACE_RETRIES_MADE.with(|made| made.replace(0));
+        retries();
+        let refused = write_atomic(&path, b"two").unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(retries(), 0, "waited for a mark that does not go away");
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+        read_only(false);
+        write_atomic(&path, b"two").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"two");
     }
 
     #[test]
