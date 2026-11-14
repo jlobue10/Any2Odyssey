@@ -203,6 +203,14 @@ fn peer_is_this_user(stream: &UnixStream) -> bool {
     same_user(sys::peer_uid(stream), sys::own_uid())
 }
 
+/// Take the whole-file lock on `file` if no other open file holds it. The
+/// lock is kept by every copy of this handle, a child's inherited one too,
+/// and goes when the last of them is closed, however those processes end.
+/// `Err` where the folder has no locks.
+pub fn try_lock_file(file: &std::fs::File) -> std::io::Result<bool> {
+    sys::try_lock(file)
+}
+
 /// Where the instance socket lives: the data folder when one was set
 /// explicitly (an isolated run must not find or disturb the real instance),
 /// otherwise the per-user runtime folder, otherwise the data folder.
@@ -770,12 +778,15 @@ impl Dialogs {
 /// End a dialog nobody waits for any more and collect it, so that it is not
 /// left as a process that has ended but is still listed.
 fn end(mut child: std::process::Child) {
-    // Not collected yet, so its number, which is also its group's, is still
-    // its own: nothing else can be hit.
-    if matches!(child.try_wait(), Ok(None)) {
-        sys::end_group(child.id());
-        let _ = child.kill();
-    }
+    // Not collected yet (a dialog is collected only by whoever takes it out
+    // of `Dialogs::open`), so its number, which is also its group's, is
+    // still its own: nothing else can be hit. That holds when the dialog
+    // itself has ended already, and the group is ended then as well:
+    // something it started may still run and hold its output open, which
+    // keeps the thread waiting for the answer. Asking first whether it had
+    // ended collected it and left that running.
+    sys::end_group(child.id());
+    let _ = child.kill();
     let _ = child.wait();
 }
 
@@ -1310,6 +1321,50 @@ mod tests {
             dialogs.run(&next),
             Ok(Some(PathBuf::from("/tmp/chosen.png")))
         );
+    }
+
+    /// A dialog whose own process is gone (it crashed, was killed, or is a
+    /// wrapper script that did not wait) while a program it started still
+    /// runs and holds its output open.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn closing_a_dialog_that_has_ended_also_ends_what_it_left_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("pids");
+        let dialogs = Arc::new(Dialogs::new());
+        let fixture = vec![(
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "sleep 600 & echo $$ $! >\"$1\"".into(),
+                "dialog-fixture".into(),
+                note.to_str().unwrap().into(),
+            ],
+        )];
+        let waiting = {
+            let dialogs = dialogs.clone();
+            std::thread::spawn(move || dialogs.run(&fixture))
+        };
+        let pids = noted_pids(&dialogs, &note);
+        let (script, left_running) = (pids[0], pids[1]);
+        // The script has ended and is not collected: nobody has its answer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(script) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!running(script) && running(left_running));
+        assert!(!waiting.is_finished());
+        dialogs.close();
+        let ended = gone_within(left_running, Duration::from_secs(5));
+        if !ended {
+            let _ = std::process::Command::new("kill")
+                .arg(left_running.to_string())
+                .status();
+        }
+        assert!(ended, "what the dialog started outlived closing it");
+        assert_eq!(waiting.join().unwrap(), Ok(None));
+        assert!(dialogs.open().child.is_none());
+        assert!(!Path::new(&format!("/proc/{script}")).exists());
     }
 
     #[cfg(target_os = "linux")]

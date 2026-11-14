@@ -89,8 +89,20 @@ pub fn update_file(
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
+            // Beyond the path length Windows takes as written, in the form
+            // it takes at any length (`fsutil::long_form`).
+            const PREFIX: &str = ".overlay-backup-";
+            let long = backup.file_name().and_then(|name| {
+                let folder = crate::fsutil::long_form(parent, name.len().max(PREFIX.len() + 6))?;
+                let backup = folder.join(name);
+                Some((folder, backup))
+            });
+            let (parent, backup) = match &long {
+                Some((parent, backup)) => (parent.as_path(), backup.as_path()),
+                None => (parent, backup),
+            };
             let mut pending = tempfile::Builder::new()
-                .prefix(".overlay-backup-")
+                .prefix(PREFIX)
                 .tempfile_in(parent)?;
             pending.write_all(&bytes)?;
             // The name is claimed once and never repaired: make sure the bytes

@@ -142,10 +142,19 @@ fn write_atomic_retrying(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
+    let long = path.file_name().and_then(|name| {
+        let folder = long_form(parent, name.len().max(TEMPORARY_NAME_LENGTH))?;
+        let path = folder.join(name);
+        Some((folder, path))
+    });
+    let (parent, path) = match &long {
+        Some((parent, path)) => (parent.as_path(), path.as_path()),
+        None => (parent, path),
+    };
     // Exclusive creation prevents collisions and following a pre-planted
     // sibling symlink. Each writer owns its temporary file until publication.
     let mut builder = tempfile::Builder::new();
-    builder.prefix(".any2odyssey-");
+    builder.prefix(TEMPORARY_PREFIX);
     // The mode is given to the creating `open`, so the umask applies as it
     // does to any other new file. Not on Windows: access there is inherited
     // from the folder either way, and the builder rejects the setting.
@@ -170,7 +179,11 @@ fn write_atomic_retrying(
     loop {
         match tmp.persist(path) {
             Ok(_) => return Ok(()),
-            Err(e) if attempt < retries && is_transient_replace_error(&e.error) => {
+            Err(e)
+                if attempt < retries
+                    && is_transient_replace_error(&e.error)
+                    && !is_read_only(path) =>
+            {
                 attempt += 1;
                 tmp = e.file;
                 #[cfg(test)]
@@ -180,6 +193,49 @@ fn write_atomic_retrying(
             Err(e) => return Err(e.error),
         }
     }
+}
+
+/// How the temporary file beside a published one is named, and how long
+/// that name is: the prefix and the six characters the builder adds.
+const TEMPORARY_PREFIX: &str = ".any2odyssey-";
+const TEMPORARY_NAME_LENGTH: usize = TEMPORARY_PREFIX.len() + 6;
+
+/// The most characters Windows takes in a file's full name written the
+/// ordinary way (`MAX_PATH`, less its terminator).
+const ORDINARY_PATH_LIMIT: usize = 259;
+
+/// `folder`, which exists, in the form Windows takes at any length
+/// (`\\?\C:\...`) when a file in it whose name has `longest_name` characters
+/// is past what the ordinary form may have: for a temporary file and the
+/// name it is published under, whichever is longer. `None` otherwise, and
+/// always off Windows.
+///
+/// The standard library makes this change by itself for whatever it opens,
+/// renames or removes. The temporary-file crate publishes with calls of its
+/// own that do not, so in such a folder a file could be read and written in
+/// place but never replaced: "The system cannot find the path specified".
+/// In a data folder of 240 to 245 characters that was because of the
+/// temporary's name alone, which is longer than `settings.json`; the same
+/// went for a guide or a picture exported into a deep folder.
+pub(crate) fn long_form(folder: &Path, longest_name: usize) -> Option<std::path::PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    // Counted in bytes, which are never fewer than Windows's characters.
+    let ordinary = std::path::absolute(folder).ok()?;
+    if ordinary.as_os_str().len() + 1 + longest_name <= ORDINARY_PATH_LIMIT {
+        return None;
+    }
+    fs::canonicalize(folder).ok()
+}
+
+/// Whether the file at `path` is marked read-only. Windows refuses to
+/// replace such a file with the same "access denied" it gives while a
+/// reader holds it, but for as long as the mark is there: trying again for
+/// a tenth of a second only made whoever saves wait, which for the settings
+/// is the window's own thread at every Apply.
+fn is_read_only(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.permissions().readonly())
 }
 
 fn is_transient_replace_error(e: &io::Error) -> bool {
@@ -312,6 +368,30 @@ mod tests {
         assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 4"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_read_only_file_is_refused_at_once_and_replaced_when_it_no_longer_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        write_atomic(&path, b"one").unwrap();
+        let read_only = |yes: bool| {
+            let mut permissions = fs::metadata(&path).unwrap().permissions();
+            permissions.set_readonly(yes);
+            fs::set_permissions(&path, permissions).unwrap();
+        };
+        read_only(true);
+        let retries = || REPLACE_RETRIES_MADE.with(|made| made.replace(0));
+        retries();
+        let refused = write_atomic(&path, b"two").unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(retries(), 0, "waited for a mark that does not go away");
+        assert_eq!(fs::read(&path).unwrap(), b"one");
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+        read_only(false);
+        write_atomic(&path, b"two").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"two");
+    }
+
     #[test]
     fn a_limited_read_takes_a_file_up_to_the_limit_and_refuses_a_larger_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -403,6 +483,68 @@ mod tests {
         );
         assert_eq!(fs::read(&path).unwrap(), b"new settings");
         assert_eq!(entries(parent).len(), 2);
+    }
+
+    /// A folder under `base` whose whole path is `length` characters long.
+    #[cfg(windows)]
+    fn folder_of_length(base: &Path, length: usize) -> std::path::PathBuf {
+        let mut folder = base.to_path_buf();
+        loop {
+            let room = length - folder.as_os_str().len();
+            if room > 102 {
+                folder.push("d".repeat(100));
+            } else {
+                folder.push("d".repeat(room - 1));
+                return folder;
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_is_replaced_where_its_name_or_the_temporarys_passes_the_path_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(dir.path().as_os_str().len() < 200, "{:?}", dir.path());
+        // In a folder of 239 characters both names fit in the 259 Windows
+        // takes. From 240 to 245 "settings.json" fits and the temporary
+        // beside it does not; beyond that neither does.
+        for length in [239, 240, 245, 246, 300] {
+            let folder = folder_of_length(dir.path(), length);
+            assert_eq!(folder.as_os_str().len(), length);
+            let path = folder.join("settings.json");
+            for content in ["one", "two"] {
+                write_atomic_durable(&path, content.as_bytes())
+                    .unwrap_or_else(|e| panic!("in a folder of {length} characters: {e}"));
+                assert_eq!(fs::read_to_string(&path).unwrap(), content);
+            }
+            write_atomic_document_with(&path, |writer| writer.write_all(b"three")).unwrap();
+            write_json_atomic_once(&path, &serde_json::json!({"frames": 4})).unwrap();
+            assert!(fs::read_to_string(&path).unwrap().contains("\"frames\": 4"));
+            assert_eq!(entries(&folder), ["settings.json"]);
+        }
+        // The published name can be the longer of the two.
+        let folder = folder_of_length(dir.path(), 230);
+        let path = folder.join("Samsung-OverlaySettings-before.json");
+        write_atomic(&path, b"kept").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"kept");
+        assert_eq!(entries(&folder), ["Samsung-OverlaySettings-before.json"]);
+        // The other files that are published through a temporary one: the
+        // copy kept of unreadable settings and the backup of Samsung's file.
+        let folder = folder_of_length(dir.path(), 235);
+        fs::create_dir_all(&folder).unwrap();
+        let settings = folder.join("settings.json");
+        fs::write(&settings, b"not settings").unwrap();
+        let kept = crate::prefs::Preferences::default()
+            .save_recovering_to(&settings)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(kept).unwrap(), b"not settings");
+        let samsung = dir.path().join("OverlaySettings.json");
+        fs::write(&samsung, b"{}").unwrap();
+        let backup = folder.join("Samsung-OverlaySettings-before.json");
+        crate::overlay_settings::update_file(&samsung, &backup, false, 0.5, 0.5).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), b"{}");
+        assert_eq!(entries(&folder).len(), 3);
     }
 
     #[cfg(unix)]

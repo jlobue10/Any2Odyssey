@@ -68,8 +68,13 @@ pub fn is_caps_heading(line: &str) -> bool {
     letters.len() >= 4 && letters.iter().all(|c| c.is_uppercase()) && line.len() < 90
 }
 
+/// Write the guide to `path`. An error names the file: the system's own
+/// text does not, and "File exists (os error 17)" was all `--export-guide`
+/// said of a path that leads through a file.
 pub fn export(path: &Path) -> std::io::Result<()> {
-    any2odyssey_core::fsutil::write_atomic_document(path, render().as_bytes())
+    any2odyssey_core::fsutil::write_atomic_document(path, render().as_bytes()).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("Could not write {}: {e}", path.display()))
+    })
 }
 
 #[cfg(test)]
@@ -98,6 +103,23 @@ mod tests {
                 assert_eq!(encode_double_quoted_attribute(&l.url), l.url);
             }
         }
+    }
+
+    #[test]
+    fn an_export_that_fails_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes");
+        std::fs::write(&file, b"a file, not a folder").unwrap();
+        let target = file.join("guide.html");
+        let error = export(&target).unwrap_err().to_string();
+        assert!(
+            error.starts_with(&format!("Could not write {}: ", target.display())),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"a file, not a folder");
+        let target = dir.path().join("guide.html");
+        export(&target).unwrap();
+        assert!(std::fs::read_to_string(target).unwrap().contains("</html>"));
     }
 
     #[test]

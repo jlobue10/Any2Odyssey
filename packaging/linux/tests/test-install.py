@@ -1005,6 +1005,33 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse((data / "wine-lens-setup").exists())
                 del self.env[variable]
 
+    def test_a_relative_xdg_data_home_counts_as_unset_as_the_program_reads_it(self):
+        # XDG_DATA_HOME=~/.local/share set where nothing expands the ~ (or any other relative path) is
+        # invalid by the XDG specification, and the program takes the usual folder instead. Taken as
+        # written, the installer looked under the folder it was run from: it did not find the model the
+        # program had installed and downloaded it again at every update, it had setup.sh build the Wine
+        # side there, and it named that folder as the one the settings stay in.
+        home, data = self.usual_place()
+        model = data / "models/depth-anything-v2-small.onnx"
+        model.parent.mkdir(parents=True)
+        model.write_text("the model\n")
+        before = sorted(path.name for path in self.root.iterdir())
+        for value in ("relative/share", "~/.local/share", "./share"):
+            with self.subTest(value=value):
+                self.env["XDG_DATA_HOME"] = value
+                result = self.run_installer("--no-deps", "--no-udev", "--no-odyssey", "--yes")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("already installed", result.stdout)
+                self.assertFalse(self.log.exists(), "the program was asked to download the model again")
+                result = self.run_installer("--uninstall")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"stay in {data};", result.stdout)
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), before)
+        # An absolute one is still the data folder's place.
+        self.env["XDG_DATA_HOME"] = str(self.root / "xdg")
+        result = self.run_installer("--uninstall")
+        self.assertIn(f"stay in {self.root}/xdg/any2odyssey;", result.stdout)
+
     @unittest.skipUnless(os.geteuid() == 0, "needs root: the refusal is for a root installer")
     def test_root_does_not_install_into_a_folder_that_is_not_roots_alone(self):
         # A root installer in a folder another user can change writes where that user points it: the

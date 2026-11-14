@@ -186,7 +186,11 @@ BIN=$PREFIX/bin
 SHARE=$PREFIX/share
 APPDIR=$SHARE/any2odyssey
 DOCDIR=$SHARE/doc/any2odyssey
-DATA=${ANY2ODYSSEY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/any2odyssey}
+# An XDG_DATA_HOME that is not an absolute path counts as unset (the XDG Base Directory specification), and
+# that is how the program reads it: taken as written, this script looked for the model and built the Wine
+# side in a folder under wherever it was run from, where the program never looks.
+case ${XDG_DATA_HOME:-} in /*) DATA_HOME=$XDG_DATA_HOME ;; *) DATA_HOME=$HOME/.local/share ;; esac
+DATA=${ANY2ODYSSEY_DATA_DIR:-$DATA_HOME/any2odyssey}
 if [ -n "$PACKAGED" ]; then
     WINE_LENS=$HERE
     [ -f "$WINE_LENS/setup.sh" ] || WINE_LENS=/usr/share/any2odyssey/wine-lens

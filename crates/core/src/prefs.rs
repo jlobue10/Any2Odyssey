@@ -182,10 +182,15 @@ impl Preferences {
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
                     .unwrap_or_else(|| Path::new("."));
+                // Beyond the path length Windows takes as written, in the
+                // form it takes at any length (`fsutil::long_form`).
+                const PREFIX: &str = "settings-recovery-";
+                const SUFFIX: &str = ".json";
+                let long = crate::fsutil::long_form(parent, PREFIX.len() + 6 + SUFFIX.len());
                 let mut backup = tempfile::Builder::new()
-                    .prefix("settings-recovery-")
-                    .suffix(".json")
-                    .tempfile_in(parent)?;
+                    .prefix(PREFIX)
+                    .suffix(SUFFIX)
+                    .tempfile_in(long.as_deref().unwrap_or(parent))?;
                 std::io::copy(&mut original, &mut backup)?;
                 backup.as_file().sync_all()?;
                 Some(backup.keep().map_err(|e| e.error)?.1)
