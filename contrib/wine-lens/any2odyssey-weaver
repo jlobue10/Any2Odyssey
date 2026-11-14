@@ -55,8 +55,10 @@ PLACE=$(cat "$T/odyssey.place" 2>/dev/null)
 [ -n "$PLACE" ] || { echo "error: the Odyssey 3D was not found among the monitors (see $T/edid.pairs)"; exit 1; }
 
 # Without eye positions Leia's weaver shows one view only, so a tracker that will not start is reported
-# but does not stop the picture.
-TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>&1 8>&- 7>&-)
+# but does not stop the picture. Its answer is what it prints, not what a program on the way says beside
+# it: bash warns at every start that it cannot set a locale that LC_ALL names and the system does not have,
+# and taken as part of the answer that turned "on" into a reason why tracking did not start.
+TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>/dev/null 8>&- 7>&-)
 [ "$TRACKING" = on ] || echo "tracking: ${TRACKING#error: }"
 
 FRAME=$(readlink -f "$1")

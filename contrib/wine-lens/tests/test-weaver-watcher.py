@@ -81,5 +81,66 @@ class WatcherTests(unittest.TestCase):
         self.assertLess(waits, 30, "the wait for the script is a busy loop")
 
 
+class TrackingAnswerTests(unittest.TestCase):
+    """What the script says about eye tracking is tracking.sh's answer, whatever else is written beside it."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        for name in ("build", "tools", "bin"):
+            (self.root / name).mkdir()
+        shutil.copy(SCRIPT, self.root / "any2odyssey-weaver")
+        (self.root / "any2odyssey-weaver").chmod(0o755)
+        (self.root / "build/any2odyssey-weaver.exe").touch()
+        (self.root / "frame").touch()
+        self.program("tools/ensure-stack.sh", "exit 0\n")
+        (self.root / "tools/mkedid.py").write_text(
+            'import sys\nopen(sys.argv[2], "w").write("0 0 3840 2160\\n")\n')
+        self.program("bin/busctl", "exit 1\n")
+        # The weaver host: the picture shows at once, and it leaves.
+        self.program("bin/wine", "echo on\n")
+        self.environment = dict(os.environ, ROOT=str(self.root), PATH=f"{self.root}/bin:{os.environ['PATH']}")
+
+    def program(self, name, body):
+        path = self.root / name
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+
+    def said(self, start, **environment):
+        """The script's lines, with a tracking.sh that does `start` when asked to start."""
+        (self.root / "stopped").unlink(missing_ok=True)
+        self.program("tools/tracking.sh",
+                     f'case $1 in\nstart) {start} ;;\nstop) echo stopped >"$ROOT/stopped" ;;\nesac\n')
+        done = subprocess.run([str(self.root / "any2odyssey-weaver"), str(self.root / "frame")],
+                              env=dict(self.environment, **environment), stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+        # The process that stays does the leaving; it is waited for before the folder goes.
+        deadline = time.monotonic() + 15
+        while not (self.root / "stopped").exists():
+            self.assertLess(time.monotonic(), deadline, "tracking was not stopped")
+            time.sleep(0.02)
+        return done.stdout.splitlines()
+
+    def test_tracking_that_started_is_not_reported(self):
+        self.assertEqual(self.said("echo on"), ["on"])
+
+    def test_a_reason_is_passed_on_in_one_line(self):
+        self.assertEqual(self.said('echo "error: the webcam is not present"'),
+                         ["tracking: the webcam is not present", "on"])
+
+    def test_a_warning_beside_the_answer_is_no_part_of_it(self):
+        warning = "echo 'sh: warning: setlocale: LC_ALL: cannot change locale (xx_XX.UTF-8)' >&2"
+        self.assertEqual(self.said(f"{warning}; echo on"), ["on"])
+        # Taken as part of the answer, the reason went out as a line of its own, "error: ...", and that
+        # line ends the picture.
+        self.assertEqual(self.said(f'{warning}; echo "error: the webcam is not present"'),
+                         ["tracking: the webcam is not present", "on"])
+
+    def test_a_locale_the_system_does_not_have_does_not_turn_on_into_a_reason(self):
+        # bash, which is sh on Arch and Fedora, warns about such a locale whenever it starts; dash says nothing.
+        self.assertEqual(self.said("echo on", LC_ALL="xx_XX.UTF-8"), ["on"])
+
+
 if __name__ == "__main__":
     unittest.main()
