@@ -95,8 +95,14 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
  if(-not $folder){continue}
  $link=Join-Path $folder 'Any2Odyssey.lnk'
  if(-not (Test-Path -LiteralPath $link -PathType Leaf)){continue}
+ # The link object reports no target for a read-only file, so a shortcut that was made read-only
+ # stayed behind, pointing at a program that is gone. The attribute is put back on one that is
+ # not this installation's.
+ $file=Get-Item -LiteralPath $link -Force;$wasReadOnly=$file.IsReadOnly
+ if($wasReadOnly){$file.IsReadOnly=$false}
  $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
  if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){Remove-Item -LiteralPath $link}
+ elseif($wasReadOnly){$file.IsReadOnly=$true}
 }
 # Exact file list only: leave Samsung files, personal settings and logs intact. -Force, because a
 # read-only attribute (copied from the package by installers up to 0.9.2, or set since) must not
