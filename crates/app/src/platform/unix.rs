@@ -7,6 +7,7 @@
 //! the guard, and a later launch that finds it answered writes its request
 //! there instead of opening a second window.
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -904,6 +905,20 @@ impl Worker {
         None
     }
 }
+/// Whether winit opens the windows on Wayland. Its rule: Wayland first,
+/// wherever `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` names something.
+pub fn uses_wayland() -> bool {
+    names_wayland(
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("WAYLAND_SOCKET"),
+    )
+}
+
+fn names_wayland(display: Option<OsString>, socket: Option<OsString>) -> bool {
+    let named = |value: Option<OsString>| value.is_some_and(|value| !value.is_empty());
+    named(display) || named(socket)
+}
+
 pub fn show_window(_: isize) {}
 pub fn hide_window(_: isize) {}
 pub fn open_path(path: &Path) {
@@ -1577,5 +1592,16 @@ mod tests {
         assert!(path.exists());
         drop(second_guard);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn wayland_is_used_wherever_the_window_library_would_use_it() {
+        let os = |text: &str| Some(OsString::from(text));
+        assert!(names_wayland(os("wayland-0"), None));
+        assert!(names_wayland(None, os("5")));
+        assert!(names_wayland(os(""), os("5")));
+        // Empty counts as unset, as it does for the window library.
+        assert!(!names_wayland(None, None));
+        assert!(!names_wayland(os(""), os("")));
     }
 }
