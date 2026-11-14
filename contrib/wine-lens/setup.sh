@@ -98,7 +98,8 @@ python3 "$HERE/tools/mkboard.py" "$BOARD" "$T/build/board.h" "$T/build/device.re
 forwarding_def() { # <library> <copy name> <own functions...>
     lib=$1 copy=$2; shift 2
     echo "LIBRARY $lib.dll"; echo "EXPORTS"
-    x86_64-w64-mingw32-objdump -p "$WINELIB/$lib.dll" |
+    # (in English: an objdump built with translations writes the heading looked for in the user's language)
+    LC_ALL=C x86_64-w64-mingw32-objdump -p "$WINELIB/$lib.dll" |
         awk '/Ordinal\/Name Pointer/{p=1;next} /^$/{if(p)exit} p&&$NF!="Name"{print $NF}' |
         while read -r name; do
             target=$copy.$name
