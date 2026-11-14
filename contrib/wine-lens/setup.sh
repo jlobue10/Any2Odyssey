@@ -21,7 +21,10 @@
 set -eu
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-DATA=${ANY2ODYSSEY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/any2odyssey}
+# An XDG_DATA_HOME that is not an absolute path counts as unset, as the program reads it (the XDG Base
+# Directory specification): taken as written, the Wine side was built under the folder this was run from.
+case ${XDG_DATA_HOME:-} in /*) DATA_HOME=$XDG_DATA_HOME ;; *) DATA_HOME=$HOME/.local/share ;; esac
+DATA=${ANY2ODYSSEY_DATA_DIR:-$DATA_HOME/any2odyssey}
 T=$DATA/wine-lens
 BOARD=/dev/odyssey-lens
 CC=x86_64-w64-mingw32-gcc
@@ -58,6 +61,7 @@ pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
 # Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them.
 WINELIB=
 for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
+         /usr/lib64/wine-wow64/wine/x86_64-windows \
          /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
     [ -f "$d/cfgmgr32.dll" ] && WINELIB=$d && break
 done
@@ -98,7 +102,8 @@ python3 "$HERE/tools/mkboard.py" "$BOARD" "$T/build/board.h" "$T/build/device.re
 forwarding_def() { # <library> <copy name> <own functions...>
     lib=$1 copy=$2; shift 2
     echo "LIBRARY $lib.dll"; echo "EXPORTS"
-    x86_64-w64-mingw32-objdump -p "$WINELIB/$lib.dll" |
+    # (in English: an objdump built with translations writes the heading looked for in the user's language)
+    LC_ALL=C x86_64-w64-mingw32-objdump -p "$WINELIB/$lib.dll" |
         awk '/Ordinal\/Name Pointer/{p=1;next} /^$/{if(p)exit} p&&$NF!="Name"{print $NF}' |
         while read -r name; do
             target=$copy.$name

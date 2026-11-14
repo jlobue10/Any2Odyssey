@@ -47,7 +47,7 @@ pub fn check(installed: Option<FileVersion>, running: Version) -> Agreement {
         format!("{major}.{minor}.{patch}.{revision}")
     };
     Agreement::Mismatch(format!(
-        "The installed conversion worker is version {installed}; these controls are {running}. Run Install.cmd from the same package to update both."
+        "The installed conversion worker is version {installed}; these controls are {running}. Run the setup program or Install.cmd of the same release to update both."
     ))
 }
 
@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(
             check(Some((0, 8, 5, 0)), Version::new(0, 8, 6)),
             Agreement::Mismatch(
-                "The installed conversion worker is version 0.8.5; these controls are 0.8.6. Run Install.cmd from the same package to update both."
+                "The installed conversion worker is version 0.8.5; these controls are 0.8.6. Run the setup program or Install.cmd of the same release to update both."
                     .to_owned()
             )
         );

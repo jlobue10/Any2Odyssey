@@ -2,6 +2,82 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.4 (2026-11-14)
+
+A Windows setup program, and a fourth audit release: five pull requests (#133 to #137). The audit round again used methods not used before. The published 0.9.3 Linux archive was run as a first-time user on a distribution that is not Arch (an Ubuntu 24.04 tree and Ubuntu 22.04, with every package name checked against the lists of Debian, Ubuntu and Fedora); the scripts, the installers and the program were run under foreign locales, encodings, time zones and clocks; the changes of 0.9.3 were attacked with counter-examples that were run; and the defects earlier rounds had described but not fixed were reproduced and fixed.
+
+**Windows: each release now has a setup program, `Any2Odyssey-<version>-windows-x64-setup.exe`.** The ZIP stays, holds the same files and installs the same thing.
+
+**Linux on Ubuntu 24.04, Ubuntu 22.04 and Debian 12: the installer's package step installed nothing, and on Ubuntu 24.04 the Odyssey 3D set-up could not be built.** Both are fixed.
+
+**Linux: two installations running at the same time could leave nothing installed in 0.9.3.** Update.
+
+### Added
+
+Windows:
+
+- **A setup program.** Run it, choose **Full converter** or **Desktop controls only** (preselected on a PC without Odyssey 3D Hub), and approve the elevation prompt of a full installation with the account you are signed in to. It is a window in front of the installer the ZIP has always had, not a second installer: it carries the release package and runs the same scripts, so every check, the Installed apps entry and the uninstaller are the same, and an installation can be made, updated and repaired with the ZIP or with the setup program in any order. When the installer refuses, its own reason is shown, and Back returns to the choice; when it refuses an older release, the setup program asks whether to install it anyway. For an unattended installation: `/VERYSILENT /SUPPRESSMSGBOXES /LOG=<file>`, with `/CONTROLSONLY` and `/ALLOWDOWNGRADE`; the exit code is 0 when installed. It is not code-signed, so Windows SmartScreen may ask about a freshly downloaded copy: verify it against its `.sha256` and with `gh attestation verify`, then choose More info, Run anyway. `installer/README.md` has the details. (#133)
+- The About page offers **Download installer** when the newest release has a setup program, under the same rules as the package link: the link is built from the version, never taken from the answer. Help and the offline guide describe the setup program. (#133)
+
+### Fixed
+
+Linux, installing on distributions other than Arch:
+
+- **The package step no longer fails as a whole when the release lacks one of the packages.** Ubuntu 24.04, Ubuntu 22.04 and Debian 12 have no ONNX Runtime package; `apt-get` then installed none of the others either, the installer still said Done, and the program stopped with "error while loading shared libraries: libpipewire-0.3.so.0". Packages a release does not have are now named apart and the rest are installed. (#137)
+- **The Odyssey 3D set-up builds on Ubuntu 24.04.** One of the small stand-ins for Wine did not compile with that release's MinGW headers, and the set-up ended there. (#137)
+- **The installer asks for libxkbcommon-x11**, without which the program ended at once in an X11 session ("Library libxkbcommon-x11.so could not be loaded"). The Arch package lists it as an optional dependency. (#137)
+- The ONNX Runtime counts as installed only under the name the program opens, `libonnxruntime.so`; Fedora has that in `onnxruntime-devel`, which is what the installer now asks for there. (#137)
+- The Odyssey 3D set-up finds Wine's libraries where Fedora keeps them. (#137)
+- `INSTALL.txt` says what the archive needs on Ubuntu, Debian and Fedora, and that 2D to 3D needs ONNX Runtime 1.22 or newer. When the library cannot be loaded, the message says so and names the packages of Debian, Ubuntu and Fedora beside Arch's. (#137)
+
+Linux, installing:
+
+- **Two installations at the same time no longer remove each other's copy of the program.** 0.9.3 copied the new program under one fixed name: of 100 pairs of installers started together, 52 ended wrong, 40 of them with nothing installed. 0.9.2 was not affected. (#136)
+- A folder of your own in `share/applications` whose name looks like the installer's staging folder (`any2odyssey.desktop.` and ten characters) keeps its files; the clean-up removed it once it was a day old, and `--uninstall` at once. (#136)
+- `./install.sh --uninstall` run from inside the installed folder also finds the program when `~/.local/share` is a link and the shell has followed it. (#136)
+- A relative `XDG_DATA_HOME` (an unexpanded `~/.local/share`, for example) is ignored by the installer and by the Odyssey 3D set-up, as it is by the program. They used it as written, so the depth model was downloaded again at every update and `--uninstall` named the wrong folder. (#134)
+
+Linux, the viewer:
+
+- **An interrupted `--install-depth-model` no longer leaves its partial download behind.** Each left up to 99 MB, removed only a day later, and never if the next attempt worked. The next attempt removes them, and never one that is still being written by another installer. (#134)
+- Closing or replacing a file dialog whose own program has already gone also ends what it left running. (#134)
+- When neither Wayland nor X11 can be used, the message names the `WAYLAND_DISPLAY` that was tried instead of calling it unset. (#136)
+
+Linux, the Wine side:
+
+- **With `LC_ALL` set to a locale the system does not have, the Odyssey 3D output no longer says that eye tracking could not be started when it had**, and a tracker that does fail no longer ends the picture. The shell's own warning about the locale was read as part of the tracker's answer. (#135)
+- The set-up reads the list of Wine's library exports correctly when the cross-compiler's objdump speaks the user's language (French, Portuguese, Russian and others); the list came out empty. Arch's objdump has no translations and was not affected. (#135)
+
+Windows:
+
+- **Uninstalling removes a shortcut that was made read-only.** It was left behind, pointing at a program that was gone. (#136)
+- Settings, the guide and exported pictures can be saved in a folder whose path is near or beyond 260 characters (from 240 for the settings). Saving failed with "The system cannot find the path specified". (#134)
+- A read-only settings file is refused at once instead of after 25 attempts. (#134)
+- The installer's messages that said to run `Install.cmd` or `Install-GUI.cmd` also name the setup program's word for it. (#133)
+
+Both editions:
+
+- `--export-guide` names the file it could not write. (#134)
+
+### Tests and releases
+
+- **The release has eight files**: the setup program and its `.sha256` beside the ZIP, both Linux files and theirs. The setup program is built from the ZIP that is published beside it, by an Inno Setup pinned by version and SHA-256, and has a build attestation like the others. (#133)
+- **CI runs the setup program for real** on its Windows runner: a full installation is refused there (no Odyssey 3D Hub), the controls-only installation installs exactly the ZIP's files, a second run repairs it, and the installed uninstaller removes it. (#133)
+- **The Linux archive was run on Ubuntu for the first time.** What held: glibc, dash, mawk, `python3` without `python`, Debian's `wine` wrapper, both MinGW thread models, a user without sudo rights, no terminal. CI now compiles the Wine stand-ins with Ubuntu's MinGW, which would have shown the failure above. (#137)
+- **Everything was run under foreign locales and clocks**: the script suites in ten locales with bash and with dash as `sh` (180 runs), the Windows installer tests under six cultures with both PowerShells (84 runs), the Rust tests and the program's command line under far-east and far-west time zones, at daylight-saving boundaries and with clocks up to 2106. The Windows installer, the Rust code and `install.sh` showed no locale or clock defect. (#135)
+- **The changes of 0.9.3 were reviewed by running counter-examples.** Besides the faults above: the Wayland pacing (0 % CPU when idle in every state under sway), `--toggle`, the empty file argument, the settings recovery, the launchers in folders with `!`, `^`, `%` and `&`, and the camera secret held. (#136)
+- The seven pinned GitHub Actions were checked against the tags their comments name: each commit is the one its tag points to.
+
+### Known, not fixed
+
+- ONNX Runtime 1.21, which Debian 13 and Ubuntu 25.04 and 25.10 package, is refused: the program is built for 1.22 or newer.
+- The setup program is not code-signed.
+- In the setup program, another account's conversion worker being replaced is announced after the installation, not before the elevation prompt as in the console.
+
+### Hardware verification
+
+Pending: these changes were made and tested without the monitor, Wine, the camera or the lens, and the setup program has installed the full converter on no PC yet (CI has no Odyssey 3D Hub). `docs/TESTING.md`, "Pending hardware verification", lists the checks under "New in 0.9.4". Most in need of a real run: a full installation and an update through the setup program on the G90XF PC, and the Odyssey 3D set-up on Ubuntu 24.04.
+
 ## 0.9.3 (2026-11-13)
 
 A third audit release: seven pull requests (#125 to #131) from a round that again used methods not used before. The Linux viewer was run under a Wayland compositor for the first time; the published 0.9.0, 0.9.1 and 0.9.2 files were updated to one another with settings, the depth model and a Wine side in place; installations were run on full disks and killed at every step; the changes of 0.9.2 were attacked with counter-examples that were run; and the Windows installer and the settings code were run against read-only files, files held open, unusual folder names and damaged records. No new features. Built and tested in CI; not yet run on the monitor or on a real Wayland desktop, see Hardware verification.

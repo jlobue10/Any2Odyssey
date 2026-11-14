@@ -77,6 +77,14 @@ if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ];
     case $CALLED in
         */share/any2odyssey) [ ! -e "${CALLED%/share/any2odyssey}/bin/any2odyssey" ] || AT=$CALLED ;;
     esac
+    # Called from the folder itself in a shell that follows links (cd -P, set -P, zsh's CHASE_LINKS), the
+    # name it was called by is where the link leads as well. The usual place is then asked whether it
+    # leads here: without this the program in ~/.local/bin stayed, and the run reported success.
+    USUAL=$HOME/.local/share/any2odyssey
+    if [ "$AT" = "$HERE" ] && [ ! -e "${HERE%/share/any2odyssey}/bin/any2odyssey" ] && [ -e "$HOME/.local/bin/any2odyssey" ] &&
+        [ "$(cd "$USUAL" 2>/dev/null && pwd -P)" = "$HERE" ]; then
+        AT=$USUAL
+    fi
     case $AT in
         */share/any2odyssey)
             # A distribution's package keeps this script in the same place and runs it through
@@ -114,6 +122,7 @@ canonical() {
     printf '%s\n' "${path:-/}"
 }
 PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
+WANT_DEPS=$DEPS # as asked for: a test run still looks which of the packages exist
 if [ -n "$TEST_ROOT" ]; then
     echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives are looked for under $TEST_ROOT, and no packages or udev rules are installed or removed"
     DEPS=
@@ -178,7 +187,11 @@ BIN=$PREFIX/bin
 SHARE=$PREFIX/share
 APPDIR=$SHARE/any2odyssey
 DOCDIR=$SHARE/doc/any2odyssey
-DATA=${ANY2ODYSSEY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/any2odyssey}
+# An XDG_DATA_HOME that is not an absolute path counts as unset (the XDG Base Directory specification), and
+# that is how the program reads it: taken as written, this script looked for the model and built the Wine
+# side in a folder under wherever it was run from, where the program never looks.
+case ${XDG_DATA_HOME:-} in /*) DATA_HOME=$XDG_DATA_HOME ;; *) DATA_HOME=$HOME/.local/share ;; esac
+DATA=${ANY2ODYSSEY_DATA_DIR:-$DATA_HOME/any2odyssey}
 if [ -n "$PACKAGED" ]; then
     WINE_LENS=$HERE
     [ -f "$WINE_LENS/setup.sh" ] || WINE_LENS=/usr/share/any2odyssey/wine-lens
@@ -218,7 +231,14 @@ if [ -n "$UNINSTALL" ]; then
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
         # The desktop entry's staging folder, where a run that was killed left one (a link is only a name).
         for stale in "$SHARE/applications/any2odyssey.desktop".??????????; do
-            if [ -d "$stale" ] && [ ! -L "$stale" ]; then run rm -rf -- "$stale"; fi
+            if [ -d "$stale" ] && [ ! -L "$stale" ]; then
+                run rm -f -- "$stale/entry"
+                run rmdir -- "$stale" 2>/dev/null || true
+            fi
+        done
+        # The same for the copy of the program that such a run was writing.
+        for stale in "$BIN"/.any2odyssey.new.??????????; do
+            if [ -f "$stale" ] && [ ! -L "$stale" ]; then run rm -f -- "$stale"; fi
         done
         # Only what this script put there, named in full. share/any2odyssey can be the program's data
         # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
@@ -289,12 +309,27 @@ if [ -z "$PACKAGED" ]; then
     # Written beside the program and moved into its place: when the copy stops half-way (a full disk, a
     # kill) the program of the installation that is there stays whole. Written over it, an update that
     # ran out of space left 14 of its 15 MB there, not executable, where a working program had been.
-    if ! run install -Dm755 "$HERE/any2odyssey" "$BIN/.any2odyssey.new"; then
-        rm -f "$BIN/.any2odyssey.new"
+    # Under a name of this run's own. With one name for every run (0.9.3), two installations at the same
+    # time removed each other's copy: both stopped with nothing installed, or one moved the other's
+    # half-written copy into place, which stayed mode 600. One that a killed run left behind goes when it
+    # is a day old, as the desktop entry's staging folder below does, and with --uninstall.
+    if [ -n "$DRY" ]; then
+        say "   would run: install -Dm755 $HERE/any2odyssey $BIN/any2odyssey"
+    elif ! (
+        install -d "$BIN" || exit 1
+        for stale in "$BIN/.any2odyssey.new" "$BIN"/.any2odyssey.new.??????????; do
+            if [ -f "$stale" ] && [ ! -L "$stale" ]; then
+                find "$stale" -prune -type f -mtime +0 -exec rm -f -- {} + 2>/dev/null || true
+            fi
+        done
+        NEW=$(mktemp "$BIN/.any2odyssey.new.XXXXXXXXXX") || exit 1
+        trap 'rm -f -- "$NEW"' 0
+        trap 'exit 1' HUP INT TERM
+        install -m755 "$HERE/any2odyssey" "$NEW" && mv -fT "$NEW" "$BIN/any2odyssey"
+    ); then
         echo "install: could not copy the program to $BIN (see the message above); an installation that was there is unchanged" >&2
         exit 1
     fi
-    run mv -fT "$BIN/.any2odyssey.new" "$BIN/any2odyssey"
     # The desktop entry names the program by its full path: ~/.local/bin is not on every session's PATH.
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
@@ -312,8 +347,11 @@ if [ -z "$PACKAGED" ]; then
             # Its age can: a run has its own for a moment, so one untouched for more than a day was left
             # by a run that was killed, and nothing else would ever remove it. A link is not followed.
             for stale in "$ENTRY".??????????; do
-                if [ -d "$stale" ] && [ ! -L "$stale" ]; then
-                    find "$stale" -prune -type d -mtime +0 -exec rm -rf -- {} + 2>/dev/null || true
+                # Only what a run leaves in one goes, and the folder when that was all: a folder of the
+                # user's own that merely has such a name (any2odyssey.desktop.2026-11-14) keeps its files.
+                if [ -d "$stale" ] && [ ! -L "$stale" ] && [ -n "$(find "$stale" -prune -type d -mtime +0 2>/dev/null)" ]; then
+                    rm -f -- "$stale/entry"
+                    rmdir -- "$stale" 2>/dev/null || true
                 fi
             done
             ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1
@@ -558,14 +596,19 @@ fi
 # ---------------------------------------------------------------------------------------------------------
 step "2. Packages"
 # What is needed, as: library or command to look for | Arch | Debian/Ubuntu | Fedora
+# (libxkbcommon-x11: in an X11 session the program ends at once without it, and no package named here
+# brings it; a desktop without GNOME's or KDE's window manager need not have it.)
 NEEDED='
 lib:libpipewire-0.3.so.0|libpipewire|libpipewire-0.3-0|pipewire-libs
 lib:libxkbcommon.so.0|libxkbcommon|libxkbcommon0|libxkbcommon
+lib:libxkbcommon-x11.so.0|libxkbcommon-x11|libxkbcommon-x11-0|libxkbcommon-x11
 lib:libGL.so.1|libglvnd|libgl1|libglvnd-glx
 cmd:curl|curl|curl|curl
 '
 DIALOG='cmd:zenity|zenity|zenity|zenity'
-ONNX_CPU='lib:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime'
+# so: a library the program opens by this very name. Debian and Fedora keep libonnxruntime.so in the
+# development package; the library package's libonnxruntime.so.1 alone is not found by the program.
+ONNX_CPU='so:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime-devel'
 ONNX_GPU='lib:libonnxruntime_providers_cuda.so|onnxruntime-cuda|libonnxruntime-dev|onnxruntime
 lib:libcudnn.so|cudnn|nvidia-cudnn|'
 WINE_SIDE='
@@ -595,9 +638,16 @@ present() {
             done
             return 1
             ;;
+        so:*)
+            if [ -z "$TEST_ROOT" ] && ldconfig -p 2>/dev/null | awk -v name="${1#so:}" '$1 == name { found = 1 } END { exit !found }'; then return 0; fi
+            for found in "$TEST_ROOT"/usr/lib*/"${1#so:}" "$TEST_ROOT"/usr/lib/*/"${1#so:}"; do
+                [ -e "$found" ] && return 0
+            done
+            return 1
+            ;;
     esac
 }
-MISSING= UNNAMED=
+MISSING= UNNAMED= ABSENT=
 check() { # <list> : adds the packages of what is missing to MISSING
     for line in $1; do
         what=${line%%|*}
@@ -620,10 +670,25 @@ if [ -n "$MODEL" ]; then
 fi
 [ -n "$WANT_ODYSSEY" ] && check "$WINE_SIDE"
 MISSING=${MISSING# }
-if [ -z "$MISSING$UNNAMED" ]; then
+# One name that the release's package lists do not have makes apt-get refuse the whole list: Ubuntu 24.04
+# has no ONNX Runtime package, and with libonnxruntime-dev among the names neither PipeWire's library nor
+# curl was installed. A simulated installation (it needs no root) names them; they are set apart.
+if [ "$FAMILY" = 3 ] && [ -n "$WANT_DEPS" ] && [ -n "$MISSING" ]; then
+    # shellcheck disable=SC2086  # a list of package names
+    ABSENT=$(LC_ALL=C apt-get install -s $MISSING 2>&1 |
+        sed -n -e 's/^E: Unable to locate package //p' -e "s/^E: Package '\\(.*\\)' has no installation candidate\$/\\1/p" | tr '\n' ' ')
+    KNOWN=
+    for package in $MISSING; do
+        case " $ABSENT " in *" $package "*) ;; *) KNOWN="$KNOWN $package" ;; esac
+    done
+    MISSING=${KNOWN# }
+    ABSENT=${ABSENT% }
+fi
+if [ -z "$MISSING$UNNAMED$ABSENT" ]; then
     say "   everything needed is installed"
 else
     [ -n "$MISSING" ] && say "   missing packages: $MISSING"
+    [ -n "$ABSENT" ] && say "   missing, and not in this system's package lists (see INSTALL.txt for what needs them): $ABSENT"
     [ -n "$UNNAMED" ] && say "   also missing, under a name this script does not know for your distribution:$UNNAMED"
     if [ -z "$DEPS" ] || [ -z "$INSTALL" ] || [ -z "$MISSING" ]; then
         [ -n "$MISSING" ] && say "   install them with your package manager, then run this script again"

@@ -63,6 +63,59 @@ Assert ($guiLine.Count -eq 1 -and $fullLine.Count -eq 1 -and $guiLine[0].EndsWit
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -RunInstall -ResultFile $report -ExpectedUserSid 'S-1-0-0' 2>&1 | Out-String
 $result=[IO.File]::ReadAllText($report,[Text.Encoding]::UTF8) | ConvertFrom-Json
 Assert (-not $result.Success -and $result.Message.Contains('different Windows account') -and -not (Test-Path -LiteralPath (Join-Path $root 'marker.txt'))) 'Different-account elevation is refused before installation'
+# The setup program (Any2Odyssey.iss) runs the launcher without a console, passes -ReportFile and
+# shows what that file says: a status line, the closing message, then every line that was printed.
+$markerInstaller=Get-Content -LiteralPath $installer -Raw
+$setupReport=Join-Path $root 'setup-report.txt'
+$fake=@'
+param([switch]$ControlsOnly,[switch]$CheckOnly,[switch]$AllowDowngrade)
+Write-Host ('Install Any2Odyssey 0.0.1 for C:\Users\Zo'+[char]0xEB)
+Write-Host 'Note: Windows reports no Desktop folder for this account; no shortcut is placed there.'
+if($env:ANY2ODYSSEY_TEST_FAILURE){throw $env:ANY2ODYSSEY_TEST_FAILURE}
+if($CheckOnly){Write-Host 'Install preflight passed for controls only. No changes made.';return}
+Write-Host 'Any2Odyssey 0.0.1 install completed.'
+'@
+Set-Content -LiteralPath $installer -Encoding UTF8 -Value $fake
+try{
+ $env:ANY2ODYSSEY_TEST_FAILURE=$null
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile $setupReport 2>&1 | Out-String
+ $lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+ Assert ($LASTEXITCODE -eq 0 -and $lines[0] -ceq 'OK' -and $lines[1] -ceq 'Any2Odyssey installation completed. Open Any2Odyssey from the desktop or Start menu.') 'A completed installation is reported to the setup program as OK with its closing message'
+ Assert (@($lines | Where-Object {$_ -ceq ('Install Any2Odyssey 0.0.1 for C:\Users\Zo'+[char]0xEB)}).Count -eq 2 -and @($lines | Where-Object {$_ -like 'Note: Windows reports no Desktop folder*'}).Count -eq 2 -and $lines -ccontains 'Any2Odyssey 0.0.1 install completed.') 'The report carries the lines of the preflight and of the installation, with characters outside ASCII intact'
+ $bytes=[IO.File]::ReadAllBytes($setupReport)
+ Assert ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) 'The setup report is UTF-8 with a byte-order mark, which Setup needs to read it as UTF-8'
+ Assert ($output.Contains('Any2Odyssey 0.0.1 install completed.')) 'With -ReportFile the lines are still printed'
+ Remove-Item -LiteralPath $setupReport
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and -not (Test-Path -LiteralPath $setupReport) -and $output.Contains('Any2Odyssey 0.0.1 install completed.')) 'Without -ReportFile no report is written and the console shows the same lines'
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile (Join-Path $root 'no-such-folder\report.txt') 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and $output.Contains('The setup report could not be written')) 'A report that cannot be written does not turn a completed installation into a failure'
+ $env:ANY2ODYSSEY_TEST_FAILURE="Samsung engine changed.`nThis release needs a compatibility update."
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile $setupReport 2>&1 | Out-String
+ $lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+ Assert ($LASTEXITCODE -eq 1 -and $lines[0] -ceq 'FAILED' -and $lines[1] -ceq 'Samsung engine changed. This release needs a compatibility update.' -and $output.Contains('Installation did not complete: Samsung engine changed.')) 'A refusal is reported as FAILED with its reason on one line'
+ # The two refusals the setup program offers to override, with the text the real checks throw: the
+ # status tells Setup to ask, and the advice about Install.cmd is left out of what it shows.
+ . (Join-Path $installerDir 'InstallSupport.ps1')
+ $refusals=@()
+ try{$null=Get-Any2OdysseyInstallAction -PackageVersion ([version]'0.0.1.0') -InstalledVersion ([version]'9.9.9.0')}catch{$refusals+=$_.Exception.Message}
+ try{Assert-Any2OdysseyWorkerNotNewer -PackageVersion ([version]'0.0.1.0') -WorkerVersion ([version]'9.9.9.0') -OwnerSid 'S-1-5-21-1' -CurrentSid 'S-1-5-21-2'}catch{$refusals+=$_.Exception.Message}
+ Assert ($refusals.Count -eq 2) 'Both downgrade guards refuse an older package'
+ foreach($refusal in $refusals){
+  $env:ANY2ODYSSEY_TEST_FAILURE=$refusal
+  $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile $setupReport 2>&1 | Out-String
+  $lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+  Assert ($LASTEXITCODE -eq 1 -and $lines[0] -ceq 'DOWNGRADE' -and $lines[1].StartsWith($refusal.Substring(0,40)) -and $lines[1].EndsWith('Downgrade blocked; nothing was changed.') -and -not $lines[1].Contains('Install.cmd') -and $output.Contains('Install.cmd -AllowDowngrade')) "A blocked downgrade is reported as DOWNGRADE without the console advice: $($refusal.Substring(0,40))..."
+ }
+ $env:ANY2ODYSSEY_TEST_FAILURE=$null
+ Remove-Item -LiteralPath $setupReport
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -AllowDowngrade -ReportFile $setupReport 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and ([IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8))[0] -ceq 'OK') 'The setup program''s second run, with -AllowDowngrade, reports OK'
+}finally{
+ $env:ANY2ODYSSEY_TEST_FAILURE=$null
+ [IO.File]::WriteAllText($installer,$markerInstaller,(New-Object Text.UTF8Encoding $true))
+ if(Test-Path -LiteralPath $setupReport){Remove-Item -LiteralPath $setupReport}
+}
 # Simulate the elevated process's response without showing UAC or installing anything. The stub
 # writes the result exactly as the elevated step does (UTF-8, no byte-order mark), with a character
 # outside ASCII in it, as a profile path can have; what the launcher prints is recorded as UTF-8 in
@@ -108,6 +161,19 @@ exit $LASTEXITCODE
 $allowedWrapper=Join-Path $root 'simulate-allowed-downgrade.ps1';Set-Content -LiteralPath $allowedWrapper -Value $allowed -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $allowedWrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 0 -and $output.Contains('Simulated elevated success')) 'AllowDowngrade is carried into the elevated command line and its success is relayed'
+# The setup program's report on the elevated path: the relayed failure and the relayed success.
+$reported=$stub.Replace("& (Join-Path `$PSScriptRoot 'Install-Launcher.ps1')","& (Join-Path `$PSScriptRoot 'Install-Launcher.ps1') -ReportFile (Join-Path `$PSScriptRoot 'setup-report.txt')")
+Assert ($reported -ne $stub) 'The elevation stub was given a report file'
+$reportedWrapper=Join-Path $root 'simulate-elevation-report.ps1';Set-Content -LiteralPath $reportedWrapper -Value $reported -Encoding UTF8
+$output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $reportedWrapper 2>&1 | Out-String
+$lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+Assert ($LASTEXITCODE -eq 1 -and $lines[0] -ceq 'FAILED' -and $lines[1] -ceq ('Simulated elevated file-copy failure in C:\Users\Zo'+[char]0xEB)) 'A failure of the elevated step reaches the setup program''s report'
+$reportedAllowed=$allowed.Replace("& (Join-Path `$PSScriptRoot 'Install-Launcher.ps1') -AllowDowngrade","& (Join-Path `$PSScriptRoot 'Install-Launcher.ps1') -AllowDowngrade -ReportFile (Join-Path `$PSScriptRoot 'setup-report.txt')")
+Assert ($reportedAllowed -ne $allowed) 'The success stub was given a report file'
+$reportedAllowedWrapper=Join-Path $root 'simulate-allowed-report.ps1';Set-Content -LiteralPath $reportedAllowedWrapper -Value $reportedAllowed -Encoding UTF8
+$output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $reportedAllowedWrapper 2>&1 | Out-String
+$lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+Assert ($LASTEXITCODE -eq 0 -and $lines[0] -ceq 'OK' -and $lines[1] -ceq 'Simulated elevated success') 'A success of the elevated step reaches the setup program''s report with its message'
 # A declined UAC prompt surfaces from Start-Process -Verb RunAs as InvalidOperationException wrapping
 # Win32Exception 1223 (ERROR_CANCELLED); the stub throws that exact shape.
 $declined=@'

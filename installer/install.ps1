@@ -33,11 +33,11 @@ Write-Host "Target: Windows account $([Security.Principal.WindowsIdentity]::GetC
 $engineDll=Join-Path $engine 'ConversionWrapper.dll'
 if($ControlsOnly){
  # Keep full-install app and renderer versions synchronized.
- if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed on this PC by a full installation (possibly from another Windows account). Controls only cannot be installed beside it; use Install.cmd from an administrator account to install or update the full installation together.'}
- if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Use Install.cmd to update the full installation together, or uninstall it first. If that full installation is already gone, remove C:\Program Files\Any2Odyssey as an administrator, then retry.'}
+ if(Test-Path -LiteralPath (Join-Path $engine $workerName)){throw 'A conversion worker is already installed on this PC by a full installation (possibly from another Windows account). Controls only cannot be installed beside it; run the full installation (Full converter in the setup program, or Install.cmd) from an administrator account to install or update both together.'}
+ if(Test-Path -LiteralPath $helper -PathType Leaf){throw 'The worker-removal helper of a full installation is still installed. Run the full installation (Full converter in the setup program, or Install.cmd) to update both together, or uninstall it first. If that full installation is already gone, remove C:\Program Files\Any2Odyssey as an administrator, then retry.'}
  Write-Host 'Controls-only mode: GUI, tray and Help; 3D conversion is unavailable. Samsung files will not be installed or changed.'
 }else{
- if(-not (Test-Path -LiteralPath $engineDll)){throw 'Samsung Odyssey 3D Hub is not installed. For full 3D conversion, install the supported Hub first. To install just the desktop controls on this PC, run Install-GUI.cmd instead.'}
+ if(-not (Test-Path -LiteralPath $engineDll)){throw 'Samsung Odyssey 3D Hub is not installed. For full 3D conversion, install the supported Hub first. To install just the desktop controls on this PC, choose Desktop controls only in the setup program, or run Install-GUI.cmd.'}
  if((Get-FileHash -LiteralPath $engineDll).Hash -ne '0116B33697CA0192FBE26DA96CB9E2592599C0CACFBB1129AE03E445CB3A840B'){throw 'Samsung engine changed. This release needs a compatibility update.'}
  # One worker path per PC. When another account placed the current worker and helper, say so here in
  # the preflight pass, which runs in the visible console; the elevated installer's own output is hidden.
@@ -130,4 +130,4 @@ Invoke-Any2OdysseyFileTransaction -Operations $operations -AfterCopy {
  if(Test-Path -LiteralPath $stage){foreach($file in Get-ChildItem -LiteralPath $stage -File){Remove-Item -LiteralPath $file.FullName -ErrorAction SilentlyContinue};Remove-Item -LiteralPath $stage -ErrorAction SilentlyContinue}
 }
 Write-Host "Any2Odyssey $versionText $($action.ToLowerInvariant()) completed. Your settings and logs were kept. Open Any2Odyssey as your normal user. No reboot is needed."
-if($ControlsOnly){Write-Host 'Desktop controls are installed; 3D remains unavailable. After installing the supported Samsung Hub, run Install.cmd to add the conversion worker.'}
+if($ControlsOnly){Write-Host 'Desktop controls are installed; 3D remains unavailable. After installing the supported Samsung Hub, run the setup program again (or Install.cmd) to add the conversion worker.'}

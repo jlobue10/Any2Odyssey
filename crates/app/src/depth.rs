@@ -35,8 +35,9 @@ pub const MODEL_SHA256: &str = "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d5
 /// The most `curl` may fetch: the model is 99 MB, and this is well above it.
 const MODEL_MAX_BYTES: u64 = 200 * 1024 * 1024;
 /// Downloads that were given up (a killed installer) are cleared away by a
-/// later one once they are this old: far longer than a download takes, so
-/// one that is still running in another terminal is never touched.
+/// later one when nobody holds their lock any more, and where the folder
+/// has no locks once they are this old: far longer than a download takes,
+/// so one that is still running in another terminal is never touched.
 const STALE_DOWNLOAD: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// The model works on patches of 14 pixels; its training size is 518.
@@ -179,13 +180,7 @@ fn install_model_in(
     // (0600), when it becomes the model: that is how everything else in the
     // data folder is kept (`fsutil::write_atomic`), and nobody but this
     // user's own program reads the model from there.
-    let partial = tempfile::Builder::new()
-        .prefix(DOWNLOAD_PREFIX)
-        .tempfile_in(folder)
-        .map_err(|e| format!("Could not create a model download: {e}"))?;
-    let output = partial
-        .reopen()
-        .map_err(|e| format!("Could not open the model download: {e}"))?;
+    let (partial, output) = start_download(folder)?;
     let status = command
         .args(download_arguments())
         .arg(MODEL_URL)
@@ -204,6 +199,53 @@ fn install_model_in(
 
 /// How a download in progress is named in the models folder.
 const DOWNLOAD_PREFIX: &str = ".depth-download-";
+
+/// Make the file a download goes to and the handle `curl` writes through.
+///
+/// That handle holds the file's lock for as long as it is open anywhere:
+/// in this process until the installation is over, and in `curl`, which
+/// inherits it. A later installer tells by it a download that was given up
+/// (interrupted with Ctrl+C, a closed terminal, a kill: nobody holds the
+/// lock) from one still running elsewhere ([`remove_stale_downloads`]).
+/// Going by age alone left every interrupted download, up to 99 MB each,
+/// for a day, and for ever when the next attempt worked and no installer
+/// ran again.
+fn start_download(folder: &Path) -> Result<(tempfile::NamedTempFile, std::fs::File), String> {
+    let mut failed = String::from("another installer removed it");
+    // Tried again when an installer that is clearing up took the new file
+    // for an abandoned one in the moment before its lock was taken: once
+    // for each installer starting at that moment, at the very most.
+    for _ in 0..16 {
+        let partial = tempfile::Builder::new()
+            .prefix(DOWNLOAD_PREFIX)
+            .tempfile_in(folder)
+            .map_err(|e| format!("Could not create a model download: {e}"))?;
+        match partial.reopen() {
+            Ok(output) if claim(&output, partial.path()) => return Ok((partial, output)),
+            Ok(_) => {}
+            Err(e) => failed = e.to_string(),
+        }
+    }
+    Err(format!("Could not open the model download: {failed}"))
+}
+
+/// Take the lock of the new download at `path`, of which `output` is an
+/// open handle. False when an installer that is clearing up holds it (it
+/// removes the file next) or has removed the file already.
+fn claim(output: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match crate::platform::try_lock_file(output) {
+        Ok(true) => {}
+        Ok(false) => return false,
+        // A folder without locks (some network file systems): nobody can
+        // take this file for an abandoned one before it is a day old.
+        Err(_) => return true,
+    }
+    match (output.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(open), Ok(named)) => open.dev() == named.dev() && open.ino() == named.ino(),
+        _ => false,
+    }
+}
 
 /// What `curl` is told, before the address.
 fn download_arguments() -> Vec<String> {
@@ -240,8 +282,9 @@ fn download_arguments() -> Vec<String> {
 
 /// Clear away downloads that were given up: files in `folder` with the name
 /// of a download in progress (and the `.part` file older versions used)
-/// that have not been written to for `age`. Nothing else is touched, and
-/// nothing that is not a plain file, a link least of all.
+/// whose lock nobody holds ([`start_download`]) or that have not been
+/// written to for `age`. Nothing else is touched, and nothing that is not
+/// a plain file, a link least of all.
 fn remove_stale_downloads(folder: &Path, age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return;
@@ -253,17 +296,27 @@ fn remove_stale_downloads(folder: &Path, age: std::time::Duration) {
             .to_str()
             .is_some_and(|name| name.starts_with(DOWNLOAD_PREFIX) || name == legacy);
         // `DirEntry::metadata` does not follow a link.
-        let stale = ours
-            && entry.metadata().is_ok_and(|metadata| {
-                metadata.is_file()
-                    && metadata
-                        .modified()
-                        .ok()
-                        .and_then(|written| written.elapsed().ok())
-                        .is_some_and(|unwritten| unwritten >= age)
-            });
-        if stale {
-            let _ = std::fs::remove_file(entry.path());
+        let Some(metadata) = entry.metadata().ok().filter(|m| ours && m.is_file()) else {
+            continue;
+        };
+        let path = entry.path();
+        // Held until the file is gone, so that an installer which made it
+        // this moment and has not locked it yet finds out ([`claim`]).
+        // Opened for writing as well: some network file systems give this
+        // lock to nobody else.
+        let unclaimed = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .ok()
+            .filter(|file| matches!(crate::platform::try_lock_file(file), Ok(true)));
+        let old = metadata
+            .modified()
+            .ok()
+            .and_then(|written| written.elapsed().ok())
+            .is_some_and(|unwritten| unwritten >= age);
+        if unclaimed.is_some() || old {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -352,7 +405,7 @@ fn runtime() -> Result<&'static Environment, String> {
             preload_cudnn();
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
-                    "ONNX Runtime could not be loaded ({}): {e}. Install your distribution's onnxruntime package (Arch: onnxruntime-cpu or onnxruntime-cuda).",
+                    "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.22 or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
                     library.display()
                 )
             })?;
@@ -843,9 +896,11 @@ mod tests {
             aged(".depth-download-Ab3xQ9"),
             aged(&format!("{MODEL_FILE}.part")),
         ];
-        // Another installer's download in progress.
+        // Another installer's download in progress: it holds the lock.
         let running = dir.path().join(".depth-download-Zz81kL");
         std::fs::write(&running, b"partial").unwrap();
+        let writing = std::fs::File::options().write(true).open(&running).unwrap();
+        assert!(matches!(crate::platform::try_lock_file(&writing), Ok(true)));
         // Old, but not ours to remove.
         let kept = [
             aged(MODEL_FILE),
@@ -874,5 +929,157 @@ mod tests {
         assert!(link.is_symlink() && victim.exists());
         // A folder that is not there is nothing to clear.
         remove_stale_downloads(&dir.path().join("missing"), day);
+        // Given up now (its installer is gone): cleared without waiting.
+        drop(writing);
+        assert!(cleared(dir.path(), &running));
+    }
+
+    /// Whether clearing `folder` up removes the download at `path`, whose
+    /// lock was let go of just now. Tried for a moment: a program that
+    /// another test's thread is starting holds every open file of this
+    /// process, this lock with it, until it has become that program.
+    fn cleared(folder: &Path, path: &Path) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            remove_stale_downloads(folder, STALE_DOWNLOAD);
+            if !path.exists() {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The download a killed installer leaves: its file, no longer locked.
+    fn abandoned_download(folder: &Path) -> PathBuf {
+        let (partial, output) = start_download(folder).unwrap();
+        let (file, path) = partial.keep().unwrap();
+        std::fs::write(&path, b"half a model").unwrap();
+        drop((file, output));
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_interrupted_download_is_cleared_by_the_next_installer() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(MODEL_FILE);
+        std::fs::write(&target, b"installed").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&target).unwrap();
+        let left = [
+            abandoned_download(dir.path()),
+            abandoned_download(dir.path()),
+        ];
+        assert!(left.iter().all(|path| path.is_file()));
+        // Minutes later, not a day: the next attempt, here one that fails.
+        assert!(install_model_in(dir.path(), download_command("printf wrong"), &expected).is_err());
+        for path in &left {
+            assert!(
+                cleared(dir.path(), path),
+                "{path:?} was left for another day"
+            );
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"installed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_download_running_in_another_installer_is_not_cleared_and_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let go = elsewhere.path().join("go");
+        let target = dir.path().join(MODEL_FILE);
+        std::fs::write(&target, b"model").unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&target).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        let downloads = || {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| std::fs::read(path).is_ok_and(|bytes| bytes == b"mo"))
+                .collect::<Vec<_>>()
+        };
+        // Halfway, until told to go on.
+        let slow = format!(
+            "printf mo; while [ ! -e '{}' ]; do sleep 0.02; done; printf del",
+            go.display()
+        );
+        std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| install_model_in(dir.path(), download_command(&slow), &expected));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while downloads().is_empty() {
+                assert!(std::time::Instant::now() < deadline, "no download started");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let theirs = downloads();
+            // Another installer comes and goes, and clears up as it does.
+            assert!(
+                install_model_in(dir.path(), download_command("printf wrong"), &expected).is_err()
+            );
+            remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
+            assert_eq!(downloads(), theirs, "a running download was removed");
+            std::fs::write(&go, b"").unwrap();
+            assert_eq!(running.join().unwrap(), Ok(target.clone()));
+        });
+        assert_eq!(std::fs::read(&target).unwrap(), b"model");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_download_is_kept_for_as_long_as_its_curl_runs_and_cleared_after() {
+        // The installer was killed and its curl was not: curl holds the
+        // lock through the handle it inherited and goes on writing.
+        let dir = tempfile::tempdir().unwrap();
+        let (partial, output) = start_download(dir.path()).unwrap();
+        let (file, path) = partial.keep().unwrap();
+        let mut curl = std::process::Command::new("sleep")
+            .arg("600")
+            .stdout(std::process::Stdio::from(output))
+            .spawn()
+            .unwrap();
+        drop(file);
+        remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
+        let kept = path.is_file();
+        curl.kill().unwrap();
+        curl.wait().unwrap();
+        assert!(kept, "removed under a curl that was still writing");
+        assert!(cleared(dir.path(), &path));
+    }
+
+    #[test]
+    fn a_new_download_taken_for_an_abandoned_one_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = || {
+            let file = tempfile::Builder::new()
+                .prefix(DOWNLOAD_PREFIX)
+                .tempfile_in(dir.path())
+                .unwrap();
+            let output = file.reopen().unwrap();
+            (file, output)
+        };
+        // Nobody else: claimed, and then nobody else's to clear.
+        let (file, output) = fresh();
+        assert!(claim(&output, file.path()));
+        remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
+        assert!(file.path().is_file());
+        // An installer that is clearing up has it locked this moment.
+        let (file, output) = fresh();
+        let clearing = std::fs::File::open(file.path()).unwrap();
+        assert!(matches!(
+            crate::platform::try_lock_file(&clearing),
+            Ok(true)
+        ));
+        assert!(!claim(&output, file.path()));
+        drop(clearing);
+        // Or has removed it already, which the open handle does not show.
+        let (file, output) = fresh();
+        remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
+        assert!(!file.path().exists());
+        assert!(!claim(&output, file.path()));
     }
 }

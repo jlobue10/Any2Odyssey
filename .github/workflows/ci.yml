@@ -71,6 +71,32 @@ jobs:
         env:
           ANY2ODYSSEY_SKIP_OS_CHECK: '1'
         run: ./scripts/verify-package.ps1
+      # The setup program is compiled by Inno Setup, pinned like the other tools here: by version and by
+      # the SHA-256 of its installer (the digest GitHub lists for that release asset of jrsoftware/issrc).
+      # To bump: change both values together, here and in release.yml. Installed for the runner's account
+      # into a folder of its own, so whatever Inno Setup the image may bring plays no part.
+      - name: Install Inno Setup
+        shell: pwsh
+        env:
+          INNO_SETUP_VERSION: 6.7.4
+          INNO_SETUP_SHA256: a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
+        run: |
+          $name="innosetup-$env:INNO_SETUP_VERSION.exe"
+          $installer=Join-Path $env:RUNNER_TEMP $name
+          curl.exe --proto '=https' --tlsv1.2 -fsSL --retry 3 -o $installer "https://github.com/jrsoftware/issrc/releases/download/is-$($env:INNO_SETUP_VERSION.Replace('.','_'))/$name"
+          if ($LASTEXITCODE -ne 0) { throw "Downloading $name failed (curl exit $LASTEXITCODE)" }
+          $hash=(Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
+          if ($hash -ne $env:INNO_SETUP_SHA256) { throw "$name has SHA-256 $hash, expected $env:INNO_SETUP_SHA256" }
+          $folder=Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          $install=Start-Process -FilePath $installer -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/CURRENTUSER','/NOICONS',('/DIR="'+$folder+'"') -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "The Inno Setup installer exited $($install.ExitCode)" }
+          $iscc=Join-Path $folder 'ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) { throw "ISCC.exe is not in $folder" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+      # From the ZIP just verified, so the setup program carries the files of the ZIP published beside it.
+      - name: Build the setup program from the packaged ZIP
+        shell: pwsh
+        run: ./scripts/build-setup.ps1
       - name: Stage the built executable for the installer tests
         shell: pwsh
         run: |
@@ -92,6 +118,14 @@ jobs:
           ANY2ODYSSEY_SKIP_OS_CHECK: '1'
         run: |
           foreach($test in Get-ChildItem -LiteralPath installer/tests -Filter 'test-*.ps1' | Where-Object Name -ne 'test-dpi-manifest.ps1' | Sort-Object Name){ & $test.FullName }
+      # The one check that runs a published program for real: on this disposable runner the setup program
+      # is refused a full installation (no Odyssey 3D Hub here), installs the desktop controls for the
+      # runner's account, repairs them, and the installed uninstaller removes them again.
+      - name: Setup program, run for real (refusal, install, repair, uninstall)
+        shell: pwsh
+        env:
+          ANY2ODYSSEY_SKIP_OS_CHECK: '1'
+        run: ./installer/tests/live/test-setup-program.ps1 -AllowRealInstall
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Any2Odyssey-windows-x64-exe
@@ -103,7 +137,15 @@ jobs:
           retention-days: 14
           path: |
             dist/*.zip
-            dist/*.sha256
+            dist/*.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Any2Odyssey-windows-x64-setup
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            dist/*-setup.exe
+            dist/*-setup.exe.sha256
 
   # The Linux edition as Arch-based distributions install it: the in-tree PKGBUILD
   # builds, runs the tests and packages as an unprivileged user, then the package
@@ -247,14 +289,30 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-tracking-stop.py
       - name: Lens setup tool check tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-setup-pgrep.py
+      # The stand-ins that setup.sh compiles on the user's PC, with the MinGW of this Ubuntu release: its
+      # headers are older than Arch's, and wtsshim.c did not compile with them up to 0.9.3, which ended the
+      # whole Odyssey 3D set-up there. Compiled only (setup.sh links them against files it generates), and
+      # only the sources that are for Windows; a2ousb.c needs a header setup.sh generates.
+      - name: Wine stand-ins compile with this Ubuntu's MinGW
+        if: matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          for source in a2ocam a2otoast cfgshim connreset dxvashim lens-helper-win monprobe powernotify weaver-host wtsshim; do
+            x86_64-w64-mingw32-gcc -O2 -c -o /dev/null "contrib/wine-lens/src/$source.c"
+          done
       - name: Windows cross-check (no linking)
         if: matrix.arch == 'x86_64'
         run: |
           rustup target add x86_64-pc-windows-msvc
           cargo check --locked --workspace --target x86_64-pc-windows-msvc
       # The archive release.yml publishes, made the same way, so a change that breaks it shows here.
+      # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
       - name: Third-party list for Linux matches the dependencies
         if: matrix.arch == 'x86_64'
+        env:
+          LC_ALL: C
+          PYTHONUTF8: '0'
+          PYTHONCOERCECLOCALE: '0'
         run: |
           scripts/third-party-linux.py > /tmp/third-party-linux.md
           diff -u THIRD-PARTY-LICENSES-LINUX.md /tmp/third-party-linux.md

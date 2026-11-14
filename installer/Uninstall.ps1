@@ -59,7 +59,7 @@ $helperIsForeign=$helperPresent -and $ownerSid -ne '' -and $ownerSid -ne $identi
 $needsHelper=(-not $controlsOnly) -and ((Test-Path -LiteralPath $worker) -or $helperPresent) -and -not $helperIsForeign
 if($helperPresent -and ($controlsOnly -or $helperIsForeign)){$notices++;Write-Host 'A full installation''s conversion worker and uninstall helper in Program Files belong to another account or an older release; they are left alone.'}
 if($needsHelper){
- if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation with Install.cmd, then retry uninstall.'}
+ if(-not (Test-Path -LiteralPath $helper -PathType Leaf)){throw 'The protected uninstall helper is missing. Repair the full installation (run the setup program or Install.cmd again), then retry uninstall.'}
  $powershell=Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
  $arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'" -ExpectedUserSid "'+$identity.User.Value+'"'
  # The helper itself checks the approving account, its own Program Files path and the fixed worker path.
@@ -95,8 +95,14 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
  if(-not $folder){continue}
  $link=Join-Path $folder 'Any2Odyssey.lnk'
  if(-not (Test-Path -LiteralPath $link -PathType Leaf)){continue}
+ # The link object reports no target for a read-only file, so a shortcut that was made read-only
+ # stayed behind, pointing at a program that is gone. The attribute is put back on one that is
+ # not this installation's.
+ $file=Get-Item -LiteralPath $link -Force;$wasReadOnly=$file.IsReadOnly
+ if($wasReadOnly){$file.IsReadOnly=$false}
  $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
  if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){Remove-Item -LiteralPath $link}
+ elseif($wasReadOnly){$file.IsReadOnly=$true}
 }
 # Exact file list only: leave Samsung files, personal settings and logs intact. -Force, because a
 # read-only attribute (copied from the package by installers up to 0.9.2, or set since) must not

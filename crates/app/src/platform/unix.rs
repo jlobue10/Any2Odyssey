@@ -203,6 +203,14 @@ fn peer_is_this_user(stream: &UnixStream) -> bool {
     same_user(sys::peer_uid(stream), sys::own_uid())
 }
 
+/// Take the whole-file lock on `file` if no other open file holds it. The
+/// lock is kept by every copy of this handle, a child's inherited one too,
+/// and goes when the last of them is closed, however those processes end.
+/// `Err` where the folder has no locks.
+pub fn try_lock_file(file: &std::fs::File) -> std::io::Result<bool> {
+    sys::try_lock(file)
+}
+
 /// Where the instance socket lives: the data folder when one was set
 /// explicitly (an isolated run must not find or disturb the real instance),
 /// otherwise the per-user runtime folder, otherwise the data folder.
@@ -770,12 +778,15 @@ impl Dialogs {
 /// End a dialog nobody waits for any more and collect it, so that it is not
 /// left as a process that has ended but is still listed.
 fn end(mut child: std::process::Child) {
-    // Not collected yet, so its number, which is also its group's, is still
-    // its own: nothing else can be hit.
-    if matches!(child.try_wait(), Ok(None)) {
-        sys::end_group(child.id());
-        let _ = child.kill();
-    }
+    // Not collected yet (a dialog is collected only by whoever takes it out
+    // of `Dialogs::open`), so its number, which is also its group's, is
+    // still its own: nothing else can be hit. That holds when the dialog
+    // itself has ended already, and the group is ended then as well:
+    // something it started may still run and hold its output open, which
+    // keeps the thread waiting for the answer. Asking first whether it had
+    // ended collected it and left that running.
+    sys::end_group(child.id());
+    let _ = child.kill();
     let _ = child.wait();
 }
 
@@ -966,35 +977,55 @@ fn dead_wayland(
 /// Call before any thread is started: it takes the variable out of this
 /// process's environment.
 pub fn leave_dead_wayland() -> Option<String> {
+    let display = std::env::var_os("WAYLAND_DISPLAY");
     let said = dead_wayland(
-        std::env::var_os("WAYLAND_DISPLAY"),
+        display.clone(),
         std::env::var_os("WAYLAND_SOCKET"),
         std::env::var_os("XDG_RUNTIME_DIR"),
         std::env::var_os("DISPLAY"),
         |socket| UnixStream::connect(socket).is_ok(),
     )?;
     std::env::remove_var("WAYLAND_DISPLAY");
+    if let Some(display) = display {
+        let _ = LEFT_WAYLAND.set(display);
+    }
     Some(said)
 }
+
+/// What `WAYLAND_DISPLAY` named when [`leave_dead_wayland`] took it out of
+/// this process's environment.
+static LEFT_WAYLAND: std::sync::OnceLock<OsString> = std::sync::OnceLock::new();
 
 /// The display variables, for the message when no window could be opened.
 pub fn display_settings() -> String {
     describe_displays(
         std::env::var_os("WAYLAND_DISPLAY"),
         std::env::var_os("DISPLAY"),
+        LEFT_WAYLAND.get().map(OsString::as_os_str),
     )
 }
 
-fn describe_displays(wayland: Option<OsString>, x11: Option<OsString>) -> String {
+/// `left` is the Wayland display this program gave up on. It is still set
+/// where the program was started: with the X11 display gone as well (a
+/// terminal multiplexer that outlived its session), the message said
+/// "WAYLAND_DISPLAY is not set" to somebody whose shell has it set.
+fn describe_displays(
+    wayland: Option<OsString>,
+    x11: Option<OsString>,
+    left: Option<&OsStr>,
+) -> String {
     let show = |name: &str, value: Option<OsString>| match value {
         Some(value) if !value.is_empty() => format!("{name}={}", value.to_string_lossy()),
         _ => format!("{name} is not set"),
     };
-    format!(
-        "{}, {}",
-        show("WAYLAND_DISPLAY", wayland),
-        show("DISPLAY", x11)
-    )
+    let wayland = match left {
+        Some(left) => format!(
+            "WAYLAND_DISPLAY={} with no compositor answering",
+            left.to_string_lossy()
+        ),
+        None => show("WAYLAND_DISPLAY", wayland),
+    };
+    format!("{wayland}, {}", show("DISPLAY", x11))
 }
 
 pub fn show_window(_: isize) {}
@@ -1290,6 +1321,50 @@ mod tests {
             dialogs.run(&next),
             Ok(Some(PathBuf::from("/tmp/chosen.png")))
         );
+    }
+
+    /// A dialog whose own process is gone (it crashed, was killed, or is a
+    /// wrapper script that did not wait) while a program it started still
+    /// runs and holds its output open.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn closing_a_dialog_that_has_ended_also_ends_what_it_left_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("pids");
+        let dialogs = Arc::new(Dialogs::new());
+        let fixture = vec![(
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "sleep 600 & echo $$ $! >\"$1\"".into(),
+                "dialog-fixture".into(),
+                note.to_str().unwrap().into(),
+            ],
+        )];
+        let waiting = {
+            let dialogs = dialogs.clone();
+            std::thread::spawn(move || dialogs.run(&fixture))
+        };
+        let pids = noted_pids(&dialogs, &note);
+        let (script, left_running) = (pids[0], pids[1]);
+        // The script has ended and is not collected: nobody has its answer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(script) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!running(script) && running(left_running));
+        assert!(!waiting.is_finished());
+        dialogs.close();
+        let ended = gone_within(left_running, Duration::from_secs(5));
+        if !ended {
+            let _ = std::process::Command::new("kill")
+                .arg(left_running.to_string())
+                .status();
+        }
+        assert!(ended, "what the dialog started outlived closing it");
+        assert_eq!(waiting.join().unwrap(), Ok(None));
+        assert!(dialogs.open().child.is_none());
+        assert!(!Path::new(&format!("/proc/{script}")).exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -1760,12 +1835,17 @@ mod tests {
     fn a_failed_start_names_both_display_variables() {
         let os = |text: &str| Some(OsString::from(text));
         assert_eq!(
-            describe_displays(os("wayland-0"), None),
+            describe_displays(os("wayland-0"), None, None),
             "WAYLAND_DISPLAY=wayland-0, DISPLAY is not set"
         );
         assert_eq!(
-            describe_displays(os(""), os(":0")),
+            describe_displays(os(""), os(":0"), None),
             "WAYLAND_DISPLAY is not set, DISPLAY=:0"
+        );
+        // The one this program took out of its environment is still named.
+        assert_eq!(
+            describe_displays(None, os(":0"), Some(OsStr::new("wayland-1"))),
+            "WAYLAND_DISPLAY=wayland-1 with no compositor answering, DISPLAY=:0"
         );
     }
 }
