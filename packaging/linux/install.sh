@@ -196,6 +196,15 @@ fi
 # share/any2odyssey/wine-lens is the setup's files and nothing else (as every installation outside the data
 # folder has it, and 0.9.1 left it in the data folder too) when no Wine side was built in it.
 only_the_setup() { [ -f "$APPDIR/wine-lens/setup.sh" ] && [ ! -e "$APPDIR/wine-lens/prefix" ] && [ ! -e "$APPDIR/wine-lens/build" ]; }
+# Where 0.9.0 or 0.9.1 built a Wine side in it, their setup's own files are still among it: they go, by
+# name. That setup.sh, run again, puts the old stand-ins into the prefix and stops as it did then. What
+# setup.sh keeps there under the same names (tools/*.sh, the two helpers) is the Wine side's and stays.
+drop_the_old_setup() {
+    [ "$WINE_LENS" != "$APPDIR/wine-lens" ] && [ -f "$APPDIR/wine-lens/setup.sh" ] || return 0
+    for old in setup.sh src tests README.md LICENSE-MIT "$RULES_NAME" tools/mkboard.py; do
+        run rm -rf "$APPDIR/wine-lens/$old"
+    done
+}
 
 # ---------------------------------------------------------------------------------------------------------
 if [ -n "$UNINSTALL" ]; then
@@ -208,7 +217,7 @@ if [ -n "$UNINSTALL" ]; then
         # as the last lines say; the Wine side is asked about below.
         run rm -f "$APPDIR/install.sh"
         [ -d "$APPDIR/wine-lens-setup" ] && run rm -rf "$APPDIR/wine-lens-setup"
-        if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; fi
+        if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; else drop_the_old_setup; fi
         if [ -z "$DRY" ] && [ -d "$APPDIR" ]; then rmdir "$APPDIR" 2>/dev/null || true; fi
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
         # The caches the installation refreshed still name the entry and the icon that are gone now.
@@ -342,7 +351,7 @@ if [ -z "$PACKAGED" ]; then
     else
         mkdir -p "$APPDIR"
         # (the setup an earlier version left in wine-lens goes; a Wine side built there does not)
-        if only_the_setup; then rm -rf "$APPDIR/wine-lens"; fi
+        if only_the_setup; then rm -rf "$APPDIR/wine-lens"; else drop_the_old_setup; fi
         rm -rf "$WINE_LENS"
         cp -R "$HERE/wine-lens" "$WINE_LENS"
         install -m755 "$HERE/install.sh" "$APPDIR/install.sh"

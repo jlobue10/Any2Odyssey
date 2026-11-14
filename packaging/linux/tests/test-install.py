@@ -569,6 +569,39 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(data.exists())
 
+    def test_the_setup_files_0_9_1_left_among_a_wine_side_it_built_go_by_name(self):
+        # Seen on a real 0.9.1 installation updated to 0.9.2: setup.sh, src and tests of 0.9.1 stayed in
+        # the Wine side for good. That setup.sh, run again, rebuilds the old stand-ins into the prefix and
+        # stops where it always did.
+        home, data = self.usual_place()
+        old = data / "wine-lens"
+        kept = self.wine_side(data) + [old / "tools/ensure-stack.sh", old / "any2odyssey-lens-helper",
+                                       old / "stack.lock"]
+        gone = [old / "setup.sh", old / "src/a2ocam.c", old / "tests/test-noxon.py", old / "README.md",
+                old / "LICENSE-MIT", old / "70-any2odyssey-lens.rules", old / "tools/mkboard.py"]
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+
+        def as_0_9_1_left_it():
+            for file in kept + gone:
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("#!/bin/sh\n")
+
+        for arguments in [flags, ["--uninstall"]]:
+            with self.subTest(arguments=arguments):
+                as_0_9_1_left_it()
+                result = self.run_installer(*arguments, "--dry-run")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for file in kept + gone:
+                    self.assertTrue(file.is_file(), f"--dry-run removed {file}")
+                result = self.run_installer(*arguments)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for file in kept:
+                    self.assertTrue(file.is_file(), f"{file} is the Wine side's and was removed")
+                for file in gone:
+                    self.assertFalse(file.exists(), f"{file} of the earlier version is still there")
+                self.assertFalse((old / "src").exists())
+                self.assertFalse((old / "tests").exists())
+
     def test_the_installed_copy_removes_the_program_when_share_is_a_link_to_another_place(self):
         # ~/.local/share kept on another drive: the script found itself where the link leads, took the
         # folder above that for the installation and left ~/.local/bin/any2odyssey behind, saying nothing.
