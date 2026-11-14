@@ -72,6 +72,8 @@ def notices(name, version, license_used):
     return "no notice in the package, and its manifest names no authors"
 
 def main():
+    # The file is UTF-8 whatever the locale says: the notices have letters that Latin-1 cannot write.
+    sys.stdout.reconfigure(encoding="utf-8")
     windows = listed_for_windows()
     extra = sorted((k, v) for k, v in tree(TARGET).items() if k not in windows)
     print("# Third-party licenses: the Linux build\n")
