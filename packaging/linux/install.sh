@@ -220,6 +220,10 @@ if [ -n "$UNINSTALL" ]; then
         for stale in "$SHARE/applications/any2odyssey.desktop".??????????; do
             if [ -d "$stale" ] && [ ! -L "$stale" ]; then run rm -rf -- "$stale"; fi
         done
+        # The same for the copy of the program that such a run was writing.
+        for stale in "$BIN"/.any2odyssey.new.??????????; do
+            if [ -f "$stale" ] && [ ! -L "$stale" ]; then run rm -f -- "$stale"; fi
+        done
         # Only what this script put there, named in full. share/any2odyssey can be the program's data
         # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
         # as the last lines say; the Wine side is asked about below.
@@ -289,12 +293,27 @@ if [ -z "$PACKAGED" ]; then
     # Written beside the program and moved into its place: when the copy stops half-way (a full disk, a
     # kill) the program of the installation that is there stays whole. Written over it, an update that
     # ran out of space left 14 of its 15 MB there, not executable, where a working program had been.
-    if ! run install -Dm755 "$HERE/any2odyssey" "$BIN/.any2odyssey.new"; then
-        rm -f "$BIN/.any2odyssey.new"
+    # Under a name of this run's own. With one name for every run (0.9.3), two installations at the same
+    # time removed each other's copy: both stopped with nothing installed, or one moved the other's
+    # half-written copy into place, which stayed mode 600. One that a killed run left behind goes when it
+    # is a day old, as the desktop entry's staging folder below does, and with --uninstall.
+    if [ -n "$DRY" ]; then
+        say "   would run: install -Dm755 $HERE/any2odyssey $BIN/any2odyssey"
+    elif ! (
+        install -d "$BIN" || exit 1
+        for stale in "$BIN/.any2odyssey.new" "$BIN"/.any2odyssey.new.??????????; do
+            if [ -f "$stale" ] && [ ! -L "$stale" ]; then
+                find "$stale" -prune -type f -mtime +0 -exec rm -f -- {} + 2>/dev/null || true
+            fi
+        done
+        NEW=$(mktemp "$BIN/.any2odyssey.new.XXXXXXXXXX") || exit 1
+        trap 'rm -f -- "$NEW"' 0
+        trap 'exit 1' HUP INT TERM
+        install -m755 "$HERE/any2odyssey" "$NEW" && mv -fT "$NEW" "$BIN/any2odyssey"
+    ); then
         echo "install: could not copy the program to $BIN (see the message above); an installation that was there is unchanged" >&2
         exit 1
     fi
-    run mv -fT "$BIN/.any2odyssey.new" "$BIN/any2odyssey"
     # The desktop entry names the program by its full path: ~/.local/bin is not on every session's PATH.
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"

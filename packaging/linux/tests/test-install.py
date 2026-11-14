@@ -673,6 +673,61 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(program.read_bytes(), (self.archive / "any2odyssey").read_bytes())
         self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
 
+    def test_a_run_that_cannot_copy_the_program_leaves_the_copy_of_another_run(self):
+        # 0.9.3 wrote every run's copy under one name, bin/.any2odyssey.new. Of two installations at the
+        # same time, the one whose `install` found the name taken ("File exists") removed that file on its
+        # way out, which was the other's finished copy: both stopped and no program was installed. Here the
+        # first run is held just before it moves its copy into place while a second one fails that way.
+        prefix = self.root / "prefix"
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "nested install failed"
+        nested = shlex.join([*SHELL, str(self.archive / "install.sh"), "--prefix", str(prefix),
+                             "--no-deps", "--no-udev", "--no-model", "--no-odyssey"])
+        (tools / "mv").write_text(
+            '#!/bin/sh\nfor last; do :; done\n'
+            f'if [ -z "${{A2O_NESTED_INSTALL:-}}" ] && [ "$last" = {shlex.quote(str(prefix / "bin/any2odyssey"))} ]; then\n'
+            f'    A2O_NESTED_INSTALL=1 {nested} >/dev/null 2>&1 || : > {shlex.quote(str(called))}\nfi\n'
+            f'exec {shlex.quote(shutil.which("mv"))} "$@"\n')
+        (tools / "install").write_text(
+            '#!/bin/sh\nfor last; do :; done\n'
+            'if [ -n "${A2O_NESTED_INSTALL:-}" ]; then\n'
+            '    case $last in */bin/.any2odyssey*)\n'
+            '        echo "install: cannot create regular file: File exists" >&2; exit 1 ;;\n    esac\nfi\n'
+            f'exec {shlex.quote(shutil.which("install"))} "$@"\n')
+        for tool in ("mv", "install"):
+            (tools / tool).chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        result = self.install(prefix)
+        if not called.exists():
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in mv or install, which the test cannot stand in for")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        program = prefix / "bin/any2odyssey"
+        self.assertEqual(program.read_bytes(), (self.archive / "any2odyssey").read_bytes())
+        self.assertTrue(os.access(program, os.X_OK))
+        self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
+
+    def test_a_copy_of_the_program_left_by_a_killed_run_goes_after_a_day_and_with_uninstall(self):
+        prefix = self.root / "prefix"
+        long_ago = time.time() - 3 * 24 * 3600
+        abandoned = [prefix / "bin/.any2odyssey.new.Ab3dE6gh1J", prefix / "bin/.any2odyssey.new"]
+        fresh = prefix / "bin/.any2odyssey.new.Zy3dE6gh1J"
+        (prefix / "bin").mkdir(parents=True)
+        for file in [*abandoned, fresh]:
+            file.write_text("half a program")
+        for file in abandoned:
+            os.utime(file, (long_ago, long_ago))
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(entry.name for entry in (prefix / "bin").iterdir()), [fresh.name, "any2odyssey"])
+        result = self.run_installer("--prefix", str(prefix), "--uninstall", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(fresh.is_file())
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(list((prefix / "bin").iterdir()), [])
+
     def test_the_packages_setup_says_that_an_installation_from_the_archive_is_still_in_the_way(self):
         # Seen with the published Arch package over a 0.9.1 installation in ~/.local: the old menu entry and
         # program went on being used, and any2odyssey-setup named the old program as the one to start.
