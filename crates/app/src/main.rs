@@ -39,9 +39,13 @@ fn usage() -> String {
 /// argument and the depth model elsewhere.
 fn usage_for(windows: bool) -> String {
     let mut text = format!(
-        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks",
+        "{APP_NAME} {}\n\nUsage:\n  Any2Odyssey                      open the controls",
         any2odyssey_core::VERSION
     );
+    if windows {
+        text.push_str("\n  Any2Odyssey --toggle             turn 3D on/off in the running instance (or start one and turn 3D on)");
+    }
+    text.push_str("\n  Any2Odyssey --show               show the running controls (or open them when no instance is running)\n  Any2Odyssey --quit               ask the running instance to quit (exit 1 when none is running)\n  Any2Odyssey --help               print this text\n  Any2Odyssey --self-test          geometry and source-isolation checks");
     if windows {
         text.push_str("\n  Any2Odyssey --check-updates      ask GitHub for the newest release (exit 0 current, 10 update available, 1 error)");
     }
@@ -53,6 +57,18 @@ fn usage_for(windows: bool) -> String {
         text.push_str("\n  Any2Odyssey --install-depth-model  download the AI depth model for 2D → 3D (about 95 MB, needs curl)");
     }
     text
+}
+
+/// What `--toggle` is answered where there is no conversion to switch, or
+/// `None` where there is (`windows`). It switches Samsung's conversion. On
+/// Linux the help promised "turn 3D on/off" all the same, and the command
+/// exited 0 having only tried to start the Windows worker in the running
+/// instance (a "Could not start conversion" line in the log each time) or,
+/// with no instance, having opened the viewer.
+fn toggle_refusal(windows: bool) -> Option<&'static str> {
+    (!windows).then_some(
+        "--toggle switches Samsung's 2D to 3D conversion, which exists only on Windows. Here the 3D output is started and stopped in the viewer's window.",
+    )
 }
 
 /// Print a line of this program's answer. Unlike `println!` it does not
@@ -252,12 +268,15 @@ fn option_like(path: &str) -> bool {
 /// is taken as it is and never has to be Unicode; the option word does, and
 /// so does every other argument ([`unicode_args`]). As elsewhere, a path
 /// after `--open` may not look like an option, and a bare one may not start
-/// with a dash.
+/// with a dash. An empty argument (a script's unset variable) names no file:
+/// it opened the viewer on an error, or, with an instance running, ended
+/// with exit 1 and not a word.
 #[cfg(not(windows))]
 fn image_argument(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
     let starts_with =
         |arg: &std::ffi::OsStr, prefix: &str| arg.as_encoded_bytes().starts_with(prefix.as_bytes());
     match args {
+        [.., path] if path.is_empty() => None,
         [flag, path] if flag == "--open" && !starts_with(path, "--") => Some(path),
         [path] if !starts_with(path, "-") => Some(path),
         _ => None,
@@ -404,6 +423,10 @@ fn main() {
         // can tell "quit delivered" from "no instance".
         [flag] if flag == "--quit" => quit_running_instance(platform::signal),
         [flag] if flag == "--show" && platform::signal(ipc::SHOW_EVENT) => 0,
+        [flag] if flag == "--toggle" && toggle_refusal(cfg!(windows)).is_some() => {
+            complain(toggle_refusal(cfg!(windows)).unwrap_or_default());
+            1
+        }
         [flag] if flag == "--toggle" && platform::signal(ipc::TOGGLE_EVENT) => 0,
         [flag] if flag == "--toggle" || flag == "--show" => {
             run_gui(flag == "--toggle", logger, None)
@@ -639,7 +662,7 @@ mod argument_tests {
         let image = std::path::PathBuf::from(image_argument(std::slice::from_ref(&name)).unwrap());
         assert_eq!(image.as_os_str().as_bytes(), b"/pictures/pair-\xff\xfe.png");
         // Ordinary names as before, relative ones and single dashes inside.
-        for plain in ["pair.png", "./--dark", "a-b.png", ""] {
+        for plain in ["pair.png", "./--dark", "a-b.png"] {
             assert_eq!(
                 image_argument(&[os(plain.as_bytes())]),
                 Some(OsStr::new(plain))
@@ -658,6 +681,8 @@ mod argument_tests {
             &[os(b"-h")],
             &[os(b"-\xff.png")],
             &[os(b"--open")],
+            &[os(b"")],
+            &[os(b"--open"), os(b"")],
             &[os(b"--open"), os(b"--dark")],
             &[os(b"--open"), os(b"--\xff")],
             &[os(b"--open"), name.clone(), os(b"extra")],
@@ -738,7 +763,7 @@ mod argument_tests {
     #[test]
     fn usage_names_every_instance_command_and_help() {
         let text = usage();
-        for word in ["--toggle", "--show", "--quit", "--help", "--export-guide"] {
+        for word in ["--show", "--quit", "--help", "--export-guide"] {
             assert!(text.contains(word), "{word}");
         }
         assert!(text.contains("or open them when no instance is running"));
@@ -756,6 +781,7 @@ mod argument_tests {
             "--test-capture-exclusion",
             "--test-offscreen",
             "--check-updates",
+            "--toggle",
         ];
         for word in windows_only {
             assert!(windows.contains(word), "{word}");
@@ -765,8 +791,10 @@ mod argument_tests {
             assert!(!windows.contains(word), "{word}");
             assert!(others.contains(word), "{word}");
         }
+        // Where it is not offered it is refused, and says where it works.
+        assert_eq!(toggle_refusal(true), None);
+        assert!(toggle_refusal(false).is_some_and(|said| said.contains("only on Windows")));
         for word in [
-            "--toggle",
             "--show",
             "--quit",
             "--help",
