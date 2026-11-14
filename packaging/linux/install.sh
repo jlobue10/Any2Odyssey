@@ -569,7 +569,9 @@ lib:libGL.so.1|libglvnd|libgl1|libglvnd-glx
 cmd:curl|curl|curl|curl
 '
 DIALOG='cmd:zenity|zenity|zenity|zenity'
-ONNX_CPU='lib:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime'
+# so: a library the program opens by this very name. Debian and Fedora keep libonnxruntime.so in the
+# development package; the library package's libonnxruntime.so.1 alone is not found by the program.
+ONNX_CPU='so:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime-devel'
 ONNX_GPU='lib:libonnxruntime_providers_cuda.so|onnxruntime-cuda|libonnxruntime-dev|onnxruntime
 lib:libcudnn.so|cudnn|nvidia-cudnn|'
 WINE_SIDE='
@@ -595,6 +597,13 @@ present() {
             # one matches nothing, which reported every installed library as missing.
             if [ -z "$TEST_ROOT" ] && ldconfig -p 2>/dev/null | grep -q -F "${1#lib:}"; then return 0; fi
             for found in "$TEST_ROOT"/usr/lib*/"${1#lib:}"* "$TEST_ROOT"/usr/lib/*/"${1#lib:}"*; do
+                [ -e "$found" ] && return 0
+            done
+            return 1
+            ;;
+        so:*)
+            if [ -z "$TEST_ROOT" ] && ldconfig -p 2>/dev/null | awk -v name="${1#so:}" '$1 == name { found = 1 } END { exit !found }'; then return 0; fi
+            for found in "$TEST_ROOT"/usr/lib*/"${1#so:}" "$TEST_ROOT"/usr/lib/*/"${1#so:}"; do
                 [ -e "$found" ] && return 0
             done
             return 1

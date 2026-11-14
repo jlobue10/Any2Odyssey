@@ -1037,6 +1037,21 @@ done
         self.assertNotIn("libxkbcommon-x11-0", missing)
         self.assertIn("libxkbcommon0", missing)
 
+    def test_the_onnx_runtime_counts_only_under_the_name_the_program_opens(self):
+        # The program opens libonnxruntime.so. Fedora's onnxruntime package has libonnxruntime.so.1 only
+        # (the plain name is in onnxruntime-devel), as Debian's libonnxruntime1.21 has: with either
+        # installed the runtime was taken for present, and on Fedora the package asked for was the wrong one.
+        self.only_package_manager("dnf", "exit 0")
+        for library in ["libonnxruntime.so.1", "libonnxruntime.so.1.26.0"]:
+            (self.system / "usr/lib64" / library).parent.mkdir(parents=True, exist_ok=True)
+            (self.system / "usr/lib64" / library).touch()
+        missing, _ = self.missing_packages()
+        self.assertIn("onnxruntime-devel", missing)
+        self.assertNotIn("onnxruntime", missing)
+        (self.system / "usr/lib64/libonnxruntime.so").symlink_to("libonnxruntime.so.1")
+        missing, _ = self.missing_packages()
+        self.assertNotIn("onnxruntime-devel", missing)
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.
