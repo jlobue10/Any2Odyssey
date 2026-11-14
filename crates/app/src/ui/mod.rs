@@ -9,7 +9,7 @@ mod viewer;
 mod widgets;
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use any2odyssey_core::theme::Palette;
 use any2odyssey_core::APP_NAME;
@@ -70,6 +70,43 @@ pub struct App {
     screenshot_taken: bool,
 }
 
+/// Whether the windows are Wayland surfaces. Asked once: the answer is the
+/// environment this program was started in.
+fn on_wayland() -> bool {
+    #[cfg(not(windows))]
+    {
+        static ON_WAYLAND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON_WAYLAND.get_or_init(platform::uses_wayland)
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
+}
+
+/// The shortest time from one frame's start to the next where the display
+/// does not space them (120 a second).
+const PACED_FRAME: Duration = Duration::from_micros(8_333);
+
+/// How long to wait before a frame that would start at `now`, when the one
+/// before it started at `last`.
+fn pacing_wait(last: Option<Instant>, now: Instant) -> Duration {
+    last.map_or(Duration::ZERO, |last| {
+        PACED_FRAME.saturating_sub(now.saturating_duration_since(last))
+    })
+}
+
+/// Space this frame from the one before ([`pacing_wait`]).
+fn pace(ctx: &egui::Context) {
+    let id = egui::Id::new("frame-pacing");
+    let last = ctx.data(|data| data.get_temp::<Instant>(id));
+    let wait = pacing_wait(last, Instant::now());
+    if !wait.is_zero() {
+        std::thread::sleep(wait);
+    }
+    ctx.data_mut(|data| data.insert_temp(id, Instant::now()));
+}
+
 fn load_png(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let img = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
@@ -104,6 +141,15 @@ pub fn run(core: Arc<Mutex<Core>>) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport,
         centered: true,
+        // On Wayland a buffer swap that waits for the display waits for the
+        // compositor to ask for a frame, and it asks a window nobody can
+        // see for none: minimized, on another workspace, or under the
+        // full-screen output window. The controls and the output window
+        // are drawn by one thread, so the output stopped answering (F11,
+        // Esc, a new picture) for as long as the controls were out of
+        // sight, and so did `--show`. There the frames are spaced by this
+        // program instead (`pace`).
+        vsync: !on_wayland(),
         ..Default::default()
     };
     eframe::run_native(
@@ -288,6 +334,15 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
+        // A Wayland window can neither restore nor focus itself (the three
+        // commands above do nothing there), so `--show` changed nothing on
+        // the screen. Asking for attention is what it may do: the desktop
+        // marks the window in its task bar.
+        if on_wayland() {
+            ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
     }
 
     fn handle_requests(&mut self, ctx: &egui::Context) {
@@ -630,6 +685,9 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if on_wayland() {
+            pace(ctx);
+        }
         // Preview capture needs several settled frames and a bounded timeout.
         // Normal controls repaint for input or a change reported by the poller.
         if self.preview {
@@ -821,6 +879,39 @@ mod tests {
             core.lock().unwrap().exiting,
             "Close must quit without a tray"
         );
+    }
+
+    #[test]
+    fn frames_the_display_does_not_space_are_spaced_here() {
+        let start = Instant::now();
+        // The first frame, and one that comes late enough, start at once.
+        assert_eq!(pacing_wait(None, start), Duration::ZERO);
+        assert_eq!(
+            pacing_wait(Some(start), start + PACED_FRAME),
+            Duration::ZERO
+        );
+        assert_eq!(
+            pacing_wait(Some(start), start + Duration::from_secs(1)),
+            Duration::ZERO
+        );
+        // One that comes early waits for the rest of the interval.
+        assert_eq!(pacing_wait(Some(start), start), PACED_FRAME);
+        assert_eq!(
+            pacing_wait(Some(start), start + Duration::from_millis(3)),
+            PACED_FRAME - Duration::from_millis(3)
+        );
+        // A clock that went back does not wait longer than one interval.
+        assert_eq!(
+            pacing_wait(Some(start + Duration::from_secs(5)), start),
+            PACED_FRAME
+        );
+        // Frames asked for back to back come no faster than the interval.
+        let ctx = egui::Context::default();
+        pace(&ctx);
+        let first = Instant::now();
+        pace(&ctx);
+        pace(&ctx);
+        assert!(first.elapsed() >= PACED_FRAME * 2 - Duration::from_millis(1));
     }
 
     #[test]
