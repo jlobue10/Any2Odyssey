@@ -624,6 +624,44 @@ class InstallerTests(unittest.TestCase):
         self.assert_removed(home / ".local")
         self.assertEqual((elsewhere / "bin/any2odyssey").read_text(), "not this installation's\n")
 
+    def test_an_update_that_cannot_copy_the_program_leaves_the_one_that_is_there(self):
+        # Updating 0.9.1 on a full disk: `install` had removed the old program and written 14 of 15 MB of
+        # the new one, mode 600, at ~/.local/bin/any2odyssey. Here `install` fails the same way for the
+        # program and for nothing else.
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        program = prefix / "bin/any2odyssey"
+        before = program.read_bytes()
+        (self.archive / "any2odyssey").write_text("#!/bin/sh\n# the next version\n" + "#" * 4096 + "\n")
+        real = shutil.which("install")
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "install").write_text(
+            '#!/bin/sh\nfor last; do :; done\n'
+            f'case $last in */bin/*any2odyssey*) : >"{self.root}/called"; rm -f "$last"\n'
+            '    head -c 100 "$2" >"$last"; chmod 600 "$last"\n'
+            '    echo "install: error writing: No space left on device" >&2; exit 1 ;; esac\n'
+            f'exec "{real}" "$@"\n')
+        (tools / "install").chmod(0o755)
+        path = self.env["PATH"]
+        self.env["PATH"] = f"{tools}{os.pathsep}{path}"
+        result = self.install(prefix)
+        if not (self.root / "called").exists():
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in install, which the test cannot stand in for")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No space left on device", result.stderr)
+        self.assertEqual(program.read_bytes(), before, "the program that was installed is damaged")
+        self.assertTrue(os.access(program, os.X_OK))
+        self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
+        # With room again the update goes through and leaves nothing beside the program.
+        self.env["PATH"] = path
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(program.read_bytes(), (self.archive / "any2odyssey").read_bytes())
+        self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
+
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
         archive = self.root / "share" / "any2odyssey"

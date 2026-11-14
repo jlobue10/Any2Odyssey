@@ -210,7 +210,7 @@ drop_the_old_setup() {
 if [ -n "$UNINSTALL" ]; then
     step "Removing Any2Odyssey from $PREFIX"
     if [ -z "$PACKAGED" ]; then
-        run rm -f "$BIN/any2odyssey" "$SHARE/applications/any2odyssey.desktop" \
+        run rm -f "$BIN/any2odyssey" "$BIN/.any2odyssey.new" "$SHARE/applications/any2odyssey.desktop" \
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
         # Only what this script put there, named in full. share/any2odyssey can be the program's data
         # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
@@ -278,7 +278,15 @@ if [ -z "$PACKAGED" ]; then
             exit 1
         done
     fi
-    run install -Dm755 "$HERE/any2odyssey" "$BIN/any2odyssey"
+    # Written beside the program and moved into its place: when the copy stops half-way (a full disk, a
+    # kill) the program of the installation that is there stays whole. Written over it, an update that
+    # ran out of space left 14 of its 15 MB there, not executable, where a working program had been.
+    if ! run install -Dm755 "$HERE/any2odyssey" "$BIN/.any2odyssey.new"; then
+        rm -f "$BIN/.any2odyssey.new"
+        echo "install: could not copy the program to $BIN (see the message above); an installation that was there is unchanged" >&2
+        exit 1
+    fi
+    run mv -fT "$BIN/.any2odyssey.new" "$BIN/any2odyssey"
     # The desktop entry names the program by its full path: ~/.local/bin is not on every session's PATH.
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
