@@ -11,7 +11,7 @@
 | Selected / follow-active window | DWM thumbnails | Not planned |
 | Click-through output | Win32 layered + transparent styles | No: the output is an ordinary window you place and make full screen, except the Odyssey 3D picture of a live screen, which lets clicks through |
 | Global shortcuts, automatic start, recovery | Yes | Local shortcuts only (Ctrl+Alt+F10 output, F1 Help, F11/Esc in the output window); output starts manually |
-| One instance, `--show` / `--quit` | Named mutex and events | A Unix socket in `$XDG_RUNTIME_DIR`; a second launch hands over its request or file |
+| One instance, `--show` / `--quit` | Named mutex and events | A Unix socket in `$XDG_RUNTIME_DIR`; a second launch hands over its request or file. `--toggle` switches the Windows conversion and is refused here (exit 1) |
 | Update check | GitHub Releases, on request or daily | No |
 | Installer | Version-aware PowerShell installer | Per release, an Arch Linux package (`packaging/arch/PKGBUILD`, with `any2odyssey-setup`) and an archive with `install.sh` (`packaging/linux/install.sh`); see below |
 
