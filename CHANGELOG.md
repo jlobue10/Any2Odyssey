@@ -2,6 +2,63 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.3 (2026-11-13)
+
+A third audit release: seven pull requests (#125 to #131) from a round that again used methods not used before. The Linux viewer was run under a Wayland compositor for the first time; the published 0.9.0, 0.9.1 and 0.9.2 files were updated to one another with settings, the depth model and a Wine side in place; installations were run on full disks and killed at every step; the changes of 0.9.2 were attacked with counter-examples that were run; and the Windows installer and the settings code were run against read-only files, files held open, unusual folder names and damaged records. No new features. Built and tested in CI; not yet run on the monitor or on a real Wayland desktop, see Hardware verification.
+
+**Linux on Wayland: up to 0.9.2 the viewer stopped answering whenever its controls could not be seen**, for example with the output window full screen over them. Update.
+
+### Fixed
+
+Linux, the viewer on Wayland:
+
+- **The viewer no longer stops answering while its controls are covered, minimized or on another workspace.** A window that cannot be seen is given no moment to draw, and the controls and the output window are drawn by one thread: F11, Esc and a double click did nothing and the window could not be closed. On Wayland the viewer now paces its own drawing, at most 120 pictures a second. X11 and Windows are unchanged. (#129)
+- **`--show` makes the controls ask for attention in the task bar.** It did nothing that could be seen: a Wayland window cannot raise itself. (#129)
+- With `WAYLAND_DISPLAY` left over from a session that is gone and an X11 display available, the viewer starts on X11 instead of stopping. Where no window system can be used, the message names both variables and is also written to `companion.log`. (#129)
+
+Linux, the viewer:
+
+- **`--toggle` says that it switches the Windows conversion and exits 1.** It was listed in `--help`, exited 0, changed nothing and wrote a line to the log on every call; with no instance running it opened the viewer. (#127)
+- Starting and closing the viewer no longer leaves a `settings.json` of Windows conversion defaults in the data folder. A file that is there is still read and left as it is. (#127)
+- An empty file argument is a usage error (exit 2) instead of a silent exit 1. (#127)
+
+Linux, installing:
+
+- **Installing again from a shell with another `XDG_DATA_HOME` or `ANY2ODYSSEY_DATA_DIR` no longer removes a Wine side built in `~/.local/share/any2odyssey/wine-lens`**, about 1 GB with Leia's runtime in it. A folder that holds a built Wine side is never taken for the setup's own. (#128)
+- **An update that runs out of disk space, or is killed, no longer leaves a damaged program.** Updating 0.9.1 on a full disk left 14 of the program's 15 MB in its place, not executable. The new program is written beside the old one and moved into its place, so an update needs about 15 MB free. (#130)
+- **`--uninstall` removes the program where `~/.local/share` is a link to another place.** It left `~/.local/bin/any2odyssey` behind and reported success. (#130)
+- **Updating an installation of 0.9.0 or 0.9.1 removes that version's setup files from the Wine side.** 0.9.2 left them there (`setup.sh`, `src`, `tests`), and that old `setup.sh`, run again, puts old files back and stops. (#130)
+- An installation running at the same time no longer loses its staging folder to this one. One left by an installer that was killed is removed once it is a day old, and by `--uninstall`. (#125, #128)
+- The packages' `README.md` comes with the picture at its top. (#128)
+- Arch package: `any2odyssey-setup` says when an installation from the release archive in `~/.local` is still the one that is started, and how to remove it without losing the settings or the depth model. (#130)
+
+Linux, the Wine side:
+
+- The camera bridge refuses a secret that is too short once its line ending is taken off, instead of counting the line ending. (#126)
+
+Windows:
+
+- **Uninstalling no longer stops at files that are read-only.** A package unpacked with the attribute installed read-only files, and the uninstaller then failed with "You do not have sufficient access rights", in one order of events half-way: worker gone, program still registered, the same on every further try. The installer no longer copies the attribute and the uninstallers remove such files. (#131)
+- `Install.cmd` and `Install-GUI.cmd` work from a folder with `!` in its name where delayed expansion is switched on in cmd; they answered "Extract the whole ZIP". (#131)
+
+Both editions:
+
+- A `settings.json` that is valid JSON but not an object (`[]`, for example) is reported as unreadable instead of being read as first-run defaults and written over. (#131)
+- Recovering unreadable settings no longer leaves one more `settings-recovery-*.json` behind every time the settings file cannot be replaced. (#131)
+
+### Tests and releases
+
+- **The Linux viewer was run under a Wayland compositor for the first time** (sway and weston without a screen, software OpenGL). Start-up with and without XWayland, the application id both windows report, full screen on two outputs, unplugging an output, scales 1.5 and 2, file dialogs, 200 hand-overs and live capture without a screen-cast portal behaved as they should. `docs/PLATFORMS.md` says what was checked and what a Wayland window cannot do: the output window cannot place itself on a chosen monitor, and on desktops that draw no window frames (GNOME) it has no title bar. (#129)
+- **Updates between the published releases were run for the first time**, as an ordinary user with settings, the depth model and a Wine side in place: nothing of the user's was lost in any direction, and after 434 kills of a running update every second run ended like a clean one. Interrupted, cut-short and wrong downloads of the depth model installed nothing. (#130)
+- **The changes of 0.9.2 were reviewed by running counter-examples**: the refusal to install as root into a folder that is not root's alone, the camera secret's length check, the log's 4 MiB turnover under four writers and the readiness check against a log growing without end held. (#128)
+- **The Windows installer was run with what its tests had always assumed away**: folder names with `&`, `'`, `%`, `!`, `^`, brackets, non-ANSI characters and emoji, UNC paths, a missing TEMP, damaged and half-written records, junctions, and files held open by another program (the previous installation came back whole). Only the two faults above were found. (#131)
+- The check that every link in the packaged documents leads to a packaged file now also reads pictures and links written as HTML. (#128)
+- CI: the checks of a pull request can no longer cancel the run on `main` when a commit is pushed moments before merging; this happened once during the 0.9.2 release. (#127)
+
+### Hardware verification
+
+Pending: these changes were made and tested without the monitor, Wine, the camera, the lens or a real Wayland desktop. `docs/TESTING.md`, "Pending hardware verification", lists the checks under "New in 0.9.3". Most in need of a real run: the viewer on KDE Plasma (Wayland) with the output window full screen over the controls, and an update of a real 0.9.0 or 0.9.1 installation whose Odyssey 3D setup had run.
+
 ## 0.9.2 (2026-11-13)
 
 A second audit release, mostly for the Linux edition: eight pull requests (#116 to #123) from two further rounds that used methods not used before. The published 0.9.1 files were inspected, round 14's own fixes were reviewed again, the shared core was put through mutation testing, the running Linux viewer was soaked for thousands of operations, the tests were run under sanitizers and repeated under load, every script was run in hostile environments, and every Win32 call of the Windows edition was checked against its contract. No new features. Built and tested in CI; not yet run on the monitor, see Hardware verification.
