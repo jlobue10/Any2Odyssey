@@ -18,7 +18,7 @@ STAGE=dist/$NAME
 
 [ -x "$EXE" ] || { echo "package-linux: $EXE is missing; build it first" >&2; exit 1; }
 rm -rf "$STAGE" "dist/$NAME.tar.gz" "dist/$NAME.tar.gz.sha256"
-mkdir -p "$STAGE/docs/assets" "$STAGE/installer"
+mkdir -p "$STAGE/docs/assets" "$STAGE/installer" "$STAGE/assets"
 
 install -m755 "$EXE" "$STAGE/any2odyssey"
 install -m644 README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE VERSION \
@@ -28,6 +28,8 @@ install -m644 README.md CHANGELOG.md USER-GUIDE.html LICENSE NOTICE VERSION \
 install -m644 docs/*.md "$STAGE/docs/"
 install -m644 docs/assets/*.png "$STAGE/docs/assets/"
 install -m644 installer/README.md "$STAGE/installer/README.md"
+# (and to the picture at its top, which is written as HTML)
+install -m644 assets/Any2Odyssey-wordmark.png "$STAGE/assets/Any2Odyssey-wordmark.png"
 install -m644 packaging/linux/any2odyssey.desktop "$STAGE/any2odyssey.desktop"
 install -m644 assets/Any2Odyssey.png "$STAGE/any2odyssey.png"
 install -m644 packaging/linux/INSTALL.txt "$STAGE/INSTALL.txt"

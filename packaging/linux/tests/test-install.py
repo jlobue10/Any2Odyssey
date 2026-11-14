@@ -446,13 +446,19 @@ class InstallerTests(unittest.TestCase):
         for name in linked:
             (self.archive / name).parent.mkdir(parents=True, exist_ok=True)
             (self.archive / name).write_text("a document\n")
+        # README.md's first picture is written as HTML, and 0.9.2 still installed the page without it.
+        pictured = "assets/Any2Odyssey-wordmark.png"
+        (self.archive / pictured).parent.mkdir()
+        (self.archive / pictured).write_bytes(b"a picture")
         (self.archive / "README.md").write_text(
-            "".join(f"[{name}]({name})\n" for name in linked) + "[elsewhere](https://example.org/a.md)\n")
+            f'<p align="center"><img src="{pictured}" alt="Any2Odyssey" width="520" /></p>\n'
+            '<a href="https://example.org/">elsewhere</a> <a href="#usage">below</a>\n'
+            + "".join(f"[{name}]({name})\n" for name in linked) + "[elsewhere](https://example.org/a.md)\n")
         prefix = self.root / "prefix"
         result = self.install(prefix)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         documents = prefix / "share/doc/any2odyssey"
-        for name in ["README.md", *linked]:
+        for name in ["README.md", pictured, *linked]:
             self.assertTrue((documents / name).is_file(), f"{name} was not installed")
         # The check the package steps run agrees, and notices a link that leads nowhere.
         check = [*SHELL, str(LINUX.parents[1] / "scripts" / "check-doc-links.sh"), str(documents)]
@@ -462,6 +468,11 @@ class InstallerTests(unittest.TestCase):
         result = subprocess.run(check, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("README.md links to docs/TESTING.md", result.stderr)
+        (documents / "docs/TESTING.md").write_text("a document\n")
+        (documents / pictured).unlink()
+        result = subprocess.run(check, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"README.md links to {pictured}", result.stderr)
         result = self.run_installer("--prefix", str(prefix), "--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_removed(prefix)
@@ -720,6 +731,64 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((left / "entry").read_text(), "half an entry")
         self.assertTrue((applications / "any2odyssey.desktop.linkedAway").is_symlink())
         self.assertEqual((elsewhere / "kept").read_text(), "not the installer's\n")
+
+    def test_a_staging_folder_abandoned_days_ago_is_removed_and_uninstalling_removes_them_all(self):
+        # A run killed outright (SIGKILL, power) cannot remove its own, and no later run did: the folder
+        # stayed in share/applications for good, after --uninstall too. One that is days old belongs to no
+        # run that is still going; a fresh one may (the test above).
+        prefix = self.root / "prefix"
+        applications = prefix / "share/applications"
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "entry").write_text("not the installer's\n")
+        long_ago = time.time() - 3 * 24 * 3600
+        abandoned = applications / "any2odyssey.desktop.Ab3dE6gh1J"
+        fresh = applications / "any2odyssey.desktop.Zy3dE6gh1J"
+        link = applications / "any2odyssey.desktop.linkedAway"
+        for folder in (abandoned, fresh):
+            folder.mkdir(parents=True)
+            (folder / "entry").write_text("half an entry")
+        link.symlink_to(elsewhere)
+        os.utime(abandoned, (long_ago, long_ago))
+        os.utime(elsewhere, (long_ago, long_ago))
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(path.name for path in applications.glob("any2odyssey.desktop*")),
+                         ["any2odyssey.desktop", fresh.name, link.name])
+        self.assertEqual((elsewhere / "entry").read_text(), "not the installer's\n")
+        result = self.run_installer("--prefix", str(prefix), "--uninstall", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(fresh.is_dir())
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([path.name for path in applications.glob("any2odyssey.desktop*")], [link.name])
+        self.assertEqual((elsewhere / "entry").read_text(), "not the installer's\n")
+
+    def test_a_wine_side_built_in_the_usual_place_survives_a_run_told_of_another_data_folder(self):
+        # Installed and prepared with the data folder in its usual place, then installed again (an update)
+        # from a shell whose XDG_DATA_HOME names another folder, as a sandboxed terminal's does: the
+        # setup's files went to share/any2odyssey/wine-lens as a whole, in place of the Wine prefix with
+        # the copy of Leia's runtime.
+        home, data = self.usual_place()
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        kept = self.wine_side(data)
+        for variable in ("XDG_DATA_HOME", "ANY2ODYSSEY_DATA_DIR"):
+            with self.subTest(variable=variable):
+                self.env[variable] = str(self.root / "another data folder")
+                result = self.run_installer(*flags)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for file in kept:
+                    self.assertTrue(file.is_file(), f"installing again removed {file}")
+                self.assertTrue((data / "wine-lens-setup/setup.sh").is_file())
+                self.assertFalse((data / "wine-lens/setup.sh").exists())
+                result = self.run_installer("--uninstall")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for file in kept:
+                    self.assertTrue(file.is_file(), f"--uninstall removed {file}")
+                self.assertFalse((data / "wine-lens-setup").exists())
+                del self.env[variable]
 
     @unittest.skipUnless(os.geteuid() == 0, "needs root: the refusal is for a root installer")
     def test_root_does_not_install_into_a_folder_that_is_not_roots_alone(self):

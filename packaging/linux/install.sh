@@ -183,6 +183,10 @@ else
     # another name: as one folder, installing again removed the Wine side, and setup.sh could not copy its
     # tools onto themselves.
     [ "$(canonical "$APPDIR")" != "$(canonical "$DATA")" ] || WINE_LENS=$APPDIR/wine-lens-setup
+    # The same when a Wine side has been built in share/any2odyssey/wine-lens although this run is told of
+    # another data folder (XDG_DATA_HOME or ANY2ODYSSEY_DATA_DIR differs from the run that built it, as in
+    # a sandboxed terminal): replacing the setup's files there would remove it.
+    if [ -e "$APPDIR/wine-lens/prefix" ] || [ -e "$APPDIR/wine-lens/build" ]; then WINE_LENS=$APPDIR/wine-lens-setup; fi
     PROGRAM=$BIN/any2odyssey
 fi
 # share/any2odyssey/wine-lens is the setup's files and nothing else (as every installation outside the data
@@ -195,6 +199,10 @@ if [ -n "$UNINSTALL" ]; then
     if [ -z "$PACKAGED" ]; then
         run rm -f "$BIN/any2odyssey" "$SHARE/applications/any2odyssey.desktop" \
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
+        # The desktop entry's staging folder, where a run that was killed left one (a link is only a name).
+        for stale in "$SHARE/applications/any2odyssey.desktop".??????????; do
+            if [ -d "$stale" ] && [ ! -L "$stale" ]; then run rm -rf -- "$stale"; fi
+        done
         # Only what this script put there, named in full. share/any2odyssey can be the program's data
         # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
         # as the last lines say; the Wine side is asked about below.
@@ -276,6 +284,13 @@ if [ -z "$PACKAGED" ]; then
             # Noclobber also rejects a substituted link before awk can truncate its target.
             # Only remove this run's staging directory. A matching name may belong to an
             # install still running; its name alone cannot show that it was abandoned.
+            # Its age can: a run has its own for a moment, so one untouched for more than a day was left
+            # by a run that was killed, and nothing else would ever remove it. A link is not followed.
+            for stale in "$ENTRY".??????????; do
+                if [ -d "$stale" ] && [ ! -L "$stale" ]; then
+                    find "$stale" -prune -type d -mtime +0 -exec rm -rf -- {} + 2>/dev/null || true
+                fi
+            done
             ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1
             trap 'rm -f -- "$ENTRY_TMP/entry"; rmdir -- "$ENTRY_TMP"' 0
             trap 'exit 1' HUP INT TERM
@@ -325,7 +340,7 @@ if [ -z "$PACKAGED" ]; then
         [ -f "$HERE/$f" ] && run install -Dm644 "$HERE/$f" "$DOCDIR/$f"
     done
     # Everything README.md links to goes with it: the other documents and its screenshots.
-    for f in "$HERE"/docs/*.md "$HERE"/docs/assets/*.png; do
+    for f in "$HERE"/docs/*.md "$HERE"/docs/assets/*.png "$HERE"/assets/*.png; do
         [ -f "$f" ] && run install -Dm644 "$f" "$DOCDIR/${f#"$HERE"/}"
     done
     # The Wine setup and this script (for --uninstall later), replaced as a whole.

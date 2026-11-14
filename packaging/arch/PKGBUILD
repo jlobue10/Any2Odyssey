@@ -76,6 +76,7 @@ package() {
   install -Dm644 -t "$pkgdir/usr/share/doc/any2odyssey/docs" "$repo"/docs/*.md
   install -Dm644 -t "$pkgdir/usr/share/doc/any2odyssey/docs/assets" "$repo"/docs/assets/*.png
   install -Dm644 "$repo/installer/README.md" "$pkgdir/usr/share/doc/any2odyssey/installer/README.md"
+  install -Dm644 "$repo/assets/Any2Odyssey-wordmark.png" "$pkgdir/usr/share/doc/any2odyssey/assets/Any2Odyssey-wordmark.png"
   for file in LICENSE NOTICE THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES-LINUX.md; do
     install -Dm644 "$repo/$file" "$pkgdir/usr/share/licenses/any2odyssey/$file"
     ln -s "../../licenses/any2odyssey/$file" "$pkgdir/usr/share/doc/any2odyssey/$file"
