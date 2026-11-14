@@ -1,5 +1,7 @@
 @echo off
-setlocal
+rem Delayed expansion (cmd /V:ON, or switched on in the registry) would drop every ! from the
+rem folder name in %~dp0, and the package would then seem not to be beside this file.
+setlocal DisableDelayedExpansion
 rem Double-clicked inside the ZIP preview, Windows copies only this file to a temporary folder.
 if not exist "%~dp0Install-Launcher.ps1" goto :notextracted
 echo Checking Any2Odyssey setup. A full installation asks for elevation: approve it with this same Windows account, which has to be an administrator account.
