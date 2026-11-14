@@ -372,19 +372,24 @@ int main(int argc, char **argv)
     struct sockaddr_in addr = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     const struct timeval patience = { .tv_sec = SEND_TIMEOUT_S };
     char secret[128] = "";
-    int listener, one = 1;
+    int listener, one = 1, usable_secret = 0;
     FILE *f;
 
     if (argc != 4) {
         fprintf(stderr, "usage: %s <vendor:product | /dev/videoN> <port> <secret file>\n", argv[0]);
         return 2;
     }
-    if (!(f = fopen(argv[3], "r")) || !fgets(secret, sizeof secret, f) || strlen(secret) < 16) {
+    if ((f = fopen(argv[3], "r"))) {
+        if (fgets(secret, sizeof secret, f)) {
+            secret[strcspn(secret, "\r\n")] = 0;
+            usable_secret = strlen(secret) >= 16;
+        }
+        fclose(f);
+    }
+    if (!usable_secret) {
         fprintf(stderr, "%s: no usable secret in %s\n", argv[0], argv[3]);
         return 1;
     }
-    fclose(f);
-    secret[strcspn(secret, "\r\n")] = 0;
 
     signal(SIGPIPE, SIG_IGN);
     addr.sin_port = htons(atoi(argv[2]));

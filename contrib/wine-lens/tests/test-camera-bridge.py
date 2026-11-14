@@ -23,9 +23,10 @@ class CameraBridgeTests(unittest.TestCase):
         if "CAMERA_BRIDGE_TEST_BINARY" not in os.environ:
             source = Path(__file__).resolve().parents[1] / "src/camera-bridge.c"
             subprocess.run(["cc", "-O2", "-Wall", "-Wextra", "-Werror", "-o", cls.binary, str(source)], check=True)
-        cls.key = b"camera-test-secret-do-not-use-in-production"
+        # The minimum supported key length remains usable with CRLF line endings.
+        cls.key = b"camera-test-key!"  # 16 bytes; test only
         cls.secret = cls.root / "secret"
-        cls.secret.write_bytes(cls.key)
+        cls.secret.write_bytes(cls.key + b"\r\n")
         cls.secret.chmod(0o600)
 
     @classmethod
@@ -97,6 +98,22 @@ class CameraBridgeTests(unittest.TestCase):
         # /dev/null opens successfully but exposes no V4L2 formats.
         self.client.sendall(b"L\n")
         self.assertEqual(self.packet(self.client), b"")
+
+    def test_short_secret_is_rejected_after_removing_line_endings(self):
+        secret = self.root / "malformed-secret"
+        for contents in [b"x" * 15 + b"\n", b"\r" + b"x" * 20, b"x\r" + b"y" * 20]:
+            with self.subTest(contents=contents):
+                secret.write_bytes(contents)
+                process = subprocess.Popen([self.binary, "/dev/null", "0", str(secret)],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    _, error = process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                    self.fail("bridge started with a secret shorter than 16 bytes after trimming")
+                self.assertEqual(process.returncode, 1)
+                self.assertIn(b"no usable secret", error)
 
     def test_challenges_differ(self):
         nonce = b"0123456789abcdef" * 2
