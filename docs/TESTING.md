@@ -123,7 +123,25 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 0.9.3 (audit rounds 11 to 17) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 0.9.4 (audit rounds 11 to 18, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+
+New in 0.9.4:
+
+- Windows, the G90XF PC with an older Any2Odyssey installed: run `Any2Odyssey-0.9.4-windows-x64-setup.exe` (not as administrator), choose Full converter. The elevation prompt comes to the front and names Windows PowerShell; after it the wizard finishes, Installed apps has one Any2Odyssey entry at 0.9.4, the About page shows an upgrade, and 3D conversion works. Settings and logs are as before.
+- Windows: run the setup program again and decline the elevation prompt: the Preparing to Install page says "Elevation was declined. Nothing was installed."; Back, then Install again, and approve: it completes as a repair.
+- Windows, a standard account: the setup program with Full converter, answering the prompt with an administrator's name and password, is refused with the sentence about a different Windows account and installs nothing. On a PC without a full installation, Desktop controls only then installs for that account.
+- Windows: a copy of the setup program downloaded with a browser: SmartScreen's "Windows protected your PC" has More info and Run anyway, as the README says. Note what it shows.
+- Windows, with 0.9.4 installed: run the 0.9.4 ZIP's `Install.cmd` (a repair), then uninstall from Settings > Apps: one entry, and everything is removed. Install again with the setup program.
+- Windows, once a newer release exists: the older release's setup program over the newer installation asks whether to install the older version; No changes nothing, Yes installs it.
+- Windows: set Read-only on the desktop shortcut, then uninstall from Settings > Apps: the shortcut is gone.
+- Windows: with `ANY2ODYSSEY_DATA_DIR` set to a folder whose path has 245 characters, start the controls, change a setting and Apply: no error, and `settings.json` in that folder has the change.
+- Linux, Ubuntu 24.04 (a real installation, not a container): `./install.sh` from the archive installs the packages the release has and names `libonnxruntime-dev` apart; the program starts in an X11 session and in a Wayland one.
+- Linux, Ubuntu 24.04 with the Windows drive mounted: the Odyssey 3D step builds (it stopped at `wtsshim.c` up to 0.9.3) and ends with "setup: done"; the lens helper works.
+- Linux, Fedora: `setup.sh` finds Wine's libraries and completes; `LANG=fr_FR.UTF-8 x86_64-w64-mingw32-objdump -p <wine>/cfgmgr32.dll | grep -c 'Ordinal/Name Pointer'` shows whether that objdump is translated (0 means it is, and 0.9.3 was affected there).
+- Linux: with `LC_ALL=xx_XX.UTF-8` (a locale the system does not have), start the Odyssey 3D output: no "eye tracking could not be started" when it did start. Stop the tracker's camera, start again: the note appears and the picture stays.
+- Linux: interrupt `any2odyssey --install-depth-model` with Ctrl+C twice, then let it finish: the model folder holds the model and no `.depth-download-*` file.
+- Linux, KDE Plasma with kdialog: Open, pick a file: it opens at once. Open, then close the viewer while the dialog is up: no kdialog process is left.
+- Linux: start two `./install.sh --no-deps --no-udev --no-model --no-odyssey` at the same moment: afterwards `any2odyssey --help` works.
 
 New in 0.9.3:
 
