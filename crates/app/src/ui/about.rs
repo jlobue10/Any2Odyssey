@@ -102,7 +102,13 @@ impl AboutState {
                                 if gold_button(ui, "Open release page", true, p).clicked() {
                                     crate::core::open_release_url(&release.page_url);
                                 }
-                                if let Some(zip) = &release.zip_url {
+                                // The setup program where the release has one (0.9.4 and later);
+                                // the ZIP package, which it carries, stays on the release page.
+                                if let Some(setup) = &release.setup_url {
+                                    if gold_button(ui, "Download installer", false, p).clicked() {
+                                        crate::core::open_release_url(setup);
+                                    }
+                                } else if let Some(zip) = &release.zip_url {
                                     if gold_button(ui, "Download package", false, p).clicked() {
                                         crate::core::open_release_url(zip);
                                     }
@@ -124,7 +130,7 @@ impl AboutState {
                                 rows(ui, p, "about-install", &install)
                             }
                             Installation::NotInstalled => {
-                                body(ui, "Not installed by the Any2Odyssey installer; running from the folder shown above. Install.cmd records an installation here.");
+                                body(ui, "Not installed by the Any2Odyssey installer; running from the folder shown above. The setup program or Install.cmd records an installation here.");
                             }
                             Installation::Unreadable(error) => {
                                 body(ui, &format!("The installation record could not be read: {error}"));

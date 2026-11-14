@@ -149,6 +149,9 @@ pub struct Release {
     pub zip_url: Option<String>,
     /// The package's `.sha256` companion, under the same conditions.
     pub checksum_url: Option<String>,
+    /// The Windows setup program (releases from 0.9.4 on), under the same
+    /// conditions. It installs what the package's `Install.cmd` installs.
+    pub setup_url: Option<String>,
     /// Release notes as plain text, see [`sanitize_notes`].
     pub notes: String,
     /// Publication time as the API reported it, kept only if it looks like a
@@ -159,6 +162,10 @@ pub struct Release {
 impl Release {
     pub fn package_name(version: Version) -> String {
         format!("Any2Odyssey-{version}-windows-x64.zip")
+    }
+
+    pub fn setup_name(version: Version) -> String {
+        format!("Any2Odyssey-{version}-windows-x64-setup.exe")
     }
 
     /// Where GitHub serves `asset` of the release tagged for `version`.
@@ -280,6 +287,7 @@ pub fn parse_latest_release(body: &str) -> Result<Release, ParseError> {
         page_url: format!("{RELEASES_PAGE}/tag/{}", version.tag()),
         zip_url: asset_url(&package),
         checksum_url: asset_url(&format!("{package}.sha256")),
+        setup_url: asset_url(&Release::setup_name(version)),
         notes: sanitize_notes(document.body.as_deref().unwrap_or_default()),
         published_at: document
             .published_at
@@ -609,6 +617,31 @@ mod tests {
             release.notes,
             "Windows x64 package.\n\n## What's Changed\n* Fix thing by @jlobue10"
         );
+    }
+
+    #[test]
+    fn setup_program_is_offered_only_when_the_release_has_one() {
+        // The sample is a release from before the setup program existed.
+        assert_eq!(parse_latest_release(SAMPLE).unwrap().setup_url, None);
+        let body = r#"{"tag_name":"v0.9.4","assets":[
+            {"name":"Any2Odyssey-0.9.4-windows-x64.zip","browser_download_url":"https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.4/Any2Odyssey-0.9.4-windows-x64.zip"},
+            {"name":"Any2Odyssey-0.9.4-windows-x64-setup.exe","browser_download_url":"https://github.com/someone-else/other-repo/releases/download/v1/setup.exe"}
+        ]}"#;
+        let release = parse_latest_release(body).unwrap();
+        // Synthesized from the version, like the package's: never the URL the document carried.
+        assert_eq!(
+            release.setup_url.as_deref(),
+            Some("https://github.com/jlobue10/Any2Odyssey/releases/download/v0.9.4/Any2Odyssey-0.9.4-windows-x64-setup.exe")
+        );
+        assert!(allowed_url(release.setup_url.as_deref().unwrap()));
+        assert!(release.zip_url.is_some());
+        // Another release's setup program, a differently spelled one, one on a host that is not allowed.
+        let body = r#"{"tag_name":"v0.9.4","assets":[
+            {"name":"Any2Odyssey-0.9.3-windows-x64-setup.exe","browser_download_url":"https://github.com/a.exe"},
+            {"name":"any2odyssey-0.9.4-windows-x64-setup.exe","browser_download_url":"https://github.com/b.exe"},
+            {"name":"Any2Odyssey-0.9.4-windows-x64-setup.exe","browser_download_url":"https://github.com.evil.example/c.exe"}
+        ]}"#;
+        assert_eq!(parse_latest_release(body).unwrap().setup_url, None);
     }
 
     #[test]
