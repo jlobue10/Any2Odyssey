@@ -109,6 +109,17 @@ try{
  foreach($name in $ownedNames+@('version.json')){(Get-Item -LiteralPath (Join-Path $app $name)).IsReadOnly=$true}
  & (Join-Path $app 'Uninstall.ps1')
  Assert (-not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration)) 'Read-only installed files are removed like any others'
+ # A shortcut made read-only (Properties > Read-only, to keep Windows from changing it): the link
+ # object reports no target for it, so it was taken for somebody else's and left behind, pointing
+ # at a program that was gone. One that does lead elsewhere stays, read-only as it was.
+ $launches.Clear()
+ New-Fixture -Elevated $false
+ $foreign=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $programs 'Any2Odyssey.lnk'));$foreign.TargetPath=Join-Path $engine 'ConversionWrapper.dll';$foreign.Save()
+ foreach($folder in @($desktop,$programs)){(Get-Item -LiteralPath (Join-Path $folder 'Any2Odyssey.lnk')).IsReadOnly=$true}
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration)) 'A read-only shortcut to the installation is removed like any other'
+ Assert ((Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')) -and (Get-Item -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')).IsReadOnly) 'A read-only shortcut that leads elsewhere stays, and stays read-only'
+ (Get-Item -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')).IsReadOnly=$false
 
  $launches.Clear()
  New-Fixture -Elevated $true

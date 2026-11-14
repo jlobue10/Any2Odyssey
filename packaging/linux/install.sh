@@ -77,6 +77,14 @@ if [ -z "$PREFIX_GIVEN" ] && [ -z "$PACKAGED" ] && [ ! -e "$HERE/any2odyssey" ];
     case $CALLED in
         */share/any2odyssey) [ ! -e "${CALLED%/share/any2odyssey}/bin/any2odyssey" ] || AT=$CALLED ;;
     esac
+    # Called from the folder itself in a shell that follows links (cd -P, set -P, zsh's CHASE_LINKS), the
+    # name it was called by is where the link leads as well. The usual place is then asked whether it
+    # leads here: without this the program in ~/.local/bin stayed, and the run reported success.
+    USUAL=$HOME/.local/share/any2odyssey
+    if [ "$AT" = "$HERE" ] && [ ! -e "${HERE%/share/any2odyssey}/bin/any2odyssey" ] && [ -e "$HOME/.local/bin/any2odyssey" ] &&
+        [ "$(cd "$USUAL" 2>/dev/null && pwd -P)" = "$HERE" ]; then
+        AT=$USUAL
+    fi
     case $AT in
         */share/any2odyssey)
             # A distribution's package keeps this script in the same place and runs it through
@@ -218,7 +226,14 @@ if [ -n "$UNINSTALL" ]; then
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
         # The desktop entry's staging folder, where a run that was killed left one (a link is only a name).
         for stale in "$SHARE/applications/any2odyssey.desktop".??????????; do
-            if [ -d "$stale" ] && [ ! -L "$stale" ]; then run rm -rf -- "$stale"; fi
+            if [ -d "$stale" ] && [ ! -L "$stale" ]; then
+                run rm -f -- "$stale/entry"
+                run rmdir -- "$stale" 2>/dev/null || true
+            fi
+        done
+        # The same for the copy of the program that such a run was writing.
+        for stale in "$BIN"/.any2odyssey.new.??????????; do
+            if [ -f "$stale" ] && [ ! -L "$stale" ]; then run rm -f -- "$stale"; fi
         done
         # Only what this script put there, named in full. share/any2odyssey can be the program's data
         # folder (see WINE_LENS above): the settings, the depth model and a Wine side that was built stay,
@@ -289,12 +304,27 @@ if [ -z "$PACKAGED" ]; then
     # Written beside the program and moved into its place: when the copy stops half-way (a full disk, a
     # kill) the program of the installation that is there stays whole. Written over it, an update that
     # ran out of space left 14 of its 15 MB there, not executable, where a working program had been.
-    if ! run install -Dm755 "$HERE/any2odyssey" "$BIN/.any2odyssey.new"; then
-        rm -f "$BIN/.any2odyssey.new"
+    # Under a name of this run's own. With one name for every run (0.9.3), two installations at the same
+    # time removed each other's copy: both stopped with nothing installed, or one moved the other's
+    # half-written copy into place, which stayed mode 600. One that a killed run left behind goes when it
+    # is a day old, as the desktop entry's staging folder below does, and with --uninstall.
+    if [ -n "$DRY" ]; then
+        say "   would run: install -Dm755 $HERE/any2odyssey $BIN/any2odyssey"
+    elif ! (
+        install -d "$BIN" || exit 1
+        for stale in "$BIN/.any2odyssey.new" "$BIN"/.any2odyssey.new.??????????; do
+            if [ -f "$stale" ] && [ ! -L "$stale" ]; then
+                find "$stale" -prune -type f -mtime +0 -exec rm -f -- {} + 2>/dev/null || true
+            fi
+        done
+        NEW=$(mktemp "$BIN/.any2odyssey.new.XXXXXXXXXX") || exit 1
+        trap 'rm -f -- "$NEW"' 0
+        trap 'exit 1' HUP INT TERM
+        install -m755 "$HERE/any2odyssey" "$NEW" && mv -fT "$NEW" "$BIN/any2odyssey"
+    ); then
         echo "install: could not copy the program to $BIN (see the message above); an installation that was there is unchanged" >&2
         exit 1
     fi
-    run mv -fT "$BIN/.any2odyssey.new" "$BIN/any2odyssey"
     # The desktop entry names the program by its full path: ~/.local/bin is not on every session's PATH.
     if [ -n "$DRY" ]; then
         say "   would write: $SHARE/applications/any2odyssey.desktop"
@@ -312,8 +342,11 @@ if [ -z "$PACKAGED" ]; then
             # Its age can: a run has its own for a moment, so one untouched for more than a day was left
             # by a run that was killed, and nothing else would ever remove it. A link is not followed.
             for stale in "$ENTRY".??????????; do
-                if [ -d "$stale" ] && [ ! -L "$stale" ]; then
-                    find "$stale" -prune -type d -mtime +0 -exec rm -rf -- {} + 2>/dev/null || true
+                # Only what a run leaves in one goes, and the folder when that was all: a folder of the
+                # user's own that merely has such a name (any2odyssey.desktop.2026-11-14) keeps its files.
+                if [ -d "$stale" ] && [ ! -L "$stale" ] && [ -n "$(find "$stale" -prune -type d -mtime +0 2>/dev/null)" ]; then
+                    rm -f -- "$stale/entry"
+                    rmdir -- "$stale" 2>/dev/null || true
                 fi
             done
             ENTRY_TMP=$(mktemp -d "$ENTRY.XXXXXXXXXX") || exit 1

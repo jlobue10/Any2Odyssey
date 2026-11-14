@@ -966,35 +966,55 @@ fn dead_wayland(
 /// Call before any thread is started: it takes the variable out of this
 /// process's environment.
 pub fn leave_dead_wayland() -> Option<String> {
+    let display = std::env::var_os("WAYLAND_DISPLAY");
     let said = dead_wayland(
-        std::env::var_os("WAYLAND_DISPLAY"),
+        display.clone(),
         std::env::var_os("WAYLAND_SOCKET"),
         std::env::var_os("XDG_RUNTIME_DIR"),
         std::env::var_os("DISPLAY"),
         |socket| UnixStream::connect(socket).is_ok(),
     )?;
     std::env::remove_var("WAYLAND_DISPLAY");
+    if let Some(display) = display {
+        let _ = LEFT_WAYLAND.set(display);
+    }
     Some(said)
 }
+
+/// What `WAYLAND_DISPLAY` named when [`leave_dead_wayland`] took it out of
+/// this process's environment.
+static LEFT_WAYLAND: std::sync::OnceLock<OsString> = std::sync::OnceLock::new();
 
 /// The display variables, for the message when no window could be opened.
 pub fn display_settings() -> String {
     describe_displays(
         std::env::var_os("WAYLAND_DISPLAY"),
         std::env::var_os("DISPLAY"),
+        LEFT_WAYLAND.get().map(OsString::as_os_str),
     )
 }
 
-fn describe_displays(wayland: Option<OsString>, x11: Option<OsString>) -> String {
+/// `left` is the Wayland display this program gave up on. It is still set
+/// where the program was started: with the X11 display gone as well (a
+/// terminal multiplexer that outlived its session), the message said
+/// "WAYLAND_DISPLAY is not set" to somebody whose shell has it set.
+fn describe_displays(
+    wayland: Option<OsString>,
+    x11: Option<OsString>,
+    left: Option<&OsStr>,
+) -> String {
     let show = |name: &str, value: Option<OsString>| match value {
         Some(value) if !value.is_empty() => format!("{name}={}", value.to_string_lossy()),
         _ => format!("{name} is not set"),
     };
-    format!(
-        "{}, {}",
-        show("WAYLAND_DISPLAY", wayland),
-        show("DISPLAY", x11)
-    )
+    let wayland = match left {
+        Some(left) => format!(
+            "WAYLAND_DISPLAY={} with no compositor answering",
+            left.to_string_lossy()
+        ),
+        None => show("WAYLAND_DISPLAY", wayland),
+    };
+    format!("{wayland}, {}", show("DISPLAY", x11))
 }
 
 pub fn show_window(_: isize) {}
@@ -1760,12 +1780,17 @@ mod tests {
     fn a_failed_start_names_both_display_variables() {
         let os = |text: &str| Some(OsString::from(text));
         assert_eq!(
-            describe_displays(os("wayland-0"), None),
+            describe_displays(os("wayland-0"), None, None),
             "WAYLAND_DISPLAY=wayland-0, DISPLAY is not set"
         );
         assert_eq!(
-            describe_displays(os(""), os(":0")),
+            describe_displays(os(""), os(":0"), None),
             "WAYLAND_DISPLAY is not set, DISPLAY=:0"
+        );
+        // The one this program took out of its environment is still named.
+        assert_eq!(
+            describe_displays(None, os(":0"), Some(OsStr::new("wayland-1"))),
+            "WAYLAND_DISPLAY=wayland-1 with no compositor answering, DISPLAY=:0"
         );
     }
 }
