@@ -21,7 +21,10 @@
 set -eu
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
-DATA=${ANY2ODYSSEY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/any2odyssey}
+# An XDG_DATA_HOME that is not an absolute path counts as unset, as the program reads it (the XDG Base
+# Directory specification): taken as written, the Wine side was built under the folder this was run from.
+case ${XDG_DATA_HOME:-} in /*) DATA_HOME=$XDG_DATA_HOME ;; *) DATA_HOME=$HOME/.local/share ;; esac
+DATA=${ANY2ODYSSEY_DATA_DIR:-$DATA_HOME/any2odyssey}
 T=$DATA/wine-lens
 BOARD=/dev/odyssey-lens
 CC=x86_64-w64-mingw32-gcc

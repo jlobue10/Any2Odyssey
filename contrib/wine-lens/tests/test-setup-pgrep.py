@@ -51,6 +51,29 @@ class SetupPgrepTests(unittest.TestCase):
         self.assertNotIn("pgrep", done.stderr)
         self.assertIn("/dev/odyssey-lens is missing", done.stderr)
 
+    @unittest.skipIf(os.path.exists("/dev/odyssey-lens"), "with the lens board present setup.sh would go on")
+    def test_a_relative_xdg_data_home_counts_as_unset_as_the_program_reads_it(self):
+        # XDG_DATA_HOME=~/.local/share set where nothing expands the ~, or any other relative path, is invalid
+        # by the XDG specification and the program takes the usual folder. Taken as written, the Wine side was
+        # built under the folder setup.sh was run from, where the program does not look for the lens helper.
+        # setup.sh makes nothing before it asks for the lens board, so the folder is read from the shell's
+        # own trace of its assignments.
+        home = self.root / "home"
+        home.mkdir()
+        environment = {name: value for name, value in os.environ.items() if name != "ANY2ODYSSEY_DATA_DIR"}
+        environment.update(PATH=f"{self.root / 'bin'}:{os.environ['PATH']}", HOME=str(home))
+        usual = home / ".local/share"
+        for value, base in (("relative/share", usual), ("~/.local/share", usual), ("", usual),
+                            (str(self.root / "xdg"), self.root / "xdg")):
+            with self.subTest(value=value):
+                environment["XDG_DATA_HOME"] = value
+                done = subprocess.run(["sh", "-x", str(SETUP), str(self.root / "win")], cwd=self.root,
+                                      env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                      timeout=60)
+                self.assertEqual(done.returncode, 1)
+                self.assertIn(f"+ T={base}/any2odyssey/wine-lens\n", done.stderr.replace("'", ""))
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["bin", "home", "win"])
+
 
 if __name__ == "__main__":
     unittest.main()
