@@ -1024,6 +1024,19 @@ done
         self.assertIn("libonnxruntime-dev", missing)
         self.assertFalse(called.exists())
 
+    def test_the_x11_keyboard_library_is_asked_for(self):
+        # In an X11 session the program ended at once without libxkbcommon-x11 ("Library
+        # libxkbcommon-x11.so could not be loaded"), which nothing the installer named brings.
+        self.only_package_manager("apt-get", "exit 0")
+        missing, _ = self.missing_packages()
+        self.assertIn("libxkbcommon-x11-0", missing)
+        library = self.system / "usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0"
+        library.parent.mkdir(parents=True)
+        library.touch()
+        missing, _ = self.missing_packages()
+        self.assertNotIn("libxkbcommon-x11-0", missing)
+        self.assertIn("libxkbcommon0", missing)
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.

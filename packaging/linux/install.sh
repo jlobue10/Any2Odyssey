@@ -559,9 +559,12 @@ fi
 # ---------------------------------------------------------------------------------------------------------
 step "2. Packages"
 # What is needed, as: library or command to look for | Arch | Debian/Ubuntu | Fedora
+# (libxkbcommon-x11: in an X11 session the program ends at once without it, and no package named here
+# brings it; a desktop without GNOME's or KDE's window manager need not have it.)
 NEEDED='
 lib:libpipewire-0.3.so.0|libpipewire|libpipewire-0.3-0|pipewire-libs
 lib:libxkbcommon.so.0|libxkbcommon|libxkbcommon0|libxkbcommon
+lib:libxkbcommon-x11.so.0|libxkbcommon-x11|libxkbcommon-x11-0|libxkbcommon-x11
 lib:libGL.so.1|libglvnd|libgl1|libglvnd-glx
 cmd:curl|curl|curl|curl
 '
