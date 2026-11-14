@@ -122,6 +122,7 @@ canonical() {
     printf '%s\n' "${path:-/}"
 }
 PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
+WANT_DEPS=$DEPS # as asked for: a test run still looks which of the packages exist
 if [ -n "$TEST_ROOT" ]; then
     echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives are looked for under $TEST_ROOT, and no packages or udev rules are installed or removed"
     DEPS=
@@ -595,14 +596,19 @@ fi
 # ---------------------------------------------------------------------------------------------------------
 step "2. Packages"
 # What is needed, as: library or command to look for | Arch | Debian/Ubuntu | Fedora
+# (libxkbcommon-x11: in an X11 session the program ends at once without it, and no package named here
+# brings it; a desktop without GNOME's or KDE's window manager need not have it.)
 NEEDED='
 lib:libpipewire-0.3.so.0|libpipewire|libpipewire-0.3-0|pipewire-libs
 lib:libxkbcommon.so.0|libxkbcommon|libxkbcommon0|libxkbcommon
+lib:libxkbcommon-x11.so.0|libxkbcommon-x11|libxkbcommon-x11-0|libxkbcommon-x11
 lib:libGL.so.1|libglvnd|libgl1|libglvnd-glx
 cmd:curl|curl|curl|curl
 '
 DIALOG='cmd:zenity|zenity|zenity|zenity'
-ONNX_CPU='lib:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime'
+# so: a library the program opens by this very name. Debian and Fedora keep libonnxruntime.so in the
+# development package; the library package's libonnxruntime.so.1 alone is not found by the program.
+ONNX_CPU='so:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime-devel'
 ONNX_GPU='lib:libonnxruntime_providers_cuda.so|onnxruntime-cuda|libonnxruntime-dev|onnxruntime
 lib:libcudnn.so|cudnn|nvidia-cudnn|'
 WINE_SIDE='
@@ -632,9 +638,16 @@ present() {
             done
             return 1
             ;;
+        so:*)
+            if [ -z "$TEST_ROOT" ] && ldconfig -p 2>/dev/null | awk -v name="${1#so:}" '$1 == name { found = 1 } END { exit !found }'; then return 0; fi
+            for found in "$TEST_ROOT"/usr/lib*/"${1#so:}" "$TEST_ROOT"/usr/lib/*/"${1#so:}"; do
+                [ -e "$found" ] && return 0
+            done
+            return 1
+            ;;
     esac
 }
-MISSING= UNNAMED=
+MISSING= UNNAMED= ABSENT=
 check() { # <list> : adds the packages of what is missing to MISSING
     for line in $1; do
         what=${line%%|*}
@@ -657,10 +670,25 @@ if [ -n "$MODEL" ]; then
 fi
 [ -n "$WANT_ODYSSEY" ] && check "$WINE_SIDE"
 MISSING=${MISSING# }
-if [ -z "$MISSING$UNNAMED" ]; then
+# One name that the release's package lists do not have makes apt-get refuse the whole list: Ubuntu 24.04
+# has no ONNX Runtime package, and with libonnxruntime-dev among the names neither PipeWire's library nor
+# curl was installed. A simulated installation (it needs no root) names them; they are set apart.
+if [ "$FAMILY" = 3 ] && [ -n "$WANT_DEPS" ] && [ -n "$MISSING" ]; then
+    # shellcheck disable=SC2086  # a list of package names
+    ABSENT=$(LC_ALL=C apt-get install -s $MISSING 2>&1 |
+        sed -n -e 's/^E: Unable to locate package //p' -e "s/^E: Package '\\(.*\\)' has no installation candidate\$/\\1/p" | tr '\n' ' ')
+    KNOWN=
+    for package in $MISSING; do
+        case " $ABSENT " in *" $package "*) ;; *) KNOWN="$KNOWN $package" ;; esac
+    done
+    MISSING=${KNOWN# }
+    ABSENT=${ABSENT% }
+fi
+if [ -z "$MISSING$UNNAMED$ABSENT" ]; then
     say "   everything needed is installed"
 else
     [ -n "$MISSING" ] && say "   missing packages: $MISSING"
+    [ -n "$ABSENT" ] && say "   missing, and not in this system's package lists (see INSTALL.txt for what needs them): $ABSENT"
     [ -n "$UNNAMED" ] && say "   also missing, under a name this script does not know for your distribution:$UNNAMED"
     if [ -z "$DEPS" ] || [ -z "$INSTALL" ] || [ -z "$MISSING" ]; then
         [ -n "$MISSING" ] && say "   install them with your package manager, then run this script again"

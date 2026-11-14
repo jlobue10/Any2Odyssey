@@ -1097,6 +1097,81 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(writable, [])
         self.assertTrue((prefix / "share/applications/any2odyssey.desktop").is_file())
 
+    def only_package_manager(self, name, body):
+        """Make `name` the one package manager on the PATH, whatever this machine has (pacman is asked first)."""
+        tools = self.root / "tools"
+        tools.mkdir()
+        for folder in reversed(os.get_exec_path(self.env)):  # an earlier folder's program wins
+            for tool in (Path(folder).iterdir() if Path(folder).is_dir() else []):
+                if tool.name not in ("pacman", "apt-get", "dnf"):
+                    (tools / tool.name).unlink(missing_ok=True)
+                    (tools / tool.name).symlink_to(tool)
+        (tools / name).write_text(f"#!/bin/sh\n{body}\n")
+        (tools / name).chmod(0o755)
+        self.env["PATH"] = str(tools)
+
+    def missing_packages(self, *arguments):
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey", *arguments)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+        self.assertLessEqual(len(lines), 1, result.stdout)
+        return lines[0].removeprefix("   missing packages: ").split() if lines else [], result.stdout
+
+    def test_a_package_the_release_does_not_have_does_not_stop_the_others(self):
+        # Ubuntu 24.04 has no ONNX Runtime package. With libonnxruntime-dev in its list apt-get installed
+        # nothing ("E: Unable to locate package"): not PipeWire's library, without which the program does
+        # not start, and not curl.
+        called = self.root / "apt-argv"
+        self.only_package_manager("apt-get", f'''echo "$*" >> "{called}"
+[ "$1 $2" = "install -s" ] || exit 1
+for name in "$@"; do
+    case $name in
+        libonnxruntime-dev) echo "E: Unable to locate package $name"; failed=1 ;;
+        zenity) echo "E: Package '$name' has no installation candidate"; failed=1 ;;
+    esac
+done
+[ -z "$failed" ] || exit 100''')
+        missing, output = self.missing_packages()
+        self.assertIn("libpipewire-0.3-0", missing)
+        self.assertNotIn("libonnxruntime-dev", missing)
+        self.assertNotIn("zenity", missing)
+        absent = [line for line in output.splitlines() if "not in this system's package lists" in line]
+        self.assertEqual(len(absent), 1, output)
+        self.assertIn("libonnxruntime-dev", absent[0].split())
+        # Asked for --no-deps the package manager is not run at all, and the names are listed as before.
+        called.unlink()
+        missing, output = self.missing_packages("--no-deps")
+        self.assertIn("libonnxruntime-dev", missing)
+        self.assertFalse(called.exists())
+
+    def test_the_x11_keyboard_library_is_asked_for(self):
+        # In an X11 session the program ended at once without libxkbcommon-x11 ("Library
+        # libxkbcommon-x11.so could not be loaded"), which nothing the installer named brings.
+        self.only_package_manager("apt-get", "exit 0")
+        missing, _ = self.missing_packages()
+        self.assertIn("libxkbcommon-x11-0", missing)
+        library = self.system / "usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0"
+        library.parent.mkdir(parents=True)
+        library.touch()
+        missing, _ = self.missing_packages()
+        self.assertNotIn("libxkbcommon-x11-0", missing)
+        self.assertIn("libxkbcommon0", missing)
+
+    def test_the_onnx_runtime_counts_only_under_the_name_the_program_opens(self):
+        # The program opens libonnxruntime.so. Fedora's onnxruntime package has libonnxruntime.so.1 only
+        # (the plain name is in onnxruntime-devel), as Debian's libonnxruntime1.21 has: with either
+        # installed the runtime was taken for present, and on Fedora the package asked for was the wrong one.
+        self.only_package_manager("dnf", "exit 0")
+        for library in ["libonnxruntime.so.1", "libonnxruntime.so.1.26.0"]:
+            (self.system / "usr/lib64" / library).parent.mkdir(parents=True, exist_ok=True)
+            (self.system / "usr/lib64" / library).touch()
+        missing, _ = self.missing_packages()
+        self.assertIn("onnxruntime-devel", missing)
+        self.assertNotIn("onnxruntime", missing)
+        (self.system / "usr/lib64/libonnxruntime.so").symlink_to("libonnxruntime.so.1")
+        missing, _ = self.missing_packages()
+        self.assertNotIn("onnxruntime-devel", missing)
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.

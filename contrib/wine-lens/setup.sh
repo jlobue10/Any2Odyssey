@@ -61,6 +61,7 @@ pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
 # Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them.
 WINELIB=
 for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
+         /usr/lib64/wine-wow64/wine/x86_64-windows \
          /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
     [ -f "$d/cfgmgr32.dll" ] && WINELIB=$d && break
 done
