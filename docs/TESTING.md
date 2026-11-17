@@ -125,7 +125,24 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 0.9.4 (audit rounds 11 to 18, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 0.9.5 (audit rounds 11 to 19, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+
+New in 0.9.5:
+
+- Windows, the G90XF PC, the ordinary case: run `Any2Odyssey-0.9.5-windows-x64-setup.exe` (not as administrator), choose Full converter. The page says "Checking this PC before the installation", then the elevation prompt comes without a question, and the installation completes as an upgrade; 3D conversion works. This is the one path the tests could not run to its end.
+- Windows, the same PC, as an administrator account that is not the one that installed the worker (or with `UninstallWorker.owner` naming another account): the setup program, Full converter. A box shows the note about the other account's worker with **Continue with the installation?**, and the elevation prompt comes only after Yes. With No the page says "The installation was not started. Nothing was changed." and nothing has changed.
+- Windows: during a full installation through the setup program, end the hidden `powershell.exe` that is not elevated in Task Manager: the page says that the installation may be incomplete; running the setup program again completes it.
+- Windows, with the controls hidden in the tray: restore the window with something other than Any2Odyssey (a window-layout tool such as PowerToys or PersistentWindows, or `Win+M` followed by `Win+Shift+M` if that reaches it). Either nothing happens or the controls come back drawn, with their taskbar button, and Close works.
+- Windows: minimize to the tray and double-click the tray icon at once, several times: the controls come back every time and answer.
+- Windows, two monitors with different scaling: drag the controls from one to the other and back a few dozen times and watch the handle and GDI counts in Task Manager: they do not grow.
+- Windows: extract the ZIP to `Downloads\Any2Odyssey [test]` and run `Install-GUI.cmd` there (it installs, as before); rename the folder to `Any2Odyssey [test` and run it again (it says to move the package and installs nothing).
+- Windows: `Any2Odyssey.exe --export-guide` into a folder of about 250 characters with a name that ends in a dot: Explorer shows the file without the dot and opens it.
+- Linux, Ubuntu 26.04 with the monitor and the Windows drive mounted: `./install.sh` ends with "setup: done" (it ended with "'wineserver' is needed" in 0.9.4), the lens helper works, and switching the output off and on again restarts Leia's service.
+- Linux, Debian 13 or Ubuntu 25.10 on a real desktop: 2D to 3D with the distribution's `libonnxruntime-dev` 1.21 converts a picture.
+- Linux, an NVIDIA GPU with the distribution's ONNX Runtime and CUDA packages (Arch: `onnxruntime-cuda` and `cudnn`): depth takes milliseconds, as before.
+- Linux, a system with a running udev other than Arch (Fedora, Ubuntu): the udev step installs the rules, `/dev/odyssey-lens` appears for the user at the seat, and a second run says "already installed".
+- Linux, openSUSE Tumbleweed or AlmaLinux 10 on a real desktop: `./install.sh`, then the viewer from the application menu.
+- Linux: in two terminals, `./install.sh --yes --no-odyssey` at the same moment over an installation: the second prints "another installation or removal is at work in ...; waiting for it to finish", both end with Done, and `~/.local/share/any2odyssey/wine-lens-setup` (or `wine-lens`) has `setup.sh` and no folder `wine-lens` inside.
 
 New in 0.9.4:
 

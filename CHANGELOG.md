@@ -2,6 +2,91 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.5 (2026-11-17)
+
+A fifth audit release: six pull requests (#139 to #144) from a round that again used methods not used before. The eight published 0.9.4 files were downloaded and taken apart, and the release run and the workflows behind them were read with tools; the Linux archive was run as a first-time user in root trees of eleven systems, each with its own package manager and libraries; the Windows setup program was compiled around a stand-in package and run more than 230 times, in every mode and with every outcome the installer can have; the Windows controls were driven for thousands of operations and measured from outside the process; the changes of 0.9.4 were attacked with counter-examples that were run; and analysers no earlier round had used were pointed at all of the code. No new features. Built and tested in CI; not yet run on the monitor, see Hardware verification.
+
+**Linux: the archive's installer now works on openSUSE and on AlmaLinux 10 and its relatives, where 0.9.4 installed no package and said Done over a program that did not start.**
+
+**Linux: 2D to 3D accepts ONNX Runtime 1.17 and newer.** 0.9.4 refused the 1.21 that Debian 13 and Ubuntu 25.10 package, and ended with Microsoft's own 1.22.0.
+
+**Windows: controls that another program restored from the tray answered no click.** Update if a window-layout tool is in use.
+
+### Fixed
+
+Linux, installing on distributions other than Arch:
+
+- **AlmaLinux 10, RHEL 10, Rocky 10 and CentOS Stream 10: the package step no longer installs nothing.** Their lists have no ONNX Runtime; with that one name unknown `dnf` installed none of the others, the installer still said Done, and the program stopped with "error while loading shared libraries: libpipewire-0.3.so.0". It is the fault 0.9.4 fixed for `apt-get`. `dnf` is now told to leave out a name it does not have, and after the package manager has run the installer looks again and names what is still missing. (#141)
+- **openSUSE: the installer knows zypper and openSUSE's package names.** It knew no package manager there, gave no advice and ended with Done over a program that does not start. Where no package manager is known, the list of missing files now comes with what to do. (#141)
+- **A user who may not use sudo, a wrong password, a system without sudo or without udev no longer end the installation at the udev step.** The depth model and everything after it were skipped. A failure there is reported with the command to run as root, and the installation goes on; without sudo the installer names the commands instead of trying them, and as root it runs them itself. The same in `--uninstall`. (#141)
+- **Alpine (musl) and systems with a glibc older than 2.35 (AlmaLinux 9) are refused before anything is installed**, with the reason. Everything was installed there although the program cannot start. (#141)
+- The last line no longer says Done when libpipewire or libxkbcommon was not found, or when the system does not let the program run from where it was put (a home folder mounted noexec). (#141)
+- **Ubuntu 26.04: the Odyssey 3D set-up finds `wineserver`.** That release's wine package has the program beside Wine's libraries only, and the set-up ended with "'wineserver' is needed". (#141)
+- The installer asks for `pgrep` (`procps-ng`, `procps`), without which the Odyssey 3D set-up ended on Fedora's and AlmaLinux's minimal installations. The set-up's messages that named Arch's packages name the others too. (#141)
+- `INSTALL.txt` says that the program needs glibc 2.35 or newer, not 2.39: it runs on Debian 12 and Ubuntu 22.04, with one line of the loader at every start that can be ignored. `docs/PLATFORMS.md` names the releases the archive was run on. (#141)
+
+Linux, installing:
+
+- **Two installations at the same time, or an installation and an `--uninstall`, now wait for each other.** 0.9.4 gave each run its own copy of the program, but the icon, the documents and the Wine set-up were still written in place: of 100 pairs started together over an installation, one run stopped in 37 and 26 ended different from what one run leaves (files of the Wine set-up gone, `setup.sh` among them), and an installation racing a removal left half an installation in 20 of 100. A run now takes a lock on the prefix folder (`flock`); a second run says that it waits. Without `flock`, or where the folder has no locks, a run goes on as before. (#140)
+
+Linux, the viewer:
+
+- **2D to 3D works with ONNX Runtime 1.17 and newer**, where it asked for 1.22: the 1.21 of Debian 13 and Ubuntu 25.10 is accepted. The depth maps are the same byte for byte. (#141)
+- **With Microsoft's own build of ONNX Runtime 1.22.0 the viewer no longer ends the moment 2D to 3D is chosen** ("std::vector<const OrtEpDevice*>::front(): Assertion '!this->empty()' failed"). It was the version the message of 0.9.4 named as the oldest accepted. (#141)
+
+Linux, the Wine side:
+
+- A tracker that ends without a word of its own (a tool it needs missing, for example) is reported with the command to run to see why. Since 0.9.4 the reason was empty: "without eye tracking ()". (#140)
+
+Windows, the controls:
+
+- **Controls hidden in the tray and put back on the screen by anything but Any2Odyssey answer again.** A window that a window-layout tool or a task switcher restored stayed "hidden" as far as the program knew: it stood above every other window, with no taskbar button, and answered no click, the Close button's included. The program now asks the window itself whether it is minimized. (#144)
+- The same state came of a show request within a few milliseconds of the hide (10 of 10 at 0 ms, 7 of 10 at 5 ms, none from 20 ms on): a script, or two requests that cross. Fixed with it. (#144)
+
+Windows, the setup program:
+
+- **A full installation shows the installer's notices and asks before the elevation prompt.** That another Windows account's conversion worker is about to be replaced was said only after it had been replaced (a "Known, not fixed" item of 0.9.4). The wizard first runs the installer's read-only checks on their own, shows what they print with **Continue with the installation?**, and only then starts the installation. No stops there with nothing changed. A controls-only installation and a silent one run as before and show the notices afterwards. (#142)
+- **When PowerShell is ended in the middle of the installation, the setup program no longer says that nothing was installed.** It says that the installation may be incomplete and to run Setup again. (#142)
+- A notice is shown once; after a controls-only installation the box held it twice. (#142)
+- The page that shows the installer's reason names the Back button instead of "Setup cannot continue. Please click Cancel to exit." (#142)
+- A long reason is shown whole, in a box that scrolls and from which it can be copied; the page cut it at the right edge and after the eighth line. (#142)
+
+Windows, installing from the ZIP:
+
+- **`Install.cmd` and `Install-GUI.cmd` no longer run the installer of another folder.** Windows PowerShell takes `[` and `]` in the path of a script for a pattern: extracted to a folder `Any2Odyssey[1]` beside a folder `Any2Odyssey1` that held a package as well, the other folder's release was installed, and nothing said so. The launchers now ask first which files would be run, and when those are not the package's own they say to move the package to a folder without `[` and `]` and install nothing. Brackets that fit no other folder install as before. (#143)
+- A folder with a `[` that no `]` closes gets the same advice instead of "The specified wildcard character pattern is not valid". (#143)
+
+Windows:
+
+- **Uninstalling no longer stops half-way at a read-only shortcut whose attributes cannot be changed** (a Desktop on a read-only share, for example). Since 0.9.4 the uninstaller ended there with the worker removed and the program left. The shortcut stays, the uninstaller names it and goes on. (#140)
+- Past the path limit a file is no longer saved under a name that ends in a dot or a space, which neither Explorer nor the program can open or delete: `--export-guide "<long folder>\guide.html."` makes `guide.html`, as it does in a short folder. (#140)
+
+### Tests and releases
+
+- **The published 0.9.4 files are what the release says they are.** All four checksums and attestations verify; the ZIP, the Linux archive and the Arch package hold the tag's files and nothing else; the setup program, decoded and never run, holds the 27 files of the ZIP inside the loader of the pinned Inno Setup 6.7.4. (#139)
+- **The workflows named one action by a commit that its repository no longer holds on any branch or under any tag**: the `stable` branch of `dtolnay/rust-toolchain` was rebuilt fourteen hours after the 0.9.4 release. The action is now named by the commit of its `master` that the old one was built on, and `scripts/check-action-pins.sh` asks GitHub at every CI run and release whether each of the seven pinned commits is still under a tag or on a branch. (#139)
+- **Two tests of the Linux installer that need root ran in no job.** The Arch job, which runs as root, now runs the installer's tests too and fails when one is skipped. (#139)
+- The Windows third-party list is compared with what `cargo tree` gives for the Windows target; it was compared with nothing, and was right. (#139)
+- **The setup program's own decisions are tested in CI**: `installer/tests/wizard/test-setup-wizard.ps1` compiles the wizard around the real launcher and a stand-in installer and checks the exit codes, the reasons, `/ALLOWDOWNGRADE`, an interrupted installation and the notice shown once. It installs nothing. (#142)
+- The release workflow compares the glibc the installer asks for with the one the built program needs. (#141)
+- **The Windows controls were driven for more than 16,000 operations** (tray, settings, Help, resizing, display and power messages) and measured from outside: handles, GDI and USER objects, threads and memory do not grow, and the data folder is left clean. (#144)
+- **The changes of 0.9.4 were reviewed by running counter-examples**, and each test 0.9.4 added was run against the code it was written for put back. Besides the faults above, one test would have waited for CI's time limit instead of failing, and nothing tested that the depth model's lock is kept until the model has its name; both are corrected. (#140)
+- Miri, PSScriptAnalyzer, gcc's and clang's analysers, cppcheck, clippy's stricter lints, ruff, mypy, bandit, shellcheck with every optional check and two spelling tools found nothing besides the launchers' brackets. Two assertions of `test-uninstall-flow.ps1` failed where `%TEMP%` has a `[` or a backtick in its path; they compare text now. (#143)
+
+### Known, not fixed
+
+- The setup program is not code-signed.
+- With `%TEMP%` at or below a junction, the setup program stops at once with "Error 448: The path cannot be traversed because it contains an untrusted mount point" (a protection Inno Setup switches on). `/NOREDIRECTIONGUARD` on its command line gets past it, and the ZIP is not affected.
+- `install.ps1` and `Install-Launcher.ps1` started by hand from a folder with `[` and `]`, and the setup program with such a `%TEMP%`, are not protected as the two `.cmd` launchers are.
+- Debian 12, Ubuntu 22.04 and 24.04 and the RHEL 10 family have no ONNX Runtime package: 2D to 3D there needs a library named in `ORT_DYLIB_PATH`. Any of Microsoft's releases from 1.17 on works.
+- On Debian 12 and Ubuntu 22.04 the loader prints "weak version `GLIBC_2.39' not found" at every start, and Debian's and Ubuntu's ONNX Runtime prints several hundred "Schema error" lines when it is loaded. Both are harmless.
+- Immutable systems (Fedora Silverblue, SteamOS): the installer names what is not installed and does not say Done, but it does not know `rpm-ostree` or how to unlock SteamOS.
+- A file dialog's helper that has a session of its own is not ended by closing or replacing the dialog. Open and Save go on working.
+
+### Hardware verification
+
+Pending: these changes were made and tested without the monitor, Wine, the camera or the lens; the setup program's new question was run with a stand-in package only, and the distributions were root trees, not installed systems. `docs/TESTING.md`, "Pending hardware verification", lists the checks under "New in 0.9.5". Most in need of a real run: a full installation through the setup program on the G90XF PC (the ordinary case, from "Checking this PC" to the elevation prompt), the controls restored from the tray by another program, and the Odyssey 3D set-up on Ubuntu 26.04.
+
 ## 0.9.4 (2026-11-14)
 
 A Windows setup program, and a fourth audit release: five pull requests (#133 to #137). The audit round again used methods not used before. The published 0.9.3 Linux archive was run as a first-time user on a distribution that is not Arch (an Ubuntu 24.04 tree and Ubuntu 22.04, with every package name checked against the lists of Debian, Ubuntu and Fedora); the scripts, the installers and the program were run under foreign locales, encodings, time zones and clocks; the changes of 0.9.3 were attacked with counter-examples that were run; and the defects earlier rounds had described but not fixed were reproduced and fixed.
