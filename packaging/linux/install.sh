@@ -290,6 +290,12 @@ if [ -n "$UNINSTALL" ]; then
         done
         # Through env: an assignment in front of a shell function does not reach the command in every shell,
         # and without it wineserver -k ends the programs of the user's default prefix instead.
+        # (wineserver where Ubuntu 26.04 keeps it, off the PATH: see setup.sh)
+        if ! have wineserver; then
+            for d in /usr/lib/x86_64-linux-gnu/wine /usr/lib/wine /usr/lib64/wine; do
+                if [ -x "$d/wineserver" ]; then PATH=$PATH:$d; break; fi
+            done
+        fi
         run env WINEPREFIX="$DATA/wine-lens/prefix" WINEDEBUG=-all wineserver -k 2>/dev/null || true
         run rm -f "$DATA/any2odyssey-lens-helper" "$DATA/any2odyssey-weaver"
         run rm -rf "$DATA/wine-lens"
