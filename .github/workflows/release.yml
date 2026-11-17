@@ -270,7 +270,8 @@ jobs:
             x86_64-w64-mingw32-gcc -O2 -c -o /dev/null "contrib/wine-lens/src/$source.c"
           done
       # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
-      - name: Third-party list for Linux matches the dependencies
+      # As in ci.yml, the script first compares THIRD-PARTY-LICENSES.md with the crates of a Windows build.
+      - name: Third-party lists match the dependencies (Windows list checked, Linux list made again)
         env:
           LC_ALL: C
           PYTHONUTF8: '0'

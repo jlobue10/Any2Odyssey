@@ -9,10 +9,16 @@ notices of its source package, by the rules the main file states. Run it from th
 `cargo fetch`, whenever the dependencies change:
 
     scripts/third-party-linux.py > THIRD-PARTY-LICENSES-LINUX.md
+
+It first checks THIRD-PARTY-LICENSES.md itself, which is written by hand: its two tables against the crates
+of a Windows build and the license each one states, and the number its text gives. It stops with what
+differs. The Linux list is "what the Windows list does not have", so it is only right while that list is;
+and a crate only Windows builds (the windows bindings, the tray icon) was compared with nothing before.
 """
 import glob, os, re, subprocess, sys
 
 TARGET = "x86_64-unknown-linux-gnu"
+WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 
 def tree(target):
     # Plain text whatever the environment says about colour (CI sets CARGO_TERM_COLOR=always).
@@ -33,6 +39,29 @@ def listed_for_windows():
         m = re.match(r"\| `([^`]+)` \| (\S+) \|", line)
         if m: listed.add((m.group(1), m.group(2)))
     return listed
+
+def check_windows_list():
+    """Stop unless THIRD-PARTY-LICENSES.md lists exactly what a Windows build contains."""
+    built = tree(WINDOWS_TARGET)
+    listed, noticed, said = {}, set(), None
+    for line in open("THIRD-PARTY-LICENSES.md", encoding="utf-8"):
+        m = re.match(r"\| `([^`]+)` \| (\S+) \| (.*?) \|$", line)
+        if m: listed[(m.group(1), m.group(2))] = m.group(3).strip()
+        m = re.match(r"\| `([^`]+)` (\S+) \|", line)
+        if m: noticed.add((m.group(1), m.group(2)))
+        m = re.match(r"The (\d+) crates below", line)
+        if m: said = int(m.group(1))
+    wrong = ["%s %s is in a Windows build and not in the table of crates" % k for k in sorted(set(built) - set(listed))]
+    wrong += ["%s %s is in the table of crates and not in a Windows build" % k for k in sorted(set(listed) - set(built))]
+    wrong += ["%s %s is listed as %s; its manifest says %s" % (*k, listed[k], built[k])
+              for k in sorted(set(built) & set(listed)) if listed[k] != built[k]]
+    wrong += ["%s %s is in the table of crates and not in the table of notices" % k for k in sorted(set(listed) - noticed)]
+    wrong += ["%s %s is in the table of notices and not in the table of crates" % k for k in sorted(noticed - set(listed))]
+    if said != len(listed):
+        wrong.append(f"the text says {said} crates; the table has {len(listed)}")
+    if wrong:
+        sys.exit("THIRD-PARTY-LICENSES.md does not match the dependencies of a Windows build "
+                 f"(cargo tree -p any2odyssey --target {WINDOWS_TARGET} -e normal):\n  " + "\n  ".join(wrong))
 
 def used_under(expression):
     """MIT when it is one of the choices, Apache-2.0 otherwise; a single license as it is."""
@@ -74,6 +103,7 @@ def notices(name, version, license_used):
 def main():
     # The file is UTF-8 whatever the locale says: the notices have letters that Latin-1 cannot write.
     sys.stdout.reconfigure(encoding="utf-8")
+    check_windows_list()
     windows = listed_for_windows()
     extra = sorted((k, v) for k, v in tree(TARGET).items() if k not in windows)
     print("# Third-party licenses: the Linux build\n")
