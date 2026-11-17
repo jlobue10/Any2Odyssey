@@ -39,7 +39,7 @@ jobs:
         with:
           # No step pushes or fetches again; do not leave the token in .git/config for build scripts.
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -169,10 +169,23 @@ jobs:
         run: |
           pacman-key --init
           pacman -Sy --noconfirm --needed archlinux-keyring
-          pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang
+          pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang python glib2
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # The installer's tests once more, because this job runs as root: two of them need root (a Windows
+      # drive whose files belong to another user; the refusal to install as root into a folder that is
+      # not root's alone) and the Linux job, which is not root, skips them. Up to 0.9.4 no job ran them.
+      # Here /bin/sh is bash, where that job's is dash. A test that is skipped fails the step: this is the
+      # run that is meant to leave none out.
+      - name: Release installer tests as root (none skipped)
+        run: |
+          python packaging/linux/tests/test-install.py 2> /tmp/test-install.log || { cat /tmp/test-install.log; exit 1; }
+          cat /tmp/test-install.log
+          if grep -q skipped /tmp/test-install.log; then
+            echo "::error::A test of the release installer was skipped in the job that is there to run them all."
+            exit 1
+          fi
       - name: Build, test and package
         run: |
           useradd -m build
@@ -222,7 +235,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -307,7 +320,9 @@ jobs:
           cargo check --locked --workspace --target x86_64-pc-windows-msvc
       # The archive release.yml publishes, made the same way, so a change that breaks it shows here.
       # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
-      - name: Third-party list for Linux matches the dependencies
+      # The script first compares THIRD-PARTY-LICENSES.md, which is written by hand, with the crates of a
+      # Windows build; up to 0.9.4 nothing did, and a crate only Windows builds could be missing from it.
+      - name: Third-party lists match the dependencies (Windows list checked, Linux list made again)
         if: matrix.arch == 'x86_64'
         env:
           LC_ALL: C
@@ -361,7 +376,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -387,3 +402,17 @@ jobs:
             echo "::error::cargo-deny refused the dependency tree (its report is above). If that is a new RustSec advisory and not this change: update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml."
             exit 1
           }
+      # The actions these workflows use are dependencies too, each named by a commit. GitHub serves a
+      # commit under a repository's name without its being in that repository's history: one a rebuilt
+      # branch left behind, and equally one pushed only to a fork. The commit of dtolnay/rust-toolchain
+      # that 0.9.4 was built with became the first kind fourteen hours after the release: that action's
+      # `stable` branch is rebuilt whenever its `master` changes, which is why the action is now named by
+      # a commit of master, with the toolchain given as its input. Asked of GitHub at every run, like the
+      # advisories: this too can turn red without a change here. First the check itself, against a
+      # stand-in for GitHub that also gives the answers it has to refuse.
+      - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
+        run: python3 scripts/tests/test-check-action-pins.py
+      - name: Every action's commit is under a tag or on a branch of its repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-action-pins.sh
