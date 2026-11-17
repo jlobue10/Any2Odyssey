@@ -337,10 +337,20 @@ jobs:
         run: |
           pacman-key --init
           pacman -Sy --noconfirm --needed archlinux-keyring
-          pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang
+          pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang python glib2
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # As in ci.yml: the installer's tests once more, because this job runs as root and two of them need
+      # root; the Linux job above, which is not root, skips them. A test that is skipped fails the step.
+      - name: Release installer tests as root (none skipped)
+        run: |
+          python packaging/linux/tests/test-install.py 2> /tmp/test-install.log || { cat /tmp/test-install.log; exit 1; }
+          cat /tmp/test-install.log
+          if grep -q skipped /tmp/test-install.log; then
+            echo "::error::A test of the release installer was skipped in the job that is there to run them all."
+            exit 1
+          fi
       - name: Build, test and package
         run: |
           useradd -m build
