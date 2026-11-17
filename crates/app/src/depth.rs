@@ -405,8 +405,10 @@ fn runtime() -> Result<&'static Environment, String> {
             preload_cudnn();
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
-                    "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.22 or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
-                    library.display()
+                    "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.{} or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora and openSUSE: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
+                    library.display(),
+                    // (the binding's own number: the oldest runtime it was built to accept)
+                    ort::MINOR_VERSION
                 )
             })?;
             // An NVIDIA GPU when the installed runtime has the CUDA provider
@@ -546,6 +548,16 @@ impl Estimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_binding_accepts_the_runtimes_distributions_package() {
+        // Built for the runtime interface of 1.22 the program refused the
+        // ONNX Runtime 1.21 of Debian 13 and Ubuntu 25.10, and the binding
+        // then also set an automatic choice of provider on every session,
+        // over which Microsoft's own 1.22.0 ends the whole program. 17 is the
+        // oldest interface the binding has (the `api-17` feature).
+        assert_eq!(ort::MINOR_VERSION, 17);
+    }
 
     #[test]
     fn stopped_requests_skip_model_loading_and_inference() {
@@ -1008,7 +1020,18 @@ mod tests {
             "printf mo; while [ ! -e '{}' ]; do sleep 0.02; done; printf del",
             go.display()
         );
+        // Tells the stand-in to go on, also when an assertion below fails:
+        // the scope waits for the installer's thread, which waits for the
+        // stand-in, and a running download that was removed showed as a
+        // test that never ends instead of one that fails.
+        struct Go<'a>(&'a Path);
+        impl Drop for Go<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::write(self.0, b"");
+            }
+        }
         std::thread::scope(|scope| {
+            let go_on = Go(&go);
             let running =
                 scope.spawn(|| install_model_in(dir.path(), download_command(&slow), &expected));
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -1023,10 +1046,46 @@ mod tests {
             );
             remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
             assert_eq!(downloads(), theirs, "a running download was removed");
-            std::fs::write(&go, b"").unwrap();
+            drop(go_on);
             assert_eq!(running.join().unwrap(), Ok(target.clone()));
         });
         assert_eq!(std::fs::read(&target).unwrap(), b"model");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// The lock is this installer's until the model has its name, not only
+    /// while curl runs: when the file is checked against the hash and moved
+    /// into place curl has ended, and to an installer clearing up in that
+    /// moment a download without a lock is one that was given up.
+    #[cfg(unix)]
+    #[test]
+    fn a_download_is_not_cleared_while_it_is_checked_and_put_in_place() {
+        const SIZE: usize = 8 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        // Large enough that checking it takes a moment.
+        let sample = elsewhere.path().join("sample");
+        std::fs::write(&sample, vec![0u8; SIZE]).unwrap();
+        let expected = any2odyssey_core::engine::sha256_hex(&sample).unwrap();
+        let target = dir.path().join(MODEL_FILE);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let installed = std::thread::scope(|scope| {
+            // Other installers, clearing up all the time.
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    remove_stale_downloads(dir.path(), STALE_DOWNLOAD);
+                }
+            });
+            let installed = install_model_in(
+                dir.path(),
+                download_command(&format!("head -c {SIZE} /dev/zero")),
+                &expected,
+            );
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            installed
+        });
+        assert_eq!(installed, Ok(target.clone()));
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), SIZE as u64);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 

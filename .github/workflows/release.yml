@@ -48,7 +48,7 @@ jobs:
             echo "::error::Could not find out whether release $TAG already exists."
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -156,6 +156,12 @@ jobs:
       - name: Build the setup program from the packaged ZIP
         shell: pwsh
         run: ./scripts/build-setup.ps1
+      # The setup program's own decisions (exit codes, the installer's reason in the log, /ALLOWDOWNGRADE,
+      # PowerShell ended half-way, a notice shown once), compiled around a stand-in installer that
+      # writes only to a temporary folder: nothing is installed by this step.
+      - name: Setup wizard logic with a stand-in installer
+        shell: pwsh
+        run: ./installer/tests/wizard/test-setup-wizard.ps1 -RequireIscc
       # The one check that runs a published program for real: on this disposable runner the setup program
       # is refused a full installation (no Odyssey 3D Hub here), installs the desktop controls for the
       # runner's account, repairs them, and the installed uninstaller removes them again.
@@ -187,7 +193,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -270,7 +276,8 @@ jobs:
             x86_64-w64-mingw32-gcc -O2 -c -o /dev/null "contrib/wine-lens/src/$source.c"
           done
       # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
-      - name: Third-party list for Linux matches the dependencies
+      # As in ci.yml, the script first compares THIRD-PARTY-LICENSES.md with the crates of a Windows build.
+      - name: Third-party lists match the dependencies (Windows list checked, Linux list made again)
         env:
           LC_ALL: C
           PYTHONUTF8: '0'
@@ -288,6 +295,12 @@ jobs:
           mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
           check/any2odyssey --help
           test "$(sha256sum < check/any2odyssey)" = "$(sha256sum < ../target/release/Any2Odyssey)"
+          # The oldest glibc this program starts on is the one install.sh refuses below and INSTALL.txt
+          # names (GLIBC_MIN). Only here, not in ci.yml: that builds on ubuntu-latest, whose program needs
+          # a newer one. Weak references (w) do not count: the loader only mentions them.
+          needs=$(objdump -T check/any2odyssey | awk '$2 != "w"' | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          says=GLIBC_$(sed -n 's/^GLIBC_MIN=//p' check/install.sh)
+          test "$needs" = "$says" || { echo "the program needs $needs, install.sh says $says"; exit 1; }
           # What ci.yml checks of the archive and its installer.
           sh -n check/wine-lens/setup.sh
           test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh
@@ -337,10 +350,20 @@ jobs:
         run: |
           pacman-key --init
           pacman -Sy --noconfirm --needed archlinux-keyring
-          pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang
+          pacman -Su --noconfirm --needed git rustup desktop-file-utils libxkbcommon libglvnd hicolor-icon-theme libpipewire clang python glib2
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # As in ci.yml: the installer's tests once more, because this job runs as root and two of them need
+      # root; the Linux job above, which is not root, skips them. A test that is skipped fails the step.
+      - name: Release installer tests as root (none skipped)
+        run: |
+          python packaging/linux/tests/test-install.py 2> /tmp/test-install.log || { cat /tmp/test-install.log; exit 1; }
+          cat /tmp/test-install.log
+          if grep -q skipped /tmp/test-install.log; then
+            echo "::error::A test of the release installer was skipped in the job that is there to run them all."
+            exit 1
+          fi
       - name: Build, test and package
         run: |
           useradd -m build
@@ -394,7 +417,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -415,6 +438,18 @@ jobs:
         run: |
           cargo deny --locked check advisories bans sources || {
             echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml, and release from that commit."
+            exit 1
+          }
+      # As in ci.yml: each action is named by a commit, and that commit has to be one its repository still
+      # holds under a tag or on a branch, not one a rebuilt branch left behind or one pushed only to a fork.
+      - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
+        run: python3 scripts/tests/test-check-action-pins.py
+      - name: Every action's commit is under a tag or on a branch of its repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/check-action-pins.sh || {
+            echo "::error::An action of these workflows is named by a commit its repository no longer holds under a tag or on a branch (see above). Nothing was published. Name a commit that it does hold, in ci.yml and release.yml, and release from that commit."
             exit 1
           }
 

@@ -12,11 +12,28 @@ if defined PROCESSOR_ARCHITEW6432 set "ANY2ODYSSEY_POWERSHELL=%SystemRoot%\Sysna
 rem Started from a PowerShell 7 prompt, this console inherits its module path, and Windows PowerShell
 rem then cannot load its own modules: Get-FileHash is not found. Cleared, it builds its default.
 set "PSModulePath="
+rem Windows PowerShell takes [ and ] in the path of a script for a pattern before it looks for a file
+rem of that very name: where the pattern fits one other folder it runs the installer found there, and
+rem where a [ is not closed it runs nothing and speaks of wildcard characters. So a folder with a [ in
+rem its path is asked about first, with no script named on the command line: which file would be run?
+set "ANY2ODYSSEY_PACKAGE=%~dp0"
+if "%ANY2ODYSSEY_PACKAGE:[=%"=="%ANY2ODYSSEY_PACKAGE%" goto :launch
+"%ANY2ODYSSEY_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -Command "foreach($name in 'Install-Launcher.ps1','install.ps1','InstallSupport.ps1','build\Any2Odyssey.exe'){$path=$env:ANY2ODYSSEY_PACKAGE+$name;if(Test-Path -LiteralPath $path){try{$found=(Get-Command -Name $path -CommandType ExternalScript,Application -ErrorAction Stop).Source;$same=[IO.Path]::GetFullPath($found) -eq [IO.Path]::GetFullPath($path)}catch{exit 1};if(-not $same){exit 1}}};exit 0"
+if errorlevel 1 goto :brackets
+:launch
 rem Arguments are passed on, for example: Install-GUI.cmd -AllowDowngrade
 "%ANY2ODYSSEY_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-Launcher.ps1" -ControlsOnly %*
 set "ANY2ODYSSEY_SETUP_EXIT=%ERRORLEVEL%"
 pause
 exit /b %ANY2ODYSSEY_SETUP_EXIT%
+
+:brackets
+echo This folder has a [ in its path, and Windows PowerShell, which runs the installer, takes [ and ] in a path for a pattern:
+echo it would not find the installer in this folder, or would run the one of another folder whose name the pattern fits.
+echo Move or extract the whole package to a folder without [ and ] in its path, then run Install-GUI.cmd from there.
+echo Nothing was installed.
+pause
+exit /b 1
 
 :notextracted
 echo The rest of the Any2Odyssey package is not beside this file.

@@ -8,7 +8,7 @@ The Linux packages contain most of the same crates and further ones (the desktop
 
 The 161 crates below are the normal (non-build, non-test) dependencies of the `any2odyssey` binary for the `x86_64-pc-windows-msvc` target, as `Cargo.lock` resolves them. Their licenses are permissive (MIT, Apache-2.0, Zlib, BSD, ISC, BSL-1.0, Unicode-3.0, 0BSD, Unlicense) or file-level copyleft compatible with the GPL (MPL-2.0 for `option-ext`); the `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` entry is `epaint_default_fonts`, whose embedded fonts are listed under "Fonts embedded in the application". The license each crate is used under, its copyright notices and the full license texts are in [License texts and copyright notices for the Rust crates](#license-texts-and-copyright-notices-for-the-rust-crates) below.
 
-Regenerate the table after changing dependencies:
+Regenerate the table after changing dependencies (CI compares both tables of this file and the number above with this command's output; `scripts/third-party-linux.py` does it and says what differs):
 
 ```sh
 cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix none --format '{p}|{l}' | sort -u

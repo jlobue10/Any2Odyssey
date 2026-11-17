@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$ControlsOnly,[switch]$AllowDowngrade,[switch]$RunInstall,[string]$ResultFile,[string]$ExpectedUserSid,[string]$ReportFile)
+param([switch]$ControlsOnly,[switch]$AllowDowngrade,[switch]$RunInstall,[string]$ResultFile,[string]$ExpectedUserSid,[string]$ReportFile,[switch]$CheckOnly)
 $ErrorActionPreference='Stop'
 $installer=Join-Path $PSScriptRoot 'install.ps1'
 $options=@{ControlsOnly=[bool]$ControlsOnly}
@@ -9,7 +9,8 @@ $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
 
 # The setup program (Any2Odyssey.iss) runs this launcher without a visible console and shows the
 # outcome in its own window. With -ReportFile every line printed below is collected as well, and
-# the file receives a status (OK, FAILED or DOWNGRADE), the closing message and then those lines.
+# the file receives a status (OK, CHECKED after -CheckOnly, FAILED, DOWNGRADE, or INTERRUPTED while
+# the installation is under way), the closing message and then those lines.
 # Without it nothing here changes what Install.cmd and Install-GUI.cmd print.
 $printed=New-Object 'System.Collections.Generic.List[string]'
 function Write-Any2OdysseyLine {
@@ -54,6 +55,15 @@ try{
  # Package/engine/version failures stay visible here, before a UAC prompt.
  $check=$options.Clone();$check.CheckOnly=$true
  Invoke-Any2OdysseyInstaller $check
+ # -CheckOnly: the installer's read-only checks and nothing else. The setup program runs them on their
+ # own first, so that it can show what they print and ask before the elevation prompt, where a
+ # console shows those lines anyway. Nothing is elevated, nothing is changed. The status is not OK,
+ # which is kept for a completed installation.
+ if($CheckOnly){Save-Any2OdysseyReport 'CHECKED' 'The checks passed. No changes were made.';exit 0}
+ # From here on files change. If this PowerShell is ended before it can report (closed from Task
+ # Manager, a sign-out, security software), the setup program finds this report instead of none and
+ # does not tell the user that nothing was installed. The real outcome replaces it below.
+ Save-Any2OdysseyReport 'INTERRUPTED' 'The installer was ended before it had finished, so the installation may be incomplete. Run Setup again: it repairs an interrupted installation, or says what is in its way.'
  $principal=New-Object Security.Principal.WindowsPrincipal($identity)
  if($ControlsOnly -or $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
   # Already elevated ("Run as administrator", UAC switched off, the built-in Administrator): no

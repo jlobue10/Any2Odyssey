@@ -65,6 +65,15 @@ class InstallerTests(unittest.TestCase):
             stdin=subprocess.DEVNULL,
         )
 
+    def without_locks(self, tools):
+        """Put a flock into `tools` that answers as in a folder without locks (some network file systems).
+
+        The installer then runs beside another one instead of waiting for it, which is what the tests that
+        start a second run in the middle of the first arrange: each step must still hold by itself.
+        """
+        (tools / "flock").write_text("#!/bin/sh\nexit 2\n")
+        (tools / "flock").chmod(0o755)
+
     def write_mounts(self):
         (self.system / "proc/self/mounts").write_text("".join(line + "\n" for line in self.mounts))
 
@@ -716,6 +725,7 @@ class InstallerTests(unittest.TestCase):
             f'exec {shlex.quote(shutil.which("install"))} "$@"\n')
         for tool in ("mv", "install"):
             (tools / tool).chmod(0o755)
+        self.without_locks(tools)
         self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
         result = self.install(prefix)
         if not called.exists():
@@ -746,6 +756,67 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer("--prefix", str(prefix), "--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(list((prefix / "bin").iterdir()), [])
+
+    def second_run_while_the_first_copies(self, prefix, *second):
+        """Update the installation in `prefix` and start `install.sh <second>` while that run copies the Wine setup.
+
+        The first run is held in its `cp` for a moment, in which the second would be through if it did not
+        wait. Returns the first run's result, the second's exit code and output, and whether the second
+        finished while the first was held.
+        """
+        if not shutil.which("flock"):
+            self.skipTest("needs flock (util-linux), which the installer takes its turn with")
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tools = self.root / "tools"
+        tools.mkdir()
+        code, output, early = (self.root / name for name in ("second code", "second output", "second early"))
+        nested = shlex.join([*SHELL, str(self.archive / "install.sh"), "--prefix", str(prefix), *second])
+        # (9 is the first run's lock: a program it starts that stays would hold it, and this one stays)
+        (tools / "cp").write_text(
+            '#!/bin/sh\nif [ -z "${A2O_NESTED_INSTALL:-}" ]; then\n'
+            f'    ( A2O_NESTED_INSTALL=1 {nested} >{shlex.quote(str(output))} 2>&1; echo $? >{shlex.quote(str(code))} )'
+            ' >/dev/null 2>&1 9<&- &\n'
+            f'    sleep 1\n    [ ! -e {shlex.quote(str(code))} ] || : >{shlex.quote(str(early))}\nfi\n'
+            f'exec {shlex.quote(shutil.which("cp"))} "$@"\n')
+        (tools / "cp").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        first = self.install(prefix)
+        if not output.exists():
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.skipTest("this shell runs a built-in cp, which the test cannot stand in for")
+        deadline = time.monotonic() + 20
+        while not code.exists() or not code.read_text().strip():
+            self.assertLess(time.monotonic(), deadline, "the second run did not end")
+            time.sleep(0.02)
+        return first, int(code.read_text()), output.read_text(), early.exists()
+
+    def test_a_run_started_while_another_copies_waits_and_the_installation_is_whole(self):
+        # 0.9.4, two installers started together over an installation, 100 pairs: in 37 one run stopped at
+        # "File exists" or "Directory not empty", in 8 files of the Wine setup were gone at the end (setup.sh
+        # among them) and in 18 a second copy of it lay inside the first, while a run said Done. Each run
+        # removes the Wine setup and copies it again, and the other's copy went with it or into it.
+        prefix = self.root / "prefix"
+        first, code, output, early = self.second_run_while_the_first_copies(
+            prefix, "--no-deps", "--no-udev", "--no-model", "--no-odyssey")
+        self.assertFalse(early, "the second run did not wait for the first:\n" + output)
+        self.assertEqual((first.returncode, code), (0, 0), first.stdout + first.stderr + output)
+        self.assertIn("waiting for it to finish", output)
+        setup = prefix / "share/any2odyssey/wine-lens"
+        self.assertEqual(sorted(entry.name for entry in setup.iterdir()), ["setup.sh"])
+        self.assertTrue(os.access(setup / "setup.sh", os.X_OK))
+        self.assertTrue(os.access(prefix / "bin/any2odyssey", os.X_OK))
+        self.assertEqual([entry.name for entry in (prefix / "bin").iterdir()], ["any2odyssey"])
+
+    def test_a_removal_started_while_an_installation_copies_waits_and_removes_all_of_it(self):
+        # Side by side (0.9.4), --uninstall took the program and the menu entry away and the installation
+        # went on to copy the Wine setup and its own copy of this script: half an installation, of which
+        # the installer said Done. Of 100 such pairs 20 ended that way.
+        prefix = self.root / "prefix"
+        first, code, output, early = self.second_run_while_the_first_copies(prefix, "--uninstall")
+        self.assertFalse(early, "the removal did not wait for the installation:\n" + output)
+        self.assertEqual((first.returncode, code), (0, 0), first.stdout + first.stderr + output)
+        self.assert_removed(prefix)
 
     def test_the_packages_setup_says_that_an_installation_from_the_archive_is_still_in_the_way(self):
         # Seen with the published Arch package over a 0.9.1 installation in ~/.local: the old menu entry and
@@ -896,6 +967,7 @@ class InstallerTests(unittest.TestCase):
             'printf "%s\\n" "$stage"\n'
         )
         (tools / "mktemp").chmod(0o755)
+        self.without_locks(tools)
         self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
         result = self.install(prefix)
         if not called.exists() and not nested_log.exists():
@@ -1103,7 +1175,7 @@ class InstallerTests(unittest.TestCase):
         tools.mkdir()
         for folder in reversed(os.get_exec_path(self.env)):  # an earlier folder's program wins
             for tool in (Path(folder).iterdir() if Path(folder).is_dir() else []):
-                if tool.name not in ("pacman", "apt-get", "dnf"):
+                if tool.name not in ("pacman", "apt-get", "dnf", "zypper"):
                     (tools / tool.name).unlink(missing_ok=True)
                     (tools / tool.name).symlink_to(tool)
         (tools / name).write_text(f"#!/bin/sh\n{body}\n")
@@ -1191,6 +1263,102 @@ done
         self.assertIn("libpipewire", missing)
         self.assertNotIn("libxkbcommon", missing)
         self.assertNotIn("libglvnd", missing)
+
+    def test_the_packages_of_opensuse_are_known(self):
+        # On openSUSE Tumbleweed the installer knew no package manager: it listed file names ("also
+        # missing, under a name this script does not know"), installed nothing, and the program did not
+        # start. The names are the ones zypper has there.
+        self.only_package_manager("zypper", "exit 0")
+        missing, output = self.missing_packages()
+        for package in ["libpipewire-0_3-0", "libxkbcommon0", "libxkbcommon-x11-0", "libglvnd", "onnxruntime-devel"]:
+            self.assertIn(package, missing)
+        self.assertNotIn("this script does not know", output)
+
+    def test_where_no_package_manager_is_known_the_missing_files_come_with_what_to_do(self):
+        # Without one, the list began with "also" although nothing came before it, said nothing about
+        # what to do with file names, and not that the program cannot start without two of them.
+        self.only_package_manager("a2o-not-a-package-manager", "exit 0")
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("   missing, under a name this script does not know for your distribution: libpipewire-0.3.so.0",
+                      result.stdout)
+        self.assertNotIn("also missing", result.stdout)
+        self.assertIn("install the packages that have them with your package manager", result.stdout)
+        self.assertIn("the program does not start", result.stdout)
+        # Nor does the last line say Done over a program that cannot start.
+        self.assertNotIn("Done.", result.stdout)
+        self.assertIn("the program does not start without them: libpipewire-0.3.so.0 libxkbcommon.so.0",
+                      result.stdout)
+        for library in ["usr/lib64/libpipewire-0.3.so.0", "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0.0.0"]:
+            (self.system / library).parent.mkdir(parents=True, exist_ok=True)
+            (self.system / library).touch()
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey")
+        self.assertIn("\nDone. Start Any2Odyssey", result.stdout)
+        self.assertNotIn("does not start without them", result.stdout)
+
+    def test_pgrep_is_asked_for_with_the_wine_side(self):
+        # setup.sh stops without pgrep, and Fedora's and other minimal installations have none: the
+        # installer installed Wine and the compilers there, and the set-up then ended at its tool check.
+        (self.system / "dev/odyssey-lens").touch()
+        self.only_package_manager("dnf", "exit 0")
+        (self.root / "tools/pgrep").unlink(missing_ok=True)
+        if subprocess.run([*SHELL, "-c", "command -v pgrep"], env=self.env, capture_output=True).returncode == 0:
+            self.skipTest("this shell has a pgrep of its own (BusyBox's), which is there without the package")
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-model")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn("procps-ng", lines[0].split())
+
+    def a_program_as_released(self):
+        """The archive's program as an ELF file, as the released one is (the installer reads its first bytes)."""
+        (self.archive / "any2odyssey").write_bytes(b"\x7fELF\x02\x01\x01" + bytes(57))
+        (self.archive / "any2odyssey").chmod(0o755)
+
+    def c_library(self, version):
+        """Make getconf answer `version` when asked for the C library, as glibc's does ("glibc 2.41")."""
+        tools = self.root / "libc-tools"
+        tools.mkdir(exist_ok=True)
+        (tools / "getconf").write_text(f'#!/bin/sh\n[ "$1" = GNU_LIBC_VERSION ] && [ -n "{version}" ] && echo "{version}"\n')
+        (tools / "getconf").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{os.environ['PATH']}"
+
+    def test_a_system_without_glibc_is_refused_before_anything_is_installed(self):
+        # On Alpine (musl) everything was installed, the depth model's step said "any2odyssey: not found",
+        # and the last line was "Done. Start Any2Odyssey from the application menu".
+        self.a_program_as_released()
+        self.c_library("")
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("GNU C library", result.stderr)
+        self.assertIn("musl", result.stderr)
+        self.assertFalse(prefix.exists())
+        # The same system with glibc's loader: installed.
+        (self.system / "lib64").mkdir()
+        (self.system / "lib64/ld-linux-x86-64.so.2").touch()
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((prefix / "bin/any2odyssey").is_file())
+
+    def test_a_c_library_older_than_the_program_needs_is_refused(self):
+        # On AlmaLinux 9 (glibc 2.34) the program does not start ("libm.so.6: version `GLIBC_2.35' not
+        # found"); the installer installed it all the same and ended with Done.
+        self.a_program_as_released()
+        (self.system / "lib64").mkdir()
+        (self.system / "lib64/ld-linux-x86-64.so.2").touch()
+        for number, (version, accepted) in enumerate([("glibc 2.34", False), ("glibc 2.9", False), ("glibc 2.35", True),
+                                                      ("glibc 2.41", True), ("glibc 2.41.9000", True),
+                                                      ("", True), ("not a version", True)]):
+            with self.subTest(version=version):
+                self.c_library(version)
+                prefix = self.root / f"prefix-{number}"
+                result = self.install(prefix)
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stdout + result.stderr)
+                self.assertEqual(prefix.exists(), accepted)
+                if not accepted:
+                    self.assertIn(f"its C library is {version}", result.stderr)
+                    self.assertIn("glibc 2.35 or newer", result.stderr)
 
 
 if __name__ == "__main__":

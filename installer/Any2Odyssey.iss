@@ -77,6 +77,12 @@ DisableWelcomePage=no
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+; Shown under the installer's reason when it refuses or fails. Setup's own sentence ("Setup cannot
+; continue. Please click Cancel to exit.") names only Cancel, but Back works on that page: it
+; returns to the summary, and from there to the installation type.
+CannotContinue=Click Back to change the installation type or to try again, or Cancel to exit.
+
 [Files]
 ; The whole release package. dontcopy: nothing is installed by Setup; PrepareToInstall unpacks
 ; these to {tmp} (ExtractTemporaryFiles), where Setup removes them again when it exits.
@@ -198,11 +204,25 @@ begin
     GetUserNameString + NewLine + Space + ExpandConstant('{localappdata}\Programs\Any2Odyssey');
 end;
 
-// One run of Install-Launcher.ps1. Status is the first line of its report (OK, FAILED or
-// DOWNGRADE), Reason the second; the installer's console lines follow and go to Setup's log.
-function RunLauncher(const Package: String; var Status, Reason, Notes: String): Boolean;
+// A notice of the installer, kept once: the checks and the installation both print it, and one
+// that was already shown before the installation (Known) is not shown again after it.
+procedure AddNote(var Notes: String; const Known, Line: String);
+begin
+  if (Pos(Line, Notes) > 0) or (Pos(Line, Known) > 0) then
+    Exit;
+  if Notes <> '' then
+    Notes := Notes + #13#10#13#10;
+  Notes := Notes + Line;
+end;
+
+// One run of Install-Launcher.ps1; with CheckOnly it stops after the installer's read-only checks.
+// Status is the first line of its report (OK for a completed installation, CHECKED for passed
+// checks, FAILED, DOWNGRADE, or INTERRUPTED when PowerShell was ended in the middle of the
+// installation), Reason the second; the installer's console lines follow and go to Setup's log.
+function RunLauncher(const Package: String; CheckOnly: Boolean; const Known: String;
+  var Status, Reason, Notes: String): Boolean;
 var
-  PowerShell, Params, ReportFile, Line: String;
+  PowerShell, Params, ReportFile, Line, Expected: String;
   Lines: TArrayOfString;
   Code, I: Integer;
 begin
@@ -220,6 +240,8 @@ begin
     Params := Params + ' -ControlsOnly';
   if DowngradeAllowed then
     Params := Params + ' -AllowDowngrade';
+  if CheckOnly then
+    Params := Params + ' -CheckOnly';
   // Started from a PowerShell 7 prompt, Setup inherits its module path, with which Windows
   // PowerShell cannot load its own modules (Install.cmd clears it for the same reason).
   SetEnvironmentVariable('PSModulePath', '');
@@ -240,27 +262,59 @@ begin
       Line := Trim(Lines[I]);
       Log('Installer: ' + Line);
       if Pos('Note:', Line) = 1 then
-      begin
-        if Notes <> '' then
-          Notes := Notes + #13#10#13#10;
-        Notes := Notes + Line;
-      end;
+        AddNote(Notes, Known, Line);
     end;
   end;
-  if (Status = 'OK') and (Code = 0) then
+  // The checks never report OK, so a report left over from them cannot pass for an installation.
+  if CheckOnly then
+    Expected := 'CHECKED'
+  else
+    Expected := 'OK';
+  if (Status = Expected) and (Code = 0) then
     Result := True
-  else if Reason = '' then
-    // Windows PowerShell ended before the launcher could write its report.
+  else if (Reason = '') or (Status = 'CHECKED') then
+    // Windows PowerShell ended before the launcher could write a report. It writes its first one when
+    // the read-only checks have passed, before anything is changed, so nothing was installed.
     Reason := 'Windows PowerShell ended with code ' + IntToStr(Code) + ' before the installer could report. ' +
       'Nothing was installed. A script execution policy set by Group Policy, Constrained Language Mode ' +
       '(AppLocker, App Control for Business) or security software stops the installer on this PC; ' +
       'the project''s installer notes (installer/README.md) describe these cases.';
 end;
 
+// The page that shows the installer's reason has room for about eight lines and wraps them at
+// spaces only. A long reason lost its end there, and a long folder path its tail: the reason of a
+// rollback that could not put a file back names the folder that holds the backups. Such a reason
+// goes into the page's memo instead, which scrolls and from which it can be copied.
+function ReasonForPage(const Reason: String): String;
+var
+  I, Run, Longest: Integer;
+begin
+  Result := Reason;
+  Run := 0;
+  Longest := 0;
+  for I := 1 to Length(Reason) do
+  begin
+    if Reason[I] = ' ' then
+      Run := 0
+    else
+      Run := Run + 1;
+    if Run > Longest then
+      Longest := Run;
+  end;
+  if (Length(Reason) <= 350) and (Longest <= 60) then
+    Exit;
+  // Setup uses this memo for a list of programs, one to a line; a sentence has to wrap.
+  WizardForm.PreparingMemo.ScrollBars := ssVertical;
+  WizardForm.PreparingMemo.WordWrap := True;
+  WizardForm.PreparingMemo.Text := Reason;
+  WizardForm.PreparingMemo.Visible := True;
+  Result := 'The installer did not complete. What it reported is in the box below.';
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
-  Package, Status, Reason, Notes: String;
-  Again: Boolean;
+  Package, Status, Reason, Notes, Shown: String;
+  Again, CheckFirst: Boolean;
 begin
   Result := '';
   Package := ExpandConstant('{tmp}\{#PackageFolder}');
@@ -274,18 +328,48 @@ begin
       Exit;
     end;
   end;
+  // A full installation in the wizard first runs the installer's read-only checks on their own.
+  // What they print as a notice (another account's conversion worker that is about to be replaced)
+  // is then shown with a question before the elevation prompt, where Install.cmd's console shows
+  // it too. A silent installation and a controls-only one, which never elevates, run once and
+  // show their notices afterwards.
+  CheckFirst := not WizardSilent and not ControlsOnly;
+  Shown := '';
   repeat
     Again := False;
     // This page is on screen while the installer works; Setup replaces the text if it has to stop here.
-    WizardForm.PreparingLabel.Caption := 'Installing Any2Odyssey. If Windows asks for administrator ' +
-      'approval, approve it with the account you are signed in to.';
+    if CheckFirst then
+      WizardForm.PreparingLabel.Caption := 'Checking this PC before the installation.'
+    else
+      WizardForm.PreparingLabel.Caption := 'Installing Any2Odyssey. If Windows asks for administrator ' +
+        'approval, approve it with the account you are signed in to.';
     WizardForm.AdjustLabelHeight(WizardForm.PreparingLabel);
     WizardForm.PreparingLabel.Visible := True;
     WizardForm.PreparingLabel.Update;
-    if RunLauncher(Package, Status, Reason, Notes) then
+    if RunLauncher(Package, CheckFirst, Shown, Status, Reason, Notes) then
     begin
-      Log('Installation completed: ' + Reason);
-      InstallNotes := Notes;
+      if CheckFirst then
+      begin
+        // The checks passed; the installation itself is the next round.
+        CheckFirst := False;
+        Again := True;
+        if Notes <> '' then
+        begin
+          if MsgBox(Notes + #13#10#13#10 + 'Continue with the installation?', mbConfirmation, MB_YESNO) = IDYES then
+            Shown := Notes
+          else
+          begin
+            Log('Stopped at the installer''s notice; nothing was installed.');
+            Again := False;
+            Result := 'The installation was not started. Nothing was changed.';
+          end;
+        end;
+      end
+      else
+      begin
+        Log('Installation completed: ' + Reason);
+        InstallNotes := Notes;
+      end;
     end
     else if (Status = 'DOWNGRADE') and not DowngradeAllowed then
     begin
@@ -307,6 +391,9 @@ begin
       Result := Reason;
     end;
   until not Again;
+  // Only for the page: a silent run's message box and the log keep the text as it is.
+  if (Result <> '') and not WizardSilent then
+    Result := ReasonForPage(Result);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

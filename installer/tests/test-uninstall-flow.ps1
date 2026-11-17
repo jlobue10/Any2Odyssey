@@ -94,7 +94,8 @@ try{
  Assert ($quitEvent.WaitOne(0)) 'The uninstaller signals the quit event (routed here to the test''s own event)'
  Assert ($launches.Count -eq 1 -and $launches[0].Verb -eq 'RunAs' -and $launches[0].Wait) 'Full uninstall requests elevation exactly once and waits for it'
  Assert ($launches[0].FilePath -like '*\WindowsPowerShell\v1.0\powershell.exe') 'Helper runs under the system Windows PowerShell'
- Assert ($launches[0].ArgumentList -like ('*-NonInteractive*-File "'+$helper+'" -ExpectedUserSid "'+$sid+'"*')) 'Helper receives its installed path and the invoking account SID'
+ # Compared as text: to -like, a [ or a backtick in the temporary folder's name is part of a pattern.
+ Assert ($launches[0].ArgumentList.Contains('-NonInteractive') -and $launches[0].ArgumentList.Contains('-File "'+$helper+'" -ExpectedUserSid "'+$sid+'"')) 'Helper receives its installed path and the invoking account SID'
  Assert (-not (Test-Path -LiteralPath $worker) -and -not (Test-Path -LiteralPath $helper)) 'Worker and helper are removed through the helper'
  foreach($name in $ownedNames+@('Uninstall.ps1','version.json')){Assert (-not (Test-Path -LiteralPath (Join-Path $app $name))) "Per-user file removed: $name"}
  Assert (-not (Test-Path -LiteralPath $app)) 'Emptied program folder is removed'
@@ -120,12 +121,32 @@ try{
  Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration)) 'A read-only shortcut to the installation is removed like any other'
  Assert ((Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')) -and (Get-Item -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')).IsReadOnly) 'A read-only shortcut that leads elsewhere stays, and stays read-only'
  (Get-Item -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')).IsReadOnly=$false
+ # A read-only shortcut whose attributes this account may not change (its permissions say so, or
+ # the Desktop is kept on a share that is read-only): it stays, as it did up to 0.9.3, the uninstall
+ # says so and removes everything else. 0.9.4 stopped at it with "Access to the path is denied",
+ # after the worker was gone and before the program and the registration were.
+ $launches.Clear()
+ New-Fixture -Elevated $false
+ $locked=Join-Path $desktop 'Any2Odyssey.lnk'
+ (Get-Item -LiteralPath $locked).IsReadOnly=$true
+ & icacls.exe $locked /deny ('*'+$sid+':(WA)') | Out-Null
+ try{
+  $notes.Clear()
+  & (Join-Path $app 'Uninstall.ps1')
+  $said=$notes -join [char]10
+  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $worker)) 'A shortcut that cannot be changed does not stop the uninstall'
+  Assert (-not (Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk'))) 'The other shortcut is still removed'
+  Assert ((Test-Path -LiteralPath $locked) -and (Get-Item -LiteralPath $locked).IsReadOnly -and $said.Contains($locked) -and $said.Contains('left in place')) 'The shortcut that cannot be changed stays and is named'
+ }finally{
+  & icacls.exe $locked /remove:d ('*'+$sid) | Out-Null
+  if(Test-Path -LiteralPath $locked){(Get-Item -LiteralPath $locked).IsReadOnly=$false}
+ }
 
  $launches.Clear()
  New-Fixture -Elevated $true
  & (Join-Path $app 'Uninstall.ps1')
  Assert ($launches.Count -eq 1 -and -not $launches[0].Verb) 'Already-elevated uninstall runs the helper directly without UAC'
- Assert ($launches[0].ArgumentList -like ('*-File "'+$helper+'" -ExpectedUserSid "'+$sid+'"*')) 'Direct helper launch still names the invoking account'
+ Assert ($launches[0].ArgumentList.Contains('-File "'+$helper+'" -ExpectedUserSid "'+$sid+'"')) 'Direct helper launch still names the invoking account'
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $worker)) 'Already-elevated uninstall removes the installation'
 
  $launches.Clear()

@@ -1030,6 +1030,10 @@ fn describe_displays(
 
 pub fn show_window(_: isize) {}
 pub fn hide_window(_: isize) {}
+/// There is no native handle to ask here: the frame's own record stands.
+pub fn is_minimized(_: isize) -> Option<bool> {
+    None
+}
 pub fn open_path(path: &Path) {
     let _ = open::that_detached(path);
 }

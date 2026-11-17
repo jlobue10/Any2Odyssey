@@ -142,7 +142,17 @@ fn write_atomic_retrying(
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
-    let long = path.file_name().and_then(|name| {
+    // The long form is taken as written, so the name goes into it as
+    // Windows reads it in a path written the ordinary way: `guide.html.`
+    // and `guide.html ` are `guide.html` there, and a device's name (`NUL`)
+    // is no file's. Joined on as given, the file was made under the name
+    // with its dot or space, which nothing that names it the ordinary way
+    // can open or remove, Explorer included.
+    let ordinary = cfg!(windows)
+        .then(|| std::path::absolute(path).ok())
+        .flatten();
+    let name = ordinary.as_deref().and_then(Path::file_name);
+    let long = name.and_then(|name| {
         let folder = long_form(parent, name.len().max(TEMPORARY_NAME_LENGTH))?;
         let path = folder.join(name);
         Some((folder, path))
@@ -545,6 +555,35 @@ mod tests {
         crate::overlay_settings::update_file(&samsung, &backup, false, 0.5, 0.5).unwrap();
         assert_eq!(fs::read(&backup).unwrap(), b"{}");
         assert_eq!(entries(&folder).len(), 3);
+    }
+
+    /// Windows drops dots and spaces from the end of a name written the
+    /// ordinary way. Past the path limit the file is saved under the same
+    /// name as before it, not under one with the dot or the space kept,
+    /// which Explorer lists and can neither open nor delete.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_is_read_the_same_way_on_both_sides_of_the_path_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        for length in [200, 250] {
+            let folder = folder_of_length(dir.path(), length);
+            for written in ["guide.html.", "guide.html ", "guide.html. ."] {
+                let path = folder.join(written);
+                write_atomic_document(&path, b"one").unwrap();
+                write_atomic_document(&path, b"two").unwrap();
+                assert_eq!(
+                    entries(&folder),
+                    ["guide.html"],
+                    "{written:?} in a folder of {length} characters"
+                );
+                assert_eq!(fs::read(&path).unwrap(), b"two");
+                fs::remove_file(&path).unwrap();
+            }
+            // A device's name is no file's at either length: nothing is
+            // made that only the long form could name again.
+            let _ = write_atomic(&folder.join("NUL"), b"x");
+            assert!(entries(&folder).is_empty());
+        }
     }
 
     #[cfg(unix)]

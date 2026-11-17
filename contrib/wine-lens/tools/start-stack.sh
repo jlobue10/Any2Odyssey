@@ -10,6 +10,12 @@ DEBUG=${1:--all}
 # tracker pauses only when it learns that way that nobody listens any more.
 [ -f "$T/build/any2odyssey-udp.so" ] && export LD_PRELOAD="$T/build/any2odyssey-udp.so${LD_PRELOAD:+:$LD_PRELOAD}"
 
+# (wineserver where Ubuntu 26.04 keeps it, off the PATH: see setup.sh)
+if ! command -v wineserver >/dev/null; then
+    for d in /usr/lib/x86_64-linux-gnu/wine /usr/lib/wine /usr/lib64/wine; do
+        if [ -x "$d/wineserver" ]; then PATH=$PATH:$d; break; fi
+    done
+fi
 WINEDEBUG=-all wineserver -k 2>/dev/null
 sleep 3
 # Detached: a wine process keeps its terminal busy otherwise.

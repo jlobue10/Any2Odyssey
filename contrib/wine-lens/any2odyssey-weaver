@@ -59,6 +59,9 @@ PLACE=$(cat "$T/odyssey.place" 2>/dev/null)
 # it: bash warns at every start that it cannot set a locale that LC_ALL names and the system does not have,
 # and taken as part of the answer that turned "on" into a reason why tracking did not start.
 TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>/dev/null 8>&- 7>&-)
+# No answer at all (it could not be run, or ended without a word): why is on standard error, which is not
+# read any more, and "tracking: " with nothing after it left the reason out of what Any2Odyssey shows.
+[ -n "$TRACKING" ] || TRACKING="error: $T/tools/tracking.sh start gave no answer; run it to see why"
 [ "$TRACKING" = on ] || echo "tracking: ${TRACKING#error: }"
 
 FRAME=$(readlink -f "$1")
