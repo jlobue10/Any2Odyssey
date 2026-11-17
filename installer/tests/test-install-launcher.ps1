@@ -59,9 +59,60 @@ foreach($name in @('Install.cmd','Install-GUI.cmd')){
  $output='' | & (Join-Path $alone $name) 2>&1 | Out-String
  Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Extract the whole ZIP')) "$name run without the rest of the package says to extract the ZIP first"
 }
+# Windows PowerShell, which the launchers start, takes [ and ] in the path of a script for a pattern
+# before it looks for a file of that very name. Where the pattern fits one other folder (new[1]folder
+# beside new1folder) it ran the installer of that other folder, and nothing said so; where a [ is not
+# closed the pattern is not valid, and it ran nothing and spoke of wildcard characters. The launchers
+# ask first which files Windows PowerShell would run, and say what to do. Brackets that fit no other
+# folder do no harm and install as before. (The folders are made and filled through .NET: to the
+# cmdlets of this test their names are patterns as well.)
+if($root.Contains('[')){
+ # The pattern is the whole path: with a [ further up, new[1]folder no longer fits new1folder.
+ Write-Host 'SKIPPED: the checks of folder names with [ need a temporary folder without one in its path.'
+}else{
+ $decoy=Join-Path $root 'new1folder';$fitted=Join-Path $root 'new[1]folder';$open=Join-Path $root 'new[folder';$harmless=Join-Path $root 'only[2]folder'
+ foreach($folder in @($decoy,$fitted,$open,$harmless)){
+  [void][IO.Directory]::CreateDirectory($folder)
+  foreach($name in @('Install-GUI.cmd','Install-Launcher.ps1','install.ps1')){[IO.File]::Copy((Join-Path $root $name),(Join-Path $folder $name))}
+ }
+ foreach($folder in @($fitted,$open)){
+  $leaf=[IO.Path]::GetFileName($folder)
+  $output='' | & $env:ComSpec /d /c (Join-Path $folder 'Install-GUI.cmd') 2>&1 | Out-String
+  Assert ($LASTEXITCODE -eq 1 -and $output.Contains('to a folder without [ and ] in its path') -and -not $output.Contains('wildcard')) "Install-GUI.cmd in a folder named $leaf says to move the package"
+  Assert (-not [IO.File]::Exists((Join-Path $decoy 'marker.txt')) -and -not [IO.File]::Exists((Join-Path $folder 'marker.txt'))) "No installer ran from $leaf, nor the one of the folder beside it"
+ }
+ $output='' | & $env:ComSpec /d /c (Join-Path $harmless 'Install-GUI.cmd') 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $harmless 'marker.txt'))) 'Install-GUI.cmd installs from a folder whose brackets fit no other folder'
+ # Reached through the short names Windows keeps beside long ones (C:\Users\RUNNER~1\...) it is the
+ # same folder: Windows PowerShell answers with the long form, and the two are compared as such.
+ $short=(New-Object -ComObject Scripting.FileSystemObject).GetFolder($root).ShortPath
+ if($short -ne $root){
+  [IO.File]::Delete((Join-Path $harmless 'marker.txt'))
+  $output='' | & $env:ComSpec /d /c (Join-Path $short 'only[2]folder\Install-GUI.cmd') 2>&1 | Out-String
+  Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $harmless 'marker.txt'))) 'The same folder reached through its short (8.3) path installs too'
+ }else{Write-Host 'SKIPPED: this volume keeps no short names, so the short-path case was not run.'}
+ # The packaged program is found the same way when the installer starts it to ask a running instance
+ # to quit (Start-Process): beside a folder that holds no scripts, only a program under that name, the
+ # one started would be the other folder's.
+ $program=Join-Path $root 'exe[1]folder';$other=Join-Path $root 'exe1folder';$apart=Join-Path $root 'exe[3]folder'
+ foreach($folder in @($program,$other,$apart)){
+  [void][IO.Directory]::CreateDirectory((Join-Path $folder 'build'))
+  [IO.File]::WriteAllText((Join-Path $folder 'build\Any2Odyssey.exe'),'A stand-in; never started.')
+ }
+ foreach($folder in @($program,$apart)){foreach($name in @('Install-GUI.cmd','Install-Launcher.ps1','install.ps1')){[IO.File]::Copy((Join-Path $root $name),(Join-Path $folder $name))}}
+ $output='' | & $env:ComSpec /d /c (Join-Path $program 'Install-GUI.cmd') 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 1 -and $output.Contains('to a folder without [ and ] in its path') -and -not [IO.File]::Exists((Join-Path $program 'marker.txt'))) 'A folder whose name fits another folder''s program is refused as well'
+ $output='' | & $env:ComSpec /d /c (Join-Path $apart 'Install-GUI.cmd') 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $apart 'marker.txt'))) 'A package with its program installs from a folder whose brackets fit no other folder'
+ # Removed as they were made, by their literal names.
+ foreach($folder in @($decoy,$fitted,$open,$harmless,$program,$other,$apart)){[IO.Directory]::Delete($folder,$true)}
+}
+$guiCheck=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') | Where-Object {$_.Contains('ANY2ODYSSEY_PACKAGE') -or $_.Contains(':brackets')})
+$fullCheck=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install.cmd') | Where-Object {$_.Contains('ANY2ODYSSEY_PACKAGE') -or $_.Contains(':brackets')})
+Assert ($guiCheck.Count -ge 4 -and ($guiCheck -join '|') -ceq ($fullCheck -join '|')) 'Install.cmd makes the same check of its folder''s name'
 # Install.cmd would ask for elevation here, so its command line is compared with the one just exercised.
-$guiLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" *'})
-$fullLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" *'})
+$guiLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" * -File *'})
+$fullLine=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install.cmd') | Where-Object {$_ -like '"%ANY2ODYSSEY_POWERSHELL%" * -File *'})
 Assert ($guiLine.Count -eq 1 -and $fullLine.Count -eq 1 -and $guiLine[0].EndsWith(' -ControlsOnly %*') -and $fullLine[0] -eq $guiLine[0].Replace(' -ControlsOnly %*',' %*')) 'Install.cmd passes its arguments on the same way'
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $launcher -RunInstall -ResultFile $report -ExpectedUserSid 'S-1-0-0' 2>&1 | Out-String
 $result=[IO.File]::ReadAllText($report,[Text.Encoding]::UTF8) | ConvertFrom-Json

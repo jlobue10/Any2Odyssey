@@ -42,9 +42,10 @@ The application folder, shortcuts, settings and Installed-apps entry are per use
 
 ## Where the launchers cannot help
 
-`Install.cmd` and `Install-GUI.cmd` start Windows PowerShell with `-ExecutionPolicy Bypass`, which covers the usual case of scripts being disabled for the user or the machine. Three situations are outside their reach:
+`Install.cmd` and `Install-GUI.cmd` start Windows PowerShell with `-ExecutionPolicy Bypass`, which covers the usual case of scripts being disabled for the user or the machine. Four situations are outside their reach:
 
 - **Run from inside the ZIP.** Double-clicking `Install.cmd` in Explorer's ZIP preview extracts only that file. It detects that the rest of the package is missing and says to extract the whole ZIP first.
+- **A `[` in the folder's path that Windows PowerShell reads as a pattern.** Windows PowerShell takes `[` and `]` in the path of a script for a pattern before it looks for a file of that very name. Where the pattern fits exactly one other folder (`Any2Odyssey[1]` beside `Any2Odyssey1`) it would run the scripts found there, and where a `[` is not closed it runs nothing. The launchers ask it first which files it would run, and when those are not the package's own they say to move the package to a folder without `[` and `]`. Brackets that fit no other folder do no harm. `install.ps1` started by hand makes no such check, and neither does the setup program, which runs the package from the temporary folder.
 - **Execution policy set by Group Policy.** A `MachinePolicy` or `UserPolicy` execution policy (check with `Get-ExecutionPolicy -List`) overrides `-ExecutionPolicy Bypass`. If it is `Restricted` or `AllSigned`, PowerShell refuses the scripts ("running scripts is disabled on this system" or "is not digitally signed"); the package's scripts are not signed. Only the administrator of that policy can allow them.
 - **Constrained Language Mode** (AppLocker or App Control for Business policies). The scripts use .NET types and COM objects (the account check, the version resource, shortcuts), which that mode blocks; setup then stops with PowerShell's own error, such as "Cannot invoke method. Method invocation is supported only on core types in this language mode". Any2Odyssey cannot be installed with these scripts on such a PC.
 
