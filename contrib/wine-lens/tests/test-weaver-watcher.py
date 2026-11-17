@@ -137,6 +137,14 @@ class TrackingAnswerTests(unittest.TestCase):
         self.assertEqual(self.said(f'{warning}; echo "error: the webcam is not present"'),
                          ["tracking: the webcam is not present", "on"])
 
+    def test_no_answer_at_all_is_said_as_that(self):
+        # tracking.sh that cannot be run (its mode lost in a copy) or that a missing tool ends: what the
+        # shell says goes to standard error. Up to 0.9.3 that was the reason shown; 0.9.4, which stopped
+        # reading it, said "tracking: " and nothing, shown as "without eye tracking ()".
+        asked = f"tracking: {self.root}/tools/tracking.sh start gave no answer; run it to see why"
+        self.assertEqual(self.said("echo 'sh: 1: pgrep: not found' >&2; exit 127"), [asked, "on"])
+        self.assertEqual(self.said("exit 3"), [asked, "on"])
+
     def test_a_locale_the_system_does_not_have_does_not_turn_on_into_a_reason(self):
         # bash, which is sh on Arch and Fedora, warns about such a locale whenever it starts; dash says nothing.
         self.assertEqual(self.said("echo on", LC_ALL="xx_XX.UTF-8"), ["on"])

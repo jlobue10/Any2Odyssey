@@ -223,10 +223,37 @@ drop_the_old_setup() {
     done
 }
 
+# One run at a time puts files into a prefix or takes them out, the others wait their turn. The program and
+# the desktop entry are each moved into place whole, but the rest is copied file by file and the Wine setup
+# is removed and copied again: of two runs started together (0.9.4) one stopped at "File exists" in most
+# pairs, and over an installation that was there some pairs ended with setup.sh and others of the Wine
+# setup's files gone, or with a second copy of it inside the first, while a run said Done. A run racing
+# --uninstall left half an installation. The lock is on the prefix folder itself (no file of its own to
+# leave behind) and goes with this process however it ends. Without flock (util-linux), or in a folder
+# that has no locks, the run goes on unlocked, as before.
+lock_prefix() {
+    [ -z "$DRY" ] && have flock && [ -d "$PREFIX" ] || return 0
+    # (asked first: a redirection that fails on exec ends the whole script)
+    ( : <"$PREFIX" ) 2>/dev/null || return 0
+    exec 9<"$PREFIX"
+    held=0
+    flock -n 9 2>/dev/null || held=$?
+    [ "$held" = 1 ] || return 0
+    say "   another installation or removal is at work in $PREFIX; waiting for it to finish"
+    if have timeout; then
+        timeout 300 flock 9 2>/dev/null || warn "it has not finished in five minutes; going on beside it"
+    else
+        flock 9 2>/dev/null || true
+    fi
+}
+# Before anything is started that stays (the program, the Wine setup) or asks a question.
+unlock_prefix() { exec 9<&-; }
+
 # ---------------------------------------------------------------------------------------------------------
 if [ -n "$UNINSTALL" ]; then
     step "Removing Any2Odyssey from $PREFIX"
     if [ -z "$PACKAGED" ]; then
+        lock_prefix
         run rm -f "$BIN/any2odyssey" "$BIN/.any2odyssey.new" "$SHARE/applications/any2odyssey.desktop" \
             "$SHARE/icons/hicolor/256x256/apps/any2odyssey.png"
         # The desktop entry's staging folder, where a run that was killed left one (a link is only a name).
@@ -248,6 +275,7 @@ if [ -n "$UNINSTALL" ]; then
         if only_the_setup; then run rm -rf "$APPDIR/wine-lens"; else drop_the_old_setup; fi
         if [ -z "$DRY" ] && [ -d "$APPDIR" ]; then rmdir "$APPDIR" 2>/dev/null || true; fi
         [ -d "$PREFIX/share/doc/any2odyssey" ] && run rm -rf "$PREFIX/share/doc/any2odyssey"
+        unlock_prefix
         # The caches the installation refreshed still name the entry and the icon that are gone now.
         [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
         [ -d "$SHARE/icons/hicolor" ] && have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
@@ -306,6 +334,8 @@ if [ -z "$PACKAGED" ]; then
             exit 1
         done
     fi
+    [ -n "$DRY" ] || mkdir -p "$PREFIX" 2>/dev/null || true
+    lock_prefix
     # Written beside the program and moved into its place: when the copy stops half-way (a full disk, a
     # kill) the program of the installation that is there stays whole. Written over it, an update that
     # ran out of space left 14 of its 15 MB there, not executable, where a working program had been.
@@ -417,6 +447,7 @@ if [ -z "$PACKAGED" ]; then
         cp -R "$HERE/wine-lens" "$WINE_LENS"
         install -m755 "$HERE/install.sh" "$APPDIR/install.sh"
     fi
+    unlock_prefix
     have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
     have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
     case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; start the program from the application menu, or as $BIN/any2odyssey" ;; esac
