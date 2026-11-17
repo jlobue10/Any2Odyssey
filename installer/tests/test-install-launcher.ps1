@@ -80,8 +80,21 @@ if($root.Contains('[')){
  }
  $output='' | & $env:ComSpec /d /c (Join-Path $harmless 'Install-GUI.cmd') 2>&1 | Out-String
  Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $harmless 'marker.txt'))) 'Install-GUI.cmd installs from a folder whose brackets fit no other folder'
+ # The packaged program is found the same way when the installer starts it to ask a running instance
+ # to quit (Start-Process): beside a folder that holds no scripts, only a program under that name, the
+ # one started would be the other folder's.
+ $program=Join-Path $root 'exe[1]folder';$other=Join-Path $root 'exe1folder';$apart=Join-Path $root 'exe[3]folder'
+ foreach($folder in @($program,$other,$apart)){
+  [void][IO.Directory]::CreateDirectory((Join-Path $folder 'build'))
+  [IO.File]::WriteAllText((Join-Path $folder 'build\Any2Odyssey.exe'),'A stand-in; never started.')
+ }
+ foreach($folder in @($program,$apart)){foreach($name in @('Install-GUI.cmd','Install-Launcher.ps1','install.ps1')){[IO.File]::Copy((Join-Path $root $name),(Join-Path $folder $name))}}
+ $output='' | & $env:ComSpec /d /c (Join-Path $program 'Install-GUI.cmd') 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 1 -and $output.Contains('to a folder without [ and ] in its path') -and -not [IO.File]::Exists((Join-Path $program 'marker.txt'))) 'A folder whose name fits another folder''s program is refused as well'
+ $output='' | & $env:ComSpec /d /c (Join-Path $apart 'Install-GUI.cmd') 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $apart 'marker.txt'))) 'A package with its program installs from a folder whose brackets fit no other folder'
  # Removed as they were made, by their literal names.
- foreach($folder in @($decoy,$fitted,$open,$harmless)){[IO.Directory]::Delete($folder,$true)}
+ foreach($folder in @($decoy,$fitted,$open,$harmless,$program,$other,$apart)){[IO.Directory]::Delete($folder,$true)}
 }
 $guiCheck=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') | Where-Object {$_.Contains('ANY2ODYSSEY_PACKAGE') -or $_.Contains(':brackets')})
 $fullCheck=@(Get-Content -LiteralPath (Join-Path $installerDir 'Install.cmd') | Where-Object {$_.Contains('ANY2ODYSSEY_PACKAGE') -or $_.Contains(':brackets')})
