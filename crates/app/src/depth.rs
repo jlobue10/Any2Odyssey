@@ -405,8 +405,10 @@ fn runtime() -> Result<&'static Environment, String> {
             preload_cudnn();
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
-                    "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.22 or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
-                    library.display()
+                    "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.{} or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora and openSUSE: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
+                    library.display(),
+                    // (the binding's own number: the oldest runtime it was built to accept)
+                    ort::MINOR_VERSION
                 )
             })?;
             // An NVIDIA GPU when the installed runtime has the CUDA provider
@@ -546,6 +548,16 @@ impl Estimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_binding_accepts_the_runtimes_distributions_package() {
+        // Built for the runtime interface of 1.22 the program refused the
+        // ONNX Runtime 1.21 of Debian 13 and Ubuntu 25.10, and the binding
+        // then also set an automatic choice of provider on every session,
+        // over which Microsoft's own 1.22.0 ends the whole program. 17 is the
+        // oldest interface the binding has (the `api-17` feature).
+        assert_eq!(ort::MINOR_VERSION, 17);
+    }
 
     #[test]
     fn stopped_requests_skip_model_loading_and_inference() {
