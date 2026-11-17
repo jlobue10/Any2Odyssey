@@ -285,6 +285,14 @@ pub fn hide_window(hwnd: isize) {
     }
 }
 
+/// Whether the window is minimized at this moment, or `None` without a
+/// native handle. A window hidden by [`hide_window`] is minimized, and one
+/// that anything has put back on the screen is not: this is what the frame
+/// compares its own record of "hidden in the tray" with.
+pub fn is_minimized(hwnd: isize) -> Option<bool> {
+    (hwnd != 0).then(|| unsafe { IsIconic(HWND(hwnd as *mut _)) }.as_bool())
+}
+
 pub fn open_path(path: &Path) {
     let path = path.to_owned();
     // Whether it is a folder is asked on the launch thread too: the caller
@@ -411,6 +419,63 @@ mod tests {
         assert!(shell_target(&dir, dir.is_dir())
             .to_string_lossy()
             .ends_with(['\\', '/']));
+    }
+
+    #[test]
+    fn a_window_hidden_for_the_tray_is_minimized_until_something_restores_it() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, IsWindowVisible, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
+            WS_POPUP,
+        };
+        let tool = |window: HWND| win::ex_style(window) & WS_EX_TOOLWINDOW_BIT != 0;
+        assert_eq!(is_minimized(0), None, "no handle, nothing to ask");
+        // A small window of a system class, on this thread.
+        let window = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("Any2Odyssey tray test"),
+                WS_POPUP,
+                0,
+                0,
+                16,
+                16,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let hwnd = window.0 as isize;
+        let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
+        assert_eq!(is_minimized(hwnd), Some(false));
+
+        // Hidden for the tray: minimized, without a taskbar button, and
+        // still a visible window for Win32 (which is what keeps its frames
+        // coming). The frame relies on "minimized" to know it is still so.
+        hide_window(hwnd);
+        assert_eq!(is_minimized(hwnd), Some(true));
+        assert!(tool(window));
+        assert!(unsafe { IsWindowVisible(window) }.as_bool());
+
+        // Restored by something that knows nothing of this program: on the
+        // screen again, which the frame can now see, and still buttonless.
+        let _ = unsafe { ShowWindow(window, SW_RESTORE) };
+        assert_eq!(is_minimized(hwnd), Some(false));
+        assert!(tool(window));
+
+        // Shown the program's way from there, and from the tray.
+        show_window(hwnd);
+        assert_eq!(is_minimized(hwnd), Some(false));
+        assert!(!tool(window));
+        hide_window(hwnd);
+        assert_eq!(is_minimized(hwnd), Some(true));
+        show_window(hwnd);
+        assert_eq!(is_minimized(hwnd), Some(false));
+        assert!(!tool(window) && unsafe { IsWindowVisible(window) }.as_bool());
+        unsafe { DestroyWindow(window) }.unwrap();
     }
 
     #[test]
