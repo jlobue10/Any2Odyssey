@@ -39,7 +39,7 @@ jobs:
         with:
           # No step pushes or fetches again; do not leave the token in .git/config for build scripts.
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -235,7 +235,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -374,7 +374,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -400,3 +400,17 @@ jobs:
             echo "::error::cargo-deny refused the dependency tree (its report is above). If that is a new RustSec advisory and not this change: update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml."
             exit 1
           }
+      # The actions these workflows use are dependencies too, each named by a commit. GitHub serves a
+      # commit under a repository's name without its being in that repository's history: one a rebuilt
+      # branch left behind, and equally one pushed only to a fork. The commit of dtolnay/rust-toolchain
+      # that 0.9.4 was built with became the first kind fourteen hours after the release: that action's
+      # `stable` branch is rebuilt whenever its `master` changes, which is why the action is now named by
+      # a commit of master, with the toolchain given as its input. Asked of GitHub at every run, like the
+      # advisories: this too can turn red without a change here. First the check itself, against a
+      # stand-in for GitHub that also gives the answers it has to refuse.
+      - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
+        run: python3 scripts/tests/test-check-action-pins.py
+      - name: Every action's commit is under a tag or on a branch of its repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/check-action-pins.sh

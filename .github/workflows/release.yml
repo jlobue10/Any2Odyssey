@@ -48,7 +48,7 @@ jobs:
             echo "::error::Could not find out whether release $TAG already exists."
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -187,7 +187,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -404,7 +404,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # commit of 2026-10-16 on the stable branch
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # commit of 2026-10-16 on the master branch
         with:
           # Must match rust-toolchain.toml: that file decides what cargo runs, this decides what the action installs.
           toolchain: 1.99.1
@@ -425,6 +425,18 @@ jobs:
         run: |
           cargo deny --locked check advisories bans sources || {
             echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml, and release from that commit."
+            exit 1
+          }
+      # As in ci.yml: each action is named by a commit, and that commit has to be one its repository still
+      # holds under a tag or on a branch, not one a rebuilt branch left behind or one pushed only to a fork.
+      - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
+        run: python3 scripts/tests/test-check-action-pins.py
+      - name: Every action's commit is under a tag or on a branch of its repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/check-action-pins.sh || {
+            echo "::error::An action of these workflows is named by a commit its repository no longer holds under a tag or on a branch (see above). Nothing was published. Name a commit that it does hold, in ci.yml and release.yml, and release from that commit."
             exit 1
           }
 
