@@ -320,6 +320,19 @@ impl App {
         platform::hide_window(hwnd);
     }
 
+    /// Whether the window is minimized at this moment.
+    ///
+    /// The frame's own record (`viewport().minimized`) is taken when the
+    /// frame starts, and a show request handled in the same frame restores
+    /// the window after that: a frame that started while the controls were
+    /// still in the tray then read "minimized" for a window it had just put
+    /// back, and hid it again. The window itself is asked where it can be.
+    fn minimized_now(&self, ctx: &egui::Context) -> bool {
+        let hwnd = self.core.lock().expect("core").controls_hwnd;
+        platform::is_minimized(hwnd)
+            .unwrap_or_else(|| ctx.input(|i| i.viewport().minimized.unwrap_or(false)))
+    }
+
     fn show_controls(&mut self, ctx: &egui::Context) {
         self.hidden = false;
         self.page = home();
@@ -646,6 +659,38 @@ fn minimize_label(tray_available: bool) -> &'static str {
     }
 }
 
+/// What a frame does about the tray.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrayStep {
+    Stay,
+    /// The window was minimized and belongs in the tray: hide it there.
+    Hide,
+    /// The controls are taken to be in the tray and the window is on the
+    /// screen: show them, as a request to show them would.
+    Show,
+}
+
+/// Compare the frame's record of the controls being hidden in the tray
+/// (`hidden`) with the window as it is now (`minimized`; a window hidden in
+/// the tray is a minimized one, see `platform::hide_window`).
+///
+/// The record alone was trusted, and only this program's own ways of
+/// showing the controls cleared it. A window that anything else restored
+/// (seen with `ShowWindow(SW_RESTORE)` and with `SC_RESTORE` from another
+/// process, which is what a window manager or a task switcher does) stood
+/// on the screen above everything else with no taskbar button, and its
+/// frames went on returning before anything was drawn or a click was
+/// looked at, the Close button's included, until the tray icon,
+/// Ctrl+Alt+F9 or `--show` was used. The same happened without any other
+/// program when a show request came within a few milliseconds of the hide.
+fn tray_step(hidden: bool, minimized: bool, hides_to_tray: bool) -> TrayStep {
+    match (hidden, minimized) {
+        (true, false) => TrayStep::Show,
+        (false, true) if hides_to_tray => TrayStep::Hide,
+        _ => TrayStep::Stay,
+    }
+}
+
 pub const SHORTCUTS_NOTICE: &str = "Global shortcuts Ctrl+Alt+F8/F9/F10 are unavailable; another app may hold them. The buttons, menus and tray still work.";
 pub const TRAY_NOTICE: &str = "The notification icon could not be created; Minimize and Close act normally. See companion.log.";
 
@@ -711,11 +756,13 @@ impl eframe::App for App {
                 }
             }
         }
-        if ctx.input(|i| i.viewport().minimized.unwrap_or(false))
-            && !self.hidden
-            && self.hides_to_tray()
-        {
-            self.hide_to_tray(ctx);
+        // After the requests: a show request handled above has just restored
+        // the window, and what is asked here is its state now.
+        let minimized = self.minimized_now(ctx);
+        match tray_step(self.hidden, minimized, self.hides_to_tray()) {
+            TrayStep::Hide => self.hide_to_tray(ctx),
+            TrayStep::Show => self.show_controls(ctx),
+            TrayStep::Stay => {}
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
             self.help.select("start");
@@ -732,7 +779,7 @@ impl eframe::App for App {
         self.viewer.show_output(ctx);
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
-        if self.hidden || ctx.input(|i| i.viewport().minimized.unwrap_or(false)) {
+        if self.hidden || minimized {
             if self.core.lock().expect("core").ready_to_exit() {
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
@@ -879,6 +926,64 @@ mod tests {
             core.lock().unwrap().exiting,
             "Close must quit without a tray"
         );
+    }
+
+    #[test]
+    fn the_record_of_being_in_the_tray_follows_the_window() {
+        for hides_to_tray in [false, true] {
+            // In the tray and minimized, or on the screen and not hidden.
+            assert_eq!(tray_step(true, true, hides_to_tray), TrayStep::Stay);
+            assert_eq!(tray_step(false, false, hides_to_tray), TrayStep::Stay);
+            // Recorded as hidden, yet on the screen: something other than
+            // a show request restored it (seen with ShowWindow(SW_RESTORE)
+            // from another process), or a show request and the hide before
+            // it crossed. Shown, whatever the preference says by now: the
+            // frame used to return early for good and the window, still
+            // topmost, answered nothing.
+            assert_eq!(tray_step(true, false, hides_to_tray), TrayStep::Show);
+        }
+        // Minimized by the user: into the tray where that is wanted and an
+        // icon exists to bring it back, otherwise an ordinary minimize.
+        assert_eq!(tray_step(false, true, true), TrayStep::Hide);
+        assert_eq!(tray_step(false, true, false), TrayStep::Stay);
+    }
+
+    #[test]
+    fn without_a_native_handle_the_frames_record_says_whether_it_is_minimized() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Arc::new(Mutex::new(Core::new_preview(Logger::new(
+            dir.path().join("test.log"),
+        ))));
+        let app = App {
+            controls: ControlsState::from_core(&core.lock().unwrap()),
+            core: core.clone(),
+            page: Page::Controls,
+            viewer: ViewerState::default(),
+            help: HelpState::default(),
+            about: AboutState::new(),
+            palette: Palette::for_dark(false),
+            wordmark: None,
+            #[cfg(windows)]
+            tray: None,
+            tray_failed: true,
+            _hotkeys: None,
+            hidden: false,
+            preview: false,
+            frames: 0,
+            screenshot_taken: false,
+        };
+        assert_eq!(core.lock().unwrap().controls_hwnd, 0);
+        assert_eq!(platform::is_minimized(0), None);
+        let ctx = egui::Context::default();
+        for minimized in [true, false] {
+            let mut input = egui::RawInput::default();
+            input
+                .viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .minimized = Some(minimized);
+            let _ = ctx.run(input, |ctx| assert_eq!(app.minimized_now(ctx), minimized));
+        }
     }
 
     #[test]
