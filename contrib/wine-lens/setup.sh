@@ -49,12 +49,12 @@ else
 fi
 
 for tool in wine wineserver $CC x86_64-w64-mingw32-objdump python3 xrandr rsync stty flock setsid; do
-    command -v "$tool" >/dev/null || die "'$tool' is needed (Arch: wine mingw-w64-gcc python xorg-xrandr rsync)"
+    command -v "$tool" >/dev/null || die "'$tool' is needed (Arch: wine mingw-w64-gcc python xorg-xrandr rsync; Debian and Ubuntu: wine gcc-mingw-w64-x86-64 python3 x11-xserver-utils rsync; Fedora: wine mingw64-gcc python3 xrandr rsync; openSUSE: wine mingw64-cross-gcc python3 xrandr rsync)"
 done
 # The tools tell whether Leia's service runs by looking among this user's own processes. BusyBox's pgrep
 # cannot (it has no -u) and fails instead: every start of the lens helper would restart the service.
 pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
-    die "a pgrep that takes -u is needed: the one of procps (procps-ng), not BusyBox's"
+    die "a pgrep that takes -u is needed: the one of procps (the package procps or procps-ng), not BusyBox's"
 [ -e "$BOARD" ] || die "$BOARD is missing. Install the udev rule and wake the monitor:
     sudo cp '$HERE/70-any2odyssey-lens.rules' /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger"
 
@@ -141,7 +141,7 @@ fi
 WEAVER=
 rm -f "$B/any2odyssey-weaver.exe"
 if ! command -v clang++ >/dev/null; then
-    echo "setup: no clang++; the output through Leia's weaver is not prepared (Arch: clang)"
+    echo "setup: no clang++; the output through Leia's weaver is not prepared (the package is clang)"
 elif clang++ --target=x86_64-pc-windows-msvc -O2 -ffreestanding -fno-exceptions -fno-rtti -nostdinc \
         -c -o "$B/srweaver.obj" "$S/srweaver.cpp" &&
      $CC -O2 -o "$B/any2odyssey-weaver.exe" "$S/weaver-host.c" "$B/srweaver.obj" -lopengl32 -lgdi32 -luser32; then

@@ -1103,7 +1103,7 @@ class InstallerTests(unittest.TestCase):
         tools.mkdir()
         for folder in reversed(os.get_exec_path(self.env)):  # an earlier folder's program wins
             for tool in (Path(folder).iterdir() if Path(folder).is_dir() else []):
-                if tool.name not in ("pacman", "apt-get", "dnf"):
+                if tool.name not in ("pacman", "apt-get", "dnf", "zypper"):
                     (tools / tool.name).unlink(missing_ok=True)
                     (tools / tool.name).symlink_to(tool)
         (tools / name).write_text(f"#!/bin/sh\n{body}\n")
@@ -1191,6 +1191,102 @@ done
         self.assertIn("libpipewire", missing)
         self.assertNotIn("libxkbcommon", missing)
         self.assertNotIn("libglvnd", missing)
+
+    def test_the_packages_of_opensuse_are_known(self):
+        # On openSUSE Tumbleweed the installer knew no package manager: it listed file names ("also
+        # missing, under a name this script does not know"), installed nothing, and the program did not
+        # start. The names are the ones zypper has there.
+        self.only_package_manager("zypper", "exit 0")
+        missing, output = self.missing_packages()
+        for package in ["libpipewire-0_3-0", "libxkbcommon0", "libxkbcommon-x11-0", "libglvnd", "onnxruntime-devel"]:
+            self.assertIn(package, missing)
+        self.assertNotIn("this script does not know", output)
+
+    def test_where_no_package_manager_is_known_the_missing_files_come_with_what_to_do(self):
+        # Without one, the list began with "also" although nothing came before it, said nothing about
+        # what to do with file names, and not that the program cannot start without two of them.
+        self.only_package_manager("a2o-not-a-package-manager", "exit 0")
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("   missing, under a name this script does not know for your distribution: libpipewire-0.3.so.0",
+                      result.stdout)
+        self.assertNotIn("also missing", result.stdout)
+        self.assertIn("install the packages that have them with your package manager", result.stdout)
+        self.assertIn("the program does not start", result.stdout)
+        # Nor does the last line say Done over a program that cannot start.
+        self.assertNotIn("Done.", result.stdout)
+        self.assertIn("Installed, but the program cannot start until this system has: libpipewire-0.3.so.0 "
+                      "libxkbcommon.so.0", result.stdout)
+        for library in ["usr/lib64/libpipewire-0.3.so.0", "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0.0.0"]:
+            (self.system / library).parent.mkdir(parents=True, exist_ok=True)
+            (self.system / library).touch()
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey")
+        self.assertIn("\nDone. Start Any2Odyssey", result.stdout)
+        self.assertNotIn("cannot start", result.stdout)
+
+    def test_pgrep_is_asked_for_with_the_wine_side(self):
+        # setup.sh stops without pgrep, and Fedora's and other minimal installations have none: the
+        # installer installed Wine and the compilers there, and the set-up then ended at its tool check.
+        (self.system / "dev/odyssey-lens").touch()
+        self.only_package_manager("dnf", "exit 0")
+        (self.root / "tools/pgrep").unlink(missing_ok=True)
+        if subprocess.run([*SHELL, "-c", "command -v pgrep"], env=self.env, capture_output=True).returncode == 0:
+            self.skipTest("this shell has a pgrep of its own (BusyBox's), which is there without the package")
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-model")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn("procps-ng", lines[0].split())
+
+    def a_program_as_released(self):
+        """The archive's program as an ELF file, as the released one is (the installer reads its first bytes)."""
+        (self.archive / "any2odyssey").write_bytes(b"\x7fELF\x02\x01\x01" + bytes(57))
+        (self.archive / "any2odyssey").chmod(0o755)
+
+    def c_library(self, version):
+        """Make getconf answer `version` when asked for the C library, as glibc's does ("glibc 2.41")."""
+        tools = self.root / "libc-tools"
+        tools.mkdir(exist_ok=True)
+        (tools / "getconf").write_text(f'#!/bin/sh\n[ "$1" = GNU_LIBC_VERSION ] && [ -n "{version}" ] && echo "{version}"\n')
+        (tools / "getconf").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{os.environ['PATH']}"
+
+    def test_a_system_without_glibc_is_refused_before_anything_is_installed(self):
+        # On Alpine (musl) everything was installed, the depth model's step said "any2odyssey: not found",
+        # and the last line was "Done. Start Any2Odyssey from the application menu".
+        self.a_program_as_released()
+        self.c_library("")
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("GNU C library", result.stderr)
+        self.assertIn("musl", result.stderr)
+        self.assertFalse(prefix.exists())
+        # The same system with glibc's loader: installed.
+        (self.system / "lib64").mkdir()
+        (self.system / "lib64/ld-linux-x86-64.so.2").touch()
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((prefix / "bin/any2odyssey").is_file())
+
+    def test_a_c_library_older_than_the_program_needs_is_refused(self):
+        # On AlmaLinux 9 (glibc 2.34) the program does not start ("libm.so.6: version `GLIBC_2.35' not
+        # found"); the installer installed it all the same and ended with Done.
+        self.a_program_as_released()
+        (self.system / "lib64").mkdir()
+        (self.system / "lib64/ld-linux-x86-64.so.2").touch()
+        for number, (version, accepted) in enumerate([("glibc 2.34", False), ("glibc 2.9", False), ("glibc 2.35", True),
+                                                      ("glibc 2.41", True), ("glibc 2.41.9000", True),
+                                                      ("", True), ("not a version", True)]):
+            with self.subTest(version=version):
+                self.c_library(version)
+                prefix = self.root / f"prefix-{number}"
+                result = self.install(prefix)
+                self.assertEqual(result.returncode, 0 if accepted else 1, result.stdout + result.stderr)
+                self.assertEqual(prefix.exists(), accepted)
+                if not accepted:
+                    self.assertIn(f"its C library is {version}", result.stderr)
+                    self.assertIn("glibc 2.35 or newer", result.stderr)
 
 
 if __name__ == "__main__":
