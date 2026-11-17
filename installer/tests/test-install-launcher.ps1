@@ -38,6 +38,9 @@ Copy-Item -LiteralPath (Join-Path $installerDir 'Install-GUI.cmd') -Destination 
 $output='' | & (Join-Path $root 'Install-GUI.cmd') -AllowDowngrade 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $marker) -and (Get-Content -LiteralPath $marker -Raw).Contains('AllowDowngrade=True')) 'Install-GUI.cmd passes -AllowDowngrade on to the installer'
 Remove-Item -LiteralPath $marker
+# -CheckOnly is passed on the same way: the launcher runs the installer's checks and stops.
+$output='' | & (Join-Path $root 'Install-GUI.cmd') -CheckOnly 2>&1 | Out-String
+Assert ($LASTEXITCODE -eq 0 -and -not (Test-Path -LiteralPath $marker)) 'Install-GUI.cmd -CheckOnly runs the checks and installs nothing'
 # An exclamation mark in the folder name, in a console with delayed expansion switched on (cmd /V:ON,
 # or the DelayedExpansion registry value): cmd then drops every ! from %~dp0, and the launcher looked
 # for the package in a folder that does not exist.
@@ -111,7 +114,43 @@ try{
  Remove-Item -LiteralPath $setupReport
  $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -AllowDowngrade -ReportFile $setupReport 2>&1 | Out-String
  Assert ($LASTEXITCODE -eq 0 -and ([IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8))[0] -ceq 'OK') 'The setup program''s second run, with -AllowDowngrade, reports OK'
+ # -CheckOnly: the read-only checks alone, which the setup program runs first to show the installer's
+ # notices before the elevation prompt. The stand-in leaves a marker when it is asked to install.
+ $checkMarker=Join-Path $root 'installed-by-check.txt'
+ Set-Content -LiteralPath $installer -Encoding UTF8 -Value ($fake+"`r`n[IO.File]::WriteAllText((Join-Path `$PSScriptRoot 'installed-by-check.txt'),'installed')")
+ Remove-Item -LiteralPath $setupReport
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -CheckOnly -ReportFile $setupReport 2>&1 | Out-String
+ $lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+ Assert ($LASTEXITCODE -eq 0 -and $lines[0] -ceq 'CHECKED' -and $lines[1] -ceq 'The checks passed. No changes were made.' -and -not (Test-Path -LiteralPath $checkMarker)) 'With -CheckOnly the launcher runs the checks, reports CHECKED (never OK) and installs nothing'
+ Assert (@($lines | Where-Object {$_ -like 'Note: Windows reports no Desktop folder*'}).Count -eq 1 -and $lines -ccontains 'Install preflight passed for controls only. No changes made.' -and $output.Contains('Install preflight passed for controls only.')) 'The report of the checks carries their notices, and the console shows them'
+ $env:ANY2ODYSSEY_TEST_FAILURE="Samsung engine changed."
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -CheckOnly -ReportFile $setupReport 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 1 -and ([IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8))[0] -ceq 'FAILED') 'A refusal of the checks is reported by -CheckOnly as by an installation'
+ $env:ANY2ODYSSEY_TEST_FAILURE=$null
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile $setupReport 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $checkMarker)) 'Without -CheckOnly the same stand-in is asked to install'
+ Remove-Item -LiteralPath $checkMarker
+ # PowerShell ended in the middle (closed from Task Manager, a sign-out, security software). After the
+ # checks have passed the setup program must not be left without a report: it would then say that
+ # nothing was installed, of an installation that may be half done.
+ $ending=@'
+param([switch]$ControlsOnly,[switch]$CheckOnly,[switch]$AllowDowngrade)
+Write-Host 'Install Any2Odyssey 0.0.1'
+if($CheckOnly -eq ($env:ANY2ODYSSEY_TEST_END -eq 'checks')){[Environment]::Exit(9)}
+Write-Host 'Install preflight passed for controls only. No changes made.'
+'@
+ Set-Content -LiteralPath $installer -Encoding UTF8 -Value $ending
+ Remove-Item -LiteralPath $setupReport
+ $env:ANY2ODYSSEY_TEST_END='installation'
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile $setupReport 2>&1 | Out-String
+ $lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+ Assert ($LASTEXITCODE -eq 9 -and $lines[0] -ceq 'INTERRUPTED' -and $lines[1].Contains('may be incomplete') -and $lines[1].Contains('Run Setup again') -and $lines -ccontains 'Install preflight passed for controls only. No changes made.') 'PowerShell ended during the installation leaves a report that says it may be incomplete'
+ Remove-Item -LiteralPath $setupReport
+ $env:ANY2ODYSSEY_TEST_END='checks'
+ $output=& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launcher -ControlsOnly -ReportFile $setupReport 2>&1 | Out-String
+ Assert ($LASTEXITCODE -eq 9 -and -not (Test-Path -LiteralPath $setupReport)) 'PowerShell ended during the read-only checks leaves no report: nothing was changed yet'
 }finally{
+ $env:ANY2ODYSSEY_TEST_END=$null
  $env:ANY2ODYSSEY_TEST_FAILURE=$null
  [IO.File]::WriteAllText($installer,$markerInstaller,(New-Object Text.UTF8Encoding $true))
  if(Test-Path -LiteralPath $setupReport){Remove-Item -LiteralPath $setupReport}
@@ -199,6 +238,17 @@ exit $LASTEXITCODE
 $otherWrapper=Join-Path $root 'simulate-launch-failure.ps1';Set-Content -LiteralPath $otherWrapper -Value $otherFailure -Encoding UTF8
 $output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $otherWrapper 2>&1 | Out-String
 Assert ($LASTEXITCODE -eq 1 -and $output.Contains('Installation did not complete: This command cannot be run due to the error: simulated launch failure.') -and -not $output.Contains('Elevation was declined')) 'A launch failure other than a declined prompt is not reported as declined'
+# -CheckOnly must stop before the elevation of a full installation: this copy of the launcher always
+# takes that branch, and the stub fails the run if anything is started.
+$checkOnlyStub=@'
+function Start-Process {throw 'The checks alone must not start an elevated process.'}
+& (Join-Path $PSScriptRoot 'Install-Launcher.ps1') -CheckOnly -ReportFile (Join-Path $PSScriptRoot 'setup-report.txt')
+exit $LASTEXITCODE
+'@
+$checkOnlyWrapper=Join-Path $root 'simulate-check-only.ps1';Set-Content -LiteralPath $checkOnlyWrapper -Value $checkOnlyStub -Encoding UTF8
+$output=& $powershell -NoProfile -ExecutionPolicy Bypass -File $checkOnlyWrapper 2>&1 | Out-String
+$lines=[IO.File]::ReadAllLines($setupReport,[Text.Encoding]::UTF8)
+Assert ($LASTEXITCODE -eq 0 -and $lines[0] -ceq 'CHECKED' -and -not $output.Contains('must not start') -and -not (Test-Path -LiteralPath (Join-Path $root 'marker.txt'))) 'With -CheckOnly a full installation stops after its checks, before the elevation prompt'
 $passed=$true
 }finally{if($passed){Remove-Item -LiteralPath $root -Recurse -Force}else{Write-Host "Fixtures retained for inspection: $root"}}
 
