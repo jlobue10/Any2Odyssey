@@ -97,6 +97,12 @@ jobs:
       - name: Build the setup program from the packaged ZIP
         shell: pwsh
         run: ./scripts/build-setup.ps1
+      # The setup program's own decisions (exit codes, the installer's reason in the log, /ALLOWDOWNGRADE,
+      # PowerShell ended half-way, a notice shown once), compiled around a stand-in installer that
+      # writes only to a temporary folder: nothing is installed by this step.
+      - name: Setup wizard logic with a stand-in installer
+        shell: pwsh
+        run: ./installer/tests/wizard/test-setup-wizard.ps1 -RequireIscc
       - name: Stage the built executable for the installer tests
         shell: pwsh
         run: |
