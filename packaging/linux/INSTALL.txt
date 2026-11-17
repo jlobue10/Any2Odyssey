@@ -19,9 +19,10 @@ Windows drive that has the Odyssey 3D Hub). Steps that need root say so and use 
 yourself, not with sudo: started as root it refuses to install into a folder that is not root's alone.
 `./install.sh --help` lists the options (--yes, --dry-run, --windows-root DIR, --uninstall and others). It
 knows the package names of the Arch, Debian/Ubuntu, Fedora and openSUSE families; it has been run on CachyOS
-and, without an Odyssey 3D, on Debian 12 and 13, Ubuntu 22.04 to 26.10, Fedora 45, openSUSE Tumbleweed and
-AlmaLinux 10. A package that your release does not have is named and left out. Where there is no sudo, the
-installer names the commands to run as root instead; as root it runs them itself.
+and, without an Odyssey 3D, on Debian 12 and 13, Ubuntu 22.04, 26.04 and 26.10, Fedora 45, openSUSE
+Tumbleweed and AlmaLinux 10 (docs/PLATFORMS.md says what was run on each). A package that your release
+does not have is named and left out. Where there is no sudo, the installer names the commands to run as
+root instead; as root it runs them itself.
 
 To remove it again, run the copy of the installer that the installation keeps; the installer prints the
 command when it finishes (`~/.local/share/any2odyssey/install.sh --uninstall`, or the same under the folder
@@ -58,7 +59,8 @@ What the installer sets up, if you would rather do it by hand
   one: Debian 12, Ubuntu 22.04 and 24.04, and RHEL 10 and its relatives have no ONNX Runtime package.
   There this mode needs a libonnxruntime.so from elsewhere, named in the environment variable
   ORT_DYLIB_PATH (the Linux x64 archive of a release of github.com/microsoft/onnxruntime has one in its
-  lib folder); everything else works without it.
+  lib folder); everything else works without it. Debian's and Ubuntu's library writes several hundred
+  lines beginning with "Schema error" to the terminal when it is loaded; they do no harm.
   The model in your data folder is checked against a fixed SHA-256, at the download and again before the
   program loads it; to use another model, give its path in the environment variable
   ANY2ODYSSEY_DEPTH_MODEL.
