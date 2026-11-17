@@ -289,6 +289,12 @@ jobs:
           mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
           check/any2odyssey --help
           test "$(sha256sum < check/any2odyssey)" = "$(sha256sum < ../target/release/Any2Odyssey)"
+          # The oldest glibc this program starts on is the one install.sh refuses below and INSTALL.txt
+          # names (GLIBC_MIN). Only here, not in ci.yml: that builds on ubuntu-latest, whose program needs
+          # a newer one. Weak references (w) do not count: the loader only mentions them.
+          needs=$(objdump -T check/any2odyssey | awk '$2 != "w"' | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)
+          says=GLIBC_$(sed -n 's/^GLIBC_MIN=//p' check/install.sh)
+          test "$needs" = "$says" || { echo "the program needs $needs, install.sh says $says"; exit 1; }
           # What ci.yml checks of the archive and its installer.
           sh -n check/wine-lens/setup.sh
           test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh

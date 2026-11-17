@@ -9,7 +9,7 @@
 # What it does, in order (every step that needs root says so and uses sudo for that step only):
 #   1. copies the program, its desktop entry, icon, documents and the Wine setup to ~/.local;
 #   2. installs the packages the program needs, and the ones for the features you choose
-#      (Arch, Debian/Ubuntu and Fedora families; elsewhere it lists them);
+#      (Arch, Debian/Ubuntu, Fedora and openSUSE families; elsewhere it lists what is missing);
 #   3. installs the udev rules for the Odyssey 3D (lens board for the user at the seat, USB power saving off
 #      for the monitor's webcam);
 #   4. downloads the open depth model for 2D -> 3D (about 95 MB);
@@ -46,6 +46,14 @@ YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
 TEST_ROOT=${A2O_INSTALL_TEST_ROOT:-}
 RULES_NAME=70-any2odyssey-lens.rules
 RULES_DIR=/etc/udev/rules.d
+# The program in the archive is built for the GNU C library on x86_64: the kernel starts it through this
+# loader, and it needs at least this version of the library (the workflows compare the number with the
+# program they have built).
+LOADER=/lib64/ld-linux-x86-64.so.2
+GLIBC_MIN=2.35
+# The steps that need root go through sudo; a root shell runs them itself (not every system has sudo).
+SUDO=sudo
+[ "$(id -u)" != 0 ] || SUDO=
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -145,6 +153,9 @@ ask() {
     case $answer in '' | y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
 }
 have() { command -v "$1" >/dev/null 2>&1; }
+# Not root and no sudo to become it (Debian installed with a root password has none): the steps that need
+# root are named for the user to run as root instead of being tried.
+no_sudo() { [ -n "$SUDO" ] && ! have sudo; }
 # A word as it can be pasted into a shell.
 quoted() {
     case $1 in
@@ -282,9 +293,14 @@ if [ -n "$UNINSTALL" ]; then
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
-    if [ -z "$TEST_ROOT" ] && [ -f "$RULES_DIR/$RULES_NAME" ] && ask "Remove the udev rules ($RULES_DIR/$RULES_NAME, needs sudo)?"; then
-        run sudo rm -f "$RULES_DIR/$RULES_NAME"
-        run sudo udevadm control --reload
+    if [ -z "$TEST_ROOT" ] && [ -f "$RULES_DIR/$RULES_NAME" ]; then
+        if no_sudo; then
+            say "   the udev rules stay (this system has no sudo); as root: rm -f $RULES_DIR/$RULES_NAME && udevadm control --reload"
+        elif ask "Remove the udev rules ($RULES_DIR/$RULES_NAME${SUDO:+, needs sudo})?"; then
+            # (a refusal by sudo must not end the removal half-way: the Wine side and the last lines follow)
+            { run $SUDO rm -f "$RULES_DIR/$RULES_NAME" && run $SUDO udevadm control --reload; } ||
+                warn "the udev rules could not be removed or reloaded (see the message above)"
+        fi
     fi
     if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?"; then
         if [ -x "$DATA/wine-lens/tools/tracking.sh" ]; then run "$DATA/wine-lens/tools/tracking.sh" stop >/dev/null 2>&1 || true; fi
@@ -302,6 +318,12 @@ if [ -n "$UNINSTALL" ]; then
         done
         # Through env: an assignment in front of a shell function does not reach the command in every shell,
         # and without it wineserver -k ends the programs of the user's default prefix instead.
+        # (wineserver where Ubuntu 26.04 keeps it, off the PATH: see setup.sh)
+        if ! have wineserver; then
+            for d in /usr/lib/x86_64-linux-gnu/wine /usr/lib/wine /usr/lib64/wine; do
+                if [ -x "$d/wineserver" ]; then PATH=$PATH:$d; break; fi
+            done
+        fi
         run env WINEPREFIX="$DATA/wine-lens/prefix" WINEDEBUG=-all wineserver -k 2>/dev/null || true
         run rm -f "$DATA/any2odyssey-lens-helper" "$DATA/any2odyssey-weaver"
         run rm -rf "$DATA/wine-lens"
@@ -320,6 +342,22 @@ if [ -z "$PACKAGED" ]; then
     for f in any2odyssey any2odyssey.desktop any2odyssey.png wine-lens/setup.sh; do
         [ -e "$HERE/$f" ] || { echo "install: $HERE/$f is missing; run this script from the extracted archive" >&2; exit 1; }
     done
+    # Can this system start the program at all? Where it cannot, everything was installed, the shell said
+    # only "any2odyssey: not found" (no loader: Alpine and other systems whose C library is not glibc) or
+    # the loader named a symbol version (an older glibc), and the last line still said Done.
+    if [ "$(head -c 4 "$HERE/any2odyssey" 2>/dev/null | tr '\177' '^')" = '^ELF' ]; then
+        if [ ! -e "$TEST_ROOT$LOADER" ]; then
+            echo "install: this system cannot run the program: it is built for the GNU C library (glibc $GLIBC_MIN or newer), whose loader $LOADER is not here. Systems with another C library (Alpine Linux and others with musl) are not supported; nothing was installed." >&2
+            exit 1
+        fi
+        libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
+        minor=${libc#glibc 2.}
+        minor=${minor%%[!0-9]*}
+        if [ "$libc" != "$minor" ] && [ -n "$minor" ] && [ "$minor" -lt "${GLIBC_MIN#2.}" ]; then
+            echo "install: this system cannot run the program: its C library is $libc, and the program needs glibc $GLIBC_MIN or newer (Ubuntu 22.04, Debian 12 and anything later have it; RHEL 9 and its relatives do not). Nothing was installed." >&2
+            exit 1
+        fi
+    fi
     # As root, only into folders that are root's alone. Every step below writes by path (install, cp -R,
     # rm -rf, the desktop entry), and whoever can change a folder on the way can swap what a path names
     # between two system calls: a root installer in another user's folder writes where that user points it.
@@ -626,34 +664,46 @@ fi
 
 # ---------------------------------------------------------------------------------------------------------
 step "2. Packages"
-# What is needed, as: library or command to look for | Arch | Debian/Ubuntu | Fedora
+# What is needed, as: library or command to look for | Arch | Debian/Ubuntu | Fedora | openSUSE
 # (libxkbcommon-x11: in an X11 session the program ends at once without it, and no package named here
 # brings it; a desktop without GNOME's or KDE's window manager need not have it.)
 NEEDED='
-lib:libpipewire-0.3.so.0|libpipewire|libpipewire-0.3-0|pipewire-libs
-lib:libxkbcommon.so.0|libxkbcommon|libxkbcommon0|libxkbcommon
-lib:libxkbcommon-x11.so.0|libxkbcommon-x11|libxkbcommon-x11-0|libxkbcommon-x11
-lib:libGL.so.1|libglvnd|libgl1|libglvnd-glx
-cmd:curl|curl|curl|curl
+lib:libpipewire-0.3.so.0|libpipewire|libpipewire-0.3-0|pipewire-libs|libpipewire-0_3-0
+lib:libxkbcommon.so.0|libxkbcommon|libxkbcommon0|libxkbcommon|libxkbcommon0
+lib:libxkbcommon-x11.so.0|libxkbcommon-x11|libxkbcommon-x11-0|libxkbcommon-x11|libxkbcommon-x11-0
+lib:libGL.so.1|libglvnd|libgl1|libglvnd-glx|libglvnd
+cmd:curl|curl|curl|curl|curl
 '
-DIALOG='cmd:zenity|zenity|zenity|zenity'
-# so: a library the program opens by this very name. Debian and Fedora keep libonnxruntime.so in the
-# development package; the library package's libonnxruntime.so.1 alone is not found by the program.
-ONNX_CPU='so:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime-devel'
+DIALOG='cmd:zenity|zenity|zenity|zenity|zenity'
+# so: a library the program opens by this very name. Debian, Fedora and openSUSE keep libonnxruntime.so in
+# the development package; the library package's libonnxruntime.so.1 alone is not found by the program.
+ONNX_CPU='so:libonnxruntime.so|onnxruntime-cpu|libonnxruntime-dev|onnxruntime-devel|onnxruntime-devel'
 ONNX_GPU='lib:libonnxruntime_providers_cuda.so|onnxruntime-cuda|libonnxruntime-dev|onnxruntime
 lib:libcudnn.so|cudnn|nvidia-cudnn|'
+# (pgrep: setup.sh stops without it, and a minimal installation or a container need not have it)
 WINE_SIDE='
-cmd:wine|wine|wine|wine
-cmd:x86_64-w64-mingw32-gcc|mingw-w64-gcc|gcc-mingw-w64-x86-64|mingw64-gcc
-cmd:clang++|clang|clang|clang
-cmd:cc|gcc|gcc|gcc
-cmd:python3|python|python3|python3
-cmd:xrandr|xorg-xrandr|x11-xserver-utils|xrandr
-cmd:rsync|rsync|rsync|rsync
+cmd:wine|wine|wine|wine|wine
+cmd:x86_64-w64-mingw32-gcc|mingw-w64-gcc|gcc-mingw-w64-x86-64|mingw64-gcc|mingw64-cross-gcc
+cmd:clang++|clang|clang|clang|clang
+cmd:cc|gcc|gcc|gcc|gcc
+cmd:python3|python|python3|python3|python3
+cmd:xrandr|xorg-xrandr|x11-xserver-utils|xrandr|xrandr
+cmd:rsync|rsync|rsync|rsync|rsync
+cmd:pgrep|procps-ng|procps|procps-ng|procps
 '
-if have pacman; then FAMILY=2 INSTALL="sudo pacman -S --needed"
-elif have apt-get; then FAMILY=3 INSTALL="sudo apt-get install -y"
-elif have dnf; then FAMILY=4 INSTALL="sudo dnf install -y"
+# One name that a release's package lists do not have makes dnf and zypper install nothing at all, as
+# apt-get does (below): RHEL 10 and its relatives have no ONNX Runtime package, and with onnxruntime-devel
+# among the names PipeWire's library was not installed either and the program did not start. Both can be
+# told to leave such a name out; dnf 5 and dnf 4 call that differently.
+if have pacman; then FAMILY=2 INSTALL="pacman -S --needed"
+elif have apt-get; then FAMILY=3 INSTALL="apt-get install -y"
+elif have dnf; then
+    FAMILY=4
+    case $(dnf --version 2>/dev/null | head -n 1) in
+        *dnf5*) INSTALL="dnf install -y --skip-unavailable" ;;
+        *) INSTALL="dnf install -y --skip-broken" ;;
+    esac
+elif have zypper; then FAMILY=5 INSTALL="zypper --non-interactive --ignore-unknown install"
 else FAMILY= INSTALL=; fi
 
 present() {
@@ -693,14 +743,18 @@ check() { # <list> : adds the packages of what is missing to MISSING
         UNNAMED="$UNNAMED ${what#*:}"
     done
 }
-check "$NEEDED"
-have zenity || have kdialog || check "$DIALOG"
-if [ -n "$MODEL" ]; then
-    # An NVIDIA GPU gets the CUDA build; depth then takes milliseconds instead of a tenth of a second.
-    if have nvidia-smi && [ "$FAMILY" = 2 ]; then check "$ONNX_GPU"; else check "$ONNX_CPU"; fi
-fi
-[ -n "$WANT_ODYSSEY" ] && check "$WINE_SIDE"
-MISSING=${MISSING# }
+look() { # sets MISSING and UNNAMED to what is not there now
+    MISSING= UNNAMED=
+    check "$NEEDED"
+    have zenity || have kdialog || check "$DIALOG"
+    if [ -n "$MODEL" ]; then
+        # An NVIDIA GPU gets the CUDA build; depth then takes milliseconds instead of a tenth of a second.
+        if have nvidia-smi && [ "$FAMILY" = 2 ]; then check "$ONNX_GPU"; else check "$ONNX_CPU"; fi
+    fi
+    [ -z "$WANT_ODYSSEY" ] || check "$WINE_SIDE"
+    MISSING=${MISSING# }
+}
+look
 # One name that the release's package lists do not have makes apt-get refuse the whole list: Ubuntu 24.04
 # has no ONNX Runtime package, and with libonnxruntime-dev among the names neither PipeWire's library nor
 # curl was installed. A simulated installation (it needs no root) names them; they are set apart.
@@ -720,12 +774,31 @@ if [ -z "$MISSING$UNNAMED$ABSENT" ]; then
 else
     [ -n "$MISSING" ] && say "   missing packages: $MISSING"
     [ -n "$ABSENT" ] && say "   missing, and not in this system's package lists (see INSTALL.txt for what needs them): $ABSENT"
-    [ -n "$UNNAMED" ] && say "   also missing, under a name this script does not know for your distribution:$UNNAMED"
+    if [ -n "$UNNAMED" ]; then
+        # (the names are files and commands: this script knows no package manager here to ask for packages)
+        say "   ${MISSING:+also }missing, under a name this script does not know for your distribution:$UNNAMED"
+        say "   install the packages that have them with your package manager, then run this script again"
+        case " $UNNAMED " in *" libpipewire-0.3.so.0 "* | *" libxkbcommon.so.0 "*) say "   (without libpipewire-0.3 and libxkbcommon the program does not start)" ;; esac
+    fi
     if [ -z "$DEPS" ] || [ -z "$INSTALL" ] || [ -z "$MISSING" ]; then
         [ -n "$MISSING" ] && say "   install them with your package manager, then run this script again"
-    elif ask "Install them now ($INSTALL ...; needs sudo)?"; then
+    elif no_sudo; then
+        say "   this system has no sudo. As root, run:   $INSTALL $MISSING"
+        say "   then run this script again"
+    elif ask "Install them now ($SUDO${SUDO:+ }$INSTALL ...${SUDO:+; needs sudo})?"; then
         # shellcheck disable=SC2086  # a list of package names
-        run $INSTALL $MISSING || warn "the package manager did not finish; the steps below may be incomplete"
+        run $SUDO $INSTALL $MISSING || warn "the package manager did not finish; the steps below may be incomplete"
+        # What is there now is looked at, not what the package manager said: it leaves out a name its
+        # lists do not have, and where it could do nothing (no rights, a system whose /usr cannot be
+        # written, as on Fedora Silverblue or SteamOS) all of them are still missing.
+        if [ -z "$DRY" ]; then
+            look
+            STILL=
+            for package in $MISSING; do
+                case " $ABSENT " in *" $package "*) ;; *) STILL="$STILL $package" ;; esac
+            done
+            [ -z "$STILL" ] || say "   not installed (not in this system's package lists, or the package manager could not install them):$STILL"
+        fi
     fi
 fi
 
@@ -741,13 +814,24 @@ elif [ ! -f "$RULES" ]; then
     warn "$RULES_NAME was not found; skipped"
 elif [ -f "$RULES_DIR/$RULES_NAME" ] && cmp -s "$RULES" "$RULES_DIR/$RULES_NAME"; then
     say "   already installed"
-elif ask "Install $RULES_DIR/$RULES_NAME (lens board for you at the seat, no USB power saving for the webcam; needs sudo)?"; then
-    run sudo install -m644 "$RULES" "$RULES_DIR/$RULES_NAME"
-    run sudo udevadm control --reload
-    run sudo udevadm trigger --subsystem-match=tty
-    # The webcam rule acts when the camera appears; for one that is here already, set it now.
-    if CAM=$(webcam_dir); then
-        run sudo sh -c "echo on > '$CAM/power/control'"
+elif [ ! -d "$RULES_DIR" ] && ! have udevadm; then
+    # A container, or a system with another device manager: the installer stopped here with "install: cannot
+    # create regular file", before the depth model and without its last lines.
+    say "   skipped: this system has no udev (no $RULES_DIR and no udevadm; a container?). The rules belong on the system the monitor is connected to."
+elif no_sudo; then
+    say "   this system has no sudo. As root, run:   install -m644 $(quoted "$RULES") $RULES_DIR/$RULES_NAME && udevadm control --reload && udevadm trigger --subsystem-match=tty"
+elif ask "Install $RULES_DIR/$RULES_NAME (lens board for you at the seat, no USB power saving for the webcam${SUDO:+; needs sudo})?"; then
+    # A refusal here (no rights to use sudo, a wrong password, no udev daemon to tell) does not end the
+    # installation: the depth model and the last lines follow.
+    if ! run $SUDO install -m644 "$RULES" "$RULES_DIR/$RULES_NAME"; then
+        warn "the udev rules were not installed (see the message above); the Odyssey 3D's lens board cannot be used until they are. As root: install -m644 $(quoted "$RULES") $RULES_DIR/$RULES_NAME && udevadm control --reload && udevadm trigger --subsystem-match=tty"
+    else
+        { run $SUDO udevadm control --reload && run $SUDO udevadm trigger --subsystem-match=tty; } ||
+            warn "the udev rules are installed but could not be put into effect now (see the message above); they are read at the next start of the system"
+        # The webcam rule acts when the camera appears; for one that is here already, set it now.
+        if CAM=$(webcam_dir); then
+            run $SUDO sh -c "echo on > '$CAM/power/control'" || true
+        fi
     fi
 fi
 if CAM=$(webcam_dir) && [ "$(cat "$CAM/power/runtime_status" 2>/dev/null)" = suspended ]; then
@@ -760,6 +844,8 @@ if [ -z "$MODEL" ]; then
     say "   skipped (--no-model)"
 elif [ -f "$DATA/models/depth-anything-v2-small.onnx" ]; then
     say "   already installed"
+elif [ -f "$PROGRAM" ] && [ ! -x "$PROGRAM" ] && [ -z "$DRY" ]; then
+    warn "$PROGRAM cannot be run where it is (the last lines say more); skipped"
 elif [ ! -x "$PROGRAM" ] && [ -z "$DRY" ]; then
     warn "$PROGRAM is not there; skipped"
 elif ask "Download the open depth model (Depth Anything V2 Small, about 95 MB, checked against a fixed SHA-256)?"; then
@@ -781,7 +867,25 @@ elif ask "Prepare it now from $WIN (copies about 1 GB of your own installation i
 fi
 
 say ""
-say "Done. Start Any2Odyssey from the application menu or as: $PROGRAM"
+# The last line does not say Done over a program that cannot start: the two libraries it is linked with or
+# opens first are looked for once more (the package step may have been declined, refused, or without names
+# for this distribution). A distribution's package brings them itself.
+LACKS=
+if [ -z "$PACKAGED" ] && [ -z "$DRY" ]; then
+    for needed in lib:libpipewire-0.3.so.0 lib:libxkbcommon.so.0; do
+        present "$needed" || LACKS="$LACKS ${needed#lib:}"
+    done
+fi
+if [ -z "$PACKAGED" ] && [ -z "$DRY" ] && [ -f "$PROGRAM" ] && [ ! -x "$PROGRAM" ]; then
+    # A home folder mounted noexec: the program was "not there" for the depth model, and then Done.
+    say "Installed, but the system does not let a program run from $BIN (a file system mounted noexec?)."
+    say "Remove it with the command below and install to a folder that allows it: --prefix DIR"
+elif [ -n "$LACKS" ]; then
+    say "Installed, but these were not found, and the program does not start without them:$LACKS (see step 2 above)."
+    say "With them, start Any2Odyssey from the application menu or as: $PROGRAM"
+else
+    say "Done. Start Any2Odyssey from the application menu or as: $PROGRAM"
+fi
 if [ -z "$PACKAGED" ]; then
     # The prefix is named when it is not the usual one, so the command also says where it removes from.
     REMOVE="$(quoted "$APPDIR/install.sh") --uninstall"
