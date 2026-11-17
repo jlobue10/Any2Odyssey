@@ -18,7 +18,7 @@ rem where a [ is not closed it runs nothing and speaks of wildcard characters. S
 rem its path is asked about first, with no script named on the command line: which file would be run?
 set "ANY2ODYSSEY_PACKAGE=%~dp0"
 if "%ANY2ODYSSEY_PACKAGE:[=%"=="%ANY2ODYSSEY_PACKAGE%" goto :launch
-"%ANY2ODYSSEY_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -Command "foreach($name in 'Install-Launcher.ps1','install.ps1','InstallSupport.ps1','build\Any2Odyssey.exe'){$path=$env:ANY2ODYSSEY_PACKAGE+$name;if(Test-Path -LiteralPath $path){try{$found=(Get-Command -Name $path -CommandType ExternalScript,Application -ErrorAction Stop).Source}catch{exit 1};if($found -ne $path){exit 1}}};exit 0"
+"%ANY2ODYSSEY_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -Command "foreach($name in 'Install-Launcher.ps1','install.ps1','InstallSupport.ps1','build\Any2Odyssey.exe'){$path=$env:ANY2ODYSSEY_PACKAGE+$name;if(Test-Path -LiteralPath $path){try{$found=(Get-Command -Name $path -CommandType ExternalScript,Application -ErrorAction Stop).Source;$same=[IO.Path]::GetFullPath($found) -eq [IO.Path]::GetFullPath($path)}catch{exit 1};if(-not $same){exit 1}}};exit 0"
 if errorlevel 1 goto :brackets
 :launch
 rem Arguments are passed on, for example: Install.cmd -AllowDowngrade

@@ -80,6 +80,14 @@ if($root.Contains('[')){
  }
  $output='' | & $env:ComSpec /d /c (Join-Path $harmless 'Install-GUI.cmd') 2>&1 | Out-String
  Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $harmless 'marker.txt'))) 'Install-GUI.cmd installs from a folder whose brackets fit no other folder'
+ # Reached through the short names Windows keeps beside long ones (C:\Users\RUNNER~1\...) it is the
+ # same folder: Windows PowerShell answers with the long form, and the two are compared as such.
+ $short=(New-Object -ComObject Scripting.FileSystemObject).GetFolder($root).ShortPath
+ if($short -ne $root){
+  [IO.File]::Delete((Join-Path $harmless 'marker.txt'))
+  $output='' | & $env:ComSpec /d /c (Join-Path $short 'only[2]folder\Install-GUI.cmd') 2>&1 | Out-String
+  Assert ($LASTEXITCODE -eq 0 -and [IO.File]::Exists((Join-Path $harmless 'marker.txt'))) 'The same folder reached through its short (8.3) path installs too'
+ }else{Write-Host 'SKIPPED: this volume keeps no short names, so the short-path case was not run.'}
  # The packaged program is found the same way when the installer starts it to ask a running instance
  # to quit (Start-Process): beside a folder that holds no scripts, only a program under that name, the
  # one started would be the other folder's.
