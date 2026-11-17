@@ -99,7 +99,12 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
  # stayed behind, pointing at a program that is gone. The attribute is put back on one that is
  # not this installation's.
  $file=Get-Item -LiteralPath $link -Force;$wasReadOnly=$file.IsReadOnly
- if($wasReadOnly){$file.IsReadOnly=$false}
+ # Where the attribute cannot be lifted (the file's permissions, a Desktop kept on a share that is
+ # read-only), the shortcut stays, as it did up to 0.9.3, and the uninstall goes on. 0.9.4 stopped
+ # here, with the conversion worker already removed and the program and its Installed apps entry left.
+ if($wasReadOnly){
+  try{$file.IsReadOnly=$false}catch{$notices++;Write-Host "The shortcut $link is read-only and could not be changed; it is left in place.";continue}
+ }
  $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
  if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){Remove-Item -LiteralPath $link}
  elseif($wasReadOnly){$file.IsReadOnly=$true}

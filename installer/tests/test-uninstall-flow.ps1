@@ -120,6 +120,26 @@ try{
  Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration)) 'A read-only shortcut to the installation is removed like any other'
  Assert ((Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')) -and (Get-Item -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')).IsReadOnly) 'A read-only shortcut that leads elsewhere stays, and stays read-only'
  (Get-Item -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk')).IsReadOnly=$false
+ # A read-only shortcut whose attributes this account may not change (its permissions say so, or
+ # the Desktop is kept on a share that is read-only): it stays, as it did up to 0.9.3, the uninstall
+ # says so and removes everything else. 0.9.4 stopped at it with "Access to the path is denied",
+ # after the worker was gone and before the program and the registration were.
+ $launches.Clear()
+ New-Fixture -Elevated $false
+ $locked=Join-Path $desktop 'Any2Odyssey.lnk'
+ (Get-Item -LiteralPath $locked).IsReadOnly=$true
+ & icacls.exe $locked /deny ('*'+$sid+':(WA)') | Out-Null
+ try{
+  $notes.Clear()
+  & (Join-Path $app 'Uninstall.ps1')
+  $said=$notes -join [char]10
+  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $worker)) 'A shortcut that cannot be changed does not stop the uninstall'
+  Assert (-not (Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk'))) 'The other shortcut is still removed'
+  Assert ((Test-Path -LiteralPath $locked) -and (Get-Item -LiteralPath $locked).IsReadOnly -and $said.Contains($locked) -and $said.Contains('left in place')) 'The shortcut that cannot be changed stays and is named'
+ }finally{
+  & icacls.exe $locked /remove:d ('*'+$sid) | Out-Null
+  if(Test-Path -LiteralPath $locked){(Get-Item -LiteralPath $locked).IsReadOnly=$false}
+ }
 
  $launches.Clear()
  New-Fixture -Elevated $true
