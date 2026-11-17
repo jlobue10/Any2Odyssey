@@ -807,6 +807,8 @@ if [ -z "$MODEL" ]; then
     say "   skipped (--no-model)"
 elif [ -f "$DATA/models/depth-anything-v2-small.onnx" ]; then
     say "   already installed"
+elif [ -f "$PROGRAM" ] && [ ! -x "$PROGRAM" ] && [ -z "$DRY" ]; then
+    warn "$PROGRAM cannot be run where it is (the last lines say more); skipped"
 elif [ ! -x "$PROGRAM" ] && [ -z "$DRY" ]; then
     warn "$PROGRAM is not there; skipped"
 elif ask "Download the open depth model (Depth Anything V2 Small, about 95 MB, checked against a fixed SHA-256)?"; then
@@ -837,9 +839,13 @@ if [ -z "$PACKAGED" ] && [ -z "$DRY" ]; then
         present "$needed" || LACKS="$LACKS ${needed#lib:}"
     done
 fi
-if [ -n "$LACKS" ]; then
-    say "Installed, but the program cannot start until this system has:$LACKS (see step 2 above)."
-    say "After that, start Any2Odyssey from the application menu or as: $PROGRAM"
+if [ -z "$PACKAGED" ] && [ -z "$DRY" ] && [ -f "$PROGRAM" ] && [ ! -x "$PROGRAM" ]; then
+    # A home folder mounted noexec: the program was "not there" for the depth model, and then Done.
+    say "Installed, but the system does not let a program run from $BIN (a file system mounted noexec?)."
+    say "Remove it with the command below and install to a folder that allows it: --prefix DIR"
+elif [ -n "$LACKS" ]; then
+    say "Installed, but these were not found, and the program does not start without them:$LACKS (see step 2 above)."
+    say "With them, start Any2Odyssey from the application menu or as: $PROGRAM"
 else
     say "Done. Start Any2Odyssey from the application menu or as: $PROGRAM"
 fi

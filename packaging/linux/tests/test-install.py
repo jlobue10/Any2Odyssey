@@ -1215,14 +1215,14 @@ done
         self.assertIn("the program does not start", result.stdout)
         # Nor does the last line say Done over a program that cannot start.
         self.assertNotIn("Done.", result.stdout)
-        self.assertIn("Installed, but the program cannot start until this system has: libpipewire-0.3.so.0 "
-                      "libxkbcommon.so.0", result.stdout)
+        self.assertIn("the program does not start without them: libpipewire-0.3.so.0 libxkbcommon.so.0",
+                      result.stdout)
         for library in ["usr/lib64/libpipewire-0.3.so.0", "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0.0.0"]:
             (self.system / library).parent.mkdir(parents=True, exist_ok=True)
             (self.system / library).touch()
         result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey")
         self.assertIn("\nDone. Start Any2Odyssey", result.stdout)
-        self.assertNotIn("cannot start", result.stdout)
+        self.assertNotIn("does not start without them", result.stdout)
 
     def test_pgrep_is_asked_for_with_the_wine_side(self):
         # setup.sh stops without pgrep, and Fedora's and other minimal installations have none: the
