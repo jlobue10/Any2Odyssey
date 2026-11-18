@@ -5,11 +5,15 @@ Requires gio (libglib2.0-bin) and desktop-file-validate (desktop-file-utils).
 The installed fixture only records its argv; it never opens an image or a UI.
 """
 
+import fcntl
 import os
 from pathlib import Path
+import pty
 import pwd
+import select
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -818,6 +822,112 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((first.returncode, code), (0, 0), first.stdout + first.stderr + output)
         self.assert_removed(prefix)
 
+    def test_ctrl_c_ends_a_run_that_waits_for_another(self):
+        # The wait went through `timeout 300 flock`, and GNU's timeout puts itself into a process group of
+        # its own, which a terminal's Ctrl+C does not reach. Under bash (sh on Arch, Fedora, openSUSE) the
+        # run stayed, for up to five minutes, and then installed although Ctrl+C had been pressed; under
+        # dash it ended only when the wait was over.
+        if not shutil.which("flock"):
+            self.skipTest("needs flock (util-linux), which the installer takes its turn with")
+        prefix = self.root / "prefix"
+        prefix.mkdir()
+        other = os.open(prefix, os.O_RDONLY)  # another run, which holds the prefix for the whole test
+        self.addCleanup(os.close, other)
+        fcntl.flock(other, fcntl.LOCK_EX)
+        command = [*SHELL, str(self.archive / "install.sh"), "--prefix", str(prefix), "--no-deps", "--no-udev",
+                   "--no-model", "--no-odyssey"]
+        pid, terminal = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(self.root)
+                os.execvpe(command[0], command, self.env)
+            finally:
+                os._exit(127)
+
+        def read_for(seconds, until):
+            """What the run prints within `seconds`, read until `until(text)` holds or the run has ended."""
+            text, deadline = b"", time.monotonic() + seconds
+            while time.monotonic() < deadline and not until(text):
+                if select.select([terminal], [], [], 0.05)[0]:
+                    try:
+                        text += os.read(terminal, 4096)
+                    except OSError:  # the run has ended and closed its side
+                        break
+            return text
+
+        status = None
+        try:
+            said = read_for(20, lambda text: b"waiting for it to finish" in text)
+            self.assertIn(b"waiting for it to finish", said)
+            # Pressed again every second, as somebody does whose first Ctrl+C seemed to do nothing (one that
+            # arrives before the wait itself has been started is not what is tested here).
+            started, pressed = time.monotonic(), 0
+            deadline = started + 10
+            while time.monotonic() < deadline and status is None:
+                if time.monotonic() >= started + 0.3 + pressed:
+                    os.write(terminal, b"\x03")
+                    pressed += 1
+                read_for(0.05, lambda text: False)
+                ended, code = os.waitpid(pid, os.WNOHANG)
+                status = code if ended else None
+            self.assertIsNotNone(status, "ten seconds after Ctrl+C the run still waits")
+            self.assertNotEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertEqual(list(prefix.iterdir()), [], "the run installed after Ctrl+C")
+        finally:
+            if status is None:
+                # What a run that does not end has left: the session of the terminal, and the group that
+                # timeout made for itself and its flock.
+                for entry in Path("/proc").iterdir():
+                    try:
+                        session = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[3])
+                        if entry.name.isdigit() and session == pid:
+                            os.kill(int(entry.name), signal.SIGKILL)
+                    except (OSError, ValueError, IndexError):
+                        pass
+                os.waitpid(pid, 0)
+            os.close(terminal)
+
+    def lock_seen_by(self, name):
+        """A stand-in that notes under `name` whether it could take the prefix's lock itself (0) or not (1).
+
+        What the installer starts has the installer's open files. One that could not take the lock was
+        started while the installer still held it, and for as long as such a program stays (the depth
+        model's download, the Wine setup with its gigabyte to copy, Wine's server) the next installation
+        or removal waits.
+        """
+        return (f'#!/bin/sh\nflock -n {shlex.quote(str(self.root / "prefix"))} true; '
+                f'echo "{name} $?" >> {shlex.quote(str(self.root / "lock seen"))}\n')
+
+    def test_the_lock_is_given_up_before_anything_is_started_that_stays(self):
+        if not shutil.which("flock"):
+            self.skipTest("needs flock (util-linux), which the installer takes its turn with")
+        (self.archive / "any2odyssey").write_text(self.lock_seen_by("program"))
+        (self.archive / "wine-lens/setup.sh").write_text(self.lock_seen_by("setup"))
+        tools = self.root / "tools"
+        tools.mkdir()
+        for name in ("update-desktop-database", "gtk-update-icon-cache", "wineserver"):
+            (tools / name).write_text(self.lock_seen_by(name))
+            (tools / name).chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        login = pwd.getpwuid(os.getuid()).pw_name
+        self.env.pop("USER", None)  # (the script then asks the system for the name, as this test does)
+        self.windows_drive(f"run/media/{login}/Windows", self.block_device("a2ofix", "pci0000:00/ata1"))
+        (self.system / "dev/odyssey-lens").touch()
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--no-deps", "--no-udev", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        seen = (self.root / "lock seen").read_text().splitlines()
+        self.assertEqual(seen, ["update-desktop-database 0", "gtk-update-icon-cache 0", "program 0", "setup 0"],
+                         result.stdout + result.stderr)
+        # The removal: the caches' tools again, and Wine's server for the Wine side it is asked to remove.
+        (self.root / "lock seen").unlink()
+        (Path(self.env["ANY2ODYSSEY_DATA_DIR"]) / "wine-lens").mkdir(parents=True)
+        result = self.run_installer("--prefix", str(prefix), "--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        seen = (self.root / "lock seen").read_text().splitlines()
+        self.assertEqual(seen, ["update-desktop-database 0", "gtk-update-icon-cache 0", "wineserver 0"],
+                         result.stdout + result.stderr)
+
     def test_the_packages_setup_says_that_an_installation_from_the_archive_is_still_in_the_way(self):
         # Seen with the published Arch package over a 0.9.1 installation in ~/.local: the old menu entry and
         # program went on being used, and any2odyssey-setup named the old program as the one to start.
@@ -1274,6 +1384,45 @@ done
             self.assertIn(package, missing)
         self.assertNotIn("this script does not know", output)
 
+    def would_install_with(self, manager, version):
+        """The package manager's command line as a dry run names it, with `manager` the one on the PATH.
+
+        Run without the stand-in for /: with it the installer never comes to that command. Nothing is
+        run or written by --dry-run, and what this machine has installed does not matter: curl is taken
+        off the PATH, so that there is something to install.
+        """
+        self.only_package_manager(manager, f'[ "$1" != --version ] || echo "{version}"')
+        (self.root / "tools/curl").unlink(missing_ok=True)
+        if subprocess.run([*SHELL, "-c", "command -v curl"], env=self.env, capture_output=True).returncode == 0:
+            self.skipTest("this shell has a curl of its own")
+        del self.env["A2O_INSTALL_TEST_ROOT"]
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--dry-run", "--yes", "--no-udev", "--no-model",
+                                    "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(prefix.exists())
+        # "would run: [sudo ]<command> <packages>", or "As root, run:   <command> <packages>" without sudo.
+        lines = [line for line in result.stdout.splitlines() if f"{manager} " in line and " curl" in line]
+        self.assertEqual(len(lines), 1, result.stdout)
+        return lines[0]
+
+    def test_dnf_is_told_to_leave_out_a_name_its_lists_do_not_have(self):
+        # AlmaLinux 10 and its relatives have no ONNX Runtime package, and with that one name unknown dnf
+        # installed none of the others: no PipeWire library, and the program did not start. zypper does
+        # the same. dnf 4 and dnf 5 call the option differently, and each refuses the other's.
+        line = self.would_install_with("dnf", "4.20.0")
+        self.assertIn("dnf install -y --skip-broken ", line)
+        self.assertNotIn("--skip-unavailable", line)
+
+    def test_dnf_5_is_told_in_its_own_words(self):
+        line = self.would_install_with("dnf", "dnf5 version 5.2.17.0")
+        self.assertIn("dnf install -y --skip-unavailable ", line)
+        self.assertNotIn("--skip-broken", line)
+
+    def test_zypper_is_told_to_leave_out_a_name_it_does_not_know(self):
+        line = self.would_install_with("zypper", "zypper 1.14.94")
+        self.assertIn("zypper --non-interactive --ignore-unknown install ", line)
+
     def test_where_no_package_manager_is_known_the_missing_files_come_with_what_to_do(self):
         # Without one, the list began with "also" although nothing came before it, said nothing about
         # what to do with file names, and not that the program cannot start without two of them.
@@ -1295,6 +1444,28 @@ done
         result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-udev", "--no-odyssey")
         self.assertIn("\nDone. Start Any2Odyssey", result.stdout)
         self.assertNotIn("does not start without them", result.stdout)
+
+    def test_a_program_that_may_not_be_run_where_it_was_put_is_not_called_done(self):
+        # A home folder mounted noexec: the depth model's step said the program "is not there", and the
+        # last line was Done. A stand-in mv takes the right to run from the program it puts in place,
+        # which is all that a test for it sees of such a file system.
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "mv").write_text(
+            f'#!/bin/sh\n{shlex.quote(shutil.which("mv"))} "$@" || exit $?\nfor last; do :; done\n'
+            'case $last in */bin/any2odyssey) chmod a-x "$last" ;; esac\n')
+        (tools / "mv").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--no-deps", "--no-udev", "--no-odyssey", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        if os.access(prefix / "bin/any2odyssey", os.X_OK):
+            self.skipTest("this shell runs a built-in mv, which the test cannot stand in for")
+        self.assertIn("cannot be run where it is", result.stdout)
+        self.assertIn(f"the system does not let a program run from {prefix}/bin", result.stdout)
+        self.assertIn("--prefix DIR", result.stdout)
+        self.assertNotIn("Done.", result.stdout)
+        self.assertFalse(self.log.exists(), "the program was started all the same")
 
     def test_pgrep_is_asked_for_with_the_wine_side(self):
         # setup.sh stops without pgrep, and Fedora's and other minimal installations have none: the
@@ -1337,6 +1508,29 @@ done
         # The same system with glibc's loader: installed.
         (self.system / "lib64").mkdir()
         (self.system / "lib64/ld-linux-x86-64.so.2").touch()
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((prefix / "bin/any2odyssey").is_file())
+
+    def test_a_loader_of_glibcs_name_in_front_of_musl_is_not_taken_for_glibc(self):
+        # Alpine with its gcompat package has /lib64/ld-linux-x86-64.so.2, and 0.9.5 installed there: the
+        # program ends at "Error relocating ...: mallopt: symbol not found", and with PipeWire's library
+        # and libxkbcommon installed the installer's last line was Done.
+        self.a_program_as_released()
+        self.c_library("")
+        for folder in ("lib64", "lib"):
+            (self.system / folder).mkdir()
+        (self.system / "lib64/ld-linux-x86-64.so.2").touch()
+        (self.system / "lib/ld-musl-x86_64.so.1").touch()
+        prefix = self.root / "prefix"
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("the C library here is musl", result.stderr)
+        self.assertIn("gcompat", result.stderr)
+        self.assertFalse(prefix.exists())
+        # A system with glibc that has musl beside it (Arch's musl package, for building with it) is
+        # not refused: its getconf names glibc.
+        self.c_library("glibc 2.42")
         result = self.install(prefix)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((prefix / "bin/any2odyssey").is_file())
