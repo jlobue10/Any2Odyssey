@@ -924,6 +924,21 @@ pub fn pick_image() -> Result<Option<PathBuf>, String> {
     ])
 }
 
+/// What kdialog's save dialog is started with: `name` in `folder` (the current
+/// one), as a whole path.
+///
+/// kdialog reads a bare name of a file that does not exist yet as an address
+/// on the internet: started with `Any2Odyssey-preview.png`, the dialog of
+/// kdialog 26.08 opened at "http: any2odyssey-preview.png" with no name in its
+/// Name box. A whole path is read as a file in a folder.
+fn kdialog_start(name: &str, folder: Option<PathBuf>) -> String {
+    folder
+        .filter(|folder| folder.is_absolute())
+        .map(|folder| folder.join(name))
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or_else(|| name.to_owned())
+}
+
 /// Ask where to save a PNG, suggesting `name`. Blocks like [`pick_image`].
 pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
     DIALOGS.run(&[
@@ -944,7 +959,7 @@ pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
                 "--title".into(),
                 "Save preview".into(),
                 "--getsavefilename".into(),
-                name.into(),
+                kdialog_start(name, std::env::current_dir().ok()),
                 "PNG (*.png)".into(),
             ],
         ),
@@ -1496,6 +1511,23 @@ mod tests {
         // The first one's caller gets no answer, and not the second one's.
         assert_eq!(waiting.join().unwrap(), Ok(None));
         assert!(dialogs.open().child.is_none());
+    }
+
+    #[test]
+    fn kdialog_is_given_the_name_to_save_as_a_whole_path() {
+        use std::os::unix::ffi::OsStringExt;
+        // A bare name of a file that is not there is an internet address to
+        // kdialog ("http: any2odyssey-preview.png").
+        assert_eq!(
+            kdialog_start("Any2Odyssey-preview.png", Some("/home/somebody".into())),
+            "/home/somebody/Any2Odyssey-preview.png"
+        );
+        assert_eq!(kdialog_start("a b.png", Some("/".into())), "/a b.png");
+        // Without a folder that can be named, the name alone, as before.
+        assert_eq!(kdialog_start("p.png", None), "p.png");
+        assert_eq!(kdialog_start("p.png", Some("relative".into())), "p.png");
+        let not_text = PathBuf::from(OsString::from_vec(b"/home/\xff".to_vec()));
+        assert_eq!(kdialog_start("p.png", Some(not_text)), "p.png");
     }
 
     #[test]
