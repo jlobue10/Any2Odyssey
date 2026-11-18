@@ -1834,6 +1834,115 @@ mod bench {
             }
         }
     }
+
+    /// The middle one of `times`, in milliseconds.
+    fn median(times: &mut [Duration]) -> f64 {
+        times.sort();
+        times[times.len() / 2].as_secs_f64() * 1e3
+    }
+
+    /// A turn of the render loop on a 4K screen that changes with every
+    /// frame, stage by stage and as a whole, the picture handed over as the
+    /// weaver gets it (a frame file in memory where there is `/dev/shm`).
+    /// No model is needed: the depth map is made up. Run by hand:
+    /// `cargo test --release -p any2odyssey live::bench::turn_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn turn_timings() {
+        let (sw, sh) = (3840u32, 2160u32);
+        let screens: Vec<Vec<u8>> = (0..2u32)
+            .map(|seed| {
+                (0..sw * sh * 4)
+                    .map(|i| {
+                        let (x, y) = (i / 4 % sw, i / 4 / sw);
+                        ((x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503))
+                            >> (3 + i % 4 * 8)) as u8
+                            ^ (seed * 91) as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        let (dw, dh) = (518u32, 294u32);
+        let values: Vec<f32> = (0..dw * dh)
+            .map(|i| {
+                let (x, y) = (i % dw, i / dw);
+                let near = x > dw / 3 && x < dw / 2 && y > dh / 4 && y < dh / 2;
+                (y as f32 / dh as f32 * 0.6 + if near { 0.3 } else { 0.0 }).min(1.0)
+            })
+            .collect();
+        let depth = Some(Depth {
+            values: &values,
+            width: dw,
+            height: dh,
+        });
+        let memory = std::path::Path::new("/dev/shm");
+        let dir = if memory.is_dir() {
+            tempfile::tempdir_in(memory)
+        } else {
+            tempfile::tempdir()
+        }
+        .unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        for lines in [1080, 1440, 2160] {
+            for sharpness in [0, 50] {
+                let (view, (x, y, w, h)) = layout((sw, sh), lines);
+                let place = Placement {
+                    view,
+                    x,
+                    y,
+                    swap: false,
+                };
+                let mut picture = vec![0u8; (w * h * 4) as usize];
+                let mut pair = vec![0u8; if sharpness > 0 { picture.len() * 2 } else { 0 }];
+                let mut canvas = vec![0u8; place.bytes()];
+                let (mut scale, mut render, mut sharpen, mut write, mut turn) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for frame in 0..65 {
+                    let source = Source {
+                        bytes: &screens[frame % 2],
+                        width: sw,
+                        height: sh,
+                        stride: sw as usize * 4,
+                        order: PixelOrder::Bgr,
+                    };
+                    let params = Params::default();
+                    let t0 = Instant::now();
+                    live::scale_to_rgba(source, &mut picture, w, h);
+                    let t1 = Instant::now();
+                    if sharpness > 0 {
+                        live::render_pair(&picture, w, h, depth, params, &mut pair);
+                    } else {
+                        live::render_placed(&picture, w, h, depth, params, place, &mut canvas);
+                    }
+                    let t2 = Instant::now();
+                    if sharpness > 0 {
+                        let amount = sharpness as f32 / 100.0;
+                        live::place_pair(&pair, w, h, amount, place, &mut canvas);
+                    }
+                    let t3 = Instant::now();
+                    sink.show_bottom_up(view.0 * 2, view.1, &canvas).unwrap();
+                    let t4 = Instant::now();
+                    // The first turns make the buffers and the file's pages.
+                    if frame >= 5 {
+                        scale.push(t1 - t0);
+                        render.push(t2 - t1);
+                        sharpen.push(t3 - t2);
+                        write.push(t4 - t3);
+                        turn.push(t4 - t0);
+                    }
+                }
+                let turn = median(&mut turn);
+                println!(
+                    "{lines} lines, sharpness {sharpness}: scale {:.2} ms, render {:.2}, sharpen {:.2}, hand over {:.2}; a turn {turn:.2} ms ({:.0} a second)",
+                    median(&mut scale),
+                    median(&mut render),
+                    median(&mut sharpen),
+                    median(&mut write),
+                    1000.0 / turn
+                );
+            }
+        }
+    }
 }
 
 /// The whole live path against the remembered screen, without the page.
