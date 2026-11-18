@@ -1423,6 +1423,28 @@ done
         line = self.would_install_with("zypper", "zypper 1.14.94")
         self.assertIn("zypper --non-interactive --ignore-unknown install ", line)
 
+    def test_with_yes_pacman_is_not_left_to_ask_a_question_of_its_own(self):
+        # apt-get, dnf and zypper are told not to ask. pacman asked "Proceed with installation? [Y/n]"
+        # after --yes too: run from a script (the published 0.9.6 archive, in a root tree of Arch, with
+        # no terminal) it took the end of its input for a no and installed nothing.
+        line = self.would_install_with("pacman", "Pacman v7.1.0 - libalpm v16.0.1")
+        self.assertIn("pacman -S --needed --noconfirm ", line)
+
+    def test_without_yes_pacman_keeps_its_own_question(self):
+        # Without --yes the command the installer names (in its question, or for root to run where there
+        # is no sudo) has no --noconfirm: pacman still shows what it is about to install and asks.
+        self.only_package_manager("pacman", '[ "$1" != --version ] || echo "Pacman v7.1.0 - libalpm v16.0.1"')
+        (self.root / "tools/curl").unlink(missing_ok=True)
+        if subprocess.run([*SHELL, "-c", "command -v curl"], env=self.env, capture_output=True).returncode == 0:
+            self.skipTest("this shell has a curl of its own")
+        del self.env["A2O_INSTALL_TEST_ROOT"]
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--dry-run", "--no-udev", "--no-model", "--no-odyssey")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(prefix.exists())
+        self.assertIn("pacman -S --needed ", result.stdout)
+        self.assertNotIn("--noconfirm", result.stdout)
+
     def test_where_no_package_manager_is_known_the_missing_files_come_with_what_to_do(self):
         # Without one, the list began with "also" although nothing came before it, said nothing about
         # what to do with file names, and not that the program cannot start without two of them.
