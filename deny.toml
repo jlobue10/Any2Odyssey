@@ -1,9 +1,10 @@
 # cargo-deny policy, checked by the "Dependency policy" job in .github/workflows/ci.yml and release.yml:
 #
-#   cargo deny --locked check advisories bans sources
+#   cargo deny --locked check advisories bans sources licenses
 #
-# Licenses are not checked here: THIRD-PARTY-LICENSES*.md are generated from the dependency tree and CI
-# compares them.
+# THIRD-PARTY-LICENSES*.md say which crates a package contains and under which license each is used, and CI
+# compares them with the dependency tree. What they cannot say is whether a license is one this project can
+# be distributed with: that is [licenses] below.
 
 [graph]
 # The platforms that are built and released; advisories for code compiled nowhere else do not apply.
@@ -36,6 +37,50 @@ ignore = [
     # follows tray-icon's Linux dependencies once tray-icon is in the graph for any of the targets above.
     { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter is not used by any crate in the tree; the GTK 3 bindings under tray-icon and muda hold glib at 0.18" },
 ]
+
+[licenses]
+# Any2Odyssey is GPL-3.0-only. Every license a crate in the tree states has to be named here, so a
+# dependency that arrives under another one (a new crate, or a new version of an old one) fails the check
+# and is looked at before it is shipped. A crate that offers a choice passes when one of its choices is
+# here; which one is used is said in THIRD-PARTY-LICENSES.md (MIT where it is offered, else Apache-2.0).
+#
+# All of these let their code be part of a GPL-3.0 program: the permissive ones without conditions that
+# the GPL lacks, and Apache-2.0 because the GPL's version 3 (not 2) takes its patent terms in.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # One of several choices for the crates that state it, but for target-lexicon, which only build
+    # scripts use.
+    "Apache-2.0 WITH LLVM-exception",
+    # arrayref, under the icon tool's renderer; elsewhere one of several choices.
+    "BSD-2-Clause",
+    # bindgen (used while building the PipeWire bindings) and tiny-skia (the icon tool, which is not
+    # shipped); elsewhere one of several choices.
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    # unicode-ident and the ICU crates under the URL parser: the Unicode data files' own license.
+    "Unicode-3.0",
+    "Zlib",
+]
+# Licenses that are right for one crate and should not pass for the next one unseen.
+exceptions = [
+    # Copyleft file by file: changes to option-ext's own files stay under the MPL, and its section 3.3
+    # lets the whole be distributed under the GPL. Nothing here changes those files.
+    { crate = "option-ext", allow = ["MPL-2.0"] },
+    # Not code: the typefaces egui embeds (Noto Emoji under the SIL Open Font License, Ubuntu Light under
+    # the Ubuntu Font Licence). They are data carried in the program under their own terms, which is
+    # what both licenses are written for; the GPL does not reach them and they put no condition on the
+    # program. THIRD-PARTY-LICENSES.md, "Fonts embedded in the application", has their notices.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
+# A license that no crate states any more is taken out of the lists above, so that they stay what the
+# tree has and not what it once had.
+unused-allowed-license = "deny"
+
+[licenses.private]
+# The workspace's own crates, which are not published: GPL-3.0-only, and not a dependency to be judged.
+ignore = true
 
 [bans]
 # Two versions of one crate are ordinary in a tree with a GUI toolkit, and listing them all would bury

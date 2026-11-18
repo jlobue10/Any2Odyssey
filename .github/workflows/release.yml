@@ -434,10 +434,10 @@ jobs:
           echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP" "$name/cargo-deny"
           install -m755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
-      - name: Advisories, banned requirements and sources
+      - name: Advisories, banned requirements, sources and licenses
         run: |
-          cargo deny --locked check advisories bans sources || {
-            echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml, and release from that commit."
+          cargo deny --locked check advisories bans sources licenses || {
+            echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml (for a license: [licenses] there says what is allowed and why), and release from that commit."
             exit 1
           }
       # As in ci.yml: each action is named by a commit, and that commit has to be one its repository still

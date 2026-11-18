@@ -373,7 +373,7 @@ jobs:
             dist/*.sha256
 
   # The policy in deny.toml: no dependency with a security advisory or a yanked version, none from
-  # outside crates.io, none without a version requirement.
+  # outside crates.io, none without a version requirement, none under a license that is not listed there.
   dependencies:
     name: Dependency policy (cargo-deny)
     runs-on: ubuntu-latest
@@ -402,10 +402,10 @@ jobs:
           install -m755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
       # The advisory database is fetched at every run: a new advisory for a crate in Cargo.lock turns this
       # red on every branch at once, whatever the change under test.
-      - name: Advisories, banned requirements and sources
+      - name: Advisories, banned requirements, sources and licenses
         run: |
-          cargo deny --locked check advisories bans sources || {
-            echo "::error::cargo-deny refused the dependency tree (its report is above). If that is a new RustSec advisory and not this change: update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml."
+          cargo deny --locked check advisories bans sources licenses || {
+            echo "::error::cargo-deny refused the dependency tree (its report is above). If that is a new RustSec advisory and not this change: update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml. If it is a license: [licenses] in deny.toml says what is allowed and why."
             exit 1
           }
       # The actions these workflows use are dependencies too, each named by a commit. GitHub serves a
