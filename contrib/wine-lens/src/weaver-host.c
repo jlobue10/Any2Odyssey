@@ -31,6 +31,7 @@
  *         24   uint32   the place (0 to 2) the newest picture is in
  */
 #include <windows.h>
+#include <shellapi.h>
 #include <GL/gl.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -65,6 +66,20 @@ static void fail(const char *reason)
     printf("error: %s\n", reason);
     fflush(stdout);
     ExitProcess(1);
+}
+
+/* The frame file, opened by its path as Windows holds it. The path main() is given has gone through the
+ * prefix's ANSI code page (Windows-1252 unless the user chose another), which has no Cyrillic, Greek or East
+ * Asian letters: a frame file in a folder named with them could not be opened, and the output did not start. */
+static HANDLE open_frame_file(const char *narrow)
+{
+    const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
+    int count = 0;
+    WCHAR **wide = CommandLineToArgvW(GetCommandLineW(), &count);
+    HANDLE file = wide && count > 1 ? CreateFileW(wide[1], GENERIC_READ, share, NULL, OPEN_EXISTING, 0, NULL)
+                                    : CreateFileA(narrow, GENERIC_READ, share, NULL, OPEN_EXISTING, 0, NULL);
+    if (wide) LocalFree(wide);
+    return file;
 }
 
 static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -158,7 +173,7 @@ int main(int argc, char **argv)
     overlay = argc > 6 && !strcmp(argv[6], "overlay");
     if (w <= 0 || h <= 0) fail("the Odyssey 3D's place on the desktop is not known");
 
-    file = CreateFileA(argv[1], GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    file = open_frame_file(argv[1]);
     if (file == INVALID_HANDLE_VALUE || !GetFileSizeEx(file, &file_size)) fail("cannot open the frame file");
     mapping = CreateFileMappingA(file, NULL, PAGE_READONLY, 0, 0, NULL);
     frame = mapping ? MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0) : NULL;
