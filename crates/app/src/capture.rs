@@ -593,9 +593,21 @@ pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
     }
 }
 
+/// The most pictures a second a desktop is asked to send. Sixty are
+/// wanted, which is as many as are rendered, and a little more is asked
+/// for: a desktop may leave out a picture that comes a moment sooner after
+/// the last one than the limit allows.
+///
+/// Measured on a screen of 120 Hz that changed at every refresh. GNOME
+/// (mutter 51.1) sent 48 a second when asked for 60, and 60 when asked for
+/// 61, 65, 72 or 90; KDE Plasma (KWin 6.8.2) sent what it was asked for,
+/// 60, 61, 65, 72 or 90.
+const MOST_A_SECOND: u32 = 62;
+
 /// The stream that is asked for: raw video in one of the pixel formats that
-/// are read here, at whatever rate it states for itself and with sixty
-/// frames a second as the most a desktop is to send. No size is wished for.
+/// are read here, at whatever rate it states for itself and with
+/// [`MOST_A_SECOND`] frames a second as the most a desktop is to send. No
+/// size is wished for.
 ///
 /// The size is the desktop's to say. KWin (Plasma 6.8) offers every size from
 /// 200 x 200 to 10000 x 10000 with the screen's own as its wish, and resizes
@@ -653,17 +665,24 @@ fn wanted_format() -> spa::pod::Object {
         ),
         // Sixty a second is as many as are rendered. A desktop that sends
         // a picture when the screen has changed says how many a second
-        // that may be at the most, and is asked to keep to sixty: of a
-        // faster screen (the Odyssey runs at 165) every picture was copied
-        // and more than half of them never looked at.
+        // that may be at the most, and is asked to keep to a little more
+        // than that (`MOST_A_SECOND`): of a faster screen (the Odyssey
+        // runs at 165) every picture was copied and more than half of
+        // them never looked at.
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoMaxFramerate,
             Choice,
             Range,
             Fraction,
-            spa::utils::Fraction { num: 60, denom: 1 },
+            spa::utils::Fraction {
+                num: MOST_A_SECOND,
+                denom: 1
+            },
             spa::utils::Fraction { num: 1, denom: 1 },
-            spa::utils::Fraction { num: 60, denom: 1 }
+            spa::utils::Fraction {
+                num: MOST_A_SECOND,
+                denom: 1
+            }
         ),
     )
 }
@@ -1070,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn sixty_a_second_is_the_most_asked_for_and_a_streams_own_rate_is_taken() {
+    fn a_little_over_sixty_a_second_is_the_most_asked_for_and_a_streams_own_rate_is_taken() {
         use spa::param::format::FormatProperties as Key;
         use spa::pod::{ChoiceValue, Value};
         use spa::utils::{Choice, ChoiceEnum};
@@ -1090,7 +1109,9 @@ mod tests {
         };
         // What a desktop is to send at the most. It names its own limit as
         // a range from 1 to the screen's rate, and the two are cut to one.
-        assert_eq!(range(Key::VideoMaxFramerate), (60, 1, 60));
+        // Not 60: asked for exactly that, GNOME sent 48 a second.
+        assert_eq!(range(Key::VideoMaxFramerate), (62, 1, 62));
+        assert_eq!(MOST_A_SECOND, 62);
         // The stream's own rate: 0 is "as the screen changes", and a fixed
         // rate of 144 or 240 was refused while 60 was the most here.
         let (_, least, most) = range(Key::VideoFramerate);
