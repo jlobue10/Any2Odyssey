@@ -1,6 +1,7 @@
 //! Layout regressions, run without a window: the real `App::update` is
 //! driven through `egui::Context::run` with a fixed screen size, and the
-//! text the frame painted is read back with its position.
+//! text the frame painted is read back with its position, together with the
+//! accessibility tree: every control with its role, name, value and place.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,22 @@ const FRAME: f32 = 12.0;
 struct Painted {
     text: String,
     rect: Rect,
+    /// What the frame lets through of it: a scroll area, a truncating box.
+    clip: Rect,
+}
+
+/// One entry of the accessibility tree, as assistive software is given it.
+#[derive(Clone, Debug)]
+struct Widget {
+    id: egui::accesskit::NodeId,
+    role: egui::accesskit::Role,
+    /// Its own label, or the text of what it is labelled by.
+    name: String,
+    value: Option<String>,
+    number: Option<f64>,
+    rect: Rect,
+    disabled: bool,
+    focusable: bool,
 }
 
 struct Harness {
@@ -29,6 +46,11 @@ struct Harness {
     events: Vec<egui::output::OutputEvent>,
     /// Outlines the last frame stroked, with their colour.
     outlines: Vec<(Rect, egui::Color32)>,
+    /// The accessibility tree of the last frame, and what has the focus.
+    widgets: Vec<Widget>,
+    focus: Option<egui::accesskit::NodeId>,
+    /// Display scale: physical pixels per point.
+    scale: f32,
     app: App,
     core: Arc<Mutex<Core>>,
     ctx: egui::Context,
@@ -43,6 +65,7 @@ impl Harness {
             dir.path().join("test.log"),
         ))));
         let ctx = egui::Context::default();
+        ctx.enable_accesskit();
         theme::install_fonts(&ctx);
         let palette = Palette::for_dark(false);
         theme::apply(&ctx, &palette);
@@ -68,6 +91,9 @@ impl Harness {
         Harness {
             events: Vec::new(),
             outlines: Vec::new(),
+            widgets: Vec::new(),
+            focus: None,
+            scale: 1.0,
             app,
             core,
             ctx,
@@ -81,14 +107,21 @@ impl Harness {
     }
 
     fn input(&self, events: Vec<egui::Event>) -> egui::RawInput {
-        egui::RawInput {
+        let mut input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(
                 pos2(0.0, 0.0),
                 vec2(self.size.0, self.size.1),
             )),
             events,
+            focused: true,
             ..Default::default()
-        }
+        };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(self.scale);
+        input
     }
 
     fn run(&mut self, events: Vec<egui::Event>) -> Vec<Painted> {
@@ -101,10 +134,25 @@ impl Harness {
         let mut painted = Vec::new();
         self.outlines.clear();
         for clipped in &output.shapes {
-            collect(&clipped.shape, &mut painted, &mut self.outlines);
+            collect(
+                &clipped.shape,
+                clipped.clip_rect,
+                &mut painted,
+                &mut self.outlines,
+            );
+        }
+        if let Some(update) = &output.platform_output.accesskit_update {
+            self.focus = Some(update.focus);
+            self.widgets = widgets_of(update);
         }
         self.events = output.platform_output.events;
         painted
+    }
+
+    /// The widget that has the keyboard focus, if one has.
+    fn focused(&self) -> Option<&Widget> {
+        let focus = self.focus?;
+        self.widgets.iter().find(|w| w.id == focus && w.focusable)
     }
 
     fn press(&mut self, key: egui::Key) -> Vec<Painted> {
@@ -146,12 +194,61 @@ impl Harness {
     }
 }
 
-fn collect(shape: &egui::Shape, out: &mut Vec<Painted>, outlines: &mut Vec<(Rect, egui::Color32)>) {
+/// The tree's entries with their names resolved.
+fn widgets_of(update: &egui::accesskit::TreeUpdate) -> Vec<Widget> {
+    use egui::accesskit::Action;
+    let label_of = |id: &egui::accesskit::NodeId| {
+        update
+            .nodes
+            .iter()
+            .find(|(other, _)| other == id)
+            .and_then(|(_, node)| node.label().or(node.value()))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    update
+        .nodes
+        .iter()
+        .filter_map(|(id, node)| {
+            let bounds = node.bounds()?;
+            let name = match node.label() {
+                Some(label) if !label.is_empty() => label.to_owned(),
+                _ => node
+                    .labelled_by()
+                    .iter()
+                    .map(label_of)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            };
+            Some(Widget {
+                id: *id,
+                role: node.role(),
+                name,
+                value: node.value().map(str::to_owned),
+                number: node.numeric_value(),
+                rect: Rect::from_min_max(
+                    pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    pos2(bounds.x1 as f32, bounds.y1 as f32),
+                ),
+                disabled: node.is_disabled(),
+                focusable: node.supports_action(Action::Focus),
+            })
+        })
+        .collect()
+}
+
+fn collect(
+    shape: &egui::Shape,
+    clip: Rect,
+    out: &mut Vec<Painted>,
+    outlines: &mut Vec<(Rect, egui::Color32)>,
+) {
     match shape {
-        egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, out, outlines)),
+        egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| collect(s, clip, out, outlines)),
         egui::Shape::Text(text) => out.push(Painted {
             text: text.galley.text().to_owned(),
             rect: Rect::from_min_size(text.pos, text.galley.size()),
+            clip,
         }),
         egui::Shape::Rect(rect) if rect.stroke.width > 0.0 => {
             outlines.push((rect.rect, rect.stroke.color));
@@ -578,5 +675,689 @@ fn no_page_panics_in_a_window_smaller_than_its_margins() {
         ] {
             Harness::new(size, page).settle();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The sweep: every page in every state at every size, display scale and zoom
+// a user can reach, checked through what the frame painted and through the
+// accessibility tree (the same one a screen reader is given).
+// ---------------------------------------------------------------------------
+
+mod sweep {
+    use std::collections::HashSet;
+
+    use any2odyssey_core::about::{AboutInfo, InstallRecord};
+    use any2odyssey_core::update::{evaluate_latest_release, UpdateState};
+    use egui::accesskit::Role;
+
+    use super::*;
+    use crate::ui::viewer::{Input, Options, Output, ViewerState};
+
+    type Setup = Box<dyn Fn(&mut Harness)>;
+
+    /// A deep folder and a file name in four scripts.
+    fn long_path() -> String {
+        let mut path = String::from("/home/someone/Pictures");
+        for i in 0..14 {
+            path.push_str(&format!("/a rather long folder name {i:02}"));
+        }
+        path.push_str("/モンスターハンター שלום مرحبا 한국어 side-by-side.png");
+        path
+    }
+
+    /// A newer release with notes as long as they are kept.
+    fn update_available() -> UpdateState {
+        let notes: String = (1..60)
+            .map(|i| {
+                format!("- Item {i}: a release note line that says what changed and wraps.\\n")
+            })
+            .collect();
+        let body = format!(
+            r#"{{"tag_name":"v99.9.9","published_at":"2027-01-02T03:04:05Z","body":"{notes}","assets":[
+            {{"name":"Any2Odyssey-99.9.9-windows-x64.zip","browser_download_url":"https://github.com/jlobue10/Any2Odyssey/releases/download/v99.9.9/Any2Odyssey-99.9.9-windows-x64.zip"}},
+            {{"name":"Any2Odyssey-99.9.9-windows-x64-setup.exe","browser_download_url":"https://github.com/jlobue10/Any2Odyssey/releases/download/v99.9.9/Any2Odyssey-99.9.9-windows-x64-setup.exe"}}]}}"#
+        );
+        let state =
+            UpdateState::from_result(evaluate_latest_release(&body).map_err(|e| format!("{e:?}")));
+        assert!(state.available().is_some());
+        state
+    }
+
+    fn viewer(input: Input, output: Output) -> ViewerState {
+        ViewerState::for_layout(
+            Options {
+                input,
+                output,
+                ..Options::default()
+            },
+            crate::ui::viewer::READY,
+            "",
+            None,
+        )
+    }
+
+    /// The controls with everything long that can be long.
+    fn crowded_controls(h: &mut Harness) {
+        h.app.tray_failed = true;
+        {
+            let mut core = h.core();
+            core.hotkeys_ok = false;
+            core.status = long_statuses()[0].clone();
+            core.prefs.mode = CaptureMode::Window;
+            core.windows = LONG_TITLES
+                .iter()
+                .enumerate()
+                .map(|(i, title)| WindowChoice {
+                    handle: i as isize + 1,
+                    title: (*title).to_owned(),
+                })
+                .collect();
+            core.selected_window = Some(1);
+        }
+        // The widest readouts, and with them the "Unapplied changes" hint.
+        h.app.controls.depth_pos = 200;
+        h.app.controls.pop_pos = -100;
+    }
+
+    /// The viewer with every row it has, the widest numbers and a path, a
+    /// status and a complaint that are each several windows wide.
+    fn crowded_viewer(h: &mut Harness) {
+        let path = long_path();
+        h.app.viewer = ViewerState::for_layout(
+            Options {
+                input: Input::Desktop,
+                output: Output::Lens,
+                depth_pos: 200,
+                pop_pos: -100,
+                sharp_pos: 100,
+                steady_pos: 95,
+                ..Options::default()
+            },
+            &format!("Preview saved to {path}."),
+            &path,
+            Some(&format!(
+                "Could not save {path}: Permission denied (os error 13)"
+            )),
+        );
+    }
+
+    fn installed_somewhere_deep(h: &mut Harness) {
+        h.core().update = UpdateState::Failed("error sending request for url (https://api.github.com/repos/jlobue10/Any2Odyssey/releases/latest): client error (Connect): dns error: No such host is known. (os error 11001)".into());
+        let folder: String = std::iter::once("C:".to_owned())
+            .chain((0..24).map(|i| format!("\\DeeplyNestedFolder{i:02}")))
+            .collect();
+        let record = InstallRecord {
+            installed: Some("2026-11-08T14:10:33.1234567-05:00".into()),
+            version: Some("0.8.6".into()),
+            previous_version: Some("0.8.5".into()),
+            action: Some("Upgrade".into()),
+            app: Some(format!("{folder}\\Any2Odyssey.exe")),
+            controls_only: true,
+            worker: Some(format!("{folder}\\Any2OdysseyWorker.exe")),
+            hash: Some("0123456789abcdef".repeat(4)),
+        };
+        h.app.about = AboutState::with_info(AboutInfo::assemble(
+            "0.8.6",
+            Some("0123456789ab"),
+            Some(std::path::PathBuf::from(&folder)),
+            Ok(Some(record)),
+        ));
+    }
+
+    /// Every page in every state that changes what is on it.
+    fn states() -> Vec<(String, Page, Setup)> {
+        let mut out: Vec<(String, Page, Setup)> = vec![
+            ("controls".into(), Page::Controls, Box::new(|_| {})),
+            (
+                "controls, crowded".into(),
+                Page::Controls,
+                Box::new(crowded_controls),
+            ),
+        ];
+        for (i, status) in long_statuses().into_iter().enumerate() {
+            out.push((
+                format!("controls, long status {i}"),
+                Page::Controls,
+                Box::new(move |h| h.core().status = status.clone()),
+            ));
+        }
+        for output in [Output::Anaglyph, Output::Sbs, Output::Odyssey, Output::Lens] {
+            for input in [Input::Pair, Input::Ai, Input::Flat, Input::Desktop] {
+                out.push((
+                    format!("viewer, {output:?} from {input:?}"),
+                    Page::Viewer,
+                    Box::new(move |h| h.app.viewer = viewer(input, output)),
+                ));
+            }
+        }
+        out.push((
+            "viewer, crowded".into(),
+            Page::Viewer,
+            Box::new(crowded_viewer),
+        ));
+        for (i, topic) in any2odyssey_core::help::topics().iter().enumerate() {
+            out.push((
+                format!("help, {}", topic.id),
+                Page::Help,
+                Box::new(move |h| h.app.help.selected = i),
+            ));
+        }
+        out.push(("about".into(), Page::About, Box::new(|_| {})));
+        out.push((
+            "about, update available".into(),
+            Page::About,
+            Box::new(|h| h.core().update = update_available()),
+        ));
+        out.push((
+            "about, checking".into(),
+            Page::About,
+            Box::new(|h| h.core().update = UpdateState::Checking),
+        ));
+        out.push((
+            "about, check failed, installed deep".into(),
+            Page::About,
+            Box::new(installed_somewhere_deep),
+        ));
+        out
+    }
+
+    /// Window sizes in points with the display scale they come with: the
+    /// default and the smallest window at every scale Windows and the Linux
+    /// desktops offer, the window maximized on the common screens, the odd
+    /// shapes a tiling window manager makes, and the default window with the
+    /// zoom at both ends of what [`largest_zoom`] leaves (0.2 to 1.7).
+    fn sizes() -> Vec<(f32, f32, f32)> {
+        let mut out = Vec::new();
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
+            out.push((980.0, 780.0, scale));
+            out.push((700.0, 580.0, scale));
+        }
+        out.extend([
+            (1280.0, 720.0, 1.0),  // 1280x720
+            (1920.0, 1080.0, 1.0), // 1920x1080
+            (3840.0, 2160.0, 1.0), // 4K at 100 %
+            (2560.0, 1440.0, 1.5), // 4K at 150 %
+            (1920.0, 1080.0, 2.0), // 4K at 200 %
+            (1536.0, 864.0, 1.25), // 1920x1080 at 125 %
+            (1280.0, 720.0, 1.5),  // 1920x1080 at 150 %
+            (700.0, 2000.0, 1.0),
+            (3000.0, 580.0, 1.0),
+            (888.0, 580.0, 1.0), // the narrowest window with two columns
+            (887.0, 580.0, 1.0), // the widest with one
+            (980.0 / 1.7, 780.0 / 1.7, 1.7),
+            (980.0 / 1.5, 780.0 / 1.5, 1.5),
+            (980.0 / 1.1, 780.0 / 1.1, 1.1),
+            (980.0 / 0.5, 780.0 / 0.5, 0.5),
+        ]);
+        out
+    }
+
+    /// What a user operates: it needs a name, room, and a place of its own.
+    fn operable(w: &Widget) -> bool {
+        matches!(
+            w.role,
+            Role::Button
+                | Role::CheckBox
+                | Role::Slider
+                | Role::ComboBox
+                | Role::TextInput
+                | Role::SpinButton
+                | Role::Link
+        )
+    }
+
+    fn short(text: &str) -> String {
+        text.chars().take(40).collect()
+    }
+
+    /// The checks of one frame. Returns what is wrong, in words.
+    fn faults(h: &Harness, painted: &[Painted]) -> Vec<String> {
+        let (width, _) = h.size;
+        let mut faults = Vec::new();
+        for p in painted {
+            let clipped =
+                p.rect.left() < p.clip.left() - 0.5 || p.rect.right() > p.clip.right() + 0.5;
+            // A text field scrolls what it holds; nothing else may be cut.
+            if clipped
+                && !h
+                    .widgets
+                    .iter()
+                    .any(|w| w.role == Role::TextInput && w.rect.expand(4.0).contains_rect(p.clip))
+            {
+                faults.push(format!("text cut off sideways: {:?}", short(&p.text)));
+            }
+            if !clipped && (p.rect.left() < FRAME - 2.5 || p.rect.right() > width - FRAME + 0.5) {
+                faults.push(format!(
+                    "text outside the window frame: {:?} spans x {:.0}..{:.0}",
+                    short(&p.text),
+                    p.rect.left(),
+                    p.rect.right()
+                ));
+            }
+        }
+        let widgets: Vec<&Widget> = h.widgets.iter().filter(|w| operable(w)).collect();
+        for w in &widgets {
+            let what = format!("{:?} {:?}", w.role, short(&w.name));
+            if w.name.trim().is_empty() {
+                faults.push(format!(
+                    "no name for assistive software: {:?} with value {:?} / {:?} at {:.0},{:.0}",
+                    w.role,
+                    w.value,
+                    w.number,
+                    w.rect.left(),
+                    w.rect.top()
+                ));
+            }
+            if w.rect.left() < FRAME - 0.5 || w.rect.right() > width - FRAME + 0.5 {
+                faults.push(format!(
+                    "cut by the window's edge: {what} spans x {:.0}..{:.0}",
+                    w.rect.left(),
+                    w.rect.right()
+                ));
+            }
+            // Links are lines of text, as high as their text, and the path
+            // box is a line of text with a frame: 20 points.
+            if w.role != Role::Link && (w.rect.width() < 24.0 || w.rect.height() < 19.5) {
+                faults.push(format!(
+                    "too small to hit: {what} is {:.0}x{:.0}",
+                    w.rect.width(),
+                    w.rect.height()
+                ));
+            }
+        }
+        for (i, a) in widgets.iter().enumerate() {
+            for b in &widgets[i + 1..] {
+                let both = a.rect.intersect(b.rect);
+                if both.width() > 1.0 && both.height() > 1.0 {
+                    faults.push(format!(
+                        "two controls in one place: {:?} {:?} and {:?} {:?}",
+                        a.role,
+                        short(&a.name),
+                        b.role,
+                        short(&b.name)
+                    ));
+                }
+            }
+        }
+        // A button or a checkbox reacts where it is drawn: no wider than
+        // its text and what is drawn around it.
+        for w in widgets
+            .iter()
+            .filter(|w| matches!(w.role, Role::Button | Role::CheckBox))
+        {
+            let text = painted
+                .iter()
+                .filter(|p| p.text == w.name && w.rect.expand(2.0).contains_rect(p.rect))
+                .map(|p| p.rect.width())
+                .fold(0.0, f32::max);
+            // The fixed-size buttons: the two primary ones and the title
+            // bar's squares. A help topic is a row of the topic list.
+            let fixed = w.rect.width() <= 190.5 && w.rect.height() == 34.0;
+            let topic = h.app.page == Page::Help && w.rect.left() < 0.3 * width;
+            if text > 0.0 && !fixed && !topic && w.rect.width() > text + 44.0 {
+                faults.push(format!(
+                    "reacts beyond what is drawn: {:?} {:?} is {:.0} wide around {:.0} of text",
+                    w.role,
+                    short(&w.name),
+                    w.rect.width(),
+                    text
+                ));
+            }
+        }
+        faults
+    }
+
+    #[test]
+    fn every_page_holds_at_every_size_scale_and_zoom() {
+        let mut wrong = Vec::new();
+        for (name, page, setup) in states() {
+            for (width, height, scale) in sizes() {
+                let mut h = Harness::new((width, height), page);
+                h.scale = scale;
+                setup(&mut h);
+                let painted = h.settle();
+                assert!(!h.widgets.is_empty(), "{name}: no accessibility tree");
+                for fault in faults(&h, &painted) {
+                    wrong.push(format!(
+                        "{name} at {width:.0}x{height:.0} scale {scale}: {fault}"
+                    ));
+                }
+            }
+        }
+        wrong.dedup();
+        assert!(
+            wrong.is_empty(),
+            "{} fault(s):\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    /// The names and values a screen reader is given for the controls that
+    /// have no text of their own.
+    #[test]
+    fn sliders_boxes_and_fields_are_named_after_their_rows() {
+        let named = |h: &Harness, role: Role| -> Vec<String> {
+            let mut names: Vec<String> = h
+                .widgets
+                .iter()
+                .filter(|w| w.role == role)
+                .map(|w| w.name.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        let mut h = Harness::new(SIZES[0], Page::Controls);
+        h.settle();
+        assert_eq!(named(&h, Role::Slider), ["Depth strength", "Pop-out"]);
+        assert_eq!(
+            named(&h, Role::ComboBox),
+            ["Capture", "Input format", "Source window"]
+        );
+        let depth = h
+            .widgets
+            .iter()
+            .find(|w| w.name == "Depth strength")
+            .unwrap();
+        assert_eq!(depth.number, Some(90.0), "the slider's value is exposed");
+        let capture = h.widgets.iter().find(|w| w.name == "Capture").unwrap();
+        assert_eq!(capture.value.as_deref(), Some(CaptureMode::Desktop.label()));
+
+        let mut h = Harness::new(SIZES[0], Page::Viewer);
+        crowded_viewer(&mut h);
+        h.settle();
+        assert_eq!(
+            named(&h, Role::Slider),
+            ["Depth steadiness", "Depth strength", "Pop-out", "Sharpness"]
+        );
+        assert_eq!(
+            named(&h, Role::ComboBox),
+            ["Depth detail", "Detail", "Input format", "Output format"]
+        );
+        assert_eq!(
+            named(&h, Role::SpinButton),
+            ["Lens pitch", "Offset", "Slant"]
+        );
+        assert_eq!(named(&h, Role::TextInput), ["Image"]);
+    }
+
+    /// Press Tab until the focus is back where it started; every stop with
+    /// its name, after the page has had time to scroll to it.
+    fn tab_stops(h: &mut Harness) -> Vec<Widget> {
+        let mut stops: Vec<Widget> = Vec::new();
+        let mut seen = HashSet::new();
+        for _ in 0..120 {
+            h.press(egui::Key::Tab);
+            // A scroll to the focused control takes up to 0.3 seconds, and
+            // a frame without a clock counts as 1/60.
+            for _ in 0..24 {
+                h.run(Vec::new());
+            }
+            let Some(focused) = h.focused().cloned() else {
+                continue;
+            };
+            if !seen.insert(focused.id) {
+                break;
+            }
+            stops.push(focused);
+        }
+        stops
+    }
+
+    #[test]
+    fn tab_goes_left_to_right_through_the_title_bar_and_the_page_follows_the_focus() {
+        // The smallest window, where every page is longer than the window,
+        // and the default one, where the Linux viewer is.
+        for (size, page, setup) in [
+            (
+                SIZES[1],
+                Page::Controls,
+                Box::new(crowded_controls) as Setup,
+            ),
+            (SIZES[1], Page::Viewer, Box::new(crowded_viewer)),
+            (SIZES[0], Page::Viewer, Box::new(crowded_viewer)),
+            (
+                SIZES[1],
+                Page::About,
+                Box::new(|h| h.core().update = update_available()),
+            ),
+            (SIZES[1], Page::Help, Box::new(|h| h.app.help.selected = 6)),
+        ] {
+            let mut h = Harness::new(size, page);
+            setup(&mut h);
+            h.settle();
+            let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(size.0, size.1));
+            let content = Rect::from_min_max(
+                pos2(FRAME, FRAME + TITLEBAR_HEIGHT),
+                pos2(size.0 - FRAME, size.1 - FRAME),
+            );
+            // What can be operated before a key is pressed. (A link that
+            // is scrolled out of view has no role or name yet: egui gives
+            // text those when it is laid out in view.)
+            let operable_at_first: Vec<Widget> = h
+                .widgets
+                .iter()
+                .filter(|w| operable(w) && w.focusable && !w.disabled)
+                .cloned()
+                .collect();
+            let stops = tab_stops(&mut h);
+            let names: Vec<&str> = stops.iter().map(|w| w.name.as_str()).collect();
+            // Reading order, and nothing before About: the title bar's drag
+            // area and the page's background used to be stops of their own.
+            assert_eq!(
+                names[..7],
+                [
+                    "About",
+                    "Help",
+                    "Dark",
+                    "Minimize",
+                    "Maximize / restore",
+                    "Minimize",
+                    "Close"
+                ],
+                "{names:?}"
+            );
+            for (i, stop) in stops.iter().enumerate() {
+                if stop.role == Role::Unknown {
+                    // egui's own: a scrolling area and its bar. Nothing of
+                    // this program's is a stop without a name.
+                    assert!(i >= 7, "an unnamed stop in the title bar: {names:?}");
+                    continue;
+                }
+                assert!(!stop.name.is_empty(), "stop {i} has no name: {stop:?}");
+                assert!(
+                    window.contains_rect(stop.rect),
+                    "{:?} has the focus at {:?}, outside the {size:?} window",
+                    stop.name,
+                    stop.rect
+                );
+                if i >= 7 {
+                    assert!(
+                        content.expand(1.0).contains_rect(stop.rect),
+                        "{:?} has the focus at {:?}, under the title bar or the frame",
+                        stop.name,
+                        stop.rect
+                    );
+                }
+            }
+            // Tab reached everything that can be operated.
+            for widget in &operable_at_first {
+                assert!(
+                    stops.iter().any(|stop| stop.id == widget.id),
+                    "Tab never reached {:?} {:?}: {names:?}",
+                    widget.role,
+                    widget.name
+                );
+            }
+            assert!(operable_at_first.len() >= 8, "{names:?}");
+        }
+    }
+
+    /// Tab until the control called `name` has the focus.
+    fn tab_to(h: &mut Harness, name: &str) {
+        for _ in 0..60 {
+            h.press(egui::Key::Tab);
+            h.settle();
+            if h.focused().is_some_and(|w| w.name == name) {
+                return;
+            }
+        }
+        panic!("Tab never reached {name:?}");
+    }
+
+    #[test]
+    fn the_keyboard_alone_operates_sliders_checkboxes_lists_and_buttons() {
+        let mut h = Harness::new(SIZES[0], Page::Controls);
+        h.settle();
+        // A slider moves with the arrow keys, one step a press.
+        tab_to(&mut h, "Depth strength");
+        h.press(egui::Key::ArrowRight);
+        h.press(egui::Key::ArrowRight);
+        h.press(egui::Key::ArrowLeft);
+        assert_eq!(h.app.controls.depth_pos, 91);
+        let painted = h.settle();
+        find(&painted, "0.91");
+        find(&painted, "Unapplied changes");
+        // Space ticks a checkbox; this one saves at once.
+        assert!(h.core().prefs.auto_convert);
+        tab_to(&mut h, "Convert automatically when this app opens");
+        h.press(egui::Key::Space);
+        h.settle();
+        assert!(!h.core().prefs.auto_convert);
+        // Space opens a list, Escape closes it without a choice.
+        tab_to(&mut h, "Capture");
+        h.press(egui::Key::Space);
+        let painted = h.settle();
+        find(&painted, CaptureMode::Window.label());
+        h.press(egui::Key::Escape);
+        let painted = h.settle();
+        assert!(try_find(&painted, CaptureMode::Window.label()).is_none());
+        assert_eq!(h.app.controls.mode, CaptureMode::Desktop);
+        // Enter presses a button: Apply takes the slider's new value.
+        tab_to(&mut h, "Apply settings / restart conversion");
+        h.press(egui::Key::Enter);
+        h.settle();
+        assert_eq!(h.core().prefs.depth, 0.91);
+        // F1 opens Help from anywhere, a text field included.
+        let mut h = Harness::new(SIZES[0], Page::Viewer);
+        h.settle();
+        tab_to(&mut h, "Image");
+        h.press(egui::Key::F1);
+        h.settle();
+        assert!(h.app.page == Page::Help);
+    }
+
+    /// Click at `at`; what the click reported as clicked or focused.
+    fn clicked(h: &mut Harness, at: egui::Pos2) -> Vec<(bool, String, Option<bool>)> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        h.run(vec![egui::Event::PointerMoved(at)]);
+        h.run(vec![button(true)]);
+        let mut events = reported(&h.events);
+        h.run(vec![button(false)]);
+        events.extend(reported(&h.events));
+        h.settle();
+        events
+    }
+
+    #[test]
+    fn a_click_beside_a_button_or_a_checkbox_is_not_a_click_on_it() {
+        // Two columns, as in the default window, and high enough to show
+        // all of the page: only what is in view is painted and found.
+        let mut h = Harness::new((SIZES[0].0, 2000.0), Page::Viewer);
+        crowded_viewer(&mut h);
+        let painted = h.settle();
+        for name in [
+            "Reset lens numbers",
+            "Save preview PNG…",
+            "Choose another screen",
+            "Show the calibration pattern",
+            "Swap left and right eyes",
+        ] {
+            let text = find(&painted, name).rect;
+            // The same row, 150 points to the right of the text: the card.
+            let beside = pos2(text.right() + 150.0, text.center().y);
+            assert_eq!(clicked(&mut h, beside), vec![], "a click beside {name:?}");
+        }
+        // On it, it is one.
+        let text = find(&painted, "Show the calibration pattern").rect;
+        assert_eq!(
+            clicked(&mut h, text.center()),
+            vec![(true, "Show the calibration pattern".to_owned(), Some(true))]
+        );
+
+        let mut h = Harness::new(SIZES[0], Page::Controls);
+        let painted = h.settle();
+        let before = h.core().prefs.clone();
+        for name in [
+            "Convert automatically when this app opens",
+            "Recover if the conversion process stops",
+            "Keep 3D above apps without taking focus",
+        ] {
+            let text = find(&painted, name).rect;
+            let column_end = if text.left() < 400.0 { 480.0 } else { 944.0 };
+            assert!(text.right() + 30.0 < column_end, "{name}");
+            let beside = pos2(column_end - 6.0, text.center().y);
+            assert_eq!(clicked(&mut h, beside), vec![], "a click beside {name:?}");
+        }
+        assert_eq!(h.core().prefs, before);
+        assert!(!h.app.controls.dirty(&h.core()));
+    }
+
+    #[test]
+    fn zoom_stops_where_the_title_bar_is_still_whole() {
+        assert_eq!(largest_zoom(980.0), 1.7);
+        assert_eq!(largest_zoom(700.0), 1.2);
+        assert_eq!(largest_zoom(2560.0), 4.5);
+        // A window forced narrower than the page still shows at zoom 1.
+        assert_eq!(largest_zoom(300.0), 1.0);
+        assert_eq!(largest_zoom(0.0), 1.0);
+        // The default window, 980 pixels wide, zoomed as far as the keys go:
+        // every frame gets the points the zoom of the frame before left.
+        let mut h = Harness::new(SIZES[0], Page::Controls);
+        h.ctx.set_zoom_factor(5.0);
+        let mut painted = Vec::new();
+        for _ in 0..6 {
+            let zoom = h.ctx.zoom_factor();
+            h.size = (980.0 / zoom, 780.0 / zoom);
+            h.scale = 1.0;
+            painted = h.run(Vec::new());
+        }
+        assert_eq!(h.ctx.zoom_factor(), 1.7);
+        assert_eq!(faults(&h, &painted), Vec::<String>::new());
+        // The title and the leftmost button side by side.
+        let title = find(&painted, "ANY2ODYSSEY").rect;
+        let about = find(&painted, "About").rect;
+        assert!(title.right() < about.left() - 13.0, "{title:?} {about:?}");
+        // Zooming out is not held back, and neither is 1.0 anywhere.
+        h.ctx.set_zoom_factor(0.2);
+        for _ in 0..3 {
+            let zoom = h.ctx.zoom_factor();
+            h.size = (980.0 / zoom, 780.0 / zoom);
+            h.run(Vec::new());
+        }
+        assert_eq!(h.ctx.zoom_factor(), 0.2);
+    }
+
+    /// The tree above comes from egui; whether a screen reader is given it
+    /// is decided by a feature of eframe, which the tests cannot see. With
+    /// `default-features = false` and no "accesskit" the program had none,
+    /// on Windows (UI Automation showed the window and nothing in it) and on
+    /// Linux (not on the accessibility bus), for as long as it named its
+    /// buttons "for assistive software".
+    #[test]
+    fn the_program_is_built_with_the_accessibility_tree() {
+        let manifest = include_str!("../../Cargo.toml");
+        let eframe = manifest
+            .lines()
+            .find(|line| line.starts_with("eframe = "))
+            .expect("the eframe dependency");
+        assert!(eframe.contains("default-features = false"), "{eframe}");
+        assert!(eframe.contains("\"accesskit\""), "{eframe}");
     }
 }

@@ -252,7 +252,13 @@ lock_prefix() {
     [ "$held" = 1 ] || return 0
     say "   another installation or removal is at work in $PREFIX; waiting for it to finish"
     if have timeout; then
-        timeout 300 flock 9 2>/dev/null || warn "it has not finished in five minutes; going on beside it"
+        # --foreground: by itself GNU's timeout moves into a process group of its own, where Ctrl+C at the
+        # terminal reaches neither it nor the flock it started. bash then waited on, for up to the five
+        # minutes, and went on to install after the Ctrl+C; dash ended, but only when the wait was over.
+        # BusyBox's timeout does not know the option and stays in this group anyway.
+        waiting="timeout 300"
+        if timeout --foreground 300 true 2>/dev/null; then waiting="timeout --foreground 300"; fi
+        $waiting flock 9 2>/dev/null || warn "it has not finished in five minutes; going on beside it"
     else
         flock 9 2>/dev/null || true
     fi
@@ -351,6 +357,13 @@ if [ -z "$PACKAGED" ]; then
             exit 1
         fi
         libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || libc=
+        # A loader of that name is not glibc yet: Alpine's gcompat package puts one in front of musl. The
+        # program does not start with it ("Error relocating ...: mallopt: symbol not found"), and with
+        # PipeWire's library and libxkbcommon installed the last line said Done all the same.
+        if [ -z "$libc" ] && [ -e "$TEST_ROOT/lib/ld-musl-x86_64.so.1" ]; then
+            echo "install: this system cannot run the program: it is built for the GNU C library (glibc $GLIBC_MIN or newer), and the C library here is musl (Alpine Linux and others). The loader $LOADER that a compatibility package provides (Alpine's gcompat) does not start it; nothing was installed." >&2
+            exit 1
+        fi
         minor=${libc#glibc 2.}
         minor=${minor%%[!0-9]*}
         if [ "$libc" != "$minor" ] && [ -n "$minor" ] && [ "$minor" -lt "${GLIBC_MIN#2.}" ]; then

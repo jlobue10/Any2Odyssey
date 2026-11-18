@@ -6,7 +6,7 @@ The Linux packages contain most of the same crates and further ones (the desktop
 
 ## Rust crates
 
-The 161 crates below are the normal (non-build, non-test) dependencies of the `any2odyssey` binary for the `x86_64-pc-windows-msvc` target, as `Cargo.lock` resolves them. Their licenses are permissive (MIT, Apache-2.0, Zlib, BSD, ISC, BSL-1.0, Unicode-3.0, 0BSD, Unlicense) or file-level copyleft compatible with the GPL (MPL-2.0 for `option-ext`); the `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` entry is `epaint_default_fonts`, whose embedded fonts are listed under "Fonts embedded in the application". The license each crate is used under, its copyright notices and the full license texts are in [License texts and copyright notices for the Rust crates](#license-texts-and-copyright-notices-for-the-rust-crates) below.
+The 176 crates below are the normal (non-build, non-test) dependencies of the `any2odyssey` binary for the `x86_64-pc-windows-msvc` target, as `Cargo.lock` resolves them. Their licenses are permissive (MIT, Apache-2.0, Zlib, BSD, ISC, BSL-1.0, Unicode-3.0, 0BSD, Unlicense) or file-level copyleft compatible with the GPL (MPL-2.0 for `option-ext`); the `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` entry is `epaint_default_fonts`, whose embedded fonts are listed under "Fonts embedded in the application". The license each crate is used under, its copyright notices and the full license texts are in [License texts and copyright notices for the Rust crates](#license-texts-and-copyright-notices-for-the-rust-crates) below.
 
 Regenerate the table after changing dependencies (CI compares both tables of this file and the number above with this command's output; `scripts/third-party-linux.py` does it and says what differs):
 
@@ -18,6 +18,10 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | --- | --- | --- |
 | `ab_glyph` | 0.2.32 | Apache-2.0 |
 | `ab_glyph_rasterizer` | 0.1.10 | Apache-2.0 |
+| `accesskit` | 0.21.1 | MIT OR Apache-2.0 |
+| `accesskit_consumer` | 0.31.0 | MIT OR Apache-2.0 |
+| `accesskit_windows` | 0.29.2 | MIT OR Apache-2.0 |
+| `accesskit_winit` | 0.29.2 | Apache-2.0 |
 | `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 |
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 |
@@ -55,6 +59,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT |
 | `fdeflate` | 0.3.7 | MIT OR Apache-2.0 |
 | `flate2` | 1.1.11 | MIT OR Apache-2.0 |
+| `foldhash` | 0.1.5 | Zlib |
 | `foldhash` | 0.2.0 | Zlib |
 | `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 |
 | `generic-array` | 0.14.7 | MIT |
@@ -65,6 +70,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `glutin-winit` | 0.5.0 | MIT |
 | `glutin_egl_sys` | 0.7.1 | Apache-2.0 |
 | `glutin_wgl_sys` | 0.6.1 | Apache-2.0 |
+| `hashbrown` | 0.15.5 | MIT OR Apache-2.0 |
 | `hashbrown` | 0.17.1 | MIT OR Apache-2.0 |
 | `html-escape` | 0.2.15 | MIT |
 | `icu_collections` | 2.4.0 | Unicode-3.0 |
@@ -145,15 +151,23 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 |
 | `webbrowser` | 1.2.6 | MIT OR Apache-2.0 |
 | `winapi-util` | 0.1.11 | Unlicense OR MIT |
+| `windows` | 0.61.3 | MIT OR Apache-2.0 |
 | `windows` | 0.62.2 | MIT OR Apache-2.0 |
+| `windows-collections` | 0.2.0 | MIT OR Apache-2.0 |
 | `windows-collections` | 0.3.2 | MIT OR Apache-2.0 |
+| `windows-core` | 0.61.2 | MIT OR Apache-2.0 |
 | `windows-core` | 0.62.2 | MIT OR Apache-2.0 |
+| `windows-future` | 0.2.1 | MIT OR Apache-2.0 |
 | `windows-future` | 0.3.2 | MIT OR Apache-2.0 |
 | `windows-implement` | 0.60.2 | MIT OR Apache-2.0 |
 | `windows-interface` | 0.59.3 | MIT OR Apache-2.0 |
+| `windows-link` | 0.1.3 | MIT OR Apache-2.0 |
 | `windows-link` | 0.2.1 | MIT OR Apache-2.0 |
+| `windows-numerics` | 0.2.0 | MIT OR Apache-2.0 |
 | `windows-numerics` | 0.3.1 | MIT OR Apache-2.0 |
+| `windows-result` | 0.3.4 | MIT OR Apache-2.0 |
 | `windows-result` | 0.4.1 | MIT OR Apache-2.0 |
+| `windows-strings` | 0.4.2 | MIT OR Apache-2.0 |
 | `windows-strings` | 0.5.1 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.52.0 | MIT OR Apache-2.0 |
 | `windows-sys` | 0.59.0 | MIT OR Apache-2.0 |
@@ -161,6 +175,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `windows-sys` | 0.61.2 | MIT OR Apache-2.0 |
 | `windows-targets` | 0.52.6 | MIT OR Apache-2.0 |
 | `windows-targets` | 0.53.5 | MIT OR Apache-2.0 |
+| `windows-threading` | 0.1.0 | MIT OR Apache-2.0 |
 | `windows-threading` | 0.2.1 | MIT OR Apache-2.0 |
 | `windows_x86_64_msvc` | 0.52.6 | MIT OR Apache-2.0 |
 | `windows_x86_64_msvc` | 0.53.1 | MIT OR Apache-2.0 |
@@ -188,6 +203,10 @@ The notices are the copyright lines of the license and copyright files in each c
 | --- | --- | --- |
 | `ab_glyph` 0.2.32 | Apache-2.0 | no notice in the package; authors per its manifest: Alex Butler |
 | `ab_glyph_rasterizer` 0.1.10 | Apache-2.0 | no notice in the package; authors per its manifest: Alex Butler |
+| `accesskit` 0.21.1 | MIT | no notice in the package; authors per its manifest: The AccessKit contributors |
+| `accesskit_consumer` 0.31.0 | MIT | no notice in the package; authors per its manifest: The AccessKit contributors |
+| `accesskit_windows` 0.29.2 | MIT | no notice in the package; authors per its manifest: The AccessKit contributors |
+| `accesskit_winit` 0.29.2 | Apache-2.0 | no notice in the package; authors per its manifest: The AccessKit contributors |
 | `adler2` 2.0.1 | MIT | `Copyright (C) Jonas Schievink <jonasschievink@gmail.com>` |
 | `ahash` 0.8.12 | MIT | `Copyright (c) 2018 Tom Kaitchuck` |
 | `anyhow` 1.0.104 | MIT | no notice in the package; authors per its manifest: David Tolnay |
@@ -225,6 +244,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `fastrand` 2.5.0 | MIT | no notice in the package; authors per its manifest: Stjepan Glavina |
 | `fdeflate` 0.3.7 | MIT | no notice in the package; authors per its manifest: The image-rs Developers |
 | `flate2` 1.1.11 | MIT | `Copyright (c) 2014-2026 Alex Crichton` |
+| `foldhash` 0.1.5 | Zlib | `Copyright (c) 2024 Orson Peters` |
 | `foldhash` 0.2.0 | Zlib | `Copyright (c) 2024 Orson Peters` |
 | `form_urlencoded` 1.2.2 | MIT | `Copyright (c) 2013-2016 The rust-url developers` |
 | `generic-array` 0.14.7 | MIT | `Copyright (c) 2015 Bartłomiej Kamiński` |
@@ -235,6 +255,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `glutin-winit` 0.5.0 | MIT | `Copyright © 2022 Kirill Chibisov` |
 | `glutin_egl_sys` 0.7.1 | Apache-2.0 | `Copyright 2022 Kirill Chibisov` |
 | `glutin_wgl_sys` 0.6.1 | Apache-2.0 | `Copyright 2022 Kirill Chibisov` |
+| `hashbrown` 0.15.5 | MIT | `Copyright (c) 2016 Amanieu d'Antras` |
 | `hashbrown` 0.17.1 | MIT | `Copyright (c) 2016 Amanieu d'Antras` |
 | `html-escape` 0.2.15 | MIT | `Copyright (c) 2020 magiclen.org (Ron Li)` |
 | `icu_collections` 2.4.0 | Unicode-3.0 | `Copyright © 2020-2024 Unicode, Inc.` |
@@ -315,15 +336,23 @@ The notices are the copyright lines of the license and copyright files in each c
 | `web-time` 1.1.0 | MIT | `Copyright 2023 dAxpeDDa` |
 | `webbrowser` 1.2.6 | MIT | `Copyright (c) 2015-2022 Amod Malviya` |
 | `winapi-util` 0.1.11 | MIT | `Copyright (c) 2017 Andrew Gallant` |
+| `windows` 0.61.3 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows` 0.62.2 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-collections` 0.2.0 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-collections` 0.3.2 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-core` 0.61.2 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-core` 0.62.2 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-future` 0.2.1 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-future` 0.3.2 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-implement` 0.60.2 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-interface` 0.59.3 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-link` 0.1.3 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-link` 0.2.1 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-numerics` 0.2.0 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-numerics` 0.3.1 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-result` 0.3.4 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-result` 0.4.1 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-strings` 0.4.2 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-strings` 0.5.1 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-sys` 0.52.0 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-sys` 0.59.0 | MIT | `Copyright (c) Microsoft Corporation.` |
@@ -331,6 +360,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `windows-sys` 0.61.2 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-targets` 0.52.6 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-targets` 0.53.5 | MIT | `Copyright (c) Microsoft Corporation.` |
+| `windows-threading` 0.1.0 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows-threading` 0.2.1 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows_x86_64_msvc` 0.52.6 | MIT | `Copyright (c) Microsoft Corporation.` |
 | `windows_x86_64_msvc` 0.53.1 | MIT | `Copyright (c) Microsoft Corporation.` |

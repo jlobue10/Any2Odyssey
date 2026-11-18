@@ -26,3 +26,5 @@ PKGBUILD text eol=lf
 *.def text eol=lf
 contrib/wine-lens/any2odyssey-weaver text eol=lf
 contrib/wine-lens/any2odyssey-lens-helper text eol=lf
+# Files saved by earlier releases, kept byte for byte (some have a byte-order mark and CR LF).
+crates/core/tests/fixtures/releases/**/*.json -text

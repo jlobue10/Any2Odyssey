@@ -81,6 +81,22 @@ impl InstallRecord {
     }
 }
 
+/// A version as the releases are named. Installers up to 0.9.5 recorded the
+/// version they replaced the way Windows reports a file version, in four
+/// parts (`0.9.4.0`), beside an installed version in three (`0.9.5`). The
+/// fourth part of a release is always 0 and is not shown; anything else is
+/// shown as written.
+fn release_version(text: &str) -> &str {
+    let parts: Vec<&str> = text.split('.').collect();
+    let numbers = parts
+        .iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    match text.strip_suffix(".0") {
+        Some(three) if numbers && parts.len() == 4 => three,
+        _ => text,
+    }
+}
+
 /// How the running executable got where it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Installation {
@@ -177,7 +193,7 @@ impl AboutInfo {
             rows.push(("Installed version".to_owned(), version));
         }
         if let Some(previous) = text(&record.previous_version) {
-            rows.push(("Replaced".to_owned(), previous));
+            rows.push(("Replaced".to_owned(), release_version(&previous).to_owned()));
         }
         rows.push((
             "Package".to_owned(),
@@ -326,6 +342,44 @@ mod tests {
         assert_eq!(
             broken.installation(),
             Installation::Unreadable("bad".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_replaced_version_is_shown_as_the_releases_are_named() {
+        for (recorded, shown) in [
+            ("0.9.4.0", "0.9.4"),
+            ("0.8.0.0", "0.8.0"),
+            ("10.20.30.0", "10.20.30"),
+            // Already in three parts (a record made from another record,
+            // and every record since the installer writes them so).
+            ("0.9.4", "0.9.4"),
+            // A real fourth part, and anything that is not a version.
+            ("0.9.4.1", "0.9.4.1"),
+            ("0.9.4.00", "0.9.4.00"),
+            ("0.9.0", "0.9.0"),
+            ("0.0", "0.0"),
+            ("1.2.3.4.0", "1.2.3.4.0"),
+            ("0.9.x.0", "0.9.x.0"),
+            ("0.9..0", "0.9..0"),
+            (".0", ".0"),
+            ("", ""),
+        ] {
+            assert_eq!(release_version(recorded), shown, "{recorded}");
+        }
+        let record = InstallRecord {
+            version: Some("0.9.5".into()),
+            previous_version: Some(" 0.9.4.0 ".into()),
+            action: Some("Upgrade".into()),
+            ..Default::default()
+        };
+        let info = AboutInfo::assemble("0.9.5", None, None, Ok(Some(record)));
+        let Installation::Installed(rows) = info.installation() else {
+            panic!("not installed");
+        };
+        assert!(
+            rows.contains(&("Replaced".to_owned(), "0.9.4".to_owned())),
+            "{rows:?}"
         );
     }
 

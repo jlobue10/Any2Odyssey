@@ -28,6 +28,31 @@ use viewer::ViewerState;
 
 const TITLEBAR_HEIGHT: f32 = 54.0;
 const EDGE: f32 = 9.0;
+/// The side of the square title bar buttons.
+const CHROME_BUTTON: f32 = 34.0;
+/// The narrowest page, in points, whose title bar holds its seven buttons
+/// beside the title. Below it About runs over the title, and from about 400
+/// points About and Help leave the window on the left.
+const NARROWEST_PAGE: f32 = 560.0;
+
+/// The largest zoom a window `width` points wide at zoom 1 can take.
+///
+/// Ctrl+Plus, Ctrl+Minus and Ctrl+0 zoom every eframe window (0.2 to 5.0),
+/// and the window keeps its pixels: at 2.0 the default window is a page of
+/// 490 points, at 3.0 one of 327 with two title bar buttons outside it. The
+/// zoom stops where the page is still whole; a wider window zooms further.
+fn largest_zoom(width: f32) -> f32 {
+    ((width / NARROWEST_PAGE * 10.0).floor() / 10.0).max(1.0)
+}
+
+/// Bring a zoom the window is too narrow for back to [`largest_zoom`].
+fn limit_zoom(ctx: &egui::Context) {
+    let zoom = ctx.zoom_factor();
+    let most = largest_zoom(ctx.viewport_rect().width() * zoom);
+    if zoom > most + 0.001 {
+        ctx.set_zoom_factor(most);
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -448,7 +473,9 @@ impl App {
             widgets::display_font(14.0),
             color(p.text),
         );
-        let response = ui.interact(bar, ui.id().with("titlebar"), Sense::click_and_drag());
+        // Dragged and double-clicked, never focused: as a Tab stop it was the
+        // first one of the window, with nothing to show for it and no name.
+        let response = ui.interact(bar, ui.id().with("titlebar"), Sense::CLICK | Sense::DRAG);
         if response.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
@@ -456,13 +483,25 @@ impl App {
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
+        // The buttons end 14 points from the right edge and are made from
+        // left to right, which is the order Tab visits them in. Laid out
+        // from the right they were made, and visited, Close first.
+        let theme_label = if p.dark { "Light" } else { "Dark" };
+        let gap = ui.spacing().item_spacing.x;
+        let width = ["About", "Help", theme_label]
+            .iter()
+            .map(|text| widgets::gold_button_width(ui, text))
+            .sum::<f32>()
+            + 4.0 * CHROME_BUTTON
+            + 6.0 * gap;
+        let right = bar.right() - 14.0;
         let mut actions = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_max(
-                    pos2(bar.left() + 8.0, bar.top() + 6.0),
-                    pos2(bar.right() - 14.0, bar.bottom() - 8.0),
+                    pos2(right - width, bar.top() + 6.0),
+                    pos2(right, bar.bottom() - 8.0),
                 ))
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         let chrome = |ui: &mut egui::Ui, text: &str, tip: &str| {
             widgets::gold_button_named(
@@ -471,20 +510,26 @@ impl App {
                 tip,
                 false,
                 &p,
-                Some(vec2(34.0, 34.0)),
+                Some(vec2(CHROME_BUTTON, CHROME_BUTTON)),
                 FontId::proportional(15.0),
             )
             .on_hover_text(tip)
         };
-        if chrome(&mut actions, "×", "Close").clicked() {
-            self.close_requested(ctx);
+        if widgets::gold_button(&mut actions, "About", false, &p)
+            .on_hover_text("Version, installation and credits")
+            .clicked()
+        {
+            self.page = Page::About;
         }
-        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
-            self.hide_to_tray(ctx);
+        if widgets::gold_button(&mut actions, "Help", false, &p).clicked() {
+            self.help.select("start");
+            self.page = Page::Help;
         }
-        if chrome(&mut actions, "□", "Maximize / restore").clicked() {
-            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        if widgets::gold_button(&mut actions, theme_label, false, &p)
+            .on_hover_text("Toggle light / dark mode")
+            .clicked()
+        {
+            self.set_dark(ctx, !p.dark);
         }
         if chrome(&mut actions, "—", "Minimize").clicked() {
             if self.hides_to_tray() {
@@ -493,22 +538,15 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             }
         }
-        let theme_label = if p.dark { "Light" } else { "Dark" };
-        if widgets::gold_button(&mut actions, theme_label, false, &p)
-            .on_hover_text("Toggle light / dark mode")
-            .clicked()
-        {
-            self.set_dark(ctx, !p.dark);
+        if chrome(&mut actions, "□", "Maximize / restore").clicked() {
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
-        if widgets::gold_button(&mut actions, "Help", false, &p).clicked() {
-            self.help.select("start");
-            self.page = Page::Help;
+        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
+            self.hide_to_tray(ctx);
         }
-        if widgets::gold_button(&mut actions, "About", false, &p)
-            .on_hover_text("Version, installation and credits")
-            .clicked()
-        {
-            self.page = Page::About;
+        if chrome(&mut actions, "×", "Close").clicked() {
+            self.close_requested(ctx);
         }
         ui.add_space(TITLEBAR_HEIGHT);
     }
@@ -621,16 +659,18 @@ impl App {
             let [w, h] = image.size;
             let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
             match image::RgbaImage::from_raw(w as u32, h as u32, rgba)
-                .ok_or("bad image".to_owned())
-                .and_then(|img| img.save(&request.path).map_err(|e| e.to_string()))
+                .ok_or("Could not save screenshot: bad image".to_owned())
+                .and_then(|img| save_screenshot(&img, &request.path))
             {
                 Ok(()) => {
-                    println!("{}", request.path.display());
+                    // Not `println!`, which panics when the line cannot be
+                    // written: with a reader that had gone the picture was
+                    // saved and the program ended with exit code 101.
+                    crate::say(&request.path.display().to_string());
                     self.core.lock().expect("core").screenshot_outcome = Some(Ok(()));
                 }
                 Err(e) => {
-                    self.core.lock().expect("core").screenshot_outcome =
-                        Some(Err(format!("Could not save screenshot: {e}")));
+                    self.core.lock().expect("core").screenshot_outcome = Some(Err(e));
                 }
             }
             self.screenshot_taken = true;
@@ -647,6 +687,27 @@ impl App {
         }
         false
     }
+}
+
+/// Write the `--screenshot` picture to `path`, in the format its ending
+/// names.
+///
+/// Like the viewer's export it goes to a temporary file beside the
+/// destination, which is moved into place once it is whole. Written in
+/// place, a picture that was there before was cut to nothing first and
+/// stayed empty or half written when the writing failed: on a full disk,
+/// and for an ending whose format cannot hold the picture (`.jpg` has no
+/// transparency) even on a healthy one.
+fn save_screenshot(image: &image::RgbaImage, path: &std::path::Path) -> Result<(), String> {
+    let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
+    let format = image::ImageFormat::from_path(path).map_err(|e| failed(&e))?;
+    let target = viewer::export_target(path)?;
+    any2odyssey_core::fsutil::write_atomic_document_with(&target, |writer| {
+        image
+            .write_to(writer, format)
+            .map_err(std::io::Error::other)
+    })
+    .map_err(|e| failed(&e))
 }
 
 /// What the explicit minimize button and menu item do on this desktop: hide
@@ -742,6 +803,11 @@ impl eframe::App for App {
         if self.screenshot_step(ctx) {
             return;
         }
+        limit_zoom(ctx);
+        // The window's name for assistive software. The tree's root has none
+        // of its own, and on Linux the title is not taken for it: a screen
+        // reader was given a frame without a name.
+        ctx.accesskit_node_builder(egui::accesskit_root_id(), |node| node.set_label(APP_NAME));
         self.handle_requests(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             let exiting = self.core.lock().expect("core").exiting;
@@ -803,10 +869,11 @@ impl eframe::App for App {
                 );
                 self.titlebar(&mut body, ctx);
                 body.add_space(8.0);
+                // For the right click only: not a Tab stop.
                 let background = body.interact(
                     body.available_rect_before_wrap(),
                     body.id().with("body-bg"),
-                    Sense::click(),
+                    Sense::CLICK,
                 );
                 background.context_menu(|ui| self.context_menu(ui));
                 match self.page {
@@ -827,6 +894,7 @@ impl eframe::App for App {
                                     tray_available,
                                     &notices,
                                 );
+                                widgets::keep_focus_visible(ui);
                             });
                     }
                     Page::Viewer => {
@@ -837,6 +905,7 @@ impl eframe::App for App {
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 self.viewer.show(ui, &mut c, &p, self.wordmark.as_ref());
+                                widgets::keep_focus_visible(ui);
                             });
                     }
                     Page::Help => {
@@ -885,6 +954,40 @@ mod layout_tests;
 mod tests {
     use super::*;
     use any2odyssey_core::log::Logger;
+
+    #[test]
+    fn a_screenshot_that_cannot_be_written_leaves_the_earlier_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]));
+        let second = image::RgbaImage::from_pixel(2, 5, image::Rgba([200, 100, 0, 128]));
+        let png = dir.path().join("shot.png");
+        save_screenshot(&first, &png).unwrap();
+        assert_eq!(image::open(&png).unwrap().to_rgba8(), first);
+        save_screenshot(&second, &png).unwrap();
+        assert_eq!(image::open(&png).unwrap().to_rgba8(), second);
+        // JPEG holds no transparency: the encoder refuses the picture, which
+        // it is asked only after the destination has been opened. Saved in
+        // place, that had already emptied the file.
+        let jpg = dir.path().join("shot.jpg");
+        std::fs::write(&jpg, b"the picture that was there").unwrap();
+        let error = save_screenshot(&first, &jpg).unwrap_err();
+        assert!(error.contains("shot.jpg"), "{error}");
+        assert_eq!(std::fs::read(&jpg).unwrap(), b"the picture that was there");
+        // An ending that names no format, and a folder: said, nothing made.
+        let unknown = dir.path().join("shot.picture");
+        let error = save_screenshot(&first, &unknown).unwrap_err();
+        assert!(error.contains("shot.picture"), "{error}");
+        assert!(!unknown.exists());
+        std::fs::create_dir(dir.path().join("folder.png")).unwrap();
+        assert!(save_screenshot(&first, &dir.path().join("folder.png")).is_err());
+        // No temporary file is left by any of them.
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["folder.png", "shot.jpg", "shot.png"]);
+    }
 
     #[test]
     fn missing_tray_minimizes_normally_and_close_quits() {

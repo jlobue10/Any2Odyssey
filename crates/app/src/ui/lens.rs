@@ -189,35 +189,36 @@ impl LensState {
             egui::Label::new(RichText::new(LENS_NOTICE).color(color(p.muted)).size(12.0)).wrap(),
         );
         let mut lens = self.lens;
-        row(ui, "Lens pitch", |ui| {
+        row(ui, "Lens pitch", |ui, name| {
             ui.add(
                 egui::DragValue::new(&mut lens.pitch)
                     .speed(0.0005)
                     .range(PITCH_RANGE.0..=PITCH_RANGE.1)
                     .max_decimals(9)
                     .min_decimals(4),
-            );
+            ).labelled_by(name);
             ui.label(RichText::new("pixels per lens").color(color(p.muted)));
         })
         .on_hover_text("The lens period along a row of pixels. Wrong by a little: broad bands across the pattern. Wrong by a lot: fine stripes.");
-        row(ui, "Slant", |ui| {
+        row(ui, "Slant", |ui, name| {
             ui.add(
                 egui::DragValue::new(&mut lens.slant)
                     .speed(0.0005)
                     .range(SLANT_RANGE.0..=SLANT_RANGE.1)
                     .max_decimals(9)
                     .min_decimals(4),
-            );
+            ).labelled_by(name);
             ui.label(RichText::new("pixels per row").color(color(p.muted)));
         })
         .on_hover_text("How far the lenses move sideways from one row to the next. Wrong: the bands tilt. Negative when the lenses lean the other way.");
-        row(ui, "Offset", |ui| {
+        row(ui, "Offset", |ui, name| {
             ui.add(
                 egui::DragValue::new(&mut lens.offset)
                     .speed(0.002)
                     .max_decimals(4)
                     .min_decimals(3),
-            );
+            )
+            .labelled_by(name);
             ui.label(RichText::new("of a lens (0–1)").color(color(p.muted)));
         })
         .on_hover_text(
@@ -512,6 +513,44 @@ mod tests {
         std::fs::write(&file, br#"{"pitch": 0, "offset": 7.25}"#).unwrap();
         let lens = read_lens(&file).unwrap();
         assert_eq!((lens.pitch, lens.offset), (PITCH_RANGE.0, 0.25));
+    }
+
+    /// The lens files of every release that has had them (the corpus of
+    /// `crates/core/tests/state_compat.rs`: each release's own writer, and
+    /// the published Linux program driven through its window), loaded the
+    /// way the viewer loads them. A calibration is the user's own work.
+    #[test]
+    fn the_lens_files_of_earlier_releases_load_without_a_problem() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/releases");
+        let mut loaded = 0;
+        for release in std::fs::read_dir(&corpus).unwrap().flatten() {
+            let Ok(states) = std::fs::read_dir(release.path()) else {
+                continue;
+            };
+            for state in states.flatten() {
+                let file = state.path().join("lens.json");
+                if !file.is_file() {
+                    continue;
+                }
+                let bytes = std::fs::read(&file).unwrap();
+                let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let mut lens = LensState::load(file.clone());
+                assert_eq!(lens.problem, None, "{}", file.display());
+                for (number, value) in [
+                    ("pitch", lens.lens.pitch),
+                    ("slant", lens.lens.slant),
+                    ("offset", lens.lens.offset),
+                ] {
+                    assert_eq!(saved[number].as_f64(), Some(value), "{}", file.display());
+                }
+                assert_eq!(saved["bgr"].as_bool(), Some(lens.lens.bgr));
+                // Nothing changed, so leaving the output writes nothing.
+                lens.store();
+                assert_eq!(std::fs::read(&file).unwrap(), bytes, "{}", file.display());
+                loaded += 1;
+            }
+        }
+        assert!(loaded >= 30, "{loaded} lens files");
     }
 
     #[test]

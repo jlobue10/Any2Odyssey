@@ -151,7 +151,17 @@ fn write_atomic_retrying(
     let ordinary = cfg!(windows)
         .then(|| std::path::absolute(path).ok())
         .flatten();
-    let name = ordinary.as_deref().and_then(Path::file_name);
+    // Only a name that is still a file's in that folder when read so. One
+    // of nothing but dots and spaces is the folder itself there, and `..`
+    // the folder above: its last part is that folder's name, and joined
+    // on it made a file called like the folder, inside it, where the
+    // ordinary form is refused.
+    let name = ordinary
+        .as_deref()
+        .filter(|ordinary| {
+            std::path::absolute(parent).is_ok_and(|folder| ordinary.parent() == Some(&folder))
+        })
+        .and_then(Path::file_name);
     let long = name.and_then(|name| {
         let folder = long_form(parent, name.len().max(TEMPORARY_NAME_LENGTH))?;
         let path = folder.join(name);
@@ -453,6 +463,44 @@ mod tests {
         assert_eq!(entries(dir.path()), ["document"]);
     }
 
+    /// The settings are replaced in this one place, on every system. A
+    /// write that fails part way (a full disk, a quota, a device error), in
+    /// the writing or in the flush to disk that follows it, must leave the
+    /// file that was there whole and nothing beside it. Shown on Linux with
+    /// the system calls themselves failing; this is the same failure put in
+    /// by hand, so that it is also run where that cannot be done.
+    #[test]
+    fn a_write_that_fails_part_way_leaves_the_earlier_file_and_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let earlier = b"{\n  \"Depth\": 1.5\n}";
+        write_atomic_durable(&path, earlier).unwrap();
+        for sync in [false, true] {
+            for audience in [Audience::Owner, Audience::Anyone] {
+                let failed = write_atomic_with(&path, sync, audience, |file| {
+                    // Half of the new content is in the temporary file.
+                    file.write_all(b"{\n  \"Dep")?;
+                    Err(io::ErrorKind::StorageFull.into())
+                });
+                assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::StorageFull);
+                assert_eq!(fs::read(&path).unwrap(), earlier);
+                assert_eq!(entries(dir.path()), ["settings.json"]);
+            }
+        }
+        // Nothing of the failures stands in the way of the next write.
+        write_atomic_durable(&path, b"{}").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+        // A first write that fails makes no file at all.
+        let new = dir.path().join("ui-settings.json");
+        let failed = write_atomic_with(&new, true, Audience::Owner, |file| {
+            file.write_all(b"{")?;
+            Err(io::ErrorKind::QuotaExceeded.into())
+        });
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::QuotaExceeded);
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn replacing_a_private_document_preserves_its_permissions() {
@@ -583,6 +631,46 @@ mod tests {
             // made that only the long form could name again.
             let _ = write_atomic(&folder.join("NUL"), b"x");
             assert!(entries(&folder).is_empty());
+        }
+    }
+
+    /// A name of nothing but dots and spaces is the folder itself to
+    /// Windows, and `..` the folder above it. Neither is a file's name: it
+    /// is refused, on both sides of the path limit. Past it (0.9.5) such a
+    /// name made a file called like that folder inside the folder that was
+    /// named, and the write reported success.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_that_windows_reads_as_a_folder_is_refused_on_both_sides_of_the_path_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        for length in [200, 250] {
+            let folder = folder_of_length(dir.path(), length);
+            fs::create_dir_all(&folder).unwrap();
+            for written in ["...", " ", ". .", ".."] {
+                let refused = write_atomic_document(&folder.join(written), b"one");
+                assert!(
+                    refused.is_err(),
+                    "{written:?} in a folder of {length} characters was written"
+                );
+                assert_eq!(
+                    entries(&folder),
+                    [""; 0],
+                    "{written:?} in a folder of {length} characters"
+                );
+            }
+        }
+    }
+
+    /// Off Windows a dot or a space at the end is part of the name.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_keeps_its_last_dot_or_space_where_that_is_an_ordinary_name() {
+        let dir = tempfile::tempdir().unwrap();
+        for written in ["guide.html.", "guide.html ", "..."] {
+            let path = dir.path().join(written);
+            write_atomic_document(&path, b"one").unwrap();
+            assert_eq!(entries(dir.path()), [written]);
+            fs::remove_file(&path).unwrap();
         }
     }
 

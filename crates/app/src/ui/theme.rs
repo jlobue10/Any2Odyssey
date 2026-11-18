@@ -68,7 +68,9 @@ pub fn apply(ctx: &egui::Context, p: &Palette) {
     v.window_stroke = Stroke::new(1.0_f32, color(p.gold));
     v.window_corner_radius = CornerRadius::same(12);
     v.menu_corner_radius = CornerRadius::same(12);
-    v.selection.bg_fill = color(p.accent);
+    // A selected list entry and selected text keep the text colour (it is
+    // the override above), so the fill behind them is one that it reads on.
+    v.selection.bg_fill = color(p.selection());
     v.selection.stroke = Stroke::new(1.0_f32, color(p.text));
     v.hyperlink_color = color(p.accent);
     v.widgets.noninteractive.bg_fill = color(p.panel);
@@ -148,7 +150,7 @@ mod tests {
                     Some(color(palette.text)),
                     "dark palette {dark}, OS {system:?}"
                 );
-                assert_eq!(style.visuals.selection.bg_fill, color(palette.accent));
+                assert_eq!(style.visuals.selection.bg_fill, color(palette.selection()));
                 assert_eq!(style.spacing.button_padding, egui::vec2(13.0, 7.0));
                 assert_eq!(style.spacing.slider_width, 180.0);
             }

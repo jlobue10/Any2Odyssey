@@ -82,6 +82,16 @@ const LIVE_LINES: [(i32, &str); 4] = [
     (2160, "2160 lines (sharpest, slowest)"),
 ];
 const LIVE_NEEDS_ODYSSEY: &str = "A live screen is shown through the Odyssey 3D output only.";
+/// The desktop has answered and no frame has come yet.
+#[cfg(target_os = "linux")]
+const LIVE_STARTING: &str = "The screen was chosen. Waiting for its first picture: some desktops send one only when something on that screen changes.";
+/// What the page says of a cast the desktop has paused, after "a ... screen, ".
+#[cfg(target_os = "linux")]
+const LIVE_PAUSED: &str = "but the desktop has paused the screen cast and no pictures are coming. It goes on when the desktop lets it; stopping and starting the output asks for the screen again.";
+/// How long a cast has to be paused before the page says so: the desktop
+/// pauses it for a moment at every change of the screen's mode.
+#[cfg(target_os = "linux")]
+const LIVE_PAUSE_TOLD: std::time::Duration = std::time::Duration::from_secs(3);
 #[cfg(not(target_os = "linux"))]
 const LIVE_NOT_HERE: &str = "Live capture is not available in this build.";
 
@@ -485,7 +495,7 @@ impl Document {
 /// leads to, and a file the user may not write would be replaced all the
 /// same (the folder decides a rename, not the file). So links are followed
 /// here, and only a file that could have been written to is replaced.
-fn export_target(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn export_target(path: &Path) -> Result<PathBuf, String> {
     let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
     let mut target = path.to_owned();
     // As many links as the system itself follows before it gives up.
@@ -717,6 +727,25 @@ impl Default for ViewerState {
 }
 
 impl ViewerState {
+    /// The page as a layout test wants it: these choices, this status line,
+    /// this text in the path box, this complaint about the lens file.
+    #[cfg(test)]
+    pub fn for_layout(
+        options: Options,
+        status: &str,
+        path_text: &str,
+        lens_problem: Option<&str>,
+    ) -> ViewerState {
+        let mut state = ViewerState {
+            options,
+            status: status.to_owned(),
+            path_text: path_text.to_owned(),
+            ..ViewerState::default()
+        };
+        state.lens.problem = lens_problem.map(str::to_owned);
+        state
+    }
+
     /// The viewer with the user's saved lens numbers; changes are saved
     /// back. `default()` keeps them in memory only.
     pub fn with_saved_lens() -> ViewerState {
@@ -1117,13 +1146,25 @@ impl ViewerState {
             }
         }
         let stats = live.stats();
+        let paused = live
+            .paused_for()
+            .is_some_and(|time| time >= LIVE_PAUSE_TOLD);
         match live.capture_state() {
             CaptureState::Asking => {
                 self.status = "Choose the screen to show in 3D in the desktop's dialog (asked once and remembered). On KDE Plasma 6 it can be the Odyssey itself; on other desktops choose another screen.".into();
             }
+            CaptureState::Starting => {
+                self.status = LIVE_STARTING.into();
+            }
             CaptureState::Running { width, height } => {
                 self.status = match &stats.output_error {
                     Some(e) => format!("The picture cannot be written: {e}"),
+                    // No frame comes while the cast is paused, which is not
+                    // a screen on which nothing changes.
+                    None if paused => format!(
+                        "Live: a {width} × {height} screen, {LIVE_PAUSED} {}",
+                        weaver.describe()
+                    ),
                     None => format!(
                         "Live: a {width} × {height} screen, {}. {}{}",
                         stats.describe(),
@@ -1508,14 +1549,14 @@ impl ViewerState {
         let two_columns = ui.available_width() >= 860.0;
         let source_panel = |ui: &mut Ui, state: &mut ViewerState| {
             section(ui, "SOURCE & INPUT", p, |ui| {
-                row(ui, "Image", |ui| {
+                row(ui, "Image", |ui, name| {
                     let open_width = 90.0;
                     let box_width = (ui.available_width() - open_width).max(80.0);
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut state.path_text)
                             .desired_width(box_width)
                             .hint_text("Path of a PNG, JPEG or BMP"),
-                    );
+                    ).labelled_by(name);
                     let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if entered {
                         if let Some(path) = state.typed_path() {
@@ -1527,7 +1568,7 @@ impl ViewerState {
                     }
                 })
                 .on_hover_text("Open… uses zenity or kdialog. Without either, type the path and press Enter, or drop the file on this window. Pressed while a file dialog is still open, it closes that dialog and opens a new one.");
-                row(ui, "Input format", |ui| {
+                row(ui, "Input format", |ui, name| {
                     egui::ComboBox::from_id_salt("viewer-input")
                         .width(ui.available_width())
                         .selected_text(state.options.input.label())
@@ -1535,14 +1576,16 @@ impl ViewerState {
                             for input in Input::ALL {
                                 ui.selectable_value(&mut state.options.input, input, input.label());
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(name);
                 });
                 ui.checkbox(&mut state.options.swap, "Swap left and right eyes");
             });
         };
         let output_panel = |ui: &mut Ui, state: &mut ViewerState| {
             section(ui, "OUTPUT", p, |ui| {
-                row(ui, "Output format", |ui| {
+                row(ui, "Output format", |ui, name| {
                     // The two Odyssey outputs' names are wider than the box
                     // in the default window: shortened to fit, where the
                     // box grew with them and took the panel through the
@@ -1559,28 +1602,31 @@ impl ViewerState {
                                     output.label(),
                                 );
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(name);
                 });
                 if matches!(state.options.input, Input::Ai | Input::Desktop) {
-                    row(ui, "Depth strength", |ui| {
+                    row(ui, "Depth strength", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.depth_pos, DEPTH.min..=DEPTH.max)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        )
+                        .labelled_by(name);
                         ui.label(RichText::new(DEPTH.readout(state.options.depth_pos)).monospace());
                     })
                     .on_hover_text("How far apart near and far are pushed: 0.00–2.00.");
-                    row(ui, "Pop-out", |ui| {
+                    row(ui, "Pop-out", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.pop_pos, POPOUT.min..=POPOUT.max)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        ).labelled_by(name);
                         ui.label(RichText::new(POPOUT.readout(state.options.pop_pos)).monospace());
                     })
                     .on_hover_text("Where the screen plane sits: −1.00 keeps everything behind the screen, 1.00 brings everything forward.");
-                    row(ui, "Depth detail", |ui| {
+                    row(ui, "Depth detail", |ui, name| {
                         let chosen = DEPTH_DETAIL
                             .iter()
                             .find(|(side, _)| *side == state.options.detail)
@@ -1592,7 +1638,7 @@ impl ViewerState {
                                 for (side, name) in DEPTH_DETAIL {
                                     ui.selectable_value(&mut state.options.detail, side, name);
                                 }
-                            });
+                            }).response.labelled_by(name);
                     })
                     .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
                 } else {
@@ -1603,27 +1649,28 @@ impl ViewerState {
                     .on_hover_text("For red/cyan and lens output. Side-by-side output keeps the pair as it is.");
                 }
                 if state.options.input == Input::Desktop {
-                    row(ui, "Sharpness", |ui| {
+                    row(ui, "Sharpness", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.sharp_pos, 0..=100)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        )
+                        .labelled_by(name);
                         ui.label(
                             RichText::new(format!("{:3}", state.options.sharp_pos)).monospace(),
                         );
                     })
                     .on_hover_text("Sharpens the two views after they are rendered. 0 is off.");
-                    row(ui, "Depth steadiness", |ui| {
+                    row(ui, "Depth steadiness", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.steady_pos, 0..=95)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        ).labelled_by(name);
                         ui.label(RichText::new(format!("{:3}", state.options.steady_pos)).monospace());
                     })
                     .on_hover_text("How much of the previous depth map is kept for each new one. Higher is calmer but slower to follow movement.");
-                    row(ui, "Detail", |ui| {
+                    row(ui, "Detail", |ui, name| {
                         let chosen = LIVE_LINES
                             .iter()
                             .find(|(lines, _)| *lines == state.options.lines)
@@ -1635,7 +1682,7 @@ impl ViewerState {
                                 for (lines, name) in LIVE_LINES {
                                     ui.selectable_value(&mut state.options.lines, lines, name);
                                 }
-                            });
+                            }).response.labelled_by(name);
                     })
                     .on_hover_text("The size of each eye's view. More lines are sharper and cost more processor time per picture.");
                     ui.checkbox(
@@ -3530,6 +3577,54 @@ mod tests {
             let expected = if panics { "closed" } else { "answer" };
             assert_eq!(*found.lock().unwrap(), [expected], "panics: {panics}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_page_says_what_a_live_screen_is_waiting_for_and_when_no_pictures_can_come() {
+        use std::time::{Duration, Instant};
+        let fed = crate::capture::Fed::start();
+        let mut state = ViewerState::default();
+        state.options.input = Input::Desktop;
+        state.options.output = Output::Odyssey;
+        state.output_open = true;
+        state.live = Some(crate::live::Live::idle(fed.capture()));
+        let ctx = egui::Context::default();
+        let said = |state: &mut ViewerState| {
+            assert!(state.show_live(&ctx, &WeaverStatus::Idle));
+            state.status.clone()
+        };
+        // The desktop's dialog is open.
+        assert!(said(&mut state).starts_with("Choose the screen"));
+        // It has been answered and no frame has come: a desktop that sends
+        // one only when the screen changes left the page asking for a
+        // screen to be chosen in a dialog that was no longer there.
+        fed.chosen();
+        assert_eq!(said(&mut state), LIVE_STARTING);
+        fed.feed(16, 9, &[0; 16 * 9 * 4]);
+        let running = said(&mut state);
+        assert!(
+            running.starts_with("Live: a 16 × 9 screen, 0 pictures a second"),
+            "{running}"
+        );
+        // Paused for a moment, as at every change of the screen's mode:
+        // nothing is said of it.
+        fed.pause(Some(Instant::now()));
+        assert_eq!(said(&mut state), running);
+        // Paused and staying so (the session manager is gone, or the cast
+        // did not come back after a change of mode): no frames, which the
+        // page called a screen that is "not changing".
+        let long_ago = Instant::now().checked_sub(LIVE_PAUSE_TOLD + Duration::from_secs(1));
+        fed.pause(Some(long_ago.expect("a clock older than four seconds")));
+        let paused = said(&mut state);
+        assert!(
+            paused.starts_with("Live: a 16 × 9 screen, but the desktop has paused"),
+            "{paused}"
+        );
+        assert!(!paused.contains("not changing"), "{paused}");
+        // And running again.
+        fed.pause(None);
+        assert_eq!(said(&mut state), running);
     }
 
     #[test]

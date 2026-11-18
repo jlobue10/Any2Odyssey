@@ -20,8 +20,13 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 image.workspace = true
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
-egui = "0.33"
+# "accesskit" is the accessibility tree: UI Automation on Windows, AT-SPI on
+# Linux. It is one of eframe's default features, and `default-features =
+# false` (which keeps wgpu out) had dropped it with the rest: assistive
+# software was given the window and nothing in it. The tree is only built
+# once something asks for it.
+eframe = { version = "0.33", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+egui = { version = "0.33", features = ["accesskit"] }
 global-hotkey = "0.7"
 open = "5"
 html-escape = "0.2"
