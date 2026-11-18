@@ -394,6 +394,58 @@ fn pause_after(
     }
 }
 
+/// How a pixel lies in its four bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Packing {
+    /// A byte a colour: blue first (`bgr`) or red first, then one to spare.
+    Bytes { bgr: bool },
+    /// Ten bits a colour in one 32-bit number, the two bits on top to
+    /// spare: red in the highest ten of the thirty (`red_high`) or blue.
+    /// wlroots desktops send this, and nothing else, for an output that is
+    /// rendered with ten bits (sway's `render_bit_depth 10`); the cast then
+    /// ended at once with "no more input formats".
+    Tens { red_high: bool },
+}
+
+/// The packing of a stream's pixels, for the formats that are asked for.
+fn packing(format: spa::param::video::VideoFormat) -> Option<Packing> {
+    use spa::param::video::VideoFormat as Format;
+    match format {
+        Format::BGRx | Format::BGRA => Some(Packing::Bytes { bgr: true }),
+        Format::RGBx | Format::RGBA => Some(Packing::Bytes { bgr: false }),
+        Format::xRGB_210LE | Format::ARGB_210LE => Some(Packing::Tens { red_high: true }),
+        Format::xBGR_210LE | Format::ABGR_210LE => Some(Packing::Tens { red_high: false }),
+        _ => None,
+    }
+}
+
+/// Write a frame of ten bits a colour into `out` as one of a byte a colour
+/// (blue, green, red, one to spare), its rows without gaps: the eight
+/// highest bits of each colour are kept. `frame` holds `height` rows of
+/// `width` pixels, each row `stride` bytes after the one before.
+fn narrow_tens(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    red_high: bool,
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    out.reserve(width * height * 4);
+    for row in frame.chunks(stride.max(1)).take(height) {
+        let Some(row) = row.get(..width * 4) else {
+            return;
+        };
+        for pixel in row.as_chunks::<4>().0 {
+            let all = u32::from_le_bytes(*pixel);
+            let (high, middle, low) = ((all >> 22) as u8, (all >> 12) as u8, (all >> 2) as u8);
+            let (red, blue) = if red_high { (high, low) } else { (low, high) };
+            out.extend_from_slice(&[blue, middle, red, 255]);
+        }
+    }
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -492,12 +544,8 @@ fn stream(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
-            let bgr = match data.format.format() {
-                spa::param::video::VideoFormat::BGRx | spa::param::video::VideoFormat::BGRA => true,
-                spa::param::video::VideoFormat::RGBx | spa::param::video::VideoFormat::RGBA => {
-                    false
-                }
-                _ => return,
+            let Some(packing) = packing(data.format.format()) else {
+                return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
             let datas = buffer.datas_mut();
@@ -528,7 +576,24 @@ fn stream(
                 return;
             }
             data.spare.clear();
-            data.spare.extend_from_slice(&frame[..needed]);
+            let (stride, bgr) = match packing {
+                Packing::Bytes { bgr } => {
+                    data.spare.extend_from_slice(&frame[..needed]);
+                    (stride, bgr)
+                }
+                Packing::Tens { red_high } => {
+                    let (width, height) = (width as usize, height as usize);
+                    narrow_tens(
+                        &frame[..needed],
+                        width,
+                        height,
+                        stride,
+                        red_high,
+                        &mut data.spare,
+                    );
+                    (row, true)
+                }
+            };
             let first = {
                 let mut slot = lock(&data.shared.slot);
                 std::mem::swap(&mut slot.bytes, &mut data.spare);
@@ -572,6 +637,12 @@ fn stream(
             spa::param::video::VideoFormat::BGRA,
             spa::param::video::VideoFormat::RGBx,
             spa::param::video::VideoFormat::RGBA,
+            // What a desktop that renders the screen with ten bits a colour
+            // has to offer, and all it has (`Packing::Tens`).
+            spa::param::video::VideoFormat::xRGB_210LE,
+            spa::param::video::VideoFormat::xBGR_210LE,
+            spa::param::video::VideoFormat::ARGB_210LE,
+            spa::param::video::VideoFormat::ABGR_210LE,
         ),
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoSize,
@@ -756,6 +827,66 @@ mod tests {
         assert!(asked.elapsed() < Duration::from_secs(10));
         // The runtime serves the next request all the same.
         assert!(finished_within(runtime, Duration::from_secs(30), async {}));
+    }
+
+    #[test]
+    fn a_frame_of_ten_bits_a_colour_is_read_as_the_picture_it_is() {
+        use spa::param::video::VideoFormat as Format;
+        assert_eq!(packing(Format::BGRx), Some(Packing::Bytes { bgr: true }));
+        assert_eq!(packing(Format::RGBA), Some(Packing::Bytes { bgr: false }));
+        let red_high = Some(Packing::Tens { red_high: true });
+        assert_eq!(packing(Format::xRGB_210LE), red_high);
+        assert_eq!(packing(Format::ARGB_210LE), red_high);
+        let blue_high = Some(Packing::Tens { red_high: false });
+        assert_eq!(packing(Format::xBGR_210LE), blue_high);
+        assert_eq!(packing(Format::ABGR_210LE), blue_high);
+        // Not asked for, and not read as something it is not.
+        assert_eq!(packing(Format::RGBx_102LE), None);
+        assert_eq!(packing(Format::NV12), None);
+
+        // Two rows of two pixels, each row followed by four bytes that
+        // belong to no pixel. Red, green and blue as ten-bit numbers.
+        let pixel = |high: u32, middle: u32, low: u32| {
+            ((0b11 << 30) | (high << 20) | (middle << 10) | low).to_le_bytes()
+        };
+        let gap = [0xEE; 4];
+        let frame = [
+            pixel(1023, 0, 0),
+            pixel(0, 1023, 0),
+            gap,
+            pixel(0, 0, 1023),
+            pixel(512, 256, 4),
+        ]
+        .concat();
+        let mut out = vec![7; 3];
+        narrow_tens(&frame, 2, 2, 12, true, &mut out);
+        // Blue, green, red and a full fourth byte, as `PixelOrder::Bgr`
+        // reads them; the gaps are gone.
+        assert_eq!(
+            out,
+            [
+                [0, 0, 255, 255],
+                [0, 255, 0, 255],
+                [255, 0, 0, 255],
+                [1, 64, 128, 255]
+            ]
+            .concat()
+        );
+        // The same numbers with blue in the high bits.
+        narrow_tens(&frame, 2, 2, 12, false, &mut out);
+        assert_eq!(
+            out,
+            [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [128, 64, 1, 255]
+            ]
+            .concat()
+        );
+        // A frame shorter than it says gives the rows it has, and no more.
+        narrow_tens(&frame[..14], 2, 2, 12, true, &mut out);
+        assert_eq!(out.len(), 8);
     }
 
     #[test]
