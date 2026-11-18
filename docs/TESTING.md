@@ -132,7 +132,30 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 0.9.6 (audit rounds 11 to 20, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 0.9.7 (audit rounds 11 to 21, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+
+New in 0.9.7:
+
+- Linux, the G90XF, the Odyssey 3D set-up (three of its scripts changed, and they are the ones seen working there): a cold start of the lens helper and of the Odyssey 3D output takes about half a minute as before, and a second request is warm. `ps` shows `wineserver -p60` and no `start-stack.sh` left beside `SRSession.exe`.
+- Linux, the G90XF, with the output on: `pkill -9 wineserver`, then Stop output and Start output: the picture comes back after one cold start, with eye tracking.
+- Linux, the G90XF: `sleep 60 | ~/.local/share/any2odyssey/any2odyssey-lens-helper` after a login: the lens is on for about half a minute.
+- Linux, the G90XF, eye tracking: start and stop the output three times in one login: the eyes are found each time, and the tracker's log says "in pause mode now" at each stop. (With a stand-in tracker under Wine the pause did not survive a second round; on the monitor it was seen working.)
+- Linux, KDE Plasma, live screen: log out and in once after updating. Start: the page reads the shown screen's own size ("Live: a 3840 × 2160 screen"), not 1920 × 1080, and small text is sharper at 2160 lines of detail. Note the pictures a second: each frame now has up to four times the pixels.
+- Linux, KDE Plasma, live screen with the 165 Hz Odyssey as the shown screen and a video playing: the page reads about 60 pictures a second, and the viewer's share of the processor is lower than with 0.9.6.
+- Linux, KDE Plasma: turn the shown screen by 90 degrees in System Settings, then Stop and Start: the picture is upright with black bars at the sides. (Turned while live it keeps the old shape until Stop and Start.)
+- Linux, KDE Plasma, another screen shown, with "Draw the pointer into the picture" on: the pointer is in the picture; with it off it is not.
+- Linux, KDE Plasma without zenity: Save preview PNG… opens kdialog in the folder the program was started in, with the file name in the Name box.
+- Linux, sway or Hyprland, if one is at hand: `output ... transform 90` on the shown screen: upright on the Odyssey, and the page names the size with its sides swapped.
+- Linux, GNOME: after `systemctl --user restart xdg-desktop-portal-gnome` the first Start works; a 60 Hz screen with a video playing reads about 60 pictures a second.
+- Linux, live screen: change the shown screen's resolution to something larger and back: `ps -o rss` of the viewer is back where it was a few seconds later.
+- Linux, a desktop: open a file whose name is Japanese, Chinese or Korean: the path box shows the name in its letters.
+- Linux, a real session: `XDG_RUNTIME_DIR=/etc/hostname any2odyssey` in two terminals: the second hands over and exits, and `any2odyssey --quit` ends the first.
+- Windows, any PC: open a window whose title is Japanese, one Chinese, one Korean (a browser tab on such a page will do), choose *Selected window* and open *Source window*: the titles are in their letters, on the line of the Latin text beside them, and boxes are seen for a moment at most the first time. `companion.log` names the typeface file that was read, and the Maximize button's square looks as it did.
+- Windows: a Hebrew and an Arabic title: letters, in reversed order (known).
+- Windows at 200 % on a 1920 × 1080 screen, or at 150 % on 1366 × 768: the controls open inside the screen, and the window can be dragged down to 360 points of height, where each page scrolls.
+- Either edition, a window made shorter than its page: click a checkbox and the primary button while the mouse is still moving: the page stays where it is. The wheel and the scroll bar scroll it; on a touch screen a finger drags it.
+- Windows: mark a shortcut to Any2Odyssey as hidden (Properties) and uninstall: it is gone with the rest.
+- Arch, from a script without a terminal: `./install.sh --yes --no-model --no-odyssey` installs the packages it names without stopping at pacman's question.
 
 New in 0.9.6:
 
