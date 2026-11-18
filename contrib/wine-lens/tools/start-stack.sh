@@ -34,4 +34,6 @@ WINEDEBUG=-all timeout 30 wine "$T/build/monprobe.exe" >"$T/monprobe.txt" 2>/dev
 python3 "$T/tools/mkedid.py" "$T/monprobe.txt" "$T/edid.reg" "$T/odyssey.place" 2>"$T/edid.pairs" || exit 1
 WINEDEBUG=-all setsid timeout 60 wine regedit /S "$T/edid.reg" >/dev/null 2>&1 </dev/null
 sleep 2
-(cd "$BIN" && WINEDEBUG=$DEBUG setsid wine SRSession.exe >"$T/session.out" 2>&1 </dev/null &)
+# (exec: without it a copy of this script's shell stays behind for as long as the session runs, and reads
+# in the list of processes as a start that never ended)
+(cd "$BIN" && export WINEDEBUG="$DEBUG" && exec setsid wine SRSession.exe >"$T/session.out" 2>&1 </dev/null &)
