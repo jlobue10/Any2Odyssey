@@ -18,6 +18,12 @@ if ! command -v wineserver >/dev/null; then
 fi
 WINEDEBUG=-all wineserver -k 2>/dev/null
 sleep 3
+# Wine ends its services three seconds after the last ordinary program of the prefix has left, and a service
+# counts as none. Until SRSession.exe runs (the last line here), the only ordinary programs are the short
+# ones below, with pauses of 6, 8 and 2 seconds between them: where "wine sc start" came back early enough,
+# Wine ended Leia's service, and the USB driver with it, in the middle of this start. The server is started
+# here with a minute of patience instead of three seconds.
+WINEDEBUG=-all wineserver -p60 >/dev/null 2>&1 </dev/null
 # Detached: a wine process keeps its terminal busy otherwise.
 (WINEDEBUG=$DEBUG setsid wine sc start a2ousb >"$T/service.trace" 2>&1 </dev/null &)
 sleep 6

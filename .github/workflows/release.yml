@@ -263,6 +263,8 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
       - name: Eye tracking stop tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-tracking-stop.py
+      - name: Lens stack start tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-start-stack.py
       - name: Lens setup tool check tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-setup-pgrep.py
       # The stand-ins that setup.sh compiles on the user's PC, with the MinGW of this Ubuntu release: its
