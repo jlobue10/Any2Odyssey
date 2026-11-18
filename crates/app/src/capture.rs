@@ -14,7 +14,7 @@
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use any2odyssey_core::live::{PixelOrder, Source};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
@@ -24,8 +24,14 @@ use pw::spa;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureState {
-    /// The desktop's dialog is open, or the stream is being set up.
+    /// The desktop has been asked for a screen and has not answered: its
+    /// dialog is open.
     Asking,
+    /// A screen was chosen and its stream is being set up: no frame has
+    /// come yet. A desktop that sends frames only when the screen changes
+    /// (xdg-desktop-portal-wlr before 0.9) leaves it at that for as long as
+    /// nothing does.
+    Starting,
     /// Frames are arriving, this many pixels each.
     Running { width: u32, height: u32 },
     /// Over: the reason, or `None` after an ordinary stop.
@@ -66,6 +72,29 @@ struct Shared {
     state: Mutex<CaptureState>,
     token: Mutex<Option<String>>,
     stop: AtomicBool,
+    /// Since when the stream of a cast that was running has been paused.
+    paused: Mutex<Option<Instant>>,
+}
+
+impl Shared {
+    fn new() -> Shared {
+        Shared {
+            slot: Mutex::new(Slot::default()),
+            arrived: Condvar::new(),
+            state: Mutex::new(CaptureState::Asking),
+            token: Mutex::new(None),
+            stop: AtomicBool::new(false),
+            paused: Mutex::new(None),
+        }
+    }
+
+    /// The desktop has answered with a screen.
+    fn chosen(&self) {
+        let mut state = lock(&self.state);
+        if *state == CaptureState::Asking {
+            *state = CaptureState::Starting;
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -89,13 +118,7 @@ impl Capture {
         pointer: bool,
         wake: impl Fn() + Send + 'static,
     ) -> Capture {
-        let shared = Arc::new(Shared {
-            slot: Mutex::new(Slot::default()),
-            arrived: Condvar::new(),
-            state: Mutex::new(CaptureState::Asking),
-            token: Mutex::new(None),
-            stop: AtomicBool::new(false),
-        });
+        let shared = Arc::new(Shared::new());
         let for_thread = shared.clone();
         let run = move || {
             let ended = run(&for_thread, restore_token, pointer, &wake).err();
@@ -124,6 +147,12 @@ impl Capture {
 
     pub fn state(&self) -> CaptureState {
         lock(&self.shared.state).clone()
+    }
+
+    /// For how long the desktop has had the running cast paused, in which
+    /// time no frame can have come; `None` while it runs.
+    pub fn paused_for(&self) -> Option<Duration> {
+        lock(&self.shared.paused).map(|since| since.elapsed())
     }
 
     /// The portal's token for the screen that was picked, once there is one.
@@ -268,14 +297,153 @@ fn run(
         other => format!("the desktop's screen-cast portal refused: {other}"),
     })?;
     *lock(&shared.token) = token;
+    // The dialog is over: the page stops asking for a screen to be chosen.
+    shared.chosen();
+    wake();
     // Whatever comes of the stream, the session is closed after it.
     let streamed = match node {
         None => Err("the portal returned no stream".to_owned()),
         Some(_) if shared.stop.load(Ordering::Relaxed) => Ok(()),
         Some(node) => stream(shared, node, fd, wake),
     };
-    let _ = runtime.block_on(session.close());
+    finished_within(runtime, CLOSE_PATIENCE, async move {
+        let _ = session.close().await;
+    });
     streamed
+}
+
+/// How long the portal's answer to the closing of a session is waited for.
+/// It comes within milliseconds from a portal that is well.
+const CLOSE_PATIENCE: Duration = Duration::from_millis(1500);
+
+/// Run `work` on `runtime` and wait until it is through, but for `patience`
+/// at the longest: whether it was through by then. It is left to finish by
+/// itself otherwise.
+///
+/// The window's thread waits for this thread when the output is stopped
+/// (`Capture::drop`). A portal that does not answer (its program, or the
+/// program behind it, stopped or hung) kept this thread in the closing of
+/// the session and the window with it: the page stood still for as long as
+/// the portal did, and `--quit` was accepted and not acted on.
+fn finished_within(
+    runtime: &tokio::runtime::Runtime,
+    patience: Duration,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) -> bool {
+    let (done, finished) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        work.await;
+        let _ = done.send(());
+    });
+    finished.recv_timeout(patience).is_ok()
+}
+
+/// What PipeWire tells of a running cast.
+enum Seen {
+    /// The stream went from one state to another.
+    State(pw::stream::StreamState, pw::stream::StreamState),
+    /// An object of the graph is gone: its number.
+    Removed(u32),
+}
+
+/// Why the cast of the screen that is node `node` is over, if `seen` means
+/// that it is.
+///
+/// A stream that pauses is not over: it pauses for a moment whenever the
+/// screen's mode changes, and for as long as the session manager is being
+/// restarted, and runs again by itself. It also pauses, and that is all it
+/// is told, when the screen's node is taken away: the output was unplugged
+/// or switched off, the desktop ended the cast, or the portal's own program
+/// went away (xdg-desktop-portal-wlr 0.8 does at a change of the screen's
+/// mode). No frame comes after that, which looks like a screen on which
+/// nothing changes, so the page went on saying that it showed one. The
+/// node going is what tells the two apart.
+fn ending(node: u32, seen: &Seen) -> Option<String> {
+    use pw::stream::StreamState::{Error, Paused, Streaming, Unconnected};
+    match seen {
+        Seen::State(_, Error(reason)) => Some(reason.clone()),
+        // The connection to PipeWire itself was lost after the stream had
+        // been running.
+        Seen::State(Streaming | Paused, Unconnected) => {
+            Some("the screen cast was ended by the desktop".to_owned())
+        }
+        Seen::Removed(id) if *id == node => {
+            Some("the screen cast was ended by the desktop".to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// Since when a cast that was running is paused, once its stream has gone
+/// from `old` to `new`; `since` is what it was before that.
+///
+/// A paused stream gets no frames, and the page must not call that a screen
+/// on which nothing changes (`Capture::paused_for`). The pause before the
+/// first frame is not one of a running cast.
+fn pause_after(
+    since: Option<Instant>,
+    old: &pw::stream::StreamState,
+    new: &pw::stream::StreamState,
+    now: Instant,
+) -> Option<Instant> {
+    use pw::stream::StreamState::{Paused, Streaming};
+    match (old, new) {
+        (Streaming, Paused) => Some(now),
+        (_, Paused) => since,
+        _ => None,
+    }
+}
+
+/// How a pixel lies in its four bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Packing {
+    /// A byte a colour: blue first (`bgr`) or red first, then one to spare.
+    Bytes { bgr: bool },
+    /// Ten bits a colour in one 32-bit number, the two bits on top to
+    /// spare: red in the highest ten of the thirty (`red_high`) or blue.
+    /// wlroots desktops send this, and nothing else, for an output that is
+    /// rendered with ten bits (sway's `render_bit_depth 10`); the cast then
+    /// ended at once with "no more input formats".
+    Tens { red_high: bool },
+}
+
+/// The packing of a stream's pixels, for the formats that are asked for.
+fn packing(format: spa::param::video::VideoFormat) -> Option<Packing> {
+    use spa::param::video::VideoFormat as Format;
+    match format {
+        Format::BGRx | Format::BGRA => Some(Packing::Bytes { bgr: true }),
+        Format::RGBx | Format::RGBA => Some(Packing::Bytes { bgr: false }),
+        Format::xRGB_210LE | Format::ARGB_210LE => Some(Packing::Tens { red_high: true }),
+        Format::xBGR_210LE | Format::ABGR_210LE => Some(Packing::Tens { red_high: false }),
+        _ => None,
+    }
+}
+
+/// Write a frame of ten bits a colour into `out` as one of a byte a colour
+/// (blue, green, red, one to spare), its rows without gaps: the eight
+/// highest bits of each colour are kept. `frame` holds `height` rows of
+/// `width` pixels, each row `stride` bytes after the one before.
+fn narrow_tens(
+    frame: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    red_high: bool,
+    out: &mut Vec<u8>,
+) {
+    out.clear();
+    out.reserve(width * height * 4);
+    for row in frame.chunks(stride.max(1)).take(height) {
+        let Some(row) = row.get(..width * 4) else {
+            return;
+        };
+        for pixel in row.as_chunks::<4>().0 {
+            let all = u32::from_le_bytes(*pixel);
+            let (high, middle, low) = ((all >> 22) as u8, (all >> 12) as u8, (all >> 2) as u8);
+            let (red, blue) = if red_high { (high, low) } else { (low, high) };
+            out.extend_from_slice(&[blue, middle, red, 255]);
+        }
+    }
 }
 
 struct StreamData {
@@ -315,7 +483,32 @@ fn stream(
     .map_err(failed("no stream"))?;
 
     let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let (state_error, state_loop, state_shared) = (error.clone(), mainloop.clone(), shared.clone());
+    // Whatever ends the cast says why (unless it was stopped from here)
+    // and has the loop left.
+    let ended = {
+        let (error, mainloop, shared) = (error.clone(), mainloop.clone(), shared.clone());
+        move |reason: String| {
+            if !shared.stop.load(Ordering::Relaxed) {
+                lock(&error).get_or_insert(reason);
+            }
+            mainloop.quit();
+        }
+    };
+    // The screen's node is watched as well as the stream: when the node
+    // goes, the stream is told nothing but to pause (see `ending`). A cast
+    // that cannot be watched like this is shown all the same.
+    let registry = core.get_registry_rc().ok();
+    let node_ended = ended.clone();
+    let _registry_listener = registry.as_ref().map(|registry| {
+        registry
+            .add_listener_local()
+            .global_remove(move |id| {
+                if let Some(reason) = ending(node, &Seen::Removed(id)) {
+                    node_ended(reason);
+                }
+            })
+            .register()
+    });
     let data = StreamData {
         format: Default::default(),
         shared: shared.clone(),
@@ -323,26 +516,13 @@ fn stream(
     };
     let _listener = stream
         .add_local_listener_with_user_data(data)
-        .state_changed(move |_, _, old, new| {
-            let over = match &new {
-                pw::stream::StreamState::Error(reason) => Some(reason.clone()),
-                // The source went away (the screen was unplugged, or the
-                // desktop ended the cast) after it had been running.
-                pw::stream::StreamState::Unconnected
-                    if matches!(
-                        old,
-                        pw::stream::StreamState::Streaming | pw::stream::StreamState::Paused
-                    ) =>
-                {
-                    Some("the screen cast was ended by the desktop".to_owned())
-                }
-                _ => None,
-            };
-            if let Some(reason) = over {
-                if !state_shared.stop.load(Ordering::Relaxed) {
-                    *lock(&state_error) = Some(reason);
-                }
-                state_loop.quit();
+        .state_changed(move |_, data, old, new| {
+            {
+                let mut paused = lock(&data.shared.paused);
+                *paused = pause_after(*paused, &old, &new, Instant::now());
+            }
+            if let Some(reason) = ending(node, &Seen::State(old, new)) {
+                ended(reason);
             }
         })
         .param_changed(|_, data, id, param| {
@@ -364,12 +544,8 @@ fn stream(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
-            let bgr = match data.format.format() {
-                spa::param::video::VideoFormat::BGRx | spa::param::video::VideoFormat::BGRA => true,
-                spa::param::video::VideoFormat::RGBx | spa::param::video::VideoFormat::RGBA => {
-                    false
-                }
-                _ => return,
+            let Some(packing) = packing(data.format.format()) else {
+                return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
             let datas = buffer.datas_mut();
@@ -400,7 +576,24 @@ fn stream(
                 return;
             }
             data.spare.clear();
-            data.spare.extend_from_slice(&frame[..needed]);
+            let (stride, bgr) = match packing {
+                Packing::Bytes { bgr } => {
+                    data.spare.extend_from_slice(&frame[..needed]);
+                    (stride, bgr)
+                }
+                Packing::Tens { red_high } => {
+                    let (width, height) = (width as usize, height as usize);
+                    narrow_tens(
+                        &frame[..needed],
+                        width,
+                        height,
+                        stride,
+                        red_high,
+                        &mut data.spare,
+                    );
+                    (row, true)
+                }
+            };
             let first = {
                 let mut slot = lock(&data.shared.slot);
                 std::mem::swap(&mut slot.bytes, &mut data.spare);
@@ -444,6 +637,12 @@ fn stream(
             spa::param::video::VideoFormat::BGRA,
             spa::param::video::VideoFormat::RGBx,
             spa::param::video::VideoFormat::RGBA,
+            // What a desktop that renders the screen with ten bits a colour
+            // has to offer, and all it has (`Packing::Tens`).
+            spa::param::video::VideoFormat::xRGB_210LE,
+            spa::param::video::VideoFormat::xBGR_210LE,
+            spa::param::video::VideoFormat::ARGB_210LE,
+            spa::param::video::VideoFormat::ABGR_210LE,
         ),
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoSize,
@@ -556,13 +755,18 @@ pub struct Fed(Arc<Shared>);
 #[cfg(test)]
 impl Fed {
     pub fn start() -> Fed {
-        Fed(Arc::new(Shared {
-            slot: Mutex::new(Slot::default()),
-            arrived: Condvar::new(),
-            state: Mutex::new(CaptureState::Asking),
-            token: Mutex::new(None),
-            stop: AtomicBool::new(false),
-        }))
+        Fed(Arc::new(Shared::new()))
+    }
+
+    /// The desktop's dialog has been answered with a screen.
+    pub fn chosen(&self) {
+        self.0.chosen();
+    }
+
+    /// The desktop has paused the cast (since `since`) or lets it run
+    /// again (`None`).
+    pub fn pause(&self, since: Option<Instant>) {
+        *lock(&self.0.paused) = since;
     }
 
     pub fn frames(&self) -> Frames {
@@ -597,6 +801,159 @@ impl Drop for Fed {
     fn drop(&mut self) {
         self.0.stop.store(true, Ordering::Relaxed);
         self.0.arrived.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pw::stream::StreamState::{Connecting, Error, Paused, Streaming, Unconnected};
+
+    const ENDED: &str = "the screen cast was ended by the desktop";
+
+    #[test]
+    fn a_portal_that_does_not_answer_is_not_waited_for_longer_than_said() {
+        let runtime = portal_runtime().unwrap();
+        // An answer that comes is waited for, however short the patience
+        // would have been for one that does not.
+        let asked = std::time::Instant::now();
+        assert!(finished_within(runtime, Duration::from_secs(30), async {}));
+        assert!(asked.elapsed() < Duration::from_secs(10));
+        // One that never comes: the wait ends when the patience does.
+        let patience = Duration::from_millis(200);
+        let asked = std::time::Instant::now();
+        assert!(!finished_within(runtime, patience, std::future::pending()));
+        assert!(asked.elapsed() >= patience);
+        assert!(asked.elapsed() < Duration::from_secs(10));
+        // The runtime serves the next request all the same.
+        assert!(finished_within(runtime, Duration::from_secs(30), async {}));
+    }
+
+    #[test]
+    fn a_frame_of_ten_bits_a_colour_is_read_as_the_picture_it_is() {
+        use spa::param::video::VideoFormat as Format;
+        assert_eq!(packing(Format::BGRx), Some(Packing::Bytes { bgr: true }));
+        assert_eq!(packing(Format::RGBA), Some(Packing::Bytes { bgr: false }));
+        let red_high = Some(Packing::Tens { red_high: true });
+        assert_eq!(packing(Format::xRGB_210LE), red_high);
+        assert_eq!(packing(Format::ARGB_210LE), red_high);
+        let blue_high = Some(Packing::Tens { red_high: false });
+        assert_eq!(packing(Format::xBGR_210LE), blue_high);
+        assert_eq!(packing(Format::ABGR_210LE), blue_high);
+        // Not asked for, and not read as something it is not.
+        assert_eq!(packing(Format::RGBx_102LE), None);
+        assert_eq!(packing(Format::NV12), None);
+
+        // Two rows of two pixels, each row followed by four bytes that
+        // belong to no pixel. Red, green and blue as ten-bit numbers.
+        let pixel = |high: u32, middle: u32, low: u32| {
+            ((0b11 << 30) | (high << 20) | (middle << 10) | low).to_le_bytes()
+        };
+        let gap = [0xEE; 4];
+        let frame = [
+            pixel(1023, 0, 0),
+            pixel(0, 1023, 0),
+            gap,
+            pixel(0, 0, 1023),
+            pixel(512, 256, 4),
+        ]
+        .concat();
+        let mut out = vec![7; 3];
+        narrow_tens(&frame, 2, 2, 12, true, &mut out);
+        // Blue, green, red and a full fourth byte, as `PixelOrder::Bgr`
+        // reads them; the gaps are gone.
+        assert_eq!(
+            out,
+            [
+                [0, 0, 255, 255],
+                [0, 255, 0, 255],
+                [255, 0, 0, 255],
+                [1, 64, 128, 255]
+            ]
+            .concat()
+        );
+        // The same numbers with blue in the high bits.
+        narrow_tens(&frame, 2, 2, 12, false, &mut out);
+        assert_eq!(
+            out,
+            [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [128, 64, 1, 255]
+            ]
+            .concat()
+        );
+        // A frame shorter than it says gives the rows it has, and no more.
+        narrow_tens(&frame[..14], 2, 2, 12, true, &mut out);
+        assert_eq!(out.len(), 8);
+    }
+
+    #[test]
+    fn a_running_cast_that_is_paused_is_known_to_be_and_since_when() {
+        let (then, now) = (Instant::now(), Instant::now() + Duration::from_secs(5));
+        // Starting up is not a pause of a running cast.
+        assert_eq!(pause_after(None, &Unconnected, &Connecting, now), None);
+        assert_eq!(pause_after(None, &Connecting, &Paused, now), None);
+        assert_eq!(pause_after(None, &Paused, &Streaming, now), None);
+        // Running, then paused: from that moment.
+        assert_eq!(pause_after(None, &Streaming, &Paused, now), Some(now));
+        // Running again, or over.
+        assert_eq!(pause_after(Some(then), &Paused, &Streaming, now), None);
+        assert_eq!(pause_after(Some(then), &Paused, &Unconnected, now), None);
+        // The page reads it from the capture.
+        let fed = Fed::start();
+        let capture = fed.capture();
+        assert_eq!(capture.paused_for(), None);
+        fed.pause(Some(then));
+        assert!(capture.paused_for().is_some());
+    }
+
+    #[test]
+    fn the_dialog_is_known_to_be_over_before_the_first_frame() {
+        let fed = Fed::start();
+        let capture = fed.capture();
+        assert_eq!(capture.state(), CaptureState::Asking);
+        fed.chosen();
+        assert_eq!(capture.state(), CaptureState::Starting);
+        fed.feed(2, 1, &[0; 8]);
+        let running = CaptureState::Running {
+            width: 2,
+            height: 1,
+        };
+        assert_eq!(capture.state(), running);
+        // An answer that comes late changes nothing.
+        fed.chosen();
+        assert_eq!(capture.state(), running);
+    }
+
+    #[test]
+    fn a_cast_whose_screen_is_taken_away_is_over_and_one_that_pauses_is_not() {
+        let state = |old, new| ending(44, &Seen::State(old, new));
+        // What a sway session with xdg-desktop-portal-wlr sends when the
+        // shown output is unplugged or switched off, or when the portal's
+        // program goes away: the stream pauses, and the link, the port and
+        // the node of the screen are removed. Only the node says that it
+        // is over.
+        assert_eq!(state(Streaming, Paused), None);
+        assert_eq!(ending(44, &Seen::Removed(49)), None);
+        assert_eq!(ending(44, &Seen::Removed(45)), None);
+        assert_eq!(ending(44, &Seen::Removed(44)).as_deref(), Some(ENDED));
+        // A change of the screen's mode, and a session manager that is
+        // restarted (its link goes and comes back): the cast runs on.
+        assert_eq!(state(Paused, Streaming), None);
+        // Starting up.
+        assert_eq!(state(Unconnected, Connecting), None);
+        assert_eq!(state(Connecting, Paused), None);
+        // A stream that was never connected has not been ended.
+        assert_eq!(state(Connecting, Unconnected), None);
+        // PipeWire itself is gone, or says what went wrong.
+        assert_eq!(state(Streaming, Unconnected).as_deref(), Some(ENDED));
+        assert_eq!(state(Paused, Unconnected).as_deref(), Some(ENDED));
+        assert_eq!(
+            state(Paused, Error("no more input formats".into())).as_deref(),
+            Some("no more input formats")
+        );
     }
 }
 

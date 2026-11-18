@@ -387,6 +387,23 @@ impl Live {
         self.capture.restore_token()
     }
 
+    /// For how long the desktop has had the cast paused
+    /// (`Capture::paused_for`).
+    pub fn paused_for(&self) -> Option<Duration> {
+        self.capture.paused_for()
+    }
+
+    /// A live screen around `capture` with nothing at work on it, for tests
+    /// of what the page says.
+    #[cfg(test)]
+    pub(crate) fn idle(capture: Capture) -> Live {
+        Live {
+            capture,
+            shared: Arc::new(Shared::new()),
+            threads: Vec::new(),
+        }
+    }
+
     #[cfg(test)]
     fn frames(&self) -> Frames {
         self.capture.frames()

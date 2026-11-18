@@ -82,6 +82,16 @@ const LIVE_LINES: [(i32, &str); 4] = [
     (2160, "2160 lines (sharpest, slowest)"),
 ];
 const LIVE_NEEDS_ODYSSEY: &str = "A live screen is shown through the Odyssey 3D output only.";
+/// The desktop has answered and no frame has come yet.
+#[cfg(target_os = "linux")]
+const LIVE_STARTING: &str = "The screen was chosen. Waiting for its first picture: some desktops send one only when something on that screen changes.";
+/// What the page says of a cast the desktop has paused, after "a ... screen, ".
+#[cfg(target_os = "linux")]
+const LIVE_PAUSED: &str = "but the desktop has paused the screen cast and no pictures are coming. It goes on when the desktop lets it; stopping and starting the output asks for the screen again.";
+/// How long a cast has to be paused before the page says so: the desktop
+/// pauses it for a moment at every change of the screen's mode.
+#[cfg(target_os = "linux")]
+const LIVE_PAUSE_TOLD: std::time::Duration = std::time::Duration::from_secs(3);
 #[cfg(not(target_os = "linux"))]
 const LIVE_NOT_HERE: &str = "Live capture is not available in this build.";
 
@@ -1136,13 +1146,25 @@ impl ViewerState {
             }
         }
         let stats = live.stats();
+        let paused = live
+            .paused_for()
+            .is_some_and(|time| time >= LIVE_PAUSE_TOLD);
         match live.capture_state() {
             CaptureState::Asking => {
                 self.status = "Choose the screen to show in 3D in the desktop's dialog (asked once and remembered). On KDE Plasma 6 it can be the Odyssey itself; on other desktops choose another screen.".into();
             }
+            CaptureState::Starting => {
+                self.status = LIVE_STARTING.into();
+            }
             CaptureState::Running { width, height } => {
                 self.status = match &stats.output_error {
                     Some(e) => format!("The picture cannot be written: {e}"),
+                    // No frame comes while the cast is paused, which is not
+                    // a screen on which nothing changes.
+                    None if paused => format!(
+                        "Live: a {width} × {height} screen, {LIVE_PAUSED} {}",
+                        weaver.describe()
+                    ),
                     None => format!(
                         "Live: a {width} × {height} screen, {}. {}{}",
                         stats.describe(),
@@ -3555,6 +3577,54 @@ mod tests {
             let expected = if panics { "closed" } else { "answer" };
             assert_eq!(*found.lock().unwrap(), [expected], "panics: {panics}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_page_says_what_a_live_screen_is_waiting_for_and_when_no_pictures_can_come() {
+        use std::time::{Duration, Instant};
+        let fed = crate::capture::Fed::start();
+        let mut state = ViewerState::default();
+        state.options.input = Input::Desktop;
+        state.options.output = Output::Odyssey;
+        state.output_open = true;
+        state.live = Some(crate::live::Live::idle(fed.capture()));
+        let ctx = egui::Context::default();
+        let said = |state: &mut ViewerState| {
+            assert!(state.show_live(&ctx, &WeaverStatus::Idle));
+            state.status.clone()
+        };
+        // The desktop's dialog is open.
+        assert!(said(&mut state).starts_with("Choose the screen"));
+        // It has been answered and no frame has come: a desktop that sends
+        // one only when the screen changes left the page asking for a
+        // screen to be chosen in a dialog that was no longer there.
+        fed.chosen();
+        assert_eq!(said(&mut state), LIVE_STARTING);
+        fed.feed(16, 9, &[0; 16 * 9 * 4]);
+        let running = said(&mut state);
+        assert!(
+            running.starts_with("Live: a 16 × 9 screen, 0 pictures a second"),
+            "{running}"
+        );
+        // Paused for a moment, as at every change of the screen's mode:
+        // nothing is said of it.
+        fed.pause(Some(Instant::now()));
+        assert_eq!(said(&mut state), running);
+        // Paused and staying so (the session manager is gone, or the cast
+        // did not come back after a change of mode): no frames, which the
+        // page called a screen that is "not changing".
+        let long_ago = Instant::now().checked_sub(LIVE_PAUSE_TOLD + Duration::from_secs(1));
+        fed.pause(Some(long_ago.expect("a clock older than four seconds")));
+        let paused = said(&mut state);
+        assert!(
+            paused.starts_with("Live: a 16 × 9 screen, but the desktop has paused"),
+            "{paused}"
+        );
+        assert!(!paused.contains("not changing"), "{paused}");
+        // And running again.
+        fed.pause(None);
+        assert_eq!(said(&mut state), running);
     }
 
     #[test]
