@@ -821,8 +821,28 @@ fn stream(
             Fraction,
             spa::utils::Fraction { num: 60, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
-            // Sixty a second is as many as are rendered; a faster screen
-            // would only have its extra frames copied and dropped.
+            // Whatever rate a stream states for itself is taken. With
+            // sixty as the most here, a stream of a fixed faster rate was
+            // refused ("no more input formats"), and one that comes as the
+            // screen changes, which is what the desktops send, was not
+            // slowed by it.
+            spa::utils::Fraction {
+                num: 1000,
+                denom: 1
+            }
+        ),
+        // Sixty a second is as many as are rendered. A desktop that sends
+        // a picture when the screen has changed says how many a second
+        // that may be at the most, and is asked to keep to sixty: of a
+        // faster screen (the Odyssey runs at 165) every picture was copied
+        // and more than half of them never looked at.
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: 60, denom: 1 },
+            spa::utils::Fraction { num: 1, denom: 1 },
             spa::utils::Fraction { num: 60, denom: 1 }
         ),
     );
