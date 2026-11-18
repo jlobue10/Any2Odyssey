@@ -106,7 +106,16 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
   try{$file.IsReadOnly=$false}catch{$notices++;Write-Host "The shortcut $link is read-only and could not be changed; it is left in place.";continue}
  }
  $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
- if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){Remove-Item -LiteralPath $link}
+ # The same for a shortcut that cannot be deleted, read-only or not (a Desktop that has become
+ # read-only, a file another program holds open): it stays and is named. Every release up to 0.9.5
+ # stopped here, half-way, and stopped at the same place however often the uninstall was run again.
+ if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){
+  try{Remove-Item -LiteralPath $link}
+  catch{
+   $notices++;Write-Host "The shortcut $link could not be removed ($($_.Exception.Message)); it is left in place."
+   if($wasReadOnly){try{$file.IsReadOnly=$true}catch{}}
+  }
+ }
  elseif($wasReadOnly){$file.IsReadOnly=$true}
 }
 # Exact file list only: leave Samsung files, personal settings and logs intact. -Force, because a

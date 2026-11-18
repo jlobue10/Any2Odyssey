@@ -5,7 +5,8 @@
 The real check asks GitHub about the actions the workflows name, so in CI it only ever shows that today's
 commits are accepted. Here a `gh` that answers from files stands in, and the refusals are run too: a commit
 on no branch and under no tag (what the one 0.9.4 was built with became the day after), a tag or a short id
-in place of a commit, and an answer that never arrives. A2O_TEST_SHELL runs the script under another shell (dash, "busybox sh").
+in place of a commit, an answer that never arrives, and one that arrives only at the second try. A2O_TEST_SHELL runs the script
+under another shell (dash, "busybox sh").
 """
 import os
 from pathlib import Path
@@ -23,7 +24,9 @@ LEFT_BEHIND = "4d" * 20
 
 # Answers what the script asks, from files under $STAND_IN: tags/<owner>__<repo> ("<commit> <tag>" lines),
 # default/<owner>__<repo>, compare/<owner>__<repo>__<commit> and heads/<owner>__<repo>__<commit>.
-# A repository without a tags file is one GitHub does not answer for.
+# A repository without a tags file is one GitHub does not answer for. With a file fail-first, the first
+# time each question is asked it fails the way the real gh fails on an HTTP error: the body of the error on
+# standard output, exit 1. A file unanswered holds a word; a question with that word in it always fails so.
 GH = r"""#!/bin/sh
 [ "$1" = api ] || exit 2
 shift
@@ -37,6 +40,18 @@ while [ $# -gt 0 ]; do
     shift
 done
 echo "$endpoint" >> "$STAND_IN/asked"
+refuse() {
+    printf '%s' '{"message":"You have exceeded a secondary rate limit.","documentation_url":"https://docs.github.com/rest","status":"403"}'
+    echo "gh: You have exceeded a secondary rate limit (HTTP 403)" >&2
+    exit 1
+}
+if [ -f "$STAND_IN/fail-first" ]; then
+    once=$STAND_IN/failed-$(printf '%s' "$endpoint" | tr -c 'A-Za-z0-9' _)
+    [ -e "$once" ] || { : > "$once"; refuse; }
+fi
+if [ -f "$STAND_IN/unanswered" ]; then
+    case $endpoint in *"$(cat "$STAND_IN/unanswered")"*) refuse ;; esac
+fi
 path=${endpoint#repos/}
 name=$(printf '%s\n' "$path" | cut -d/ -f1,2 | sed 's|/|__|')
 rest=$(printf '%s\n' "$path" | cut -d/ -f3-)
@@ -121,6 +136,40 @@ class CheckActionPinsTests(unittest.TestCase):
         # Asked three times before giving up.
         asked = (self.stand_in / "asked").read_text().splitlines()
         self.assertEqual(asked.count("repos/nobody/answers/tags?per_page=100"), 3)
+
+    def test_the_body_of_a_failed_try_is_not_taken_for_the_name_of_a_tag_or_a_branch(self):
+        # gh prints what GitHub answered to a failed request on standard output. Up to 0.9.5 that went
+        # into the answer together with the next try's: after one failed try a commit that no tag and no
+        # branch holds was accepted, as under the tag {"message":"You have exceeded ...
+        (self.stand_in / "fail-first").touch()
+        result = self.check(f"- uses: one/action@{LEFT_BEHIND} # stable")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(f"::error::one/action@{LEFT_BEHIND}: one/action has this commit under no tag", result.stdout)
+        self.assertNotIn("ok  ", result.stdout)
+        # The commits that are held are still accepted, and what is printed are the names alone.
+        for failed in self.stand_in.glob("failed-*"):
+            failed.unlink()
+        result = self.check(f"- uses: one/action@{TAGGED}", f"- uses: one/action@{ON_MAIN}",
+                            f"- uses: one/action@{BRANCH_HEAD}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"ok  one/action@{TAGGED}: tag v4.4.0 v4\n", result.stdout)
+        self.assertIn(f"ok  one/action@{ON_MAIN}: on the branch main\n", result.stdout)
+        self.assertIn(f"ok  one/action@{BRANCH_HEAD}: head of the branch releases/v3\n", result.stdout)
+        self.assertNotIn("message", result.stdout)
+
+    def test_a_question_about_the_branches_that_gets_no_answer_is_said_as_that(self):
+        # GitHub answered for the tags and then not any more: the commit is refused (nobody said it is
+        # held), but not with the sentence that tells to change the workflows.
+        for question in ["compare", "branches-where-head"]:
+            with self.subTest(question=question):
+                (self.stand_in / "unanswered").write_text(question)
+                result = self.check(f"- uses: one/action@{LEFT_BEHIND}")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("GitHub did not answer whether a branch has it", result.stdout)
+                self.assertNotIn("not on its branch", result.stdout)
+        # A commit of the main branch is still found when only the last question goes unanswered.
+        result = self.check(f"- uses: one/action@{ON_MAIN}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_local_actions_images_and_comments_are_not_asked_about(self):
         result = self.check("- uses: ./.github/actions/local", "- uses: docker://alpine:3",
