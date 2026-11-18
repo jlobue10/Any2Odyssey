@@ -324,6 +324,16 @@ jobs:
         run: |
           rustup target add x86_64-pc-windows-msvc
           cargo check --locked --workspace --target x86_64-pc-windows-msvc
+      # The oldest C library and the oldest ONNX Runtime the program takes are decided in install.sh and in
+      # the binding's feature; README.md, INSTALL.txt, docs/PLATFORMS.md and the text of the release page
+      # (release.yml) repeat them. The release pages of 0.9.5 and 0.9.6 still named the numbers of 0.9.4.
+      # First the check itself, on copies that are left behind.
+      - name: The check of the documents' numbers refuses what it should
+        if: matrix.arch == 'x86_64'
+        run: python3 scripts/tests/test-check-doc-numbers.py
+      - name: Documents and release text name the glibc and ONNX Runtime the sources name
+        if: matrix.arch == 'x86_64'
+        run: scripts/check-doc-numbers.sh
       # The archive release.yml publishes, made the same way, so a change that breaks it shows here.
       # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
       # The script first compares THIRD-PARTY-LICENSES.md, which is written by hand, with the crates of a
