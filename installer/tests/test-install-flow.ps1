@@ -100,6 +100,7 @@ try{
  $notes.Clear()
  & $testInstall
  Assert ((Get-Content -LiteralPath (Join-Path $data 'install-result.json') -Raw | ConvertFrom-Json).Action -eq 'Repair') 'Repeated installer repairs the same release'
+ Assert ((Get-Content -LiteralPath (Join-Path $app 'version.json') -Raw | ConvertFrom-Json).PreviousVersion -ceq (Get-Content -LiteralPath (Join-Path $repo 'VERSION') -Raw).Trim()) 'The record names the replaced version as the releases are named, in three parts'
  Assert (($notes -join [char]10).Contains('installed by another Windows account (S-1-5-21-1-2-3-1001)')) 'Installing over another account''s worker prints a notice'
  Assert ((Get-Content -LiteralPath $ownerFile -Raw).Trim() -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Installing over another account''s installation takes over the owner marker'
  Assert ((Get-ItemProperty -LiteralPath $registration).EstimatedSize -eq 4096) 'Repair keeps registry values the installer does not own'
