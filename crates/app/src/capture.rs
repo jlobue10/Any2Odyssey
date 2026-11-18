@@ -249,12 +249,7 @@ fn run(
             // picture; a screen shown on itself has the real one on top
             // already. Where the desktop cannot draw it into the stream,
             // the stream comes without.
-            let cursor = match proxy.available_cursor_modes().await {
-                Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => {
-                    CursorMode::Embedded
-                }
-                _ => CursorMode::Hidden,
-            };
+            let cursor = wished_cursor(pointer, proxy.available_cursor_modes().await.ok());
             proxy
                 .select_sources(
                     &session,
@@ -310,6 +305,27 @@ fn run(
         let _ = session.close().await;
     });
     streamed
+}
+
+/// The cursor mode to ask the portal for: the pointer drawn into the frames
+/// where that is wanted and the desktop can do it, and otherwise nothing,
+/// which the portal takes for "hidden".
+///
+/// "Hidden" used to be asked for by name. The portal checks a named mode
+/// against the modes its backend has told it of, and for a moment after the
+/// backend has been started again (it had ended, or was updated) it knows of
+/// none: the next Start then ended with "Unavailable cursor mode 1", on GNOME
+/// with xdg-desktop-portal 1.22. What is not named is not checked.
+fn wished_cursor(
+    pointer: bool,
+    available: Option<ashpd::enumflags2::BitFlags<CursorMode>>,
+) -> Option<CursorMode> {
+    match available {
+        Some(modes) if pointer && modes.contains(CursorMode::Embedded) => {
+            Some(CursorMode::Embedded)
+        }
+        _ => None,
+    }
 }
 
 /// How long the portal's answer to the closing of a session is waited for.
@@ -554,6 +570,81 @@ pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
     }
 }
 
+/// The stream that is asked for: raw video in one of the pixel formats that
+/// are read here, at whatever rate it states for itself and with sixty
+/// frames a second as the most a desktop is to send. No size is wished for.
+///
+/// The size is the desktop's to say. KWin (Plasma 6.8) offers every size from
+/// 200 x 200 to 10000 x 10000 with the screen's own as its wish, and resizes
+/// the picture to whatever the reader wishes for instead; the wish here used
+/// to be 1920 x 1080, so every screen came at that size: a 2560 x 1440 one
+/// scaled down, a screen turned on its side (1080 x 1920) pressed into the
+/// wide shape. Desktops that offer one size (GNOME, wlroots) took no notice.
+fn wanted_format() -> spa::pod::Object {
+    spa::pod::object!(
+        spa::utils::SpaTypes::ObjectParamFormat,
+        spa::param::ParamType::EnumFormat,
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaType,
+            Id,
+            spa::param::format::MediaType::Video
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            spa::param::format::MediaSubtype::Raw
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRA,
+            spa::param::video::VideoFormat::RGBx,
+            spa::param::video::VideoFormat::RGBA,
+            // What a desktop that renders the screen with ten bits a colour
+            // has to offer, and all it has (`Packing::Tens`).
+            spa::param::video::VideoFormat::xRGB_210LE,
+            spa::param::video::VideoFormat::xBGR_210LE,
+            spa::param::video::VideoFormat::ARGB_210LE,
+            spa::param::video::VideoFormat::ABGR_210LE,
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: 60, denom: 1 },
+            spa::utils::Fraction { num: 0, denom: 1 },
+            // Whatever rate a stream states for itself is taken. With
+            // sixty as the most here, a stream of a fixed faster rate was
+            // refused ("no more input formats"), and one that comes as the
+            // screen changes, which is what the desktops send, was not
+            // slowed by it.
+            spa::utils::Fraction {
+                num: 1000,
+                denom: 1
+            }
+        ),
+        // Sixty a second is as many as are rendered. A desktop that sends
+        // a picture when the screen has changed says how many a second
+        // that may be at the most, and is asked to keep to sixty: of a
+        // faster screen (the Odyssey runs at 165) every picture was copied
+        // and more than half of them never looked at.
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: 60, denom: 1 },
+            spa::utils::Fraction { num: 1, denom: 1 },
+            spa::utils::Fraction { num: 60, denom: 1 }
+        ),
+    )
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -766,86 +857,7 @@ fn stream(
         .register()
         .map_err(failed("no stream listener"))?;
 
-    let format = spa::pod::object!(
-        spa::utils::SpaTypes::ObjectParamFormat,
-        spa::param::ParamType::EnumFormat,
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaType,
-            Id,
-            spa::param::format::MediaType::Video
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaSubtype,
-            Id,
-            spa::param::format::MediaSubtype::Raw
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRA,
-            spa::param::video::VideoFormat::RGBx,
-            spa::param::video::VideoFormat::RGBA,
-            // What a desktop that renders the screen with ten bits a colour
-            // has to offer, and all it has (`Packing::Tens`).
-            spa::param::video::VideoFormat::xRGB_210LE,
-            spa::param::video::VideoFormat::xBGR_210LE,
-            spa::param::video::VideoFormat::ARGB_210LE,
-            spa::param::video::VideoFormat::ABGR_210LE,
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            spa::utils::Rectangle {
-                width: 1920,
-                height: 1080
-            },
-            spa::utils::Rectangle {
-                width: 1,
-                height: 1
-            },
-            spa::utils::Rectangle {
-                width: 16384,
-                height: 16384
-            }
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            spa::utils::Fraction { num: 60, denom: 1 },
-            spa::utils::Fraction { num: 0, denom: 1 },
-            // Whatever rate a stream states for itself is taken. With
-            // sixty as the most here, a stream of a fixed faster rate was
-            // refused ("no more input formats"), and one that comes as the
-            // screen changes, which is what the desktops send, was not
-            // slowed by it.
-            spa::utils::Fraction {
-                num: 1000,
-                denom: 1
-            }
-        ),
-        // Sixty a second is as many as are rendered. A desktop that sends
-        // a picture when the screen has changed says how many a second
-        // that may be at the most, and is asked to keep to sixty: of a
-        // faster screen (the Odyssey runs at 165) every picture was copied
-        // and more than half of them never looked at.
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoMaxFramerate,
-            Choice,
-            Range,
-            Fraction,
-            spa::utils::Fraction { num: 60, denom: 1 },
-            spa::utils::Fraction { num: 1, denom: 1 },
-            spa::utils::Fraction { num: 60, denom: 1 }
-        ),
-    );
+    let format = wanted_format();
     let values = spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(format),
@@ -982,6 +994,90 @@ mod tests {
     use pw::stream::StreamState::{Connecting, Error, Paused, Streaming, Unconnected};
 
     const ENDED: &str = "the screen cast was ended by the desktop";
+
+    #[test]
+    fn no_size_is_wished_for_and_every_format_wished_for_can_be_read() {
+        use spa::param::format::FormatProperties as Key;
+        let format = wanted_format();
+        let has = |key: Key| format.properties.iter().any(|p| p.key == key.as_raw());
+        // KWin resizes the picture to the size a reader wishes for: with
+        // 1920 x 1080 wished for, a 2560 x 1440 screen came at 1920 x 1080.
+        assert!(!has(Key::VideoSize));
+        assert!(has(Key::MediaType) && has(Key::MediaSubtype) && has(Key::VideoFramerate));
+        assert!(has(Key::VideoMaxFramerate));
+        let formats = format
+            .properties
+            .iter()
+            .find(|p| p.key == Key::VideoFormat.as_raw())
+            .expect("the pixel formats are named");
+        let spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
+            _,
+            spa::utils::ChoiceEnum::Enum {
+                default,
+                alternatives,
+            },
+        ))) = &formats.value
+        else {
+            panic!("the pixel formats are a choice: {:?}", formats.value);
+        };
+        assert!(!alternatives.is_empty());
+        for id in alternatives.iter().chain([default]) {
+            let format = spa::param::video::VideoFormat::from_raw(id.0);
+            assert!(packing(format).is_some(), "{format:?} is wished for");
+        }
+        // And it can be written as PipeWire wants it.
+        let written = spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(format),
+        );
+        assert!(written.is_ok());
+    }
+
+    #[test]
+    fn sixty_a_second_is_the_most_asked_for_and_a_streams_own_rate_is_taken() {
+        use spa::param::format::FormatProperties as Key;
+        use spa::pod::{ChoiceValue, Value};
+        use spa::utils::{Choice, ChoiceEnum};
+        let format = wanted_format();
+        // A range of whole numbers a second: the wish, the least, the most.
+        let range = |key: Key| {
+            let named = format.properties.iter().find(|p| p.key == key.as_raw());
+            let Some(Value::Choice(ChoiceValue::Fraction(Choice(
+                _,
+                ChoiceEnum::Range { default, min, max },
+            )))) = named.map(|p| &p.value)
+            else {
+                panic!("{key:?} is not a range: {named:?}");
+            };
+            assert_eq!((default.denom, min.denom, max.denom), (1, 1, 1));
+            (default.num, min.num, max.num)
+        };
+        // What a desktop is to send at the most. It names its own limit as
+        // a range from 1 to the screen's rate, and the two are cut to one.
+        assert_eq!(range(Key::VideoMaxFramerate), (60, 1, 60));
+        // The stream's own rate: 0 is "as the screen changes", and a fixed
+        // rate of 144 or 240 was refused while 60 was the most here.
+        let (_, least, most) = range(Key::VideoFramerate);
+        assert_eq!(least, 0);
+        assert!(most >= 240);
+    }
+
+    #[test]
+    fn the_pointer_is_asked_for_by_name_only_where_it_is_drawn() {
+        use ashpd::enumflags2::BitFlags;
+        let all = CursorMode::Hidden | CursorMode::Embedded | CursorMode::Metadata;
+        assert_eq!(wished_cursor(true, Some(all)), Some(CursorMode::Embedded));
+        // No pointer wanted: nothing is named, which the portal takes for
+        // hidden. Named, it was refused for a moment after the portal's
+        // backend had been started again ("Unavailable cursor mode 1").
+        assert_eq!(wished_cursor(false, Some(all)), None);
+        assert_eq!(wished_cursor(false, None), None);
+        // A desktop that cannot draw it, or does not say what it can.
+        let cannot = CursorMode::Hidden | CursorMode::Metadata;
+        assert_eq!(wished_cursor(true, Some(cannot)), None);
+        assert_eq!(wished_cursor(true, Some(BitFlags::empty())), None);
+        assert_eq!(wished_cursor(true, None), None);
+    }
 
     #[test]
     fn a_portal_that_does_not_answer_is_not_waited_for_longer_than_said() {
