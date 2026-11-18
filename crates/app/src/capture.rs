@@ -459,7 +459,8 @@ impl spa::buffer::meta::Metadata for TurnNote {
 }
 
 /// What is asked to come with every frame, each as PipeWire wants it
-/// described: the note about how the picture lies. A desktop attaches a
+/// described: the frame's header, which can say that its bytes are no
+/// picture, and the note about how the picture lies. A desktop attaches a
 /// note only for a receiver that has asked for it, so a rotated screen of
 /// a desktop that hands out the panel's own pixels (sway and the other
 /// wlroots desktops) was shown lying on its side.
@@ -486,11 +487,54 @@ fn wanted_notes() -> Result<Vec<Vec<u8>>, String> {
         .map(|done| done.0.into_inner())
         .map_err(|e| format!("PipeWire: could not describe the wanted notes: {e:?}"))
     };
-    use spa::buffer::meta::Metadata;
-    Ok(vec![note(
-        TurnNote::META_TYPE,
-        std::mem::size_of::<TurnNote>(),
-    )?])
+    use spa::buffer::meta::{MetaHeader, Metadata};
+    Ok(vec![
+        note(MetaHeader::META_TYPE, std::mem::size_of::<MetaHeader>())?,
+        note(TurnNote::META_TYPE, std::mem::size_of::<TurnNote>())?,
+    ])
+}
+
+/// What a buffer says about the picture in it.
+#[derive(Clone, Copy, Debug)]
+struct Told {
+    /// Where the picture begins in the buffer's memory, how many bytes of
+    /// it are valid, and how far its rows are apart.
+    offset: u32,
+    size: u32,
+    stride: i32,
+    /// The buffer or the frame's header is marked as corrupted.
+    spoiled: bool,
+}
+
+/// The rows of a `width` x `height` picture of four bytes a pixel in the
+/// memory `bytes` of a buffer that says `told` about it, and how far apart
+/// they are. `None` for a buffer that holds no picture or not all of one.
+///
+/// A desktop also sends buffers that are no picture, and says so: marked
+/// as corrupted (xdg-desktop-portal-wlr for a frame it could not copy, in
+/// the buffer and in the frame's header; KDE for an update of the pointer
+/// alone), or with no valid bytes at all (GNOME for a frame it could not
+/// record, from 43 on with the mark as well). The memory of such a buffer
+/// holds an older picture or none; it was read all the same, and shown.
+fn picture_in(bytes: &[u8], told: Told, width: u32, height: u32) -> Option<(&[u8], usize)> {
+    if told.spoiled || told.size == 0 {
+        return None;
+    }
+    let (offset, size) = (told.offset as usize, told.size as usize);
+    let row = width as usize * 4;
+    // A distance that cannot be one (none, backwards, shorter than a row)
+    // is taken for rows without gaps.
+    let stride = usize::try_from(told.stride)
+        .ok()
+        .filter(|s| *s >= row)
+        .unwrap_or(row);
+    let needed = match (height as usize).checked_sub(1) {
+        Some(rows) if row > 0 => stride.checked_mul(rows)?.checked_add(row)?,
+        _ => return None,
+    };
+    let end = offset.saturating_add(size.min(bytes.len()));
+    let valid = bytes.get(offset..end.min(bytes.len()))?;
+    Some((valid.get(..needed)?, stride))
 }
 
 struct StreamData {
@@ -612,34 +656,29 @@ fn stream(
                 .find_meta::<TurnNote>()
                 .and_then(|note| Turned::from_note(note.0))
                 .unwrap_or_default();
+            let header_spoiled = buffer
+                .find_meta::<spa::buffer::meta::MetaHeader>()
+                .is_some_and(|header| {
+                    let corrupted = spa::buffer::meta::MetaHeaderFlags::CORRUPTED;
+                    header.flags().contains(corrupted)
+                });
             let datas = buffer.datas_mut();
             let Some(plane) = datas.first_mut() else {
                 return;
             };
             let chunk = plane.chunk();
-            let (offset, size) = (chunk.offset() as usize, chunk.size() as usize);
-            let row = width as usize * 4;
-            let stride = usize::try_from(chunk.stride())
-                .ok()
-                .filter(|s| *s >= row)
-                .unwrap_or(row);
+            let told = Told {
+                offset: chunk.offset(),
+                size: chunk.size(),
+                stride: chunk.stride(),
+                spoiled: header_spoiled
+                    || chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED),
+            };
             let Some(bytes) = plane.data() else { return };
-            let needed = match (height as usize).checked_sub(1) {
-                Some(rows) if row > 0 => stride * rows + row,
-                _ => return,
-            };
-            let end = offset.saturating_add(if size == 0 {
-                needed
-            } else {
-                size.min(bytes.len())
-            });
-            let Some(frame) = bytes.get(offset..end.min(bytes.len())) else {
+            let Some((frame, stride)) = picture_in(bytes, told, width, height) else {
                 return;
             };
-            if frame.len() < needed {
-                return;
-            }
-            let frame = &frame[..needed];
+            let row = width as usize * 4;
             let lying = |bytes, stride| Source {
                 bytes,
                 width,
@@ -973,6 +1012,109 @@ mod tests {
         // A frame shorter than it says gives the rows it has, and no more.
         narrow_tens(&frame[..14], 2, 2, 12, true, &mut out);
         assert_eq!(out.len(), 8);
+    }
+
+    #[test]
+    fn the_header_and_the_note_about_the_turn_are_asked_for_as_pipewire_lays_them_out() {
+        use spa::pod::{deserialize::PodDeserializer, Value};
+        // PipeWire's numbers for the two, and the bytes each of them is: a
+        // desktop does not attach a note that is asked for at another size.
+        let expected = [(1, 32), (8, 4)];
+        let notes = wanted_notes().unwrap();
+        assert_eq!(notes.len(), expected.len());
+        for (note, (kind, size)) in notes.iter().zip(expected) {
+            assert!(spa::pod::Pod::from_bytes(note).is_some());
+            let Ok((_, Value::Object(wanted))) = PodDeserializer::deserialize_any_from(note) else {
+                panic!("the note {kind} is not an object");
+            };
+            assert_eq!(wanted.type_, spa::sys::SPA_TYPE_OBJECT_ParamMeta);
+            assert_eq!(wanted.id, spa::sys::SPA_PARAM_Meta);
+            let values: Vec<_> = wanted.properties.iter().map(|p| &p.value).collect();
+            assert_eq!(
+                values,
+                [&Value::Id(spa::utils::Id(kind)), &Value::Int(size)],
+                "note {kind}"
+            );
+        }
+        assert_eq!(std::mem::size_of::<TurnNote>(), 4);
+    }
+
+    #[test]
+    fn a_buffer_gives_its_picture_only_when_it_says_it_holds_all_of_one() {
+        // A picture of 3 x 2 pixels, its rows 16 bytes apart, 8 bytes into
+        // a buffer that has 4 more at its end.
+        let bytes: Vec<u8> = (0..40).collect();
+        let told = Told {
+            offset: 8,
+            size: 32,
+            stride: 16,
+            spoiled: false,
+        };
+        let picture = |told| picture_in(&bytes, told, 3, 2);
+        assert_eq!(picture(told), Some((&bytes[8..36], 16)));
+        // The last row need not have the gap after it; one byte less than
+        // the picture is not a picture.
+        assert_eq!(
+            picture(Told { size: 28, ..told }),
+            Some((&bytes[8..36], 16))
+        );
+        assert_eq!(picture(Told { size: 27, ..told }), None);
+        // More bytes than the buffer has are as many as it has.
+        let all = Some((&bytes[8..36], 16));
+        assert_eq!(picture(Told { size: 4096, ..told }), all);
+        assert_eq!(
+            picture(Told {
+                size: u32::MAX,
+                ..told
+            }),
+            all
+        );
+        // Marked as no picture, or without a valid byte: what the memory
+        // holds is not looked at.
+        assert_eq!(
+            picture(Told {
+                spoiled: true,
+                ..told
+            }),
+            None
+        );
+        assert_eq!(picture(Told { size: 0, ..told }), None);
+        // A picture that begins where it cannot.
+        for offset in [13, 40, 41, u32::MAX] {
+            assert_eq!(picture(Told { offset, ..told }), None, "offset {offset}");
+        }
+        assert_eq!(
+            picture(Told { offset: 12, ..told }),
+            Some((&bytes[12..40], 16))
+        );
+        // A distance between rows that cannot be one is taken for none.
+        for stride in [0, -16, 11, i32::MIN] {
+            assert_eq!(
+                picture(Told { stride, ..told }),
+                Some((&bytes[8..32], 12)),
+                "stride {stride}"
+            );
+        }
+        // Rows further apart than the buffer is long.
+        assert_eq!(picture(Told { stride: 24, ..told }), None);
+        assert_eq!(
+            picture(Told {
+                stride: i32::MAX,
+                ..told
+            }),
+            None
+        );
+        // A size the buffer was not made for, and no size at all.
+        assert_eq!(picture_in(&bytes, told, 3, 3), None);
+        assert_eq!(picture_in(&bytes, told, 9, 1), None);
+        assert_eq!(picture_in(&bytes, told, 0, 2), None);
+        assert_eq!(picture_in(&bytes, told, 3, 0), None);
+        assert_eq!(picture_in(&bytes, told, u32::MAX, u32::MAX), None);
+        assert_eq!(picture_in(&[], told, 1, 1), None);
+        assert_eq!(
+            picture_in(&bytes, Told { offset: 0, ..told }, 1, 1),
+            Some((&bytes[..4], 16))
+        );
     }
 
     #[test]
