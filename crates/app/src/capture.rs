@@ -14,7 +14,7 @@
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use any2odyssey_core::live::{PixelOrder, Source};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
@@ -24,8 +24,14 @@ use pw::spa;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureState {
-    /// The desktop's dialog is open, or the stream is being set up.
+    /// The desktop has been asked for a screen and has not answered: its
+    /// dialog is open.
     Asking,
+    /// A screen was chosen and its stream is being set up: no frame has
+    /// come yet. A desktop that sends frames only when the screen changes
+    /// (xdg-desktop-portal-wlr before 0.9) leaves it at that for as long as
+    /// nothing does.
+    Starting,
     /// Frames are arriving, this many pixels each.
     Running { width: u32, height: u32 },
     /// Over: the reason, or `None` after an ordinary stop.
@@ -66,6 +72,29 @@ struct Shared {
     state: Mutex<CaptureState>,
     token: Mutex<Option<String>>,
     stop: AtomicBool,
+    /// Since when the stream of a cast that was running has been paused.
+    paused: Mutex<Option<Instant>>,
+}
+
+impl Shared {
+    fn new() -> Shared {
+        Shared {
+            slot: Mutex::new(Slot::default()),
+            arrived: Condvar::new(),
+            state: Mutex::new(CaptureState::Asking),
+            token: Mutex::new(None),
+            stop: AtomicBool::new(false),
+            paused: Mutex::new(None),
+        }
+    }
+
+    /// The desktop has answered with a screen.
+    fn chosen(&self) {
+        let mut state = lock(&self.state);
+        if *state == CaptureState::Asking {
+            *state = CaptureState::Starting;
+        }
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -89,13 +118,7 @@ impl Capture {
         pointer: bool,
         wake: impl Fn() + Send + 'static,
     ) -> Capture {
-        let shared = Arc::new(Shared {
-            slot: Mutex::new(Slot::default()),
-            arrived: Condvar::new(),
-            state: Mutex::new(CaptureState::Asking),
-            token: Mutex::new(None),
-            stop: AtomicBool::new(false),
-        });
+        let shared = Arc::new(Shared::new());
         let for_thread = shared.clone();
         let run = move || {
             let ended = run(&for_thread, restore_token, pointer, &wake).err();
@@ -124,6 +147,12 @@ impl Capture {
 
     pub fn state(&self) -> CaptureState {
         lock(&self.shared.state).clone()
+    }
+
+    /// For how long the desktop has had the running cast paused, in which
+    /// time no frame can have come; `None` while it runs.
+    pub fn paused_for(&self) -> Option<Duration> {
+        lock(&self.shared.paused).map(|since| since.elapsed())
     }
 
     /// The portal's token for the screen that was picked, once there is one.
@@ -268,6 +297,9 @@ fn run(
         other => format!("the desktop's screen-cast portal refused: {other}"),
     })?;
     *lock(&shared.token) = token;
+    // The dialog is over: the page stops asking for a screen to be chosen.
+    shared.chosen();
+    wake();
     // Whatever comes of the stream, the session is closed after it.
     let streamed = match node {
         None => Err("the portal returned no stream".to_owned()),
@@ -342,6 +374,26 @@ fn ending(node: u32, seen: &Seen) -> Option<String> {
     }
 }
 
+/// Since when a cast that was running is paused, once its stream has gone
+/// from `old` to `new`; `since` is what it was before that.
+///
+/// A paused stream gets no frames, and the page must not call that a screen
+/// on which nothing changes (`Capture::paused_for`). The pause before the
+/// first frame is not one of a running cast.
+fn pause_after(
+    since: Option<Instant>,
+    old: &pw::stream::StreamState,
+    new: &pw::stream::StreamState,
+    now: Instant,
+) -> Option<Instant> {
+    use pw::stream::StreamState::{Paused, Streaming};
+    match (old, new) {
+        (Streaming, Paused) => Some(now),
+        (_, Paused) => since,
+        _ => None,
+    }
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -412,7 +464,11 @@ fn stream(
     };
     let _listener = stream
         .add_local_listener_with_user_data(data)
-        .state_changed(move |_, _, old, new| {
+        .state_changed(move |_, data, old, new| {
+            {
+                let mut paused = lock(&data.shared.paused);
+                *paused = pause_after(*paused, &old, &new, Instant::now());
+            }
             if let Some(reason) = ending(node, &Seen::State(old, new)) {
                 ended(reason);
             }
@@ -628,13 +684,18 @@ pub struct Fed(Arc<Shared>);
 #[cfg(test)]
 impl Fed {
     pub fn start() -> Fed {
-        Fed(Arc::new(Shared {
-            slot: Mutex::new(Slot::default()),
-            arrived: Condvar::new(),
-            state: Mutex::new(CaptureState::Asking),
-            token: Mutex::new(None),
-            stop: AtomicBool::new(false),
-        }))
+        Fed(Arc::new(Shared::new()))
+    }
+
+    /// The desktop's dialog has been answered with a screen.
+    pub fn chosen(&self) {
+        self.0.chosen();
+    }
+
+    /// The desktop has paused the cast (since `since`) or lets it run
+    /// again (`None`).
+    pub fn pause(&self, since: Option<Instant>) {
+        *lock(&self.0.paused) = since;
     }
 
     pub fn frames(&self) -> Frames {
@@ -695,6 +756,44 @@ mod tests {
         assert!(asked.elapsed() < Duration::from_secs(10));
         // The runtime serves the next request all the same.
         assert!(finished_within(runtime, Duration::from_secs(30), async {}));
+    }
+
+    #[test]
+    fn a_running_cast_that_is_paused_is_known_to_be_and_since_when() {
+        let (then, now) = (Instant::now(), Instant::now() + Duration::from_secs(5));
+        // Starting up is not a pause of a running cast.
+        assert_eq!(pause_after(None, &Unconnected, &Connecting, now), None);
+        assert_eq!(pause_after(None, &Connecting, &Paused, now), None);
+        assert_eq!(pause_after(None, &Paused, &Streaming, now), None);
+        // Running, then paused: from that moment.
+        assert_eq!(pause_after(None, &Streaming, &Paused, now), Some(now));
+        // Running again, or over.
+        assert_eq!(pause_after(Some(then), &Paused, &Streaming, now), None);
+        assert_eq!(pause_after(Some(then), &Paused, &Unconnected, now), None);
+        // The page reads it from the capture.
+        let fed = Fed::start();
+        let capture = fed.capture();
+        assert_eq!(capture.paused_for(), None);
+        fed.pause(Some(then));
+        assert!(capture.paused_for().is_some());
+    }
+
+    #[test]
+    fn the_dialog_is_known_to_be_over_before_the_first_frame() {
+        let fed = Fed::start();
+        let capture = fed.capture();
+        assert_eq!(capture.state(), CaptureState::Asking);
+        fed.chosen();
+        assert_eq!(capture.state(), CaptureState::Starting);
+        fed.feed(2, 1, &[0; 8]);
+        let running = CaptureState::Running {
+            width: 2,
+            height: 1,
+        };
+        assert_eq!(capture.state(), running);
+        // An answer that comes late changes nothing.
+        fed.chosen();
+        assert_eq!(capture.state(), running);
     }
 
     #[test]
