@@ -2,7 +2,34 @@
 
 `THIRD-PARTY-LICENSES.md` lists the works the Windows package contains and gives the texts of their licenses. A Linux build of Any2Odyssey contains most of those crates and, beyond them, the 113 crates below: the normal (non-build, non-test) dependencies of the `any2odyssey` binary for `x86_64-unknown-linux-gnu` that the Windows list does not have, as `Cargo.lock` resolves them. They are used by the same rule as there: under the MIT license when a crate offers it, under the Apache License 2.0 otherwise, and a crate with a single license under that one. The texts of the MIT, Apache 2.0, ISC and zlib licenses are in `THIRD-PARTY-LICENSES.md`. The notices are the copyright lines of the license and copyright files in each crate's source package as published on crates.io; where a package has none, the authors field of its manifest is given and marked as such.
 
-Libraries the Linux build links at run time and does not contain (PipeWire, the C library, the desktop's graphics libraries, ONNX Runtime and cuDNN where installed) are the system's own, under their own terms. Samsung's and Leia's software is not included: the Wine setup in `contrib/wine-lens` copies the user's own installation.
+Like the Windows program, the Linux one also contains the Rust standard library and the crates it is built from; they are under "The Rust standard library" in `THIRD-PARTY-LICENSES.md`.
+
+Libraries the Linux build links at run time and does not contain (PipeWire's library, the C library, the desktop's graphics libraries, ONNX Runtime and cuDNN where installed) are the system's own, under their own terms. Samsung's and Leia's software is not included: the Wine setup in `contrib/wine-lens` copies the user's own installation.
+
+One part of PipeWire is contained: its SPA headers define small functions in the headers themselves (`spa/pod/parser.h`, `spa/pod/iter.h` and the format headers under `spa/param`), and the `libspa-sys` crate compiles those the program uses into it, from the PipeWire development files of the system the program is built on. They are under PipeWire's license, with this notice:
+
+```text
+Copyright © 2018 Wim Taymans
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
 
 Regenerate with `scripts/third-party-linux.py > THIRD-PARTY-LICENSES-LINUX.md` after changing dependencies.
 
