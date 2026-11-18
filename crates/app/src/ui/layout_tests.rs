@@ -1381,6 +1381,33 @@ mod sweep {
         assert_eq!(h.ctx.zoom_factor(), 0.2);
     }
 
+    /// A control that ends in the three points a scroll area may paint over
+    /// below its own edge is not in view: those points lie under the window's
+    /// frame. Whether a control ends there is a matter of the window's
+    /// height, so every height around the default is tried; at 780 to 782
+    /// "Reset lens numbers" did, and Tab left it there.
+    #[test]
+    fn the_page_follows_the_focus_to_a_control_that_ends_under_the_frame() {
+        for height in 765..=795 {
+            let size = (SIZES[0].0, height as f32);
+            let mut h = Harness::new(size, Page::Viewer);
+            h.app.viewer = viewer(Input::Pair, Output::Lens);
+            h.settle();
+            tab_to(&mut h, "Reset lens numbers");
+            // A scroll to the focused control takes up to 0.3 seconds.
+            for _ in 0..24 {
+                h.run(Vec::new());
+            }
+            let focused = h.focused().expect("the focus").rect;
+            assert!(
+                focused.bottom() <= size.1 - FRAME + 1.0,
+                "in a window {height} points high the focused button ends at {}, under the frame",
+                focused.bottom()
+            );
+            assert!(focused.top() >= FRAME + TITLEBAR_HEIGHT, "{focused:?}");
+        }
+    }
+
     /// A gold button in a column of `Ui::columns`, where the layout hands
     /// every widget the column's whole width: it reacts where it is drawn.
     /// (The cards of the pages no longer lay their contents out like that,

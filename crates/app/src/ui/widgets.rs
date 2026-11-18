@@ -391,8 +391,14 @@ pub fn keep_focus_visible(ui: &Ui) {
     let Some(rect) = ctx.read_response(id).map(|response| response.rect) else {
         return;
     };
-    // Only what belongs to these contents; the visible part is the clip.
-    if ui.min_rect().expand(1.0).contains_rect(rect) && !ui.clip_rect().contains_rect(rect) {
+    // Only what belongs to these contents. The visible part is the clip
+    // without the margin a scroll area may paint over above and below
+    // (three points): at the bottom that margin lies under the window's
+    // frame, and a control that ended in it was taken for one in view. In
+    // the default window Tab left "Reset lens numbers" there.
+    let margin = vec2(0.0, ui.visuals().clip_rect_margin);
+    let visible = ui.clip_rect().shrink2(margin);
+    if ui.min_rect().expand(1.0).contains_rect(rect) && !visible.contains_rect(rect) {
         ui.scroll_to_rect(rect.expand(12.0), None);
     }
 }
