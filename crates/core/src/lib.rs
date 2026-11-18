@@ -19,6 +19,7 @@ pub mod log_readiness;
 pub mod overlay_settings;
 pub mod paths;
 pub mod prefs;
+pub mod resample;
 pub mod slider;
 pub mod status;
 pub mod stereo;

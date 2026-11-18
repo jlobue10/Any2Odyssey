@@ -32,7 +32,8 @@ use std::process::Command;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
-use image::{imageops, RgbaImage};
+use any2odyssey_core::resample::{resize_into, Part};
+use image::RgbaImage;
 
 use crate::lens_switch::{self, Running};
 
@@ -175,6 +176,160 @@ fn frame_folders(runtime: Option<PathBuf>, shared: &Path, data: PathBuf) -> Vec<
     folders
 }
 
+/// The frame file's picture places as memory of this process, where the
+/// file itself lives in memory (a `tmpfs`: the session's runtime folder,
+/// `/dev/shm`).
+///
+/// Written with `write`, a picture goes to the system a page at a time, and
+/// for a file in memory that is all there is to do: the 66 MB of a pair of
+/// 2160-line views took longer to hand over than to render, the largest
+/// single part of a live picture's turn. A shared mapping is those same
+/// pages, and copying into it puts the same bytes at the same places of the
+/// same file, where the helper reads them as before. Only the picture's
+/// bytes go this way; the header is written as it always was.
+///
+/// Two things a `write` cannot do and a store into a mapping can are kept
+/// from happening. A page that has no memory yet is given one when it is
+/// first touched, and where there is none left the process is killed
+/// (SIGBUS) instead of told: so a place is used only once the system has
+/// set its memory aside (`fallocate`), and where it will not, the picture
+/// is written as before, with the error that gives. And a file on a disk is
+/// never mapped (there, setting aside is not always a promise).
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod mapped {
+    use std::ffi::{c_int, c_void};
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
+
+    extern "C" {
+        fn fstatfs(fd: c_int, answer: *mut [u64; 32]) -> c_int;
+        fn mmap(
+            address: *mut c_void,
+            length: usize,
+            protection: c_int,
+            flags: c_int,
+            fd: c_int,
+            offset: i64,
+        ) -> *mut c_void;
+        fn munmap(address: *mut c_void, length: usize) -> c_int;
+        fn fallocate(fd: c_int, mode: c_int, offset: i64, length: i64) -> c_int;
+    }
+
+    /// What `fstatfs` calls a file system that keeps its files in memory.
+    const TMPFS_MAGIC: u64 = 0x0102_1994;
+    const PROT_READ_WRITE: c_int = 1 | 2;
+    const MAP_SHARED: c_int = 1;
+
+    pub struct Places {
+        start: *mut u8,
+        length: usize,
+    }
+
+    // SAFETY: the mapping belongs to this value alone and is reached only
+    // through it; nothing about it is tied to the thread that made it.
+    unsafe impl Send for Places {}
+
+    impl Places {
+        /// Map the `length` bytes of `file`; `None` when the file is not
+        /// kept in memory or cannot be mapped.
+        pub fn of(file: &File, length: u64) -> Option<Places> {
+            let length = usize::try_from(length).ok().filter(|&l| l > 0)?;
+            let mut answer = [0u64; 32];
+            // SAFETY: the descriptor is open for the call. The answer is a
+            // `struct statfs`, which on x86_64 and aarch64 Linux (glibc and
+            // musl) is 120 bytes and begins with the 8-byte type of the
+            // file system: it fits the 256 bytes given.
+            if unsafe { fstatfs(file.as_raw_fd(), &mut answer) } != 0 || answer[0] != TMPFS_MAGIC {
+                return None;
+            }
+            // SAFETY: a new shared mapping of an open file at an address
+            // the system chooses; nothing of this process is replaced.
+            let start = unsafe {
+                mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    PROT_READ_WRITE,
+                    MAP_SHARED,
+                    file.as_raw_fd(),
+                    0,
+                )
+            };
+            // The failure value is the address with every bit set.
+            if start.is_null() || start as usize == usize::MAX {
+                return None;
+            }
+            Some(Places {
+                start: start.cast(),
+                length,
+            })
+        }
+
+        /// Have the system set memory aside for `bytes` bytes of the file
+        /// from `at` on. False when it does not (there is none left, or
+        /// this file system cannot): those bytes must then not be touched
+        /// through the mapping.
+        pub fn reserve(&self, file: &File, at: u64, bytes: usize) -> bool {
+            let (Ok(at), Ok(bytes)) = (i64::try_from(at), i64::try_from(bytes)) else {
+                return false;
+            };
+            // SAFETY: two numbers and an open descriptor.
+            bytes > 0 && unsafe { fallocate(file.as_raw_fd(), 0, at, bytes) } == 0
+        }
+
+        /// The `bytes` bytes of the file from `at` on, to write to. `None`
+        /// outside the mapping.
+        pub fn slice(&mut self, at: u64, bytes: usize) -> Option<&mut [u8]> {
+            let at = usize::try_from(at).ok()?;
+            if at.checked_add(bytes)? > self.length {
+                return None;
+            }
+            // SAFETY: the range lies inside the mapping, which stays until
+            // this value is dropped, and `&mut self` keeps every other use
+            // of it in this process away for as long as the slice lives.
+            // The helper maps the file for reading only; the bytes are
+            // only ever stored here, never read.
+            Some(unsafe { std::slice::from_raw_parts_mut(self.start.add(at), bytes) })
+        }
+    }
+
+    impl Drop for Places {
+        fn drop(&mut self) {
+            // SAFETY: exactly the mapping made in `of`, and no slice of it
+            // outlives this value.
+            unsafe { munmap(self.start.cast(), self.length) };
+        }
+    }
+}
+
+/// Elsewhere there are no picture places as memory: a picture is written.
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+mod mapped {
+    use std::convert::Infallible;
+    use std::fs::File;
+
+    pub struct Places(Infallible);
+
+    impl Places {
+        pub fn of(_: &File, _: u64) -> Option<Places> {
+            None
+        }
+
+        pub fn reserve(&self, _: &File, _: u64, _: usize) -> bool {
+            match self.0 {}
+        }
+
+        pub fn slice(&mut self, _: u64, _: usize) -> Option<&mut [u8]> {
+            match self.0 {}
+        }
+    }
+}
+
 /// The file the pictures go through. It lives in memory where it can (the
 /// session's runtime folder) and only this user can read it.
 struct FrameFile {
@@ -183,8 +338,13 @@ struct FrameFile {
     sequence: u32,
     /// The place the newest picture is in.
     place: u32,
-    /// Working room for turning a picture upside down.
+    /// Working room for turning a picture upside down, where it is written
+    /// and not copied into its place.
     flipped: Vec<u8>,
+    /// The places as memory, where the file lives in memory (`mapped`),
+    /// and how many bytes of each have had memory set aside.
+    mapped: Option<mapped::Places>,
+    reserved: [usize; PLACES as usize],
 }
 
 impl FrameFile {
@@ -243,12 +403,15 @@ impl FrameFile {
         file.write_all(&header)?;
         // From here on the file is removed with the `FrameFile`.
         let (file, path) = named.keep().map_err(|e| e.error)?;
+        let mapped = mapped::Places::of(&file, FILE_BYTES);
         Ok(FrameFile {
             file,
             path,
             sequence: 0,
             place: 0,
             flipped: Vec::new(),
+            mapped,
+            reserved: [0; PLACES as usize],
         })
     }
 
@@ -257,11 +420,55 @@ impl FrameFile {
         self.file.write_all(bytes)
     }
 
+    /// Where `place` begins in the file.
+    fn start_of(place: u32) -> u64 {
+        HEADER_BYTES + u64::from(place) * u64::from(CAPACITY)
+    }
+
+    /// The first `bytes` bytes of `place` as memory to copy a picture
+    /// into, where the file is mapped and the system has set that memory
+    /// aside. `None` otherwise: the picture is written then. A place whose
+    /// memory is refused ends the copying for this file, so the refusal is
+    /// not asked for again at every picture and the write that follows
+    /// says what is wrong.
+    fn memory_of(&mut self, place: u32, bytes: usize) -> Option<&mut [u8]> {
+        let at = FrameFile::start_of(place);
+        let reserved = &mut self.reserved[place as usize];
+        if *reserved < bytes {
+            if !self.mapped.as_ref()?.reserve(&self.file, at, bytes) {
+                self.mapped = None;
+                return None;
+            }
+            *reserved = bytes;
+        }
+        self.mapped.as_mut()?.slice(at, bytes)
+    }
+
+    /// Whether a picture of this size, given as `given` bytes, can be shown.
+    fn fits(width: u32, height: u32, given: usize) -> bool {
+        let bytes = u64::from(width) * u64::from(height) * 4;
+        width != 0 && height != 0 && bytes <= u64::from(CAPACITY) && given as u64 == bytes
+    }
+
     /// Replace the picture with `rgba`, rows from the top down.
     fn show(&mut self, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<()> {
         let row = width as usize * 4;
         if row == 0 || rgba.len() != row * height as usize {
             return Err(does_not_fit());
+        }
+        if !FrameFile::fits(width, height, rgba.len()) {
+            return Err(does_not_fit());
+        }
+        let place = (self.place + 1) % PLACES;
+        if let Some(memory) = self.memory_of(place, rgba.len()) {
+            // Turned upside down on its way into its place.
+            for (into, pixels) in memory
+                .chunks_exact_mut(row)
+                .zip(rgba.chunks_exact(row).rev())
+            {
+                into.copy_from_slice(pixels);
+            }
+            return self.point_at(width, height, place);
         }
         let mut flipped = std::mem::take(&mut self.flipped);
         flipped.clear();
@@ -274,17 +481,29 @@ impl FrameFile {
         shown
     }
 
-    /// Replace the picture with `rgba`, rows from the bottom up: written
-    /// into the next place, then the header is pointed at it. The sequence
-    /// is odd while the header changes, so the helper never takes a
-    /// half-written header for a whole one.
+    /// Replace the picture with `rgba`, rows from the bottom up: put into
+    /// the next place, then the header is pointed at it.
     fn show_bottom_up(&mut self, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<()> {
-        let bytes = u64::from(width) * u64::from(height) * 4;
-        if width == 0 || height == 0 || bytes > u64::from(CAPACITY) || rgba.len() as u64 != bytes {
+        if !FrameFile::fits(width, height, rgba.len()) {
             return Err(does_not_fit());
         }
         let place = (self.place + 1) % PLACES;
-        self.put(HEADER_BYTES + u64::from(place) * u64::from(CAPACITY), rgba)?;
+        match self.memory_of(place, rgba.len()) {
+            Some(memory) => memory.copy_from_slice(rgba),
+            None => self.put(FrameFile::start_of(place), rgba)?,
+        }
+        self.point_at(width, height, place)
+    }
+
+    /// Point the header at the picture in `place`, which is whole by now.
+    /// The sequence is odd while the header changes, so the helper never
+    /// takes a half-written header for a whole one.
+    fn point_at(&mut self, width: u32, height: u32, place: u32) -> std::io::Result<()> {
+        // A picture copied into its place was stored by this processor;
+        // the header is written by the system. Whoever sees the header
+        // must see the picture: nothing is left to the order in which a
+        // processor makes its stores known.
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         self.sequence = self.sequence.wrapping_add(1) | 1;
         self.put(12, &self.sequence.to_le_bytes())?;
         let mut fields = [0u8; 12];
@@ -610,39 +829,26 @@ pub fn compose_still(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
     let eye_w = if flat { pair.width() } else { pair.width() / 2 };
     let eye = (eye_w.max(1), pair.height().max(1));
     let (x, y, w, h) = place_view(eye, if flat { 1.0 } else { stretch }, view);
-    let fit = |side: u32| {
-        let part = imageops::crop_imm(pair, side * eye_w, 0, eye.0, eye.1);
-        imageops::resize(&*part, w, h, imageops::FilterType::Triangle)
-    };
-    // A flat picture is identical in both eyes: resize it once and copy the
-    // fitted pixels to both halves instead of running the same filter twice.
-    // The two views of a pair share nothing: the right one is resized on a
-    // thread of its own while this one resizes the left (here, if that
-    // thread cannot be had).
-    let (left, right) = if flat {
-        (fit(0), None)
+    let part = |side: u32| Part::of(pair, side * eye_w, eye.0);
+    // Each view is resized straight into its half, its rows shared out over
+    // the cores (`core::resample`: the image crate's triangle resize and
+    // replace, byte for byte, which made the whole resized view twice over
+    // before a pixel reached the picture and were most of what a step of a
+    // slider cost). A flat picture is the same in both eyes: it is resized
+    // once and each row copied to the other half.
+    if flat {
+        resize_into(&mut canvas, part(0), &[x, view.0 + x], y, w, h);
     } else {
-        std::thread::scope(|scope| {
-            let right = std::thread::Builder::new().spawn_scoped(scope, || fit(1));
-            let left = fit(0);
-            let right = match right {
-                Ok(right) => right
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                Err(_) => fit(1),
-            };
-            (left, Some(right))
-        })
-    };
-    imageops::replace(&mut canvas, &left, i64::from(x), i64::from(y));
-    let right = right.as_ref().unwrap_or(&left);
-    imageops::replace(&mut canvas, right, i64::from(view.0 + x), i64::from(y));
+        resize_into(&mut canvas, part(0), &[x], y, w, h);
+        resize_into(&mut canvas, part(1), &[view.0 + x], y, w, h);
+    }
     canvas
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::imageops;
 
     #[test]
     fn a_view_is_fitted_to_the_panel_not_to_its_half() {
@@ -687,7 +893,8 @@ mod tests {
         assert_eq!(canvas.get_pixel(5, 5).0, [7, 8, 9, 255]);
     }
 
-    /// `compose_still` as it was while it resized one view after the other.
+    /// `compose_still` as it was while the image crate resized each view
+    /// whole and its pixels were then copied into the picture.
     fn compose_still_in_turn(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
         let view = STILL_VIEW;
         let mut canvas = RgbaImage::from_pixel(view.0 * 2, view.1, image::Rgba([0, 0, 0, 255]));
@@ -712,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn views_resized_side_by_side_give_the_same_bytes_as_one_after_the_other() {
+    fn views_resized_row_by_row_give_the_bytes_the_image_crate_gave() {
         // Every pixel differs from its neighbours and the two views differ.
         let noisy = |w: u32, h: u32| {
             RgbaImage::from_fn(w, h, |x, y| {
@@ -726,6 +933,17 @@ mod tests {
             (300, 400, false, 0.5),
             (1, 1, false, 1.0),
             (641, 181, true, 1.0),
+            // A view larger than its half in both directions, and one that
+            // is exactly its half (a half-width pair of the panel's size:
+            // nothing is resized).
+            (4100, 1200, false, 1.0),
+            (3840, 2160, false, 2.0),
+            (1920, 2160, true, 1.0),
+            // Pictures that have no view to show.
+            (0, 0, false, 1.0),
+            (0, 7, true, 1.0),
+            (2, 0, false, 1.0),
+            (1, 9, false, 1.0),
         ] {
             let pair = noisy(w, h);
             assert!(
@@ -846,6 +1064,134 @@ mod tests {
         assert!(!gone.exists() && kept.exists());
         // A folder that is not there is an error, not a file somewhere else.
         assert!(FrameFile::create_in(&dir.path().join("none")).is_err());
+    }
+
+    /// The header and the first `bytes` bytes of each place of `frames`,
+    /// read from the file as another program reads them.
+    #[cfg(unix)]
+    fn as_read(frames: &FrameFile, bytes: usize) -> Vec<u8> {
+        use std::os::unix::fs::FileExt;
+        let mut all = vec![0u8; HEADER_BYTES as usize + bytes * PLACES as usize];
+        let (header, places) = all.split_at_mut(HEADER_BYTES as usize);
+        frames.file.read_exact_at(header, 0).unwrap();
+        for (place, into) in places.chunks_exact_mut(bytes).enumerate() {
+            let at = FrameFile::start_of(place as u32);
+            frames.file.read_exact_at(into, at).unwrap();
+        }
+        all
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn a_picture_copied_into_its_place_is_the_picture_written_there() {
+        // A frame file in memory is mapped, and one on a disk is not: the
+        // test needs the first kind.
+        let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+            eprintln!("skipped: no /dev/shm to make a frame file in");
+            return;
+        };
+        let mut copied = FrameFile::create_in(dir.path()).unwrap();
+        let mut written = FrameFile::create_in(dir.path()).unwrap();
+        if copied.mapped.is_none() {
+            eprintln!("skipped: /dev/shm is not a file system in memory here");
+            return;
+        }
+        written.mapped = None;
+        // Pictures that grow and shrink, through every place more than
+        // once, given from the top down and from the bottom up in turn.
+        let sizes = [
+            (2u32, 2u32),
+            (64, 36),
+            (640, 360),
+            (3, 5),
+            (1280, 720),
+            (64, 36),
+            (1, 1),
+            (641, 359),
+            (1280, 720),
+            (2, 1),
+        ];
+        let largest = 1280 * 720 * 4;
+        for (index, (w, h)) in sizes.into_iter().enumerate() {
+            let rgba: Vec<u8> = (0..w as usize * h as usize * 4)
+                .map(|i| (i.wrapping_mul(31).wrapping_add(index * 97) ^ (i >> 7)) as u8)
+                .collect();
+            for frames in [&mut copied, &mut written] {
+                if index % 2 == 0 {
+                    frames.show(w, h, &rgba).unwrap();
+                } else {
+                    frames.show_bottom_up(w, h, &rgba).unwrap();
+                }
+            }
+            assert!(copied.mapped.is_some(), "picture {index}");
+            assert_eq!(
+                (copied.sequence, copied.place),
+                (written.sequence, written.place)
+            );
+            assert_eq!(copied.sequence, 2 * (index as u32 + 1));
+            // Every byte a reader can find is the same: the header and all
+            // three places, the ones not written this time included.
+            assert!(
+                as_read(&copied, largest) == as_read(&written, largest),
+                "picture {index}, {w}x{h}"
+            );
+        }
+        // What does not fit is refused the same way and changes nothing.
+        let before = as_read(&copied, largest);
+        for frames in [&mut copied, &mut written] {
+            assert!(frames.show(2, 2, &[0; 15]).is_err());
+            assert!(frames.show_bottom_up(0, 2, &[]).is_err());
+            assert!(frames.show(PANEL.0 * 2 + 1, PANEL.1, &[]).is_err());
+        }
+        assert!(as_read(&copied, largest) == before);
+        // The copy needs no second picture to turn the first upside down in.
+        assert_eq!(copied.flipped.capacity(), 0);
+        assert!(written.flipped.capacity() > 0);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn only_memory_that_was_set_aside_inside_the_file_is_handed_out() {
+        let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+            eprintln!("skipped: no /dev/shm to make a frame file in");
+            return;
+        };
+        let mut frames = FrameFile::create_in(dir.path()).unwrap();
+        let Some(places) = frames.mapped.as_mut() else {
+            eprintln!("skipped: /dev/shm is not a file system in memory here");
+            return;
+        };
+        // Inside the file, to its last byte; never past it.
+        assert_eq!(places.slice(0, 16).map(|s| s.len()), Some(16));
+        assert_eq!(places.slice(FILE_BYTES - 8, 8).map(|s| s.len()), Some(8));
+        assert!(places.slice(FILE_BYTES - 8, 9).is_none());
+        assert!(places.slice(FILE_BYTES, 1).is_none());
+        assert!(places.slice(u64::MAX, 1).is_none());
+        assert!(places.slice(1, usize::MAX).is_none());
+        assert!(!places.reserve(&frames.file, 0, 0));
+        // A place is set aside as far as the largest picture it has held.
+        frames.show_bottom_up(4, 2, &[7; 32]).unwrap();
+        frames.show_bottom_up(2, 2, &[8; 16]).unwrap();
+        assert_eq!(frames.reserved, [0, 32, 16]);
+        frames.show_bottom_up(1, 1, &[9; 4]).unwrap();
+        frames.show_bottom_up(1, 1, &[9; 4]).unwrap();
+        assert_eq!(frames.reserved, [4, 32, 16]);
+        // A file that is not in memory is written, as before: nothing is
+        // mapped, nothing set aside, and the reader finds the picture.
+        let mut written = FrameFile::create_in(dir.path()).unwrap();
+        written.mapped = None;
+        written.show_bottom_up(1, 1, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(written.reserved, [0; 3]);
+        assert_eq!(
+            as_read(&written, 4)[HEADER_BYTES as usize + 4..][..4],
+            [1, 2, 3, 4]
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1034,6 +1380,67 @@ mod tests {
             assert_eq!(
                 status,
                 WeaverStatus::Failed("the helper stopped unexpectedly".into())
+            );
+        }
+    }
+}
+
+/// Timings of a still picture's way to the Odyssey 3D output on this
+/// machine. Run by hand:
+/// `cargo test --release -p any2odyssey weaver::bench -- --ignored --nocapture`
+#[cfg(all(test, target_os = "linux"))]
+mod bench {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The middle one of `times`, in milliseconds.
+    fn median(times: &mut [Duration]) -> f64 {
+        times.sort();
+        times[times.len() / 2].as_secs_f64() * 1e3
+    }
+
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn still_timings() {
+        let memory = Path::new("/dev/shm");
+        let dir = if memory.is_dir() {
+            tempfile::tempdir_in(memory)
+        } else {
+            tempfile::tempdir()
+        }
+        .unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        // Pairs as wide as two 1080-line, two 2160-line and two 8K-wide
+        // views, and one picture for both eyes.
+        for (w, h, flat) in [
+            (3840u32, 1080u32, false),
+            (7680, 2160, false),
+            (7680, 4320, false),
+            (3840, 2160, true),
+        ] {
+            let pair = RgbaImage::from_fn(w, h, |x, y| {
+                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).to_le_bytes();
+                image::Rgba([v[0], v[1], v[2], 255])
+            });
+            let (mut compose, mut hand_over) = (Vec::new(), Vec::new());
+            for round in 0..12 {
+                let t0 = Instant::now();
+                let picture = compose_still(&pair, flat, 1.0);
+                let t1 = Instant::now();
+                sink.show(picture.width(), picture.height(), picture.as_raw())
+                    .unwrap();
+                let t2 = Instant::now();
+                // The first rounds make the file's pages.
+                if round >= 2 {
+                    compose.push(t1 - t0);
+                    hand_over.push(t2 - t1);
+                }
+            }
+            println!(
+                "{w}x{h}{}: compose {:.1} ms, hand over {:.1} ms",
+                if flat { " for both eyes" } else { " pair" },
+                median(&mut compose),
+                median(&mut hand_over)
             );
         }
     }

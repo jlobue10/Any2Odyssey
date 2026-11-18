@@ -13,9 +13,11 @@
 //! (the pattern in [`calibration_pattern`] makes errors visible), and nothing
 //! here switches the panel's lens on.
 
-use image::{imageops, GenericImageView, Rgba, RgbaImage};
+use image::{Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::resample::{resize_into, Part};
 
 /// The lens sheet as seen from the viewer's seat, in panel pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -220,17 +222,15 @@ pub fn weave_pattern(
 /// centred on black. `stretch_x` widens the image first: 2.0 for one eye of
 /// a half-width pair, 1.0 otherwise.
 pub fn fit(image: &RgbaImage, width: u32, height: u32, stretch_x: f64) -> RgbaImage {
-    fit_view(image, width, height, stretch_x)
+    fit_part(Part::of(image, 0, image.width()), width, height, stretch_x)
 }
 
-/// [`fit`] for any view of an image, so that one eye of a pair is fitted
-/// from where it lies in the pair.
-fn fit_view<I>(image: &I, width: u32, height: u32, stretch_x: f64) -> RgbaImage
-where
-    I: GenericImageView<Pixel = Rgba<u8>>,
-{
+/// [`fit`] for some columns of an image, so that one eye of a pair is
+/// fitted from where it lies in the pair.
+fn fit_part(part: Part<'_>, width: u32, height: u32, stretch_x: f64) -> RgbaImage {
     let mut canvas = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
-    if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
+    let (part_w, part_h) = part.size();
+    if part_w == 0 || part_h == 0 || width == 0 || height == 0 {
         return canvas;
     }
     let stretch = if stretch_x.is_finite() && stretch_x > 0.0 {
@@ -238,20 +238,23 @@ where
     } else {
         1.0
     };
-    let shown_w = image.width() as f64 * stretch;
-    let shown_h = image.height() as f64;
+    let shown_w = part_w as f64 * stretch;
+    let shown_h = part_h as f64;
     let scale = (width as f64 / shown_w).min(height as f64 / shown_h);
     let w = ((shown_w * scale).round() as u32).clamp(1, width);
     let h = ((shown_h * scale).round() as u32).clamp(1, height);
-    let (left, top) = (((width - w) / 2) as i64, ((height - h) / 2) as i64);
-    // Copy native-size pixels straight into the canvas; only a resize needs
-    // its own temporary image.
-    if (w, h) == image.dimensions() {
-        imageops::replace(&mut canvas, image, left, top);
-    } else {
-        let resized = imageops::resize(image, w, h, imageops::FilterType::Triangle);
-        imageops::replace(&mut canvas, &resized, left, top);
-    }
+    // Resized row by row straight into the canvas, the rows shared out
+    // over the cores, or copied where the size is its own (`resample`: the
+    // bytes the image crate's triangle resize and replace gave, without a
+    // whole resized picture in between).
+    resize_into(
+        &mut canvas,
+        part,
+        &[(width - w) / 2],
+        (height - h) / 2,
+        w,
+        h,
+    );
     canvas
 }
 
@@ -270,18 +273,12 @@ pub fn fit_pair(
         return Err(WeaveError::Empty);
     }
     let eye = pair.width() / 2;
-    let fitted = |x: u32| {
-        fit_view(
-            &*imageops::crop_imm(pair, x, 0, eye, pair.height()),
-            width,
-            height,
-            stretch_x,
-        )
-    };
+    let fitted = |x: u32| fit_part(Part::of(pair, x, eye), width, height, stretch_x);
     let right_x = pair.width() - eye;
-    // Each eye is a resize of its own and, for a large pair, most of what
-    // a new picture costs: the two are made at the same time where there
-    // are cores for it and the area is worth a thread.
+    // Each eye has a canvas of its own to make and fill, which for the
+    // panel's size is a good part of the work: the two are made at the same
+    // time where there are cores for it and the area is worth a thread.
+    // (The rows of each are shared out over the cores besides.)
     if crate::dibr::threads_for(width as usize, height as usize) < 2 {
         return Ok((fitted(0), fitted(right_x)));
     }
@@ -313,6 +310,7 @@ pub fn weave_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::imageops;
 
     fn lens(pitch: f64, slant: f64, offset: f64) -> Lens {
         Lens {
@@ -611,6 +609,71 @@ mod tests {
             fit_pair(&RgbaImage::new(1, 4), 8, 8, 1.0),
             Err(WeaveError::Empty)
         );
+    }
+
+    /// [`fit`] as it was while the image crate made the whole resized
+    /// picture, which was then copied into the canvas.
+    fn fit_with_the_image_crate(
+        image: &RgbaImage,
+        width: u32,
+        height: u32,
+        stretch_x: f64,
+    ) -> RgbaImage {
+        let mut canvas = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 255]));
+        if image.width() == 0 || image.height() == 0 || width == 0 || height == 0 {
+            return canvas;
+        }
+        let stretch = if stretch_x.is_finite() && stretch_x > 0.0 {
+            stretch_x
+        } else {
+            1.0
+        };
+        let shown_w = image.width() as f64 * stretch;
+        let shown_h = image.height() as f64;
+        let scale = (width as f64 / shown_w).min(height as f64 / shown_h);
+        let w = ((shown_w * scale).round() as u32).clamp(1, width);
+        let h = ((shown_h * scale).round() as u32).clamp(1, height);
+        let (left, top) = (((width - w) / 2) as i64, ((height - h) / 2) as i64);
+        if (w, h) == image.dimensions() {
+            imageops::replace(&mut canvas, image, left, top);
+        } else {
+            let resized = imageops::resize(image, w, h, imageops::FilterType::Triangle);
+            imageops::replace(&mut canvas, &resized, left, top);
+        }
+        canvas
+    }
+
+    #[test]
+    fn a_picture_fitted_row_by_row_has_the_bytes_the_image_crate_gave() {
+        let mut noise = 0x51de_ca5eu32;
+        for (sw, sh) in [(64, 36), (37, 91), (1, 1), (320, 180), (3, 500), (96, 54)] {
+            let image = RgbaImage::from_fn(sw, sh, |_, _| {
+                noise ^= noise << 13;
+                noise ^= noise >> 17;
+                noise ^= noise << 5;
+                Rgba(noise.to_le_bytes())
+            });
+            // Areas the picture is enlarged to, shrunk into and fits as it
+            // is, wider and taller than it, and one large enough for its
+            // rows to be shared out over several threads.
+            for (w, h) in [(128, 72), (31, 17), (sw, sh), (9, 300), (640, 360), (1, 1)] {
+                for stretch in [1.0, 2.0, 0.5] {
+                    assert!(
+                        fit(&image, w, h, stretch)
+                            == fit_with_the_image_crate(&image, w, h, stretch),
+                        "{sw}x{sh} into {w}x{h}, stretch {stretch}"
+                    );
+                }
+            }
+            if sw >= 2 {
+                let eye = sw / 2;
+                let left = imageops::crop_imm(&image, 0, 0, eye, sh).to_image();
+                let right = imageops::crop_imm(&image, sw - eye, 0, eye, sh).to_image();
+                let (l, r) = fit_pair(&image, 200, 120, 2.0).unwrap();
+                assert!(l == fit_with_the_image_crate(&left, 200, 120, 2.0));
+                assert!(r == fit_with_the_image_crate(&right, 200, 120, 2.0));
+            }
+        }
     }
 
     #[test]
