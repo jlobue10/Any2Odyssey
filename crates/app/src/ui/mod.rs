@@ -31,6 +31,13 @@ const TITLEBAR_HEIGHT: f32 = 54.0;
 const EDGE: f32 = 9.0;
 /// The side of the square title bar buttons.
 const CHROME_BUTTON: f32 = 34.0;
+/// The smallest window, in points. Every page scrolls, so the height is
+/// what leaves the title bar, the way back and a few lines of a page; the
+/// width is what the title bar needs. Up to 0.9.6 the height was 580, more
+/// than the whole of a 1920x1080 screen at 200 % (540 points) or of a
+/// 1366x768 one at 150 % (512): the window could not be made to fit, and
+/// its lower edge, the resize handles with it, lay outside the screen.
+const SMALLEST_WINDOW: [f32; 2] = [700.0, 360.0];
 /// The face of the Maximize button: a square the built-in typefaces have
 /// (U+25FB). It was U+25A1, which none of them has, and what was drawn was
 /// egui's stand-in for a missing letter, which is this square. With a
@@ -158,7 +165,7 @@ pub fn run(core: Arc<Mutex<Core>>) -> anyhow::Result<()> {
         .with_title(APP_NAME)
         .with_app_id("any2odyssey")
         .with_inner_size([980.0, 780.0])
-        .with_min_inner_size([700.0, 580.0])
+        .with_min_inner_size(SMALLEST_WINDOW)
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(true);

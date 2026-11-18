@@ -14,8 +14,11 @@ use egui::{pos2, vec2, Rect};
 use super::*;
 use crate::core::WindowChoice;
 
-/// The default window and the smallest one the viewport allows.
+/// The default window and a small one: as narrow as the viewport allows,
+/// and as high as its smallest was up to 0.9.6.
 const SIZES: [(f32, f32); 2] = [(980.0, 780.0), (700.0, 580.0)];
+/// The smallest window the viewport allows.
+const SMALLEST: (f32, f32) = (SMALLEST_WINDOW[0], SMALLEST_WINDOW[1]);
 /// The window frame is drawn over the outer 12 points.
 const FRAME: f32 = 12.0;
 
@@ -701,7 +704,7 @@ fn long_about_values_wrap_inside_the_window() {
     }
 }
 
-/// The viewport asks for at least 700x580, but a tiling window manager or a
+/// The viewport asks for at least 700x360, but a tiling window manager or a
 /// frame during a restore can hand over anything. Sizes derived by
 /// subtracting margins went negative there, which egui rejects with a debug
 /// assertion: a panic in debug builds.
@@ -915,6 +918,7 @@ mod sweep {
         for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
             out.push((980.0, 780.0, scale));
             out.push((700.0, 580.0, scale));
+            out.push((SMALLEST.0, SMALLEST.1, scale));
         }
         out.extend([
             (1280.0, 720.0, 1.0),  // 1280x720
@@ -928,6 +932,14 @@ mod sweep {
             (3000.0, 580.0, 1.0),
             (888.0, 580.0, 1.0), // the narrowest window with two columns
             (887.0, 580.0, 1.0), // the widest with one
+            (3000.0, SMALLEST.1, 1.0),
+            (888.0, SMALLEST.1, 1.0),
+            (887.0, SMALLEST.1, 1.0),
+            // The smallest window at the largest zoom it takes.
+            (SMALLEST.0 / 1.2, SMALLEST.1 / 1.2, 1.2),
+            // Lower than the viewport allows: a program that sizes windows.
+            (700.0, 300.0, 1.0),
+            (700.0, 240.0, 1.0),
             (980.0 / 1.7, 780.0 / 1.7, 1.7),
             (980.0 / 1.5, 780.0 / 1.5, 1.5),
             (980.0 / 1.1, 780.0 / 1.1, 1.1),
@@ -956,9 +968,26 @@ mod sweep {
 
     /// The checks of one frame. Returns what is wrong, in words.
     fn faults(h: &Harness, painted: &[Painted]) -> Vec<String> {
-        let (width, _) = h.size;
+        let (width, height) = h.size;
         let mut faults = Vec::new();
         for p in painted {
+            // What can be seen of it. A page that is longer than the window
+            // scrolls, and a line at the edge of what scrolls is cut by that
+            // edge: nothing may be seen beyond the window's own frame, where
+            // no scrolling brings it back. (What scrolls is seen 3 points
+            // beyond its own edge, which is egui's margin for it; the
+            // frame's innermost line is drawn there.)
+            let seen = p.rect.intersect(p.clip);
+            if seen.is_positive()
+                && (seen.top() < FRAME - 0.5 || seen.bottom() > height - FRAME + 3.5)
+            {
+                faults.push(format!(
+                    "text over the window's upper or lower edge: {:?} is seen at y {:.0}..{:.0}",
+                    short(&p.text),
+                    seen.top(),
+                    seen.bottom()
+                ));
+            }
             let clipped =
                 p.rect.left() < p.clip.left() - 0.5 || p.rect.right() > p.clip.right() + 0.5;
             // A text field scrolls what it holds; nothing else may be cut.
@@ -1185,6 +1214,15 @@ mod sweep {
                 Box::new(|h| h.core().update = update_available()),
             ),
             (SIZES[1], Page::Help, Box::new(|h| h.app.help.selected = 6)),
+            // The smallest window: 360 points high, of which a page has 250.
+            (SMALLEST, Page::Controls, Box::new(crowded_controls)),
+            (SMALLEST, Page::Viewer, Box::new(crowded_viewer)),
+            (
+                SMALLEST,
+                Page::About,
+                Box::new(|h| h.core().update = update_available()),
+            ),
+            (SMALLEST, Page::Help, Box::new(|h| h.app.help.selected = 6)),
         ] {
             let mut h = Harness::new(size, page);
             setup(&mut h);
@@ -1253,6 +1291,91 @@ mod sweep {
                 );
             }
             assert!(operable_at_first.len() >= 8, "{names:?}");
+        }
+    }
+
+    /// The wheel over the middle of the page, far enough for any page.
+    fn wheel_to_the_end(h: &mut Harness) -> Vec<Painted> {
+        let middle = pos2(h.size.0 * 0.6, h.size.1 * 0.7);
+        h.run(vec![egui::Event::PointerMoved(middle)]);
+        for _ in 0..40 {
+            h.run(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -400.0),
+                modifiers: Default::default(),
+            }]);
+        }
+        h.settle()
+    }
+
+    /// In the smallest window no page is shown whole, and every page is
+    /// brought to its last line by the wheel: nothing is below the window
+    /// for good. (Up to 0.9.6 the smallest window was 580 points high.)
+    #[test]
+    fn every_page_scrolls_to_its_end_in_the_smallest_window() {
+        let last_topic = any2odyssey_core::help::topics().len() - 1;
+        let cases: [(Page, Setup, &str); 4] = [
+            (
+                Page::Controls,
+                Box::new(crowded_controls),
+                "Samsung Odyssey G90XF",
+            ),
+            (Page::Viewer, Box::new(crowded_viewer), "stereo viewer"),
+            (
+                Page::About,
+                Box::new(|h| h.core().update = update_available()),
+                "Report a problem",
+            ),
+            (
+                Page::Help,
+                Box::new(move |h| h.app.help.selected = last_topic),
+                "",
+            ),
+        ];
+        for (page, setup, last) in cases {
+            for scale in [1.0, 2.0] {
+                let mut h = Harness::new(SMALLEST, page);
+                h.scale = scale;
+                setup(&mut h);
+                let first = h.settle();
+                let context = format!("{} at scale {scale}", last);
+                // The last line of the Help article is its last paragraph.
+                let last = if page == Page::Help {
+                    let topic = &any2odyssey_core::help::topics()[last_topic];
+                    let body = any2odyssey_core::help::paragraphs(&topic.body);
+                    let line = body.last().unwrap().lines().last().unwrap();
+                    line.chars().take(30).collect::<String>()
+                } else {
+                    last.to_owned()
+                };
+                let inside = |painted: &[Painted]| {
+                    painted.iter().any(|p| {
+                        let seen = p.rect.intersect(p.clip);
+                        p.text.contains(&last)
+                            && seen.height() >= p.rect.height().min(14.0) - 0.5
+                            && seen.bottom() <= SMALLEST.1 - FRAME + 3.5
+                    })
+                };
+                assert!(
+                    !inside(&first),
+                    "{context}: the page fits, nothing to scroll"
+                );
+                let scrolled = wheel_to_the_end(&mut h);
+                assert!(
+                    inside(&scrolled),
+                    "{context}: {last:?} was not brought into the window; what is seen there: {:?}",
+                    scrolled
+                        .iter()
+                        .filter(|p| p.rect.intersect(p.clip).is_positive())
+                        .map(|p| (short(&p.text), p.rect.top().round()))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    faults(&h, &scrolled).is_empty(),
+                    "{context}: {:?}",
+                    faults(&h, &scrolled)
+                );
+            }
         }
     }
 
