@@ -128,7 +128,29 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 0.9.5 (audit rounds 11 to 19, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 0.9.6 (audit rounds 11 to 20, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+
+New in 0.9.6:
+
+- Linux, the G90XF, a still picture on the Odyssey 3D output: the picture is as it was (upright, both views, black borders for a picture that is not 16:9), and dragging a depth slider follows the pointer.
+- Linux, the G90XF, live screen at 1080, 1440 and 2160 lines, with and without sharpening: the picture is as it was, with no tearing and no black frames while a video plays, and `A2O_WEAVER_STATS` shows the weaves a second as before. This is the check that Wine's view of the frame file shows what is copied into its memory. With `env -u XDG_RUNTIME_DIR` the frame file is in `/dev/shm` and the picture shows.
+- Linux, the same: with the runtime folder filled to within 30 MB, start the output at 2160 lines: the page says that the picture could not be written, and the viewer goes on. In `top` the viewer's RES is larger by the frame file's pictures while the output is on and falls back when it is stopped.
+- Linux, the lens-interleave output: the picture is as it was.
+- Linux, KDE Plasma, live screen with a remembered screen: "The screen was chosen. Waiting for its first picture" shows for a moment at most, then "Live: ...".
+- Linux, KDE Plasma, live screen: change the shown screen's resolution, refresh rate and rotation: the picture goes on, the page names the new size, and neither "Live capture ended" nor a lasting "paused" appears. (A rotated screen is shown on its side on sway; note what Plasma does.)
+- Linux, KDE Plasma, live screen: disable or unplug the shown screen: "Live capture ended: the screen cast was ended by the desktop.", and Start works again when the screen is back.
+- Linux, live screen: `systemctl --user restart wireplumber`: the picture comes back by itself; if that takes more than three seconds the page says meanwhile that the desktop has paused the cast.
+- Linux, live screen: `kill -STOP` of `xdg-desktop-portal-kde`, then Stop output: "Output stopped" and the lens off after about two seconds. After `kill -CONT`, Start works.
+- Linux, live screen with HDR or ten bits a colour on the shown screen: the live screen starts and its colours are right.
+- Linux viewer, with the lens output chosen: change *Lens pitch*, then click the empty card beside *Reset lens numbers*: the number stays. Tab from the top: the page scrolls when the focus reaches *View logs*.
+- Linux, without a runtime folder (`env -u XDG_RUNTIME_DIR`) and with `XDG_DATA_HOME` in a folder more than about 90 characters deep: start the viewer, open a picture from the file manager: it arrives in the window that is open, and `any2odyssey --quit` closes it.
+- Linux, a real terminal: start `./install.sh --yes --no-odyssey` in two terminals at the same moment and press Ctrl+C in the one that says it waits: it ends at once, and the other finishes with Done.
+- Windows, the G90XF PC: start Narrator (Ctrl+Win+Enter) with the controls open and Tab through the page: "About, button" comes first, then "Depth strength, slider" and "Capture, combo box" with their values. Switch 3D on and off once with Narrator running: the tree is new code in the window that also owns the tray icon and the shortcuts.
+- Windows: click the empty card to the right of *Convert automatically when this app opens*: nothing is ticked. Click the text: it is.
+- Either edition: press Ctrl+Plus ten times in the default window: the page grows to 1.7 times and stops, with the title bar whole; Ctrl+0 brings it back.
+- Either edition, both themes: open a drop-down list and read the selected entry; move the pointer over the primary button and read it.
+- Windows: update from 0.9.5 and open About: "Replaced 0.9.5", in three parts.
+- Windows, where the Desktop is on a share: make the share read-only and uninstall from Settings > Apps: the window names the shortcut that was left, and Any2Odyssey is gone from Installed apps.
 
 New in 0.9.5:
 

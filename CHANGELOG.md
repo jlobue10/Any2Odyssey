@@ -2,6 +2,85 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.6 (2026-11-17)
+
+A sixth audit release: six pull requests (#146 to #151) from a round whose methods were again new. The Linux live screen was run for real under a headless desktop with PipeWire and the screen-cast portal, and the session was changed under it: modes, screens taken away, the portal and PipeWire stopped and restarted. The Linux program was run about 2,200 times with the operating system failing underneath it, one system call at a time, and on full, read-only and missing folders. Every page of the interface was drawn at every window size, display scale and zoom, walked with the keyboard, and read through the accessibility tree, on Linux and on a desktop of Windows that is never shown. The saved files of all fourteen releases were made with each release's own code and read by every other. The six Linux releases were measured against each other with one script, and the hot paths that were left were profiled. A second account and a hostile server played the attacker against the running program, and found nothing. And the changes of 0.9.5 were attacked with counter-examples that were run. Built and tested in CI; not yet run on the monitor, see Hardware verification.
+
+**Linux: a click on the empty card beside *Reset lens numbers* reset the lens numbers.** The viewer's hand-drawn buttons reacted across the whole width of their card.
+
+**Linux, live screen: a screen that was unplugged or switched off was shown as "not changing" for ever, and Stop output did nothing while the desktop's portal did not answer.**
+
+**Linux, Odyssey 3D output: a still picture follows a slider about five times faster, and each live picture is handed over in less than half the time.** The pictures are the same byte for byte.
+
+**Both editions: screen readers are given the controls.** They were given an empty window.
+
+### Fixed
+
+Linux, the live screen:
+
+- **A live screen whose screen is taken away ends, instead of reading "not changing" over a frozen picture.** When the shown screen goes, PipeWire only pauses the stream and removes the screen's node; the program took an error or a lost connection for the end and nothing else. After the shown output was unplugged or switched off, or the portal's backend ended, the page read "Live: a 1920 × 1080 screen, not changing, so nothing is redrawn" for as long as the output was left on. With xdg-desktop-portal-wlr 0.8.4 on sway the same came of a change of the shown output's mode. The page now reads "Live capture ended: the screen cast was ended by the desktop." about a quarter of a second later, and Start works again. (#150)
+- **Stop output no longer freezes the window while the portal does not answer.** With xdg-desktop-portal or its backend standing still, Stop output had no effect, the window was not redrawn, and `--quit` from a second launch was accepted and not acted on. The portal's answer is now waited for 1.5 seconds at the longest. (#150)
+- **The page says when a live screen waits for its first picture, and when the desktop has paused the cast.** It read "Choose the screen to show in 3D in the desktop's dialog" with no dialog open, on a desktop that sends the first picture only when something moves, and "not changing" for a cast the desktop had paused. (#150)
+- **A screen that the desktop renders with ten bits a colour can be shown.** The page read "Live capture ended: no more input formats." at every start. The four formats of ten bits a colour are accepted and written as a byte a colour. Run on sway only. (#150)
+
+Linux, the viewer:
+
+- **A button reacts where it is drawn.** In the default window *Reset lens numbers* was 158 points of button in 440 points that reacted, and so were *Save preview PNG…* and *Choose another screen*: a click on the blank card, to leave a number field for instance, reset the calibration, and it was saved a second later. (#148)
+- **One instance again where the path of the instance socket is long.** Without a runtime folder the socket lies in the data folder, and under a deep home folder or `XDG_DATA_HOME` its path passed the 107 bytes a socket's address holds: every launch became a window of its own and `--quit` found nothing running. (#147)
+- `--inspect`, `--layout-probe`, `--test-capture-exclusion`, `--test-offscreen` and `--worker`, which only say that they run on Windows, exit 1 when nobody reads what they say; they ended with a panic message and exit code 101. (#147)
+
+Linux, installing:
+
+- **Ctrl+C ends an installer that waits for another one.** The wait that 0.9.5 added ran in a process group of its own: under bash the installer waited on and then installed after the Ctrl+C, and under dash it ended only when the wait was over. (#149)
+- **Alpine with the `gcompat` package is refused like Alpine without it.** That package puts a loader of glibc's name in front of musl, which was all 0.9.5 looked for: the installer said Done over a program that answers "Error relocating ...: mallopt: symbol not found". (#149)
+
+Both editions, the controls and the viewer:
+
+- **A checkbox reacts on its box and its text**, not on the whole row beside it. On Windows that is *Convert automatically when this app opens*, *Recover if the conversion process stops* and *Minimize and close to the tray*, which save at once: a click on the blank card to bring the window forward could change how the program starts. (#148)
+- **Assistive software is given the controls.** UI Automation showed one element on every page of the Windows controls, and the Linux viewer was not on the accessibility bus at all, although the notes of 0.8.7 say that buttons and Help topics announce a name and a role: the program was built without the part of its interface library that does it (AccessKit). It is built in now (15 more libraries in the Windows program, 20 more on Linux, about 0.4 MB; both third-party lists name them). Sliders, drop-down boxes, the path box and the lens number fields have the name of their row ("Depth strength, slider"), and the window has a name on Linux. (#148)
+- **Tab starts at About and goes in reading order, and the page follows the focus.** The first stop was the title bar's invisible drag area, then the title bar from Close backwards; and the focus went on to buttons below the window's edge, where Space pressed something nobody could see. (#148)
+- **A selected list entry and selected text can be read** (a contrast of 2.6:1 in the light theme and 1.7:1 in the dark one; now 7.1:1 and 5.1:1), and so can the primary button under the pointer, which now darkens there in the light theme. (#148)
+- **Zoom stops where the title bar is still whole.** Ctrl+Plus, Ctrl+Minus and Ctrl+0 zoom the window; at 3.0 About and Help were outside it. The limit is 1.7 for the default window and more for a wider one. (#148)
+- **`--screenshot FILE` no longer destroys the picture that was there when the new one cannot be written**: on a full disk, and for `shot.jpg` on a healthy one (JPEG has no transparency, and the file had been emptied before the encoder said so). It is written beside the destination and moved into place. (#147)
+- Past the path limit of Windows, a name that Windows reads as a folder (only dots or spaces, or `..`) made a file called like the folder, and the write said it had succeeded. It is refused, as it is in a short folder. (#149)
+
+Windows:
+
+- **Uninstalling goes on past a shortcut that cannot be deleted** (a Desktop that has become read-only, a file another program holds open). Every release stopped there with the worker removed and the program left, at every further try. The shortcut stays and is named. (#149)
+- **The About page names the replaced version as the releases are named**: "Replaced 0.9.4", where it read "0.9.4.0" beside "Installed version 0.9.5". (#146)
+
+### Faster
+
+- **Linux, a still picture on the Odyssey 3D output: a step of a slider takes 22 ms instead of 125 at 1080p, and 34 instead of 180 at 4K** (measured without a GPU). Each view is now resized row by row, on several cores, straight into the picture; the result is the same byte for byte. The lens-interleave output is fitted the same way (20 ms instead of 176). (#151)
+- **Linux, live screen: each picture is copied into the frame file's memory instead of being written to it.** The hand-over was the largest single part of a live picture's turn. At 2160 lines with sharpening a turn takes 17.4 ms instead of 21.9, and the test loop shows 55 pictures a second where it showed 41; at 1080 and 1440 lines 60 a second were reached before, now with 15 % less processor time. The file, its header and the order in which they change are as before; where the file is not kept in memory, or the system does not set the memory aside, the picture is written as before. While the output is on, the viewer's memory reads higher by the pictures in the frame file (49 MB at 1080 lines, 194 MB at 2160). This is the one change here that is new `unsafe` code, and what Wine's side sees of it could not be run without the monitor: it is the first hardware check. (#151)
+- **The six Linux releases, measured the same way, show no step back that needs a change.** Start, idle (four wake-ups a second, 122 MB) and memory are level from 0.9.0 to 0.9.5. Two steps cost time and buy something: a step of a slider in the preview is a third slower since 0.9.2, for a session that holds 561 MB instead of 752; and the first 2D to 3D of a run takes 50 to 100 ms more since 0.9.1, for the check of the depth model's SHA-256. (#151)
+
+### Tests and releases
+
+- **The check of the actions' commits could pass a commit that no tag and no branch holds.** When GitHub's first answer was an error (a rate limit, a 502), the error's text stood where the names of tags are expected, and the commit was accepted. Only an answer that arrived counts now, and a question GitHub did not answer is told apart from the answer no. (#149)
+- **The saved files of all fourteen releases are in the repository, written by each release's own code, and are read in CI**: settings, the status files, the lens numbers, what the published Linux programs wrote through their windows, and the installation records under both PowerShells (270 small files). Every release's files are read by 0.9.5 with every value kept and nothing called damaged, and the reverse; a change of a file's format now fails a test in the pull request that makes it. (#146)
+- **About 2,200 runs of the Linux program with a fault in them left no settings file, exported picture, guide or depth model half written or empty**, and no temporary file beside them. The atomic writer has a test with a write that fails part way, which runs on Windows too. (#147)
+- **The interface is swept without a display in the tests**: 41 states at 29 sizes for controls cut by the window's edge or lying over each other, the accessibility tree for names, the Tab order, and the themes' contrasts. At the default and the smallest window, at scales 1 to 3 and maximized up to 4K, nothing was cut or overlapped. (#148)
+- **The changes of 0.9.5 were reviewed by running counter-examples**, and each fix of 0.9.5 was taken out again to see whether a test notices: five did not have one (the lock held to the end of a run, the three package managers' options for an unknown package, the last line on a `noexec` home), and have one now. (#149)
+- **A second account on the same machine and a hostile server found nothing.** The other account could not connect to the instance socket, read the camera bridge's secret, answer its challenge or take its port unnoticed; a wrong, oversized or redirected depth model download left nothing behind. The Wine side was not part of it. (no pull request)
+- One test of the depth model's download never ended when no file descriptor was left; it ends now. (#147)
+
+### Known, not fixed
+
+- Window titles and paths in Chinese, Japanese, Korean, Hebrew or Arabic are drawn as boxes, in the Windows source list and in the viewer's status line: the program's typefaces do not have those letters.
+- Linux, live screen: a rotated screen is shown on its side on sway (the frame says how it is turned; the program does not read that yet). Not tried on KDE or GNOME.
+- Linux, live screen: the picture buffers keep the largest size a session has seen until the output is stopped.
+- Linux, live screen at 2160 lines with sharpening: still below 60 pictures a second on the processor alone.
+- Linux: with `XDG_RUNTIME_DIR` set to something that cannot be used (a file, a read-only folder, another user's), every launch is a window of its own, as before.
+- Linux: an ONNX Runtime file that is cut short ends the viewer inside the system's loader ("Bus error") when 2D to 3D is chosen.
+- The smallest window is 580 points high, which is more than a 1080p screen at 200 % or a 768p screen at 150 % shows.
+- Going back to an old release brings its own faults back: the installers of 0.8.0 to 0.8.6 refuse to install after a newer release was uninstalled (`install.ps1 -AllowDowngrade`, or delete `%LOCALAPPDATA%\Any2Odyssey\install-result.json` first), and the Linux `install.sh` of 0.9.0 and 0.9.1 over a newer installation removes the Wine side.
+- The items of 0.9.5 that are not named above stand as they were.
+
+### Hardware verification
+
+Pending: these changes were made and tested without the monitor, Wine, the camera or the lens; the live screen ran on sway with a stand-in for the Wine side, the Windows controls on a desktop that is not shown, and the timings without a GPU. `docs/TESTING.md`, "Pending hardware verification", lists the checks under "New in 0.9.6". Most in need of a real run: the Odyssey 3D output under Linux with a still picture and a live screen (that the picture copied into the frame file's memory arrives as the written one did), the live screen on KDE Plasma when the shown screen is changed or taken away, and the Windows controls with Narrator while 3D is switched on and off.
+
 ## 0.9.5 (2026-11-17)
 
 A fifth audit release: six pull requests (#139 to #144) from a round that again used methods not used before. The eight published 0.9.4 files were downloaded and taken apart, and the release run and the workflows behind them were read with tools; the Linux archive was run as a first-time user in root trees of eleven systems, each with its own package manager and libraries; the Windows setup program was compiled around a stand-in package and run more than 230 times, in every mode and with every outcome the installer can have; the Windows controls were driven for thousands of operations and measured from outside the process; the changes of 0.9.4 were attacked with counter-examples that were run; and analysers no earlier round had used were pointed at all of the code. No new features. Built and tested in CI; not yet run on the monitor, see Hardware verification.
