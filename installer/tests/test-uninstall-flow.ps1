@@ -142,6 +142,30 @@ try{
   if(Test-Path -LiteralPath $locked){(Get-Item -LiteralPath $locked).IsReadOnly=$false}
  }
 
+ # A shortcut this account may not delete, read-only or not (what a Desktop that has become read-only
+ # makes of every file on it; 0.9.5 dealt with the read-only one only): the uninstall stopped at it with
+ # "Access to the path is denied", the worker gone and the program and its registration left, and a
+ # second run stopped at the same place. It stays, is named, and everything else is removed.
+ foreach($readOnly in @($false,$true)){
+  $launches.Clear()
+  New-Fixture -Elevated $false
+  $locked=Join-Path $programs 'Any2Odyssey.lnk'
+  & icacls.exe $locked /deny ('*'+$sid+':(DE)') | Out-Null
+  & icacls.exe $programs /deny ('*'+$sid+':(DC)') | Out-Null
+  if($readOnly){(Get-Item -LiteralPath $locked).IsReadOnly=$true}
+  try{
+   $notes.Clear()
+   & (Join-Path $app 'Uninstall.ps1')
+   $said=$notes -join [char]10
+   Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $worker)) "A shortcut that cannot be deleted does not stop the uninstall (read-only: $readOnly)"
+   Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk'))) "The other shortcut is still removed (read-only: $readOnly)"
+   Assert ((Test-Path -LiteralPath $locked) -and (Get-Item -LiteralPath $locked).IsReadOnly -eq $readOnly -and $said.Contains($locked) -and $said.Contains('left in place')) "The shortcut that cannot be deleted stays as it was and is named (read-only: $readOnly)"
+  }finally{
+   & icacls.exe $programs /remove:d ('*'+$sid) | Out-Null
+   if(Test-Path -LiteralPath $locked){& icacls.exe $locked /remove:d ('*'+$sid) | Out-Null;(Get-Item -LiteralPath $locked).IsReadOnly=$false}
+  }
+ }
+
  $launches.Clear()
  New-Fixture -Elevated $true
  & (Join-Path $app 'Uninstall.ps1')
