@@ -444,16 +444,22 @@ jobs:
           echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP" "$name/cargo-deny"
           install -m755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
-      - name: Advisories, banned requirements and sources
+      - name: Advisories, banned requirements, sources and licenses
         run: |
-          cargo deny --locked check advisories bans sources || {
-            echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml, and release from that commit."
+          cargo deny --locked check advisories bans sources licenses || {
+            echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml (for a license: [licenses] there says what is allowed and why), and release from that commit."
             exit 1
           }
       # As in ci.yml: each action is named by a commit, and that commit has to be one its repository still
       # holds under a tag or on a branch, not one a rebuilt branch left behind or one pushed only to a fork.
       - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
         run: python3 scripts/tests/test-check-action-pins.py
+      # THIRD-PARTY-LICENSES.md is written by hand, and scripts/third-party-linux.py compares it with the
+      # crates of a Windows build (in the Linux job, where the build is). What that comparison has to
+      # refuse is run here, against a stand-in for cargo: a crate that is missing, one too many, a wrong
+      # license or number, a crate named twice.
+      - name: The check of the third-party list refuses what it should (stand-in for cargo)
+        run: python3 scripts/tests/test-third-party-linux.py
       - name: Every action's commit is under a tag or on a branch of its repository
         env:
           GH_TOKEN: ${{ github.token }}

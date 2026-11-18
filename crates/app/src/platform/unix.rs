@@ -211,23 +211,37 @@ pub fn try_lock_file(file: &std::fs::File) -> std::io::Result<bool> {
     sys::try_lock(file)
 }
 
-/// Where the instance socket lives: the data folder when one was set
-/// explicitly (an isolated run must not find or disturb the real instance),
-/// otherwise the per-user runtime folder, otherwise the data folder.
-fn socket_path() -> PathBuf {
-    socket_path_from(
+/// Where the instance socket may live, the place that is tried first
+/// first: the data folder alone when one was set explicitly (an isolated
+/// run must not find or disturb the real instance), otherwise the per-user
+/// runtime folder and after it the data folder.
+///
+/// The data folder is where the socket lies when no runtime folder is
+/// named, and it is also where it lies when the one that is named cannot
+/// be used: a file, a folder that is read-only, another user's (what `su`
+/// without a login leaves in `XDG_RUNTIME_DIR`). Up to 0.9.6 only the named
+/// folder was tried. No socket could be made there, so every launch became
+/// a window of its own, `--quit` found nothing running and a picture opened
+/// from the file manager got another window each time.
+fn socket_paths() -> Vec<PathBuf> {
+    socket_paths_from(
         std::env::var_os(paths::DATA_DIR_ENV).is_some(),
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
         paths::data_dir(),
     )
 }
 
-fn socket_path_from(data_overridden: bool, runtime: Option<PathBuf>, data: PathBuf) -> PathBuf {
-    let dir = match runtime {
-        Some(dir) if !data_overridden && dir.is_absolute() => dir,
-        _ => data,
-    };
-    dir.join(SOCKET_NAME)
+fn socket_paths_from(
+    data_overridden: bool,
+    runtime: Option<PathBuf>,
+    data: PathBuf,
+) -> Vec<PathBuf> {
+    let runtime = runtime.filter(|dir| !data_overridden && dir.is_absolute());
+    runtime
+        .into_iter()
+        .chain([data])
+        .map(|dir| dir.join(SOCKET_NAME))
+        .collect()
 }
 
 /// The most bytes of path a socket's address holds on Linux (`sun_path`,
@@ -505,12 +519,18 @@ pub fn signal(event: &str) -> bool {
         ipc::TOGGLE_EVENT => Request::Toggle,
         _ => return false,
     };
-    send(&socket_path(), &request)
+    send_to_any(&socket_paths(), &request)
 }
 
 /// Hand an image to the running instance. False when none is running.
 pub fn signal_open(path: &Path) -> bool {
-    send(&socket_path(), &Request::Open(path.to_path_buf()))
+    send_to_any(&socket_paths(), &Request::Open(path.to_path_buf()))
+}
+
+/// Send `request` to the instance that answers at the first of `paths`
+/// where one does: where [`single_instance_among`] has bound its socket.
+fn send_to_any(paths: &[PathBuf], request: &Request) -> bool {
+    paths.iter().any(|path| send(path, request))
 }
 
 pub struct SingleInstance {
@@ -595,21 +615,42 @@ impl Drop for SingleInstance {
 
 /// `None` when another instance of this user already answers the socket.
 pub fn single_instance() -> Option<SingleInstance> {
-    single_instance_at(socket_path())
+    single_instance_among(&socket_paths())
 }
 
+#[cfg(test)]
 fn single_instance_at(path: PathBuf) -> Option<SingleInstance> {
-    match bind_instance(&path) {
-        Bound::Listening(listener) => {
-            let socket = SocketFile::at(&path);
+    single_instance_among(&[path])
+}
+
+fn single_instance_among(paths: &[PathBuf]) -> Option<SingleInstance> {
+    match bind_among(paths) {
+        (Bound::Listening(listener), path) => {
+            let socket = path.and_then(SocketFile::at);
             *LISTENER.lock().expect("listener") = Some(listener);
             Some(SingleInstance { socket })
         }
-        Bound::Occupied => None,
-        // No socket could be created at all (read-only or missing folder):
+        (Bound::Occupied, _) => None,
+        // No socket could be created at all (read-only or missing folders):
         // run without a guard rather than refuse to start.
-        Bound::Unavailable => Some(SingleInstance { socket: None }),
+        (Bound::Unavailable, _) => Some(SingleInstance { socket: None }),
     }
+}
+
+/// Bind the instance socket at the first of `paths` where that can be done,
+/// and say where. A place where no socket can be made and none answers is
+/// passed over for the next; one where an instance answers ends the search:
+/// every launch goes through the places in the same order, so the launch
+/// that found the first of them unusable is found by the next one that
+/// does.
+fn bind_among(paths: &[PathBuf]) -> (Bound, Option<&Path>) {
+    for path in paths {
+        match bind_instance(path) {
+            Bound::Unavailable => {}
+            bound => return (bound, Some(path)),
+        }
+    }
+    (Bound::Unavailable, None)
 }
 
 enum Bound {
@@ -1590,23 +1631,97 @@ mod tests {
     fn an_isolated_run_keeps_its_socket_out_of_the_runtime_folder() {
         let runtime = Some(PathBuf::from("/run/user/1000"));
         let data = PathBuf::from("/home/u/.local/share/any2odyssey");
+        // The runtime folder first, and the data folder if that fails.
         assert_eq!(
-            socket_path_from(false, runtime.clone(), data.clone()),
-            PathBuf::from("/run/user/1000/any2odyssey.sock")
+            socket_paths_from(false, runtime.clone(), data.clone()),
+            [
+                PathBuf::from("/run/user/1000/any2odyssey.sock"),
+                data.join(SOCKET_NAME)
+            ]
         );
         assert_eq!(
-            socket_path_from(true, runtime, data.clone()),
-            data.join(SOCKET_NAME)
+            socket_paths_from(true, runtime, data.clone()),
+            [data.join(SOCKET_NAME)]
         );
         assert_eq!(
-            socket_path_from(false, None, data.clone()),
-            data.join(SOCKET_NAME)
+            socket_paths_from(false, None, data.clone()),
+            [data.join(SOCKET_NAME)]
         );
         // A relative runtime folder is a broken environment, not a place.
         assert_eq!(
-            socket_path_from(false, Some(PathBuf::from("run")), data.clone()),
-            data.join(SOCKET_NAME)
+            socket_paths_from(false, Some(PathBuf::from("run")), data.clone()),
+            [data.join(SOCKET_NAME)]
         );
+    }
+
+    /// `XDG_RUNTIME_DIR` naming something no socket can be made in: up to
+    /// 0.9.6 every launch then ran without the socket, each a window of its
+    /// own that `--quit` and `--open` could not reach.
+    #[test]
+    fn a_runtime_folder_that_cannot_be_used_leaves_the_data_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        // A file where the folder should be; a folder that is not there
+        // under one that cannot be written to; a folder that cannot be
+        // written to. (The last two stop nobody who is root.)
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let locked = dir.path().join("read-only");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let root = std::fs::write(locked.join("probe"), b"").is_ok();
+        let mut unusable = vec![file];
+        if !root {
+            unusable.extend([locked.join("missing"), locked.clone()]);
+        }
+        for runtime in unusable {
+            let paths = socket_paths_from(false, Some(runtime.clone()), data.clone());
+            let context = runtime.display().to_string();
+            let (Bound::Listening(listener), Some(bound)) = bind_among(&paths) else {
+                panic!("{context}: no socket anywhere");
+            };
+            assert_eq!(bound, data.join(SOCKET_NAME), "{context}");
+            // The next launch finds this one, and so does a request.
+            assert!(
+                matches!(bind_among(&paths), (Bound::Occupied, Some(at)) if at == bound),
+                "{context}: a second instance"
+            );
+            let server = std::thread::spawn(move || {
+                // Probes of the launches above and below come first.
+                loop {
+                    if let Some(request) = serve(listener.accept().unwrap().0) {
+                        return request;
+                    }
+                }
+            });
+            assert!(send_to_any(&paths, &Request::Quit), "{context}");
+            assert_eq!(server.join().unwrap(), Request::Quit, "{context}");
+            // The listener went with the thread: its name is a stale one,
+            // which the next launch clears away and binds again.
+            assert!(
+                matches!(bind_among(&paths), (Bound::Listening(_), Some(at)) if at == bound),
+                "{context}: the stale socket was not taken over"
+            );
+            std::fs::remove_file(data.join(SOCKET_NAME)).unwrap();
+        }
+        // Nowhere at all: the program runs without the socket, as before.
+        let nowhere = [
+            dir.path().join("a-file").join(SOCKET_NAME),
+            dir.path().join("a-file/data").join(SOCKET_NAME),
+        ];
+        assert!(matches!(bind_among(&nowhere), (Bound::Unavailable, None)));
+        // A runtime folder that can be used is used, and the data folder
+        // is not looked at: nothing is made there.
+        let usable = dir.path().join("runtime");
+        std::fs::create_dir(&usable).unwrap();
+        let untouched = dir.path().join("untouched");
+        let paths = socket_paths_from(false, Some(usable.clone()), untouched.clone());
+        assert!(
+            matches!(bind_among(&paths), (Bound::Listening(_), Some(at)) if at == usable.join(SOCKET_NAME))
+        );
+        assert!(!untouched.exists());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

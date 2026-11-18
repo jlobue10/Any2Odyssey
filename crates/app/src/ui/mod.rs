@@ -4,6 +4,7 @@ mod about;
 mod controls;
 mod help;
 mod lens;
+mod system_fonts;
 mod theme;
 mod viewer;
 mod widgets;
@@ -30,6 +31,19 @@ const TITLEBAR_HEIGHT: f32 = 54.0;
 const EDGE: f32 = 9.0;
 /// The side of the square title bar buttons.
 const CHROME_BUTTON: f32 = 34.0;
+/// The smallest window, in points. Every page scrolls, so the height is
+/// what leaves the title bar, the way back and a few lines of a page; the
+/// width is what the title bar needs. Up to 0.9.6 the height was 580, more
+/// than the whole of a 1920x1080 screen at 200 % (540 points) or of a
+/// 1366x768 one at 150 % (512): the window could not be made to fit, and
+/// its lower edge, the resize handles with it, lay outside the screen.
+const SMALLEST_WINDOW: [f32; 2] = [700.0, 360.0];
+/// The face of the Maximize button: a square the built-in typefaces have
+/// (U+25FB). It was U+25A1, which none of them has, and what was drawn was
+/// egui's stand-in for a missing letter, which is this square. With a
+/// typeface of the system added for other text (`system_fonts`), U+25A1
+/// would be drawn with that typeface's own, larger square from then on.
+const MAXIMIZE: &str = "\u{25FB}";
 /// The narrowest page, in points, whose title bar holds its seven buttons
 /// beside the title. Below it About runs over the title, and from about 400
 /// points About and Help leave the window on the left.
@@ -151,7 +165,7 @@ pub fn run(core: Arc<Mutex<Core>>) -> anyhow::Result<()> {
         .with_title(APP_NAME)
         .with_app_id("any2odyssey")
         .with_inner_size([980.0, 780.0])
-        .with_min_inner_size([700.0, 580.0])
+        .with_min_inner_size(SMALLEST_WINDOW)
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(true);
@@ -188,6 +202,16 @@ pub fn run(core: Arc<Mutex<Core>>) -> anyhow::Result<()> {
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, core: Arc<Mutex<Core>>) -> App {
         theme::install_fonts(&cc.egui_ctx);
+        // A window title or a file name in letters those typefaces lack is
+        // drawn with one of the system's, looked for when it is first shown.
+        system_fonts::install(&cc.egui_ctx, {
+            let core = core.clone();
+            move |line: &str| {
+                if let Ok(core) = core.lock() {
+                    core.log(line);
+                }
+            }
+        });
         let hwnd = window_handle(cc);
         let wordmark = load_png(include_bytes!(
             "../../../../assets/Any2Odyssey-wordmark.png"
@@ -538,7 +562,7 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             }
         }
-        if chrome(&mut actions, "□", "Maximize / restore").clicked() {
+        if chrome(&mut actions, MAXIMIZE, "Maximize / restore").clicked() {
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }

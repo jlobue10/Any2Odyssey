@@ -5,6 +5,8 @@ use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, Stroke,
 
 pub const DISPLAY_FONT: &str = "display";
 pub const UI_FONT: &str = "ui";
+/// Fira Sans (OFL), the face of the interface's text.
+pub const UI_FONT_FILE: &[u8] = include_bytes!("../../../../assets/fonts/FiraSans-Regular.ttf");
 
 pub fn color(c: Rgb) -> Color32 {
     Color32::from_rgb(c.0, c.1, c.2)
@@ -30,9 +32,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     // triangles that egui's default font lacks.
     fonts.font_data.insert(
         UI_FONT.to_owned(),
-        std::sync::Arc::new(FontData::from_static(include_bytes!(
-            "../../../../assets/fonts/FiraSans-Regular.ttf"
-        ))),
+        std::sync::Arc::new(FontData::from_static(UI_FONT_FILE)),
     );
     if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
         list.insert(0, UI_FONT.to_owned());

@@ -392,6 +392,142 @@ fn preload_cudnn() {
     }
 }
 
+/// How many bytes the library file `path` has, and how many its own headers
+/// say it has, when the second is the larger: a file that was cut short (a
+/// copy or a download that was interrupted). `None` for a whole file, and
+/// for anything that is not a library for this kind of processor, which the
+/// system's loader refuses with a message of its own.
+///
+/// The loader maps a library by what its headers say and never compares
+/// that with the file's length. Of a file that is cut short it maps pages
+/// that are not there, and the first touch of one ends the whole program
+/// with "Bus error", inside the loader, where nothing can be caught. So the
+/// headers are read here first: the program headers and every segment they
+/// load must lie inside the file, and so must the table of sections, which
+/// is the last thing in a library as the linker writes it.
+fn cut_short(path: &Path) -> Option<(u64, u64)> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let mut ident = [0u8; 16];
+    file.read_exact(&mut ident).ok()?;
+    let wide = cfg!(target_pointer_width = "64");
+    let little = cfg!(target_endian = "little");
+    if ident[..4] != *b"\x7fELF"
+        || ident[4] != if wide { 2 } else { 1 }
+        || ident[5] != if little { 1 } else { 2 }
+    {
+        return None;
+    }
+    let number = |bytes: &[u8]| -> u64 {
+        let mut value = [0u8; 8];
+        if little {
+            value[..bytes.len()].copy_from_slice(bytes);
+            u64::from_le_bytes(value)
+        } else {
+            value[8 - bytes.len()..].copy_from_slice(bytes);
+            u64::from_be_bytes(value)
+        }
+    };
+    // Where the fields lie, for 64 and for 32 bits: in the file's header the
+    // two tables' places, entry sizes and counts; in a program header its
+    // kind, its place in the file and its length there.
+    let (header_size, tables, sizes, entry, offset, filesz) = if wide {
+        (
+            64usize,
+            [0x20..0x28, 0x28..0x30],
+            0x36usize,
+            56u64,
+            8..16,
+            32..40,
+        )
+    } else {
+        (52, [0x1C..0x20, 0x20..0x24], 0x2A, 32, 4..8, 16..20)
+    };
+    let mut header = vec![0u8; header_size];
+    header[..16].copy_from_slice(&ident);
+    if file.read_exact(&mut header[16..]).is_err() {
+        // Not even its header is whole.
+        return Some((length, header_size as u64));
+    }
+    let [program_table, section_table] = tables.map(|at| number(&header[at]));
+    let field = |index: usize| number(&header[sizes + 2 * index..sizes + 2 * index + 2]);
+    let (program_entry, programs, section_entry, sections) =
+        (field(0), field(1), field(2), field(3));
+    let mut needed = header_size as u64;
+    // Zero where a library has no such table (a stripped one has no table
+    // of sections), and all ones for a count that is kept elsewhere.
+    if program_table != 0 && programs != 0xFFFF {
+        needed = needed.max(program_table.saturating_add(program_entry * programs));
+    }
+    if section_table != 0 {
+        needed = needed.max(section_table.saturating_add(section_entry * sections));
+    }
+    if needed <= length && program_table != 0 && programs != 0xFFFF && program_entry >= entry {
+        let mut segment = vec![0u8; program_entry as usize];
+        for index in 0..programs {
+            let at = program_table + index * program_entry;
+            if file.seek(SeekFrom::Start(at)).is_err() || file.read_exact(&mut segment).is_err() {
+                return Some((length, at.saturating_add(program_entry)));
+            }
+            const LOAD: u64 = 1;
+            if number(&segment[..4]) == LOAD {
+                let end = number(&segment[offset.clone()])
+                    .saturating_add(number(&segment[filesz.clone()]));
+                needed = needed.max(end);
+            }
+        }
+    }
+    (needed > length).then_some((length, needed))
+}
+
+/// The folders the system's loader looks in for a library that is named
+/// without a folder, as far as they can be known without asking it:
+/// `LD_LIBRARY_PATH`, and where the distributions keep their libraries.
+fn loader_folders() -> Vec<PathBuf> {
+    let named = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+    let multiarch = format!("{}-linux-gnu", std::env::consts::ARCH);
+    std::env::split_paths(&named)
+        .filter(|folder| folder.is_absolute())
+        .chain(
+            [
+                "/lib64",
+                "/usr/lib64",
+                "/lib",
+                "/usr/lib",
+                &format!("/lib/{multiarch}"),
+                &format!("/usr/lib/{multiarch}"),
+                "/usr/local/lib",
+            ]
+            .map(PathBuf::from),
+        )
+        .collect()
+}
+
+/// What to say instead of loading `library`, when a file the loader could
+/// take for it is cut short ([`cut_short`]): the file itself where it is
+/// named with its folder, otherwise one of that name in `folders`.
+fn unloadable(library: &Path, folders: &[PathBuf]) -> Option<String> {
+    let with_folder = library.components().count() > 1;
+    let candidates: Vec<PathBuf> = if with_folder {
+        vec![library.to_owned()]
+    } else {
+        folders.iter().map(|folder| folder.join(library)).collect()
+    };
+    candidates.iter().find_map(|file| {
+        let (length, needed) = cut_short(file)?;
+        Some(format!(
+            "ONNX Runtime could not be loaded: {} is cut short (it has {length} bytes and its own headers describe {needed}), as an interrupted copy or download leaves it. Install or copy it again{}.",
+            file.display(),
+            if with_folder {
+                ""
+            } else {
+                ", or name a whole library with ORT_DYLIB_PATH"
+            }
+        ))
+    })
+}
+
 /// Load the runtime library once per process. The outcome is remembered: a
 /// library that could not be loaded will not appear while the program runs.
 fn runtime() -> Result<&'static Environment, String> {
@@ -402,6 +538,9 @@ fn runtime() -> Result<&'static Environment, String> {
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(RUNTIME_LIBRARY));
+            if let Some(refusal) = unloadable(&library, &loader_folders()) {
+                return Err(refusal);
+            }
             preload_cudnn();
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
@@ -548,6 +687,145 @@ impl Estimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A library as the linker writes one for a 64-bit little-endian
+    /// processor: the header, two program headers, the 4000 bytes the
+    /// second one loads, and a table of three sections at the end. Without
+    /// `sections` it is a stripped one, which ends with its last segment.
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    fn library(sections: bool) -> Vec<u8> {
+        let mut file = vec![0u8; 64 + 2 * 56 + 4000];
+        file[..8].copy_from_slice(b"\x7fELF\x02\x01\x01\x00");
+        let mut put = |at: usize, value: u64, width: usize| {
+            file[at..at + width].copy_from_slice(&value.to_le_bytes()[..width]);
+        };
+        put(16, 3, 2); // a shared object
+        put(32, 64, 8); // the program headers follow the header
+        put(52, 64, 2);
+        put(54, 56, 2);
+        put(56, 2, 2);
+        if sections {
+            put(40, 4176, 8);
+            put(58, 64, 2);
+            put(60, 3, 2);
+        }
+        // Both are loaded: the headers themselves, and the 4000 bytes.
+        for (header, offset, length) in [(64, 0, 176), (120, 176, 4000)] {
+            put(header, 1, 4);
+            put(header + 8, offset, 8);
+            put(header + 32, length, 8);
+        }
+        if sections {
+            file.extend([0u8; 3 * 64]);
+        }
+        file
+    }
+
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn a_library_that_is_cut_short_is_told_from_a_whole_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libonnxruntime.so");
+        let cut = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            cut_short(&path)
+        };
+        let whole = library(true);
+        assert_eq!(whole.len(), 4368);
+        assert_eq!(cut(&whole), None);
+        // More than its headers describe is not this function's business.
+        assert_eq!(cut(&[whole.clone(), vec![0; 100]].concat()), None);
+        // Cut in the table of sections, before it, in the segment, in the
+        // program headers and in the header.
+        for length in [4367, 4176, 2000, 176, 100, 64] {
+            assert_eq!(
+                cut(&whole[..length]),
+                Some((length as u64, 4368)),
+                "{length}"
+            );
+        }
+        assert_eq!(cut(&whole[..40]), Some((40, 64)));
+        // A stripped library has no table of sections: its segments decide.
+        let stripped = library(false);
+        assert_eq!(stripped.len(), 4176);
+        assert_eq!(cut(&stripped), None);
+        assert_eq!(cut(&stripped[..4175]), Some((4175, 4176)));
+        assert_eq!(cut(&stripped[..200]), Some((200, 4176)));
+        // What is not a library for this processor is the loader's to refuse,
+        // which it does with a message: text, nothing, a 32-bit library, one
+        // of the other byte order.
+        assert_eq!(cut(b"this is not a library"), None);
+        assert_eq!(cut(b""), None);
+        assert_eq!(cut(b"\x7fELF"), None);
+        for (at, value) in [(4, 1), (5, 2)] {
+            let mut other = whole[..2000].to_vec();
+            other[at] = value;
+            assert_eq!(cut(&other), None);
+        }
+        assert_eq!(cut_short(dir.path()), None);
+        assert_eq!(cut_short(&dir.path().join("missing")), None);
+        // A real one: this test program is whole, and its first megabyte
+        // is not.
+        let program = std::env::current_exe().unwrap();
+        assert_eq!(cut_short(&program), None);
+        let mut start = vec![0u8; 1 << 20];
+        std::io::Read::read_exact(&mut std::fs::File::open(&program).unwrap(), &mut start).unwrap();
+        let length = std::fs::metadata(&program).unwrap().len();
+        assert!(length > 1 << 20);
+        assert!(matches!(cut(&start), Some((have, needed)) if have == 1 << 20 && needed <= length));
+    }
+
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn a_cut_library_is_refused_with_its_name_wherever_the_loader_could_find_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (good, bad, empty) = (
+            dir.path().join("good"),
+            dir.path().join("bad"),
+            dir.path().join("empty"),
+        );
+        for folder in [&good, &bad, &empty] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let whole = library(true);
+        std::fs::write(good.join("libonnxruntime.so"), &whole).unwrap();
+        std::fs::write(bad.join("libonnxruntime.so"), &whole[..3000]).unwrap();
+        // Named with its folder (ORT_DYLIB_PATH): that file and no other.
+        let message =
+            unloadable(&bad.join("libonnxruntime.so"), std::slice::from_ref(&good)).unwrap();
+        assert!(
+            message.contains(&bad.join("libonnxruntime.so").display().to_string())
+                && message.contains("cut short")
+                && message.contains("3000 bytes")
+                && message.contains("4368")
+                && !message.contains("ORT_DYLIB_PATH"),
+            "{message}"
+        );
+        assert_eq!(
+            unloadable(&good.join("libonnxruntime.so"), std::slice::from_ref(&bad)),
+            None
+        );
+        // Named without one: wherever the loader looks.
+        let name = Path::new(RUNTIME_LIBRARY);
+        let missing = dir.path().join("missing");
+        assert_eq!(
+            unloadable(name, &[missing.clone(), empty.clone(), good.clone()]),
+            None
+        );
+        assert_eq!(unloadable(name, &[]), None);
+        let message = unloadable(name, &[missing, empty, good, bad.clone()]).unwrap();
+        assert!(
+            message.contains(&bad.join("libonnxruntime.so").display().to_string())
+                && message.contains("ORT_DYLIB_PATH"),
+            "{message}"
+        );
+        // A link to the library, as the distributions install it.
+        std::os::unix::fs::symlink(bad.join("libonnxruntime.so"), bad.join("link.so")).unwrap();
+        assert!(unloadable(&bad.join("link.so"), &[]).is_some());
+        // The loader's own folders are absolute, whatever the variable holds.
+        assert!(loader_folders().iter().all(|folder| folder.is_absolute()));
+        assert!(loader_folders().contains(&PathBuf::from("/usr/lib")));
+    }
 
     #[test]
     fn the_binding_accepts_the_runtimes_distributions_package() {
