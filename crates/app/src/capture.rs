@@ -537,6 +537,23 @@ fn picture_in(bytes: &[u8], told: Told, width: u32, height: u32) -> Option<(&[u8
     Some((valid.get(..needed)?, stride))
 }
 
+/// Room a buffer may keep beyond what a frame needs: not worth giving back.
+const SMALL_ROOM: usize = 4096;
+
+/// Let go of `buffer`'s room when it is more than a frame of `wanted` bytes
+/// needs: the next frame then gets room of its own size.
+///
+/// The buffers that take the frames keep the room of the largest frame
+/// they have held. After a larger screen (another mode of the shown one, or
+/// one picture of it while the desktop changed it) the program stayed that
+/// much larger until the output was stopped: 265 MB after 7680 x 4320. A
+/// buffer that fits is left alone, so this costs a comparison a frame.
+fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
+    if buffer.capacity() > wanted.max(SMALL_ROOM) {
+        *buffer = Vec::new();
+    }
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -688,6 +705,14 @@ fn stream(
                 order: PixelOrder::Bgr,
             };
             let (tens_wide, tens_high) = (width as usize, height as usize);
+            // What the frame takes in the buffer it is written to: its rows
+            // as they come, or without their gaps.
+            let wanted = match (packing, turned) {
+                (Packing::Bytes { .. }, Turned::Upright) => frame.len(),
+                _ => row * tens_high,
+            };
+            fitted(&mut data.spare, wanted);
+            fitted(&mut data.narrowed, wanted);
             let (width, height, stride, bgr) = match (packing, turned) {
                 (Packing::Bytes { bgr }, Turned::Upright) => {
                     data.spare.clear();
@@ -722,6 +747,8 @@ fn stream(
             let first = {
                 let mut slot = lock(&data.shared.slot);
                 std::mem::swap(&mut slot.bytes, &mut data.spare);
+                // What was the slot's has held the frame before this one.
+                fitted(&mut data.spare, slot.bytes.len());
                 slot.width = width;
                 slot.height = height;
                 slot.stride = stride;
@@ -1115,6 +1142,32 @@ mod tests {
             picture_in(&bytes, Told { offset: 0, ..told }, 1, 1),
             Some((&bytes[..4], 16))
         );
+    }
+
+    #[test]
+    fn a_buffer_larger_than_a_frame_needs_is_let_go_of_and_one_that_fits_is_kept() {
+        // The room of a frame of 7680 x 4320 before one of 1920 x 1080.
+        let mut buffer = Vec::with_capacity(7680 * 4320 * 4);
+        buffer.extend_from_slice(&[1, 2, 3]);
+        fitted(&mut buffer, 1920 * 1080 * 4);
+        assert_eq!((buffer.len(), buffer.capacity()), (0, 0));
+        // The next frame takes what it needs, and that is kept from then
+        // on, with what is in it.
+        buffer.extend_from_slice(&[7; 10_000]);
+        let (room, place) = (buffer.capacity(), buffer.as_ptr());
+        assert!(room < 20_000);
+        fitted(&mut buffer, 10_000);
+        fitted(&mut buffer, 16_384 * 16_384 * 4);
+        assert_eq!((buffer.capacity(), buffer.as_ptr()), (room, place));
+        assert_eq!(buffer, [7; 10_000]);
+        // A little too much room is not worth a new buffer for every frame
+        // of a screen of a few pixels.
+        let mut small = Vec::with_capacity(64);
+        fitted(&mut small, 4);
+        assert_eq!(small.capacity(), 64);
+        let mut empty = Vec::new();
+        fitted(&mut empty, 0);
+        assert_eq!(empty.capacity(), 0);
     }
 
     #[test]
