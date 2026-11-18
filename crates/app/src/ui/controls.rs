@@ -7,7 +7,7 @@ use any2odyssey_core::theme::Palette;
 use egui::{RichText, Ui};
 
 use super::theme::color;
-use super::widgets::{banner, gold_button, row, section};
+use super::widgets::{banner, gold_button, row, section, unjustified};
 use crate::core::{Core, MenuCommand, UiRequest};
 
 /// Width kept for the Refresh button beside the source box.
@@ -210,7 +210,7 @@ impl ControlsState {
         let two_columns = ui.available_width() >= 860.0;
         let source_panel = |ui: &mut Ui, core: &mut Core, state: &mut ControlsState| {
             section(ui, "SOURCE & INPUT", p, |ui| {
-                row(ui, "Capture", |ui| {
+                row(ui, "Capture", |ui, name| {
                     let mut idx = state.mode.index();
                     egui::ComboBox::from_id_salt("capture-mode")
                         .width(ui.available_width())
@@ -219,10 +219,12 @@ impl ControlsState {
                             for m in CaptureMode::ALL {
                                 ui.selectable_value(&mut idx, m.index(), m.label());
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(name);
                     state.mode = CaptureMode::from_index(idx);
                 });
-                row(ui, "Input format", |ui| {
+                row(ui, "Input format", |ui, name| {
                     let mut sbs = state.side_by_side;
                     let text = if sbs {
                         "Side-by-side input (manual)"
@@ -235,10 +237,12 @@ impl ControlsState {
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut sbs, false, "2D → 3D automatically (AI)");
                             ui.selectable_value(&mut sbs, true, "Side-by-side input (manual)");
-                        });
+                        })
+                        .response
+                        .labelled_by(name);
                     state.side_by_side = sbs;
                 });
-                row(ui, "Source window", |ui| {
+                row(ui, "Source window", |ui, name| {
                     let enabled = state.mode != CaptureMode::Desktop;
                     ui.add_enabled_ui(enabled, |ui| {
                         let selected = state
@@ -279,7 +283,7 @@ impl ControlsState {
                                                 .on_hover_text(&w.title);
                                             }
                                         })
-                                        .response
+                                        .response.labelled_by(name)
                                 },
                             )
                             .inner;
@@ -297,13 +301,13 @@ impl ControlsState {
         };
         let tuning_panel = |ui: &mut Ui, core: &mut Core, state: &mut ControlsState| {
             section(ui, "DEPTH & POP-OUT", p, |ui| {
-                row(ui, "Depth strength", |ui| {
-                    ui.add(egui::Slider::new(&mut state.depth_pos, DEPTH.min..=DEPTH.max).show_value(false).step_by(1.0));
+                row(ui, "Depth strength", |ui, name| {
+                    ui.add(egui::Slider::new(&mut state.depth_pos, DEPTH.min..=DEPTH.max).show_value(false).step_by(1.0)).labelled_by(name);
                     ui.label(RichText::new(DEPTH.readout(state.depth_pos)).monospace());
                 })
                 .on_hover_text("Depth strength: 0.00–2.00. Apply settings to save; active conversion briefly restarts.");
-                row(ui, "Pop-out", |ui| {
-                    ui.add(egui::Slider::new(&mut state.pop_pos, POPOUT.min..=POPOUT.max).show_value(false).step_by(1.0));
+                row(ui, "Pop-out", |ui, name| {
+                    ui.add(egui::Slider::new(&mut state.pop_pos, POPOUT.min..=POPOUT.max).show_value(false).step_by(1.0)).labelled_by(name);
                     ui.label(RichText::new(POPOUT.readout(state.pop_pos)).monospace());
                 })
                 .on_hover_text("Pop-out: −1.00–1.00. Apply settings to save; active conversion briefly restarts.");
@@ -369,23 +373,22 @@ impl ControlsState {
                 }
             };
             if two_columns {
+                // A column hands every widget its whole width to react in:
+                // a click on the empty card beside a checkbox's text ticked
+                // it, and three of these save at once.
                 ui.columns(2, |cols| {
-                    draw(
-                        &mut cols[0],
-                        &mut auto,
-                        &mut recover,
-                        &mut minimize,
-                        &mut keep,
-                        0,
-                    );
-                    draw(
-                        &mut cols[1],
-                        &mut auto,
-                        &mut recover,
-                        &mut minimize,
-                        &mut keep,
-                        1,
-                    );
+                    for (column, ui) in cols.iter_mut().enumerate() {
+                        unjustified(ui, |ui| {
+                            draw(
+                                ui,
+                                &mut auto,
+                                &mut recover,
+                                &mut minimize,
+                                &mut keep,
+                                column,
+                            );
+                        });
+                    }
                 });
             } else {
                 draw(ui, &mut auto, &mut recover, &mut minimize, &mut keep, 0);

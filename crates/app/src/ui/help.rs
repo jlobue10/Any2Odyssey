@@ -5,7 +5,7 @@ use any2odyssey_core::theme::Palette;
 use egui::{Color32, CornerRadius, RichText, ScrollArea, Ui};
 
 use super::theme::color;
-use super::widgets::{display_font, gold_button};
+use super::widgets::{display_font, gold_button, keep_focus_visible};
 
 #[derive(Default)]
 pub struct HelpState {
@@ -102,6 +102,7 @@ impl HelpState {
                                 self.selected = i;
                             }
                         }
+                        keep_focus_visible(ui);
                     });
             });
         let topic = &all[self.selected.min(all.len() - 1)];
@@ -146,6 +147,7 @@ impl HelpState {
                         for link in &topic.links {
                             ui.hyperlink_to(&link.label, &link.url);
                         }
+                        keep_focus_visible(ui);
                     });
             });
         ui.advance_cursor_after_rect(area);

@@ -717,6 +717,25 @@ impl Default for ViewerState {
 }
 
 impl ViewerState {
+    /// The page as a layout test wants it: these choices, this status line,
+    /// this text in the path box, this complaint about the lens file.
+    #[cfg(test)]
+    pub fn for_layout(
+        options: Options,
+        status: &str,
+        path_text: &str,
+        lens_problem: Option<&str>,
+    ) -> ViewerState {
+        let mut state = ViewerState {
+            options,
+            status: status.to_owned(),
+            path_text: path_text.to_owned(),
+            ..ViewerState::default()
+        };
+        state.lens.problem = lens_problem.map(str::to_owned);
+        state
+    }
+
     /// The viewer with the user's saved lens numbers; changes are saved
     /// back. `default()` keeps them in memory only.
     pub fn with_saved_lens() -> ViewerState {
@@ -1508,14 +1527,14 @@ impl ViewerState {
         let two_columns = ui.available_width() >= 860.0;
         let source_panel = |ui: &mut Ui, state: &mut ViewerState| {
             section(ui, "SOURCE & INPUT", p, |ui| {
-                row(ui, "Image", |ui| {
+                row(ui, "Image", |ui, name| {
                     let open_width = 90.0;
                     let box_width = (ui.available_width() - open_width).max(80.0);
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut state.path_text)
                             .desired_width(box_width)
                             .hint_text("Path of a PNG, JPEG or BMP"),
-                    );
+                    ).labelled_by(name);
                     let entered = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if entered {
                         if let Some(path) = state.typed_path() {
@@ -1527,7 +1546,7 @@ impl ViewerState {
                     }
                 })
                 .on_hover_text("Open… uses zenity or kdialog. Without either, type the path and press Enter, or drop the file on this window. Pressed while a file dialog is still open, it closes that dialog and opens a new one.");
-                row(ui, "Input format", |ui| {
+                row(ui, "Input format", |ui, name| {
                     egui::ComboBox::from_id_salt("viewer-input")
                         .width(ui.available_width())
                         .selected_text(state.options.input.label())
@@ -1535,14 +1554,16 @@ impl ViewerState {
                             for input in Input::ALL {
                                 ui.selectable_value(&mut state.options.input, input, input.label());
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(name);
                 });
                 ui.checkbox(&mut state.options.swap, "Swap left and right eyes");
             });
         };
         let output_panel = |ui: &mut Ui, state: &mut ViewerState| {
             section(ui, "OUTPUT", p, |ui| {
-                row(ui, "Output format", |ui| {
+                row(ui, "Output format", |ui, name| {
                     // The two Odyssey outputs' names are wider than the box
                     // in the default window: shortened to fit, where the
                     // box grew with them and took the panel through the
@@ -1559,28 +1580,31 @@ impl ViewerState {
                                     output.label(),
                                 );
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(name);
                 });
                 if matches!(state.options.input, Input::Ai | Input::Desktop) {
-                    row(ui, "Depth strength", |ui| {
+                    row(ui, "Depth strength", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.depth_pos, DEPTH.min..=DEPTH.max)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        )
+                        .labelled_by(name);
                         ui.label(RichText::new(DEPTH.readout(state.options.depth_pos)).monospace());
                     })
                     .on_hover_text("How far apart near and far are pushed: 0.00–2.00.");
-                    row(ui, "Pop-out", |ui| {
+                    row(ui, "Pop-out", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.pop_pos, POPOUT.min..=POPOUT.max)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        ).labelled_by(name);
                         ui.label(RichText::new(POPOUT.readout(state.options.pop_pos)).monospace());
                     })
                     .on_hover_text("Where the screen plane sits: −1.00 keeps everything behind the screen, 1.00 brings everything forward.");
-                    row(ui, "Depth detail", |ui| {
+                    row(ui, "Depth detail", |ui, name| {
                         let chosen = DEPTH_DETAIL
                             .iter()
                             .find(|(side, _)| *side == state.options.detail)
@@ -1592,7 +1616,7 @@ impl ViewerState {
                                 for (side, name) in DEPTH_DETAIL {
                                     ui.selectable_value(&mut state.options.detail, side, name);
                                 }
-                            });
+                            }).response.labelled_by(name);
                     })
                     .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
                 } else {
@@ -1603,27 +1627,28 @@ impl ViewerState {
                     .on_hover_text("For red/cyan and lens output. Side-by-side output keeps the pair as it is.");
                 }
                 if state.options.input == Input::Desktop {
-                    row(ui, "Sharpness", |ui| {
+                    row(ui, "Sharpness", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.sharp_pos, 0..=100)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        )
+                        .labelled_by(name);
                         ui.label(
                             RichText::new(format!("{:3}", state.options.sharp_pos)).monospace(),
                         );
                     })
                     .on_hover_text("Sharpens the two views after they are rendered. 0 is off.");
-                    row(ui, "Depth steadiness", |ui| {
+                    row(ui, "Depth steadiness", |ui, name| {
                         ui.add(
                             egui::Slider::new(&mut state.options.steady_pos, 0..=95)
                                 .show_value(false)
                                 .step_by(1.0),
-                        );
+                        ).labelled_by(name);
                         ui.label(RichText::new(format!("{:3}", state.options.steady_pos)).monospace());
                     })
                     .on_hover_text("How much of the previous depth map is kept for each new one. Higher is calmer but slower to follow movement.");
-                    row(ui, "Detail", |ui| {
+                    row(ui, "Detail", |ui, name| {
                         let chosen = LIVE_LINES
                             .iter()
                             .find(|(lines, _)| *lines == state.options.lines)
@@ -1635,7 +1660,7 @@ impl ViewerState {
                                 for (lines, name) in LIVE_LINES {
                                     ui.selectable_value(&mut state.options.lines, lines, name);
                                 }
-                            });
+                            }).response.labelled_by(name);
                     })
                     .on_hover_text("The size of each eye's view. More lines are sharper and cost more processor time per picture.");
                     ui.checkbox(

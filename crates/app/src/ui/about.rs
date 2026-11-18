@@ -9,7 +9,7 @@ use any2odyssey_core::APP_NAME;
 use egui::{CornerRadius, RichText, ScrollArea, Ui};
 
 use super::theme::color;
-use super::widgets::{display_font, gold_button};
+use super::widgets::{display_font, gold_button, keep_focus_visible};
 use crate::core::Core;
 
 pub struct AboutState {
@@ -149,6 +149,7 @@ impl AboutState {
                         ] {
                             ui.hyperlink_to(label, url);
                         }
+                        keep_focus_visible(ui);
                     });
             });
         ui.advance_cursor_after_rect(area);
