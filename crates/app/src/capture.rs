@@ -446,6 +446,60 @@ fn narrow_tens(
     }
 }
 
+/// The stream that is asked for: raw video in one of the pixel formats that
+/// are read here, at sixty frames a second at the most. No size is wished for.
+///
+/// The size is the desktop's to say. KWin (Plasma 6.8) offers every size from
+/// 200 x 200 to 10000 x 10000 with the screen's own as its wish, and resizes
+/// the picture to whatever the reader wishes for instead; the wish here used
+/// to be 1920 x 1080, so every screen came at that size: a 2560 x 1440 one
+/// scaled down, a screen turned on its side (1080 x 1920) pressed into the
+/// wide shape. Desktops that offer one size (GNOME, wlroots) took no notice.
+fn wanted_format() -> spa::pod::Object {
+    spa::pod::object!(
+        spa::utils::SpaTypes::ObjectParamFormat,
+        spa::param::ParamType::EnumFormat,
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaType,
+            Id,
+            spa::param::format::MediaType::Video
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            spa::param::format::MediaSubtype::Raw
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRA,
+            spa::param::video::VideoFormat::RGBx,
+            spa::param::video::VideoFormat::RGBA,
+            // What a desktop that renders the screen with ten bits a colour
+            // has to offer, and all it has (`Packing::Tens`).
+            spa::param::video::VideoFormat::xRGB_210LE,
+            spa::param::video::VideoFormat::xBGR_210LE,
+            spa::param::video::VideoFormat::ARGB_210LE,
+            spa::param::video::VideoFormat::ABGR_210LE,
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: 60, denom: 1 },
+            spa::utils::Fraction { num: 0, denom: 1 },
+            // Sixty a second is as many as are rendered; a faster screen
+            // would only have its extra frames copied and dropped.
+            spa::utils::Fraction { num: 60, denom: 1 }
+        ),
+    )
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -614,66 +668,7 @@ fn stream(
         .register()
         .map_err(failed("no stream listener"))?;
 
-    let format = spa::pod::object!(
-        spa::utils::SpaTypes::ObjectParamFormat,
-        spa::param::ParamType::EnumFormat,
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaType,
-            Id,
-            spa::param::format::MediaType::Video
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaSubtype,
-            Id,
-            spa::param::format::MediaSubtype::Raw
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRA,
-            spa::param::video::VideoFormat::RGBx,
-            spa::param::video::VideoFormat::RGBA,
-            // What a desktop that renders the screen with ten bits a colour
-            // has to offer, and all it has (`Packing::Tens`).
-            spa::param::video::VideoFormat::xRGB_210LE,
-            spa::param::video::VideoFormat::xBGR_210LE,
-            spa::param::video::VideoFormat::ARGB_210LE,
-            spa::param::video::VideoFormat::ABGR_210LE,
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            spa::utils::Rectangle {
-                width: 1920,
-                height: 1080
-            },
-            spa::utils::Rectangle {
-                width: 1,
-                height: 1
-            },
-            spa::utils::Rectangle {
-                width: 16384,
-                height: 16384
-            }
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            spa::utils::Fraction { num: 60, denom: 1 },
-            spa::utils::Fraction { num: 0, denom: 1 },
-            // Sixty a second is as many as are rendered; a faster screen
-            // would only have its extra frames copied and dropped.
-            spa::utils::Fraction { num: 60, denom: 1 }
-        ),
-    );
+    let format = wanted_format();
     let values = spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(format),
@@ -810,6 +805,43 @@ mod tests {
     use pw::stream::StreamState::{Connecting, Error, Paused, Streaming, Unconnected};
 
     const ENDED: &str = "the screen cast was ended by the desktop";
+
+    #[test]
+    fn no_size_is_wished_for_and_every_format_wished_for_can_be_read() {
+        use spa::param::format::FormatProperties as Key;
+        let format = wanted_format();
+        let has = |key: Key| format.properties.iter().any(|p| p.key == key.as_raw());
+        // KWin resizes the picture to the size a reader wishes for: with
+        // 1920 x 1080 wished for, a 2560 x 1440 screen came at 1920 x 1080.
+        assert!(!has(Key::VideoSize));
+        assert!(has(Key::MediaType) && has(Key::MediaSubtype) && has(Key::VideoFramerate));
+        let formats = format
+            .properties
+            .iter()
+            .find(|p| p.key == Key::VideoFormat.as_raw())
+            .expect("the pixel formats are named");
+        let spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
+            _,
+            spa::utils::ChoiceEnum::Enum {
+                default,
+                alternatives,
+            },
+        ))) = &formats.value
+        else {
+            panic!("the pixel formats are a choice: {:?}", formats.value);
+        };
+        assert!(!alternatives.is_empty());
+        for id in alternatives.iter().chain([default]) {
+            let format = spa::param::video::VideoFormat::from_raw(id.0);
+            assert!(packing(format).is_some(), "{format:?} is wished for");
+        }
+        // And it can be written as PipeWire wants it.
+        let written = spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(format),
+        );
+        assert!(written.is_ok());
+    }
 
     #[test]
     fn a_portal_that_does_not_answer_is_not_waited_for_longer_than_said() {
