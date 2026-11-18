@@ -451,6 +451,49 @@ fn the_source_list_is_bounded_and_inside_the_window() {
     }
 }
 
+/// Window titles in letters the built-in typefaces do not have.
+const FOREIGN_TITLES: [&str; 5] = [
+    "モンスターハンターワイルズ (Monster Hunter Wilds)",
+    "照片查看器 - 写真.jpg",
+    "한국어 메모장",
+    "שלום עולם - פנקס רשימות",
+    "مرحبا بالعالم - المفكرة",
+];
+
+/// Up to 0.9.6 each of these was a row of boxes, in the box and in the open
+/// list, so that such windows could not be told apart. They are drawn with
+/// the typefaces this system has for them; where it has none (a container),
+/// the test asks for nothing.
+#[test]
+fn source_titles_in_other_scripts_are_drawn_with_typefaces_of_the_system() {
+    for size in SIZES {
+        let mut h = with_windows(size, &FOREIGN_TITLES);
+        let fonts =
+            system_fonts::install_with(&h.ctx, system_fonts::os::System::new(), |_: &str| {});
+        let start = |title: &str| title.chars().take(4).collect::<String>();
+        let painted = h.settle();
+        let shown = find(&painted, &start(FOREIGN_TITLES[0])).rect;
+        // The other titles are painted only in the open list, which is an
+        // area over the page.
+        h.click(shown.center());
+        system_fonts::tests::draw_until_settled(&fonts, || {
+            h.settle();
+        });
+        let painted = h.settle();
+        let context = format!("{}x{}", size.0, size.1);
+        assert_inside_window(&painted, size.0, &context);
+        for title in FOREIGN_TITLES {
+            find(&painted, &start(title));
+            let boxes = system_fonts::tests::undrawn(&h.ctx, title);
+            assert!(
+                boxes.is_empty(),
+                "{context}: {title:?} is drawn with boxes for {boxes:?}; added {:?}",
+                fonts.added()
+            );
+        }
+    }
+}
+
 #[test]
 fn startup_notices_stay_visible_whatever_the_status_says() {
     for size in SIZES {
@@ -544,7 +587,7 @@ fn custom_buttons_and_help_topics_have_accessible_names() {
     let mut h = Harness::new(SIZES[0], Page::Controls);
     let painted = h.settle();
     // A glyph-faced chrome button reports what it does, not its glyph.
-    let maximize = find(&painted, "□").rect.center();
+    let maximize = find(&painted, MAXIMIZE).rect.center();
     h.run(vec![egui::Event::PointerMoved(maximize)]);
     let button = |pressed| egui::Event::PointerButton {
         pos: maximize,
@@ -934,6 +977,25 @@ mod sweep {
                     p.rect.left(),
                     p.rect.right()
                 ));
+            }
+        }
+        // The interface's own signs are ones the built-in typefaces have.
+        // One they lack is drawn with egui's stand-in, a square, and changes
+        // its shape when a typeface of the system is added for a window
+        // title or a file name (letters are what those are added for, and
+        // the stand-in itself always reads as lacking).
+        let font = egui::FontId::proportional(14.0);
+        for p in painted {
+            for sign in p.text.chars().filter(|c| {
+                *c as u32 >= 0x100 && !c.is_alphanumeric() && !c.is_whitespace() && *c != '\u{25FB}'
+            }) {
+                if !h.ctx.fonts_mut(|fonts| fonts.has_glyph(&font, sign)) {
+                    faults.push(format!(
+                        "a sign the built-in typefaces lack: U+{:04X} in {:?}",
+                        sign as u32,
+                        short(&p.text)
+                    ));
+                }
             }
         }
         let widgets: Vec<&Widget> = h.widgets.iter().filter(|w| operable(w)).collect();
