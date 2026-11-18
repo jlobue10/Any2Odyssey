@@ -27,6 +27,6 @@ sleep 20 | ~/.local/share/any2odyssey/any2odyssey-lens-helper     # lens on for 
 - `70-any2odyssey-lens.rules`: the lens board for the person at the seat, and USB power saving off for the
   webcam (it stops sending pictures once it has been suspended, until the monitor is power-cycled).
 
-Everything here is MIT-licensed (`../LICENSE-MIT`) and contains nothing of Leia's or Samsung's. Nothing in it talks to the lens
+Everything here is MIT-licensed and contains nothing of Leia's or Samsung's (the license is the file `LICENSE-MIT`: one folder up in the source tree, in this folder in the release archive and in an installation made from it, and in `/usr/share/licenses/any2odyssey` with the Arch package). Nothing in it talks to the lens
 board: Leia's own service does, exactly as on Windows. The camera bridge listens on the loopback interface only
 and gives pictures only to a program that knows a secret kept in a file only you can read.
