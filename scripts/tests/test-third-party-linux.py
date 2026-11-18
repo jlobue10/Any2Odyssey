@@ -27,12 +27,21 @@ CRATES = ["| `alpha` | 1.0.0 | MIT |", "| `beta` | 2.0.0 | MIT OR Apache-2.0 |"]
 NOTICES = ["| `alpha` 1.0.0 | MIT | `Copyright (c) 2020 A` |", "| `beta` 2.0.0 | MIT | `Copyright (c) 2021 B` |"]
 
 
-def document(crates=CRATES, notices=NOTICES, number=2):
+# The toolchain the stand-in's rust-toolchain.toml names. The script also stops unless the list has a section
+# on the standard library of that toolchain, which is in every program and in no `cargo tree`.
+TOOLCHAIN = "1.0.0"
+
+
+def document(crates=CRATES, notices=NOTICES, number=2, library=TOOLCHAIN):
+    section = [] if library is None else [
+        "## The Rust standard library", "",
+        f"Both editions are built with Rust {library} (`rust-toolchain.toml`).", ""]
     return "\n".join([
         "# Third-party licenses", "",
         f"The {number} crates below are the dependencies.", "",
         "| Crate | Version | License |", "| --- | --- | --- |", *crates, "",
-        "| Crate and version | Used under | Copyright notices |", "| --- | --- | --- |", *notices, ""])
+        "| Crate and version | Used under | Copyright notices |", "| --- | --- | --- |", *notices, "",
+        *section])
 
 
 @unittest.skipIf(os.name == "nt", "the stand-in for cargo is a shell script")
@@ -45,6 +54,7 @@ class ThirdPartyList(unittest.TestCase):
         cargo.write_text('#!/bin/sh\n[ "$1" = tree ] || exit 2\ncat "$STAND_IN_TREE"\n')
         cargo.chmod(0o755)
         (self.folder / "tree").write_text(TREE)
+        (self.folder / "rust-toolchain.toml").write_text(f'[toolchain]\nchannel = "{TOOLCHAIN}"\n')
 
     def tearDown(self):
         self.temp.cleanup()
@@ -70,6 +80,16 @@ class ThirdPartyList(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # The stand-in's tree is the same for both targets: Linux has nothing beyond it.
         self.assertIn("the 0 crates below", result.stdout)
+
+    def test_the_standard_library_of_another_toolchain_or_of_none_is_refused(self):
+        # The section is written by hand from one toolchain's own lock file: when rust-toolchain.toml moves
+        # on, the list has to be looked at again, and a list without the section names no standard library.
+        for text, reason in ((document(library="0.9.0"), "describes the standard library of Rust 0.9.0"),
+                             (document(library=None), 'has no section "## The Rust standard library"')):
+            result = self.check(text)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn(reason, result.stderr)
+            self.assertEqual(result.stdout, "")
 
     def test_a_crate_named_twice_is_refused(self):
         self.refused(document(crates=CRATES + CRATES[:1]), "alpha 1.0.0 is in the table of crates twice")
