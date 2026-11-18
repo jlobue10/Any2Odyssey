@@ -1178,9 +1178,10 @@ mod sweep {
                     pair[1].name
                 );
             }
-            // The page's background is not a stop. Only the scrolling area
-            // of the controls and of the viewer has the whole page for its
-            // place; the background had it too, on every page.
+            // The page's background is not a stop, and neither is the
+            // scrolling area of the controls and of the viewer (it was
+            // egui's own, for dragging the page: `drag_with_a_finger`).
+            // Both had the whole page for their place, without a name.
             let whole_page = Rect::from_min_max(
                 pos2(FRAME, FRAME + TITLEBAR_HEIGHT + 8.0),
                 pos2(size.0 - FRAME, size.1 - FRAME),
@@ -1190,11 +1191,7 @@ mod sweep {
                 .iter()
                 .filter(|s| near(s.rect.min, whole_page.min) && near(s.rect.max, whole_page.max))
                 .count();
-            assert_eq!(
-                over_the_page,
-                usize::from(matches!(page, Page::Controls | Page::Viewer)),
-                "{names:?}"
-            );
+            assert_eq!(over_the_page, 0, "{names:?}");
             for (i, stop) in stops.iter().enumerate() {
                 if stop.role == Role::Unknown {
                     // egui's own: a scrolling area and its bar. Nothing of
@@ -1449,6 +1446,176 @@ mod sweep {
             let mut h = Harness::new(SIZES[0], page);
             h.settle();
             assert_eq!(h.window_name.as_deref(), Some(APP_NAME));
+        }
+    }
+
+    /// Where the page is: the top of the banner's line, which no click on
+    /// the page moves. `None` once the page is scrolled so far that the
+    /// line is out of view.
+    fn banner_at(painted: &[Painted]) -> Option<f32> {
+        try_find(painted, "CONTINUOUS DESKTOP 3D").map(|p| p.rect.top())
+    }
+
+    /// A page in a window it does not fit: what it is called, the window's
+    /// size, and a checkbox and the primary button that are in view.
+    type ScrollingPage = (&'static str, Page, (f32, f32), [&'static str; 2]);
+
+    /// The two pages in windows they do not fit: the viewer in its default
+    /// window, and the controls in one 640 points high (they fit the
+    /// default one).
+    fn pages_that_scroll() -> [ScrollingPage; 2] {
+        [
+            (
+                "the viewer",
+                Page::Viewer,
+                SIZES[0],
+                ["Swap left and right eyes", "Start output"],
+            ),
+            (
+                "the controls",
+                Page::Controls,
+                (980.0, 640.0),
+                ["Convert automatically when this app opens", "Turn on 3D"],
+            ),
+        ]
+    }
+
+    fn button_at(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// A press on a checkbox or a button was the start of a drag of the
+    /// page (`widgets::dragged_by_touch`): the page moved as far as the
+    /// pointer had moved in the frame of the press. With a pointer that is
+    /// put on a control and pressed in one go that was all the way from
+    /// where it had been, and the page went to its end; with a hand that is
+    /// still slowing down, a few points at every click.
+    #[test]
+    fn a_click_leaves_the_page_where_it_is_however_the_pointer_comes_to_it() {
+        for (what, page, size, names) in pages_that_scroll() {
+            for name in names {
+                for arrival in ["at rest", "put there and pressed at once", "slowing down"] {
+                    let mut h = Harness::new(size, page);
+                    let painted = h.settle();
+                    let before = banner_at(&painted);
+                    assert!(before.is_some(), "{what}: no banner");
+                    let target = h
+                        .widgets
+                        .iter()
+                        .find(|w| w.name == name)
+                        .unwrap_or_else(|| panic!("{name} is not on the page"))
+                        .rect
+                        .center();
+                    // The pointer has been lower on the page, and at rest.
+                    h.run(vec![egui::Event::PointerMoved(target + vec2(40.0, 250.0))]);
+                    h.settle();
+                    let frames: Vec<Vec<egui::Event>> = match arrival {
+                        "at rest" => vec![
+                            vec![egui::Event::PointerMoved(target)],
+                            vec![button_at(target, true)],
+                            vec![button_at(target, false)],
+                        ],
+                        "put there and pressed at once" => vec![
+                            vec![egui::Event::PointerMoved(target), button_at(target, true)],
+                            vec![button_at(target, false)],
+                        ],
+                        // Up to the control at 8, 8 and 6 points a frame;
+                        // the button goes down in a frame in which the
+                        // pointer moved 4 more, and it moves 2 while held.
+                        _ => {
+                            let at = |below: f32| target + vec2(0.0, below);
+                            vec![
+                                vec![egui::Event::PointerMoved(at(20.0))],
+                                vec![egui::Event::PointerMoved(at(12.0))],
+                                vec![egui::Event::PointerMoved(at(6.0))],
+                                vec![egui::Event::PointerMoved(at(2.0)), button_at(at(2.0), true)],
+                                vec![egui::Event::PointerMoved(at(0.0))],
+                                vec![button_at(at(0.0), false)],
+                            ]
+                        }
+                    };
+                    let mut said = Vec::new();
+                    for events in frames {
+                        h.run(events);
+                        said.extend(reported(&h.events));
+                    }
+                    assert!(
+                        said.iter()
+                            .any(|(clicked, label, _)| *clicked && label == name),
+                        "{name}, {arrival}: the click said {said:?}"
+                    );
+                    // A page that was thrown goes on moving for a second.
+                    for frame in 0..60 {
+                        let painted = h.run(Vec::new());
+                        assert_eq!(
+                            banner_at(&painted),
+                            before,
+                            "{what}: a click on {name:?} with the pointer {arrival} moved the page (frame {frame})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A finger still drags the page, from anywhere on it, a checkbox
+    /// included, and a drag is not a click.
+    #[test]
+    fn a_finger_drags_the_page_and_does_not_click() {
+        for (what, page, size, names) in pages_that_scroll() {
+            let mut h = Harness::new(size, page);
+            let painted = h.settle();
+            let before = banner_at(&painted).expect("the banner");
+            let start = h
+                .widgets
+                .iter()
+                .find(|w| w.name == names[0])
+                .expect("the checkbox")
+                .rect
+                .center();
+            let touch = |phase, pos| egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(7),
+                phase,
+                pos,
+                force: None,
+            };
+            // What a touch screen sends: the touch, and a pointer with it.
+            let mut said = Vec::new();
+            let mut frames = vec![vec![
+                touch(egui::TouchPhase::Start, start),
+                egui::Event::PointerMoved(start),
+                button_at(start, true),
+            ]];
+            let mut at = start;
+            for _ in 0..5 {
+                at.y -= 10.0;
+                frames.push(vec![
+                    touch(egui::TouchPhase::Move, at),
+                    egui::Event::PointerMoved(at),
+                ]);
+            }
+            frames.push(vec![
+                touch(egui::TouchPhase::End, at),
+                button_at(at, false),
+                egui::Event::PointerGone,
+            ]);
+            for events in frames {
+                h.run(events);
+                said.extend(reported(&h.events));
+            }
+            let painted = h.settle();
+            assert!(
+                banner_at(&painted).is_none_or(|now| now <= before - 40.0),
+                "{what}: the banner is at {:?}, it was at {before}",
+                banner_at(&painted)
+            );
+            assert_eq!(said, vec![], "{what}: the drag was taken for a click");
         }
     }
 

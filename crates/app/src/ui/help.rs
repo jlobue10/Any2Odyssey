@@ -5,7 +5,9 @@ use any2odyssey_core::theme::Palette;
 use egui::{Color32, CornerRadius, RichText, ScrollArea, Ui};
 
 use super::theme::color;
-use super::widgets::{display_font, gold_button, keep_focus_visible};
+use super::widgets::{
+    display_font, drag_with_a_finger, gold_button, keep_focus_visible, PAGE_SCROLL,
+};
 
 #[derive(Default)]
 pub struct HelpState {
@@ -52,7 +54,9 @@ impl HelpState {
                 ScrollArea::vertical()
                     .id_salt("help-topics")
                     .auto_shrink([false, false])
+                    .scroll_source(PAGE_SCROLL)
                     .show(ui, |ui| {
+                        drag_with_a_finger(ui);
                         for (i, t) in all.iter().enumerate() {
                             let selected = i == self.selected;
                             let fill = if selected {
@@ -122,7 +126,9 @@ impl HelpState {
                 ScrollArea::vertical()
                     .id_salt("help-article")
                     .auto_shrink([false, false])
+                    .scroll_source(PAGE_SCROLL)
                     .show(ui, |ui| {
+                        drag_with_a_finger(ui);
                         ui.set_width(ui.available_width());
                         ui.label(
                             RichText::new(&topic.title)
