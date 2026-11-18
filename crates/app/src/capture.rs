@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use any2odyssey_core::live::{PixelOrder, Source};
+use any2odyssey_core::live::{self, PixelOrder, Source, Turned};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::PersistMode;
 use pipewire as pw;
@@ -446,6 +446,53 @@ fn narrow_tens(
     }
 }
 
+/// The note a frame carries about how its picture lies in the buffer
+/// (`SPA_META_VideoTransform`): one number, read by
+/// [`Turned::from_note`]. The PipeWire library's own type for it is there
+/// only when the program is built for PipeWire 0.3.62 or newer; the note's
+/// number and its one field are the same for every version.
+#[repr(transparent)]
+struct TurnNote(u32);
+
+impl spa::buffer::meta::Metadata for TurnNote {
+    const META_TYPE: u32 = 8;
+}
+
+/// What is asked to come with every frame, each as PipeWire wants it
+/// described: the note about how the picture lies. A desktop attaches a
+/// note only for a receiver that has asked for it, so a rotated screen of
+/// a desktop that hands out the panel's own pixels (sway and the other
+/// wlroots desktops) was shown lying on its side.
+fn wanted_notes() -> Result<Vec<Vec<u8>>, String> {
+    let note = |kind: u32, size: usize| {
+        let wanted = spa::pod::Object {
+            type_: spa::utils::SpaTypes::ObjectParamMeta.as_raw(),
+            id: spa::param::ParamType::Meta.as_raw(),
+            properties: vec![
+                spa::pod::Property::new(
+                    spa::sys::SPA_PARAM_META_type,
+                    spa::pod::Value::Id(spa::utils::Id(kind)),
+                ),
+                spa::pod::Property::new(
+                    spa::sys::SPA_PARAM_META_size,
+                    spa::pod::Value::Int(size as i32),
+                ),
+            ],
+        };
+        spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(wanted),
+        )
+        .map(|done| done.0.into_inner())
+        .map_err(|e| format!("PipeWire: could not describe the wanted notes: {e:?}"))
+    };
+    use spa::buffer::meta::Metadata;
+    Ok(vec![note(
+        TurnNote::META_TYPE,
+        std::mem::size_of::<TurnNote>(),
+    )?])
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -453,6 +500,9 @@ struct StreamData {
     /// the slot's, so the two buffers serve every frame and the reader is
     /// kept waiting for the exchange only, not for the copy.
     spare: Vec<u8>,
+    /// Where a frame of ten bits a colour that does not lie upright is
+    /// written as bytes before it is turned; empty for every other frame.
+    narrowed: Vec<u8>,
 }
 
 fn stream(
@@ -513,7 +563,9 @@ fn stream(
         format: Default::default(),
         shared: shared.clone(),
         spare: Vec::new(),
+        narrowed: Vec::new(),
     };
+    let notes = wanted_notes()?;
     let _listener = stream
         .add_local_listener_with_user_data(data)
         .state_changed(move |_, data, old, new| {
@@ -525,7 +577,7 @@ fn stream(
                 ended(reason);
             }
         })
-        .param_changed(|_, data, id, param| {
+        .param_changed(move |stream, data, id, param| {
             let Some(param) = param else { return };
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
@@ -538,6 +590,13 @@ fn stream(
                 && media_subtype == spa::param::format::MediaSubtype::Raw
             {
                 let _ = data.format.parse(param);
+                // The notes are asked for with every format that is agreed
+                // on: the buffers are made anew for it.
+                let mut notes: Vec<_> = notes
+                    .iter()
+                    .filter_map(|note| spa::pod::Pod::from_bytes(note))
+                    .collect();
+                let _ = stream.update_params(&mut notes);
             }
         })
         .process(|stream, data| {
@@ -548,6 +607,11 @@ fn stream(
                 return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
+            // A note that names no turn leaves the frame as it comes.
+            let turned = buffer
+                .find_meta::<TurnNote>()
+                .and_then(|note| Turned::from_note(note.0))
+                .unwrap_or_default();
             let datas = buffer.datas_mut();
             let Some(plane) = datas.first_mut() else {
                 return;
@@ -575,25 +639,47 @@ fn stream(
             if frame.len() < needed {
                 return;
             }
-            data.spare.clear();
-            let (stride, bgr) = match packing {
-                Packing::Bytes { bgr } => {
-                    data.spare.extend_from_slice(&frame[..needed]);
-                    (stride, bgr)
+            let frame = &frame[..needed];
+            let lying = |bytes, stride| Source {
+                bytes,
+                width,
+                height,
+                stride,
+                // Not looked at: a pixel's bytes are moved as they are.
+                order: PixelOrder::Bgr,
+            };
+            let (tens_wide, tens_high) = (width as usize, height as usize);
+            let (width, height, stride, bgr) = match (packing, turned) {
+                (Packing::Bytes { bgr }, Turned::Upright) => {
+                    data.spare.clear();
+                    data.spare.extend_from_slice(frame);
+                    (width, height, stride, bgr)
                 }
-                Packing::Tens { red_high } => {
-                    let (width, height) = (width as usize, height as usize);
-                    narrow_tens(
-                        &frame[..needed],
-                        width,
-                        height,
-                        stride,
-                        red_high,
-                        &mut data.spare,
-                    );
-                    (row, true)
+                (Packing::Tens { red_high }, Turned::Upright) => {
+                    let spare = &mut data.spare;
+                    narrow_tens(frame, tens_wide, tens_high, stride, red_high, spare);
+                    (width, height, row, true)
+                }
+                (Packing::Bytes { bgr }, _) => {
+                    let upright = live::turn_upright(lying(frame, stride), turned, &mut data.spare);
+                    let Some((width, height)) = upright else {
+                        return;
+                    };
+                    (width, height, width as usize * 4, bgr)
+                }
+                (Packing::Tens { red_high }, _) => {
+                    let narrowed = &mut data.narrowed;
+                    narrow_tens(frame, tens_wide, tens_high, stride, red_high, narrowed);
+                    let upright = live::turn_upright(lying(narrowed, row), turned, &mut data.spare);
+                    let Some((width, height)) = upright else {
+                        return;
+                    };
+                    (width, height, width as usize * 4, true)
                 }
             };
+            if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
+                data.narrowed = Vec::new();
+            }
             let first = {
                 let mut slot = lock(&data.shared.slot);
                 std::mem::swap(&mut slot.bytes, &mut data.spare);
