@@ -485,7 +485,7 @@ impl Document {
 /// leads to, and a file the user may not write would be replaced all the
 /// same (the folder decides a rename, not the file). So links are followed
 /// here, and only a file that could have been written to is replaced.
-fn export_target(path: &Path) -> Result<PathBuf, String> {
+pub(super) fn export_target(path: &Path) -> Result<PathBuf, String> {
     let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
     let mut target = path.to_owned();
     // As many links as the system itself follows before it gives up.

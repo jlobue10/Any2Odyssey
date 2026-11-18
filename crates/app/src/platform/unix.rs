@@ -230,6 +230,54 @@ fn socket_path_from(data_overridden: bool, runtime: Option<PathBuf>, data: PathB
     dir.join(SOCKET_NAME)
 }
 
+/// The most bytes of path a socket's address holds on Linux (`sun_path`,
+/// less its terminator). The standard library refuses a longer one before
+/// the kernel is asked.
+#[cfg(target_os = "linux")]
+const SOCKET_PATH_LIMIT: usize = 107;
+
+/// The name a socket at `path` is bound and connected by.
+///
+/// That is `path` itself wherever an address has room for it. A longer one
+/// is named through an open handle of its folder, `/proc/self/fd/<n>/<name>`,
+/// which the kernel follows to the same place; the handle is held here and
+/// must be kept for as long as the name is used. Linux only: elsewhere, and
+/// where the folder cannot be opened, the path is given as it is and the
+/// caller gets the refusal.
+///
+/// The instance socket lies in the runtime folder, whose path is short, but
+/// without one (no login session manager) it lies in the data folder, and
+/// with a home folder or an `XDG_DATA_HOME` of some depth that path passed
+/// the limit. No socket could be made then: every launch became an instance
+/// of its own, `--quit` found nothing running beside an open window, and a
+/// picture opened from the file manager got another window each time.
+struct SocketName {
+    path: PathBuf,
+    _folder: Option<std::fs::File>,
+}
+
+fn socket_name(path: &Path) -> SocketName {
+    #[cfg(target_os = "linux")]
+    if path.as_os_str().len() > SOCKET_PATH_LIMIT {
+        use std::os::fd::AsRawFd;
+        let folder = path
+            .parent()
+            .filter(|folder| !folder.as_os_str().is_empty())
+            .and_then(|folder| std::fs::File::open(folder).ok());
+        if let (Some(folder), Some(name)) = (folder, path.file_name()) {
+            let through = format!("/proc/self/fd/{}", folder.as_raw_fd());
+            return SocketName {
+                path: Path::new(&through).join(name),
+                _folder: Some(folder),
+            };
+        }
+    }
+    SocketName {
+        path: path.to_owned(),
+        _folder: None,
+    }
+}
+
 /// A request another launch hands to the running instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Request {
@@ -432,7 +480,8 @@ fn send(path: &Path, request: &Request) -> bool {
     if line.len() > MAX_REQUEST_BYTES {
         return false;
     }
-    let Ok(stream) = UnixStream::connect(path) else {
+    let name = socket_name(path);
+    let Ok(stream) = UnixStream::connect(&name.path) else {
         return false;
     };
     // A request can name a file: it is told to this user's instance only.
@@ -589,7 +638,8 @@ fn bind_instance(path: &Path) -> Bound {
         let Some(socket) = SocketFile::at(path).filter(|_| taken) else {
             return Bound::Unavailable;
         };
-        match UnixStream::connect(path) {
+        let name = socket_name(path);
+        match UnixStream::connect(&name.path) {
             Ok(_) => return Bound::Occupied,
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
             // Permission and other failures do not prove the owner
@@ -630,7 +680,10 @@ fn bind_private(path: &Path) -> std::io::Result<UnixListener> {
                 return Err(std::io::Error::other("the staging folder is not private"));
             }
             let name = staging.path().join("s");
-            let listener = UnixListener::bind(&name)?;
+            let listener = {
+                let short = socket_name(&name);
+                UnixListener::bind(&short.path)?
+            };
             std::fs::set_permissions(&name, private.clone())?;
             // The staging folder and the first name go when this returns.
             std::fs::hard_link(&name, path).map(|()| listener)
@@ -638,10 +691,14 @@ fn bind_private(path: &Path) -> std::io::Result<UnixListener> {
     match staged {
         Ok(listener) => Ok(listener),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
-        // No hard links here, or a path too long for a socket once the
-        // staging folder is in it: bind in place and close it at once.
+        // No hard links here, or (not on Linux) a path too long for a socket
+        // once the staging folder is in it: bind in place and close it at
+        // once.
         Err(_) => {
-            let listener = UnixListener::bind(path)?;
+            let listener = {
+                let short = socket_name(path);
+                UnixListener::bind(&short.path)?
+            };
             std::fs::set_permissions(path, private)?;
             Ok(listener)
         }
@@ -867,28 +924,32 @@ pub fn estimate_depth(
     )
 }
 
-pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
-    eprintln!("The conversion worker runs only on Windows.");
+/// Say that a mode exists only on Windows and fail (exit 1). Said with
+/// [`crate::complain`], not `eprintln!`: that one panics when standard
+/// error cannot be written (a reader that has gone, a full disk behind a
+/// redirection), and these modes then ended with a panic message and exit
+/// code 101 instead of 1.
+fn only_on_windows(said: &str) -> i32 {
+    crate::complain(said);
     1
+}
+pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
+    only_on_windows("The conversion worker runs only on Windows.")
 }
 /// The capture diagnostics look at the Windows worker's windows. Asked for
 /// here they failed without a word.
 const WINDOWS_ONLY_DIAGNOSTIC: &str = "This diagnostic runs only on Windows.";
 pub fn inspect(_: u32) -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn layout_probe(_: u32, _: u32) -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn test_capture_exclusion() -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn test_offscreen() -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn validate() -> Result<(), String> {
     Err("3D conversion needs Samsung's Odyssey 3D Hub engine, which exists only on Windows.".into())
@@ -1639,6 +1700,75 @@ mod tests {
             bind_private(&path).unwrap_err().kind(),
             std::io::ErrorKind::AlreadyExists
         );
+    }
+
+    /// A data folder whose path leaves no room for the socket's name in a
+    /// socket address (107 bytes on Linux), as under a deep home folder on
+    /// a system without a runtime folder.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_too_deep_for_a_socket_address_still_has_one_instance() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = dir.path().to_owned();
+        while folder.as_os_str().len() < 2 * SOCKET_PATH_LIMIT {
+            folder.push("a folder with a long name");
+        }
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join(SOCKET_NAME);
+        // The address itself has no room for it.
+        assert_eq!(
+            UnixListener::bind(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!path.exists());
+        // A path that fits is used as it is, a longer one through its folder.
+        let usual = Path::new("/run/user/1000").join(SOCKET_NAME);
+        let short = socket_name(&usual);
+        assert_eq!(short.path, usual);
+        assert!(short._folder.is_none());
+        let long = socket_name(&path);
+        assert!(long.path.starts_with("/proc/self/fd"), "{:?}", long.path);
+        assert!(long.path.as_os_str().len() <= SOCKET_PATH_LIMIT);
+        assert_eq!(long.path.file_name(), path.file_name());
+        drop(long);
+
+        let Bound::Listening(listener) = bind_instance(&path) else {
+            panic!("the first instance must bind");
+        };
+        // The socket is where every launch looks for it, private, and
+        // nothing is left beside it.
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let mut names: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [SOCKET_NAME.to_owned(), format!("{SOCKET_NAME}.lock")]
+        );
+        // A second launch finds it answered, and its request is delivered.
+        assert!(matches!(bind_instance(&path), Bound::Occupied));
+        let server = std::thread::spawn(move || {
+            // The first connection is the second launch's silent probe.
+            let probe = listener.accept().unwrap().0;
+            assert_eq!(serve(probe), None);
+            serve(listener.accept().unwrap().0)
+        });
+        assert!(send(&path, &Request::Quit));
+        assert_eq!(server.join().unwrap(), Some(Request::Quit));
+        // The instance has gone and left its file: the next launch takes over.
+        assert!(!send(&path, &Request::Show));
+        let reclaimed = (0..200).any(|_| {
+            matches!(bind_instance(&path), Bound::Listening(_)) || {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(reclaimed, "a stale socket file must be taken over");
     }
 
     #[test]

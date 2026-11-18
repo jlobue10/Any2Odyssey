@@ -621,16 +621,18 @@ impl App {
             let [w, h] = image.size;
             let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
             match image::RgbaImage::from_raw(w as u32, h as u32, rgba)
-                .ok_or("bad image".to_owned())
-                .and_then(|img| img.save(&request.path).map_err(|e| e.to_string()))
+                .ok_or("Could not save screenshot: bad image".to_owned())
+                .and_then(|img| save_screenshot(&img, &request.path))
             {
                 Ok(()) => {
-                    println!("{}", request.path.display());
+                    // Not `println!`, which panics when the line cannot be
+                    // written: with a reader that had gone the picture was
+                    // saved and the program ended with exit code 101.
+                    crate::say(&request.path.display().to_string());
                     self.core.lock().expect("core").screenshot_outcome = Some(Ok(()));
                 }
                 Err(e) => {
-                    self.core.lock().expect("core").screenshot_outcome =
-                        Some(Err(format!("Could not save screenshot: {e}")));
+                    self.core.lock().expect("core").screenshot_outcome = Some(Err(e));
                 }
             }
             self.screenshot_taken = true;
@@ -647,6 +649,27 @@ impl App {
         }
         false
     }
+}
+
+/// Write the `--screenshot` picture to `path`, in the format its ending
+/// names.
+///
+/// Like the viewer's export it goes to a temporary file beside the
+/// destination, which is moved into place once it is whole. Written in
+/// place, a picture that was there before was cut to nothing first and
+/// stayed empty or half written when the writing failed: on a full disk,
+/// and for an ending whose format cannot hold the picture (`.jpg` has no
+/// transparency) even on a healthy one.
+fn save_screenshot(image: &image::RgbaImage, path: &std::path::Path) -> Result<(), String> {
+    let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
+    let format = image::ImageFormat::from_path(path).map_err(|e| failed(&e))?;
+    let target = viewer::export_target(path)?;
+    any2odyssey_core::fsutil::write_atomic_document_with(&target, |writer| {
+        image
+            .write_to(writer, format)
+            .map_err(std::io::Error::other)
+    })
+    .map_err(|e| failed(&e))
 }
 
 /// What the explicit minimize button and menu item do on this desktop: hide
@@ -885,6 +908,40 @@ mod layout_tests;
 mod tests {
     use super::*;
     use any2odyssey_core::log::Logger;
+
+    #[test]
+    fn a_screenshot_that_cannot_be_written_leaves_the_earlier_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]));
+        let second = image::RgbaImage::from_pixel(2, 5, image::Rgba([200, 100, 0, 128]));
+        let png = dir.path().join("shot.png");
+        save_screenshot(&first, &png).unwrap();
+        assert_eq!(image::open(&png).unwrap().to_rgba8(), first);
+        save_screenshot(&second, &png).unwrap();
+        assert_eq!(image::open(&png).unwrap().to_rgba8(), second);
+        // JPEG holds no transparency: the encoder refuses the picture, which
+        // it is asked only after the destination has been opened. Saved in
+        // place, that had already emptied the file.
+        let jpg = dir.path().join("shot.jpg");
+        std::fs::write(&jpg, b"the picture that was there").unwrap();
+        let error = save_screenshot(&first, &jpg).unwrap_err();
+        assert!(error.contains("shot.jpg"), "{error}");
+        assert_eq!(std::fs::read(&jpg).unwrap(), b"the picture that was there");
+        // An ending that names no format, and a folder: said, nothing made.
+        let unknown = dir.path().join("shot.picture");
+        let error = save_screenshot(&first, &unknown).unwrap_err();
+        assert!(error.contains("shot.picture"), "{error}");
+        assert!(!unknown.exists());
+        std::fs::create_dir(dir.path().join("folder.png")).unwrap();
+        assert!(save_screenshot(&first, &dir.path().join("folder.png")).is_err());
+        // No temporary file is left by any of them.
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["folder.png", "shot.jpg", "shot.png"]);
+    }
 
     #[test]
     fn missing_tray_minimizes_normally_and_close_quits() {

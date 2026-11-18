@@ -453,6 +453,44 @@ mod tests {
         assert_eq!(entries(dir.path()), ["document"]);
     }
 
+    /// The settings are replaced in this one place, on every system. A
+    /// write that fails part way (a full disk, a quota, a device error), in
+    /// the writing or in the flush to disk that follows it, must leave the
+    /// file that was there whole and nothing beside it. Shown on Linux with
+    /// the system calls themselves failing; this is the same failure put in
+    /// by hand, so that it is also run where that cannot be done.
+    #[test]
+    fn a_write_that_fails_part_way_leaves_the_earlier_file_and_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let earlier = b"{\n  \"Depth\": 1.5\n}";
+        write_atomic_durable(&path, earlier).unwrap();
+        for sync in [false, true] {
+            for audience in [Audience::Owner, Audience::Anyone] {
+                let failed = write_atomic_with(&path, sync, audience, |file| {
+                    // Half of the new content is in the temporary file.
+                    file.write_all(b"{\n  \"Dep")?;
+                    Err(io::ErrorKind::StorageFull.into())
+                });
+                assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::StorageFull);
+                assert_eq!(fs::read(&path).unwrap(), earlier);
+                assert_eq!(entries(dir.path()), ["settings.json"]);
+            }
+        }
+        // Nothing of the failures stands in the way of the next write.
+        write_atomic_durable(&path, b"{}").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+        // A first write that fails makes no file at all.
+        let new = dir.path().join("ui-settings.json");
+        let failed = write_atomic_with(&new, true, Audience::Owner, |file| {
+            file.write_all(b"{")?;
+            Err(io::ErrorKind::QuotaExceeded.into())
+        });
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::QuotaExceeded);
+        assert_eq!(entries(dir.path()), ["settings.json"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn replacing_a_private_document_preserves_its_permissions() {
