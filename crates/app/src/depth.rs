@@ -1024,10 +1024,18 @@ mod tests {
         // the scope waits for the installer's thread, which waits for the
         // stand-in, and a running download that was removed showed as a
         // test that never ends instead of one that fails.
+        //
+        // Tried until the file is there: with no descriptor to be had at
+        // that moment (the other tests of a run under `ulimit -n 32` held
+        // them all) the one attempt failed without a word, and the test
+        // never ended after all.
         struct Go<'a>(&'a Path);
         impl Drop for Go<'_> {
             fn drop(&mut self) {
-                let _ = std::fs::write(self.0, b"");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                while std::fs::write(self.0, b"").is_err() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
             }
         }
         std::thread::scope(|scope| {
