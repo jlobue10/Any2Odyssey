@@ -263,6 +263,8 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
       - name: Eye tracking stop tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-tracking-stop.py
+      - name: Lens stack start tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-start-stack.py
       - name: Lens setup tool check tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-setup-pgrep.py
       # The stand-ins that setup.sh compiles on the user's PC, with the MinGW of this Ubuntu release: its
@@ -275,6 +277,11 @@ jobs:
           for source in a2ocam a2otoast cfgshim connreset dxvashim lens-helper-win monprobe powernotify weaver-host wtsshim; do
             x86_64-w64-mingw32-gcc -O2 -c -o /dev/null "contrib/wine-lens/src/$source.c"
           done
+      # As in ci.yml: the numbers the documents and the release text below repeat are the sources' own.
+      - name: The check of the documents' numbers refuses what it should
+        run: python3 scripts/tests/test-check-doc-numbers.py
+      - name: Documents and release text name the glibc and ONNX Runtime the sources name
+        run: scripts/check-doc-numbers.sh
       # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
       # As in ci.yml, the script first compares THIRD-PARTY-LICENSES.md with the crates of a Windows build.
       - name: Third-party lists match the dependencies (Windows list checked, Linux list made again)
@@ -295,6 +302,11 @@ jobs:
           mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
           check/any2odyssey --help
           test "$(sha256sum < check/any2odyssey)" = "$(sha256sum < ../target/release/Any2Odyssey)"
+          # ci.yml's "Offline guide matches the embedded Help topics" runs in its Linux job; here only the
+          # Windows job compared the guide, with the Windows program. The guide in this archive is what the
+          # program in this archive exports.
+          check/any2odyssey --export-guide "$RUNNER_TEMP/guide.html"
+          cmp "$RUNNER_TEMP/guide.html" check/USER-GUIDE.html
           # The oldest glibc this program starts on is the one install.sh refuses below and INSTALL.txt
           # names (GLIBC_MIN). Only here, not in ci.yml: that builds on ubuntu-latest, whose program needs
           # a newer one. Weak references (w) do not count: the loader only mentions them.
@@ -434,16 +446,22 @@ jobs:
           echo "$CARGO_DENY_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP" "$name/cargo-deny"
           install -m755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
-      - name: Advisories, banned requirements and sources
+      - name: Advisories, banned requirements, sources and licenses
         run: |
-          cargo deny --locked check advisories bans sources || {
-            echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml, and release from that commit."
+          cargo deny --locked check advisories bans sources licenses || {
+            echo "::error::cargo-deny refused the dependency tree (its report is above). Nothing was published. Update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml (for a license: [licenses] there says what is allowed and why), and release from that commit."
             exit 1
           }
       # As in ci.yml: each action is named by a commit, and that commit has to be one its repository still
       # holds under a tag or on a branch, not one a rebuilt branch left behind or one pushed only to a fork.
       - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
         run: python3 scripts/tests/test-check-action-pins.py
+      # THIRD-PARTY-LICENSES.md is written by hand, and scripts/third-party-linux.py compares it with the
+      # crates of a Windows build (in the Linux job, where the build is). What that comparison has to
+      # refuse is run here, against a stand-in for cargo: a crate that is missing, one too many, a wrong
+      # license or number, a crate named twice.
+      - name: The check of the third-party list refuses what it should (stand-in for cargo)
+        run: python3 scripts/tests/test-third-party-linux.py
       - name: Every action's commit is under a tag or on a branch of its repository
         env:
           GH_TOKEN: ${{ github.token }}
@@ -590,4 +608,4 @@ jobs:
 
             **Windows x64**: run `Any2Odyssey-*-windows-x64-setup.exe` and choose the full converter (needs Odyssey 3D Hub 1.5.1) or the desktop controls only. It is not code-signed, so SmartScreen may ask: check the file as above, then More info, Run anyway. `Any2Odyssey-*-windows-x64.zip` holds the same files with scripts in place of the setup window: extract it and run `Install.cmd` (full converter) or `Install-GUI.cmd` (controls only).
 
-            **Linux x86_64**: the stereo viewer, with glasses-free output on an Odyssey 3D for images and a live screen through your own copy of Leia's runtime under Wine (experimental; see `docs/LENS-SWITCH.md`). The Odyssey 3D part needs a dual-boot PC: Windows with the Odyssey 3D Hub on a drive Linux can mount. On Arch-based distributions install `any2odyssey-*-x86_64.pkg.tar.zst` with `sudo pacman -U`, then run `any2odyssey-setup` for the depth model and the Odyssey 3D. Elsewhere extract `Any2Odyssey-*-linux-x86_64.tar.gz` (built on Ubuntu 24.04; needs glibc 2.39 or newer) and run its `./install.sh`, which installs the program for your user and asks about the packages it needs, the udev rules, the depth model and the Odyssey 3D setup. 2D to 3D needs ONNX Runtime 1.22 or newer, which Ubuntu 24.04 and Debian 13 do not package (`INSTALL.txt` in the archive says more).
+            **Linux x86_64**: the stereo viewer, with glasses-free output on an Odyssey 3D for images and a live screen through your own copy of Leia's runtime under Wine (experimental; see `docs/LENS-SWITCH.md`). The Odyssey 3D part needs a dual-boot PC: Windows with the Odyssey 3D Hub on a drive Linux can mount. On Arch-based distributions install `any2odyssey-*-x86_64.pkg.tar.zst` with `sudo pacman -U`, then run `any2odyssey-setup` for the depth model and the Odyssey 3D. Elsewhere extract `Any2Odyssey-*-linux-x86_64.tar.gz` (built on Ubuntu 24.04; needs glibc 2.35 or newer: Ubuntu 22.04, Debian 12 or anything later) and run its `./install.sh`, which installs the program for your user and asks about the packages it needs, the udev rules, the depth model and the Odyssey 3D setup. 2D to 3D needs ONNX Runtime 1.17 or newer, which Ubuntu 24.04 and Debian 12 do not package (`INSTALL.txt` in the archive says which releases do, and what to do where there is none).

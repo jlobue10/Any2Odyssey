@@ -27,6 +27,7 @@ LEFT_BEHIND = "4d" * 20
 # A repository without a tags file is one GitHub does not answer for. With a file fail-first, the first
 # time each question is asked it fails the way the real gh fails on an HTTP error: the body of the error on
 # standard output, exit 1. A file unanswered holds a word; a question with that word in it always fails so.
+# A file unanswered-whole holds one whole question, which always fails so.
 GH = r"""#!/bin/sh
 [ "$1" = api ] || exit 2
 shift
@@ -51,6 +52,9 @@ if [ -f "$STAND_IN/fail-first" ]; then
 fi
 if [ -f "$STAND_IN/unanswered" ]; then
     case $endpoint in *"$(cat "$STAND_IN/unanswered")"*) refuse ;; esac
+fi
+if [ -f "$STAND_IN/unanswered-whole" ] && [ "$endpoint" = "$(cat "$STAND_IN/unanswered-whole")" ]; then
+    refuse
 fi
 path=${endpoint#repos/}
 name=$(printf '%s\n' "$path" | cut -d/ -f1,2 | sed 's|/|__|')
@@ -169,6 +173,20 @@ class CheckActionPinsTests(unittest.TestCase):
                 self.assertNotIn("not on its branch", result.stdout)
         # A commit of the main branch is still found when only the last question goes unanswered.
         result = self.check(f"- uses: one/action@{ON_MAIN}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The first question about the branches, which of them is the main one. Without its answer the
+        # commit cannot be looked for on that branch: that is "no answer" as well, not "no", also for a
+        # commit the main branch holds.
+        (self.stand_in / "unanswered").unlink()
+        (self.stand_in / "unanswered-whole").write_text("repos/one/action")
+        for commit in [LEFT_BEHIND, ON_MAIN]:
+            with self.subTest(question="the main branch", commit=commit):
+                result = self.check(f"- uses: one/action@{commit}")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("GitHub did not answer whether a branch has it", result.stdout)
+                self.assertNotIn("not on its branch", result.stdout)
+        # The head of another branch is found all the same.
+        result = self.check(f"- uses: one/action@{BRANCH_HEAD}")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_local_actions_images_and_comments_are_not_asked_about(self):

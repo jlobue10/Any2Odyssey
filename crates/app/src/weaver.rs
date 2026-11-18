@@ -1152,6 +1152,111 @@ mod tests {
         assert!(written.flipped.capacity() > 0);
     }
 
+    /// The file system `folder` is on, as the system's list of mounts names
+    /// it (`tmpfs`, `ext4`, ...): asked another way than `mapped` asks.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn file_system_of(folder: &Path) -> Option<String> {
+        let folder = folder.canonicalize().ok()?;
+        let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+        mounts
+            .lines()
+            .filter_map(|line| {
+                let (before, after) = line.split_once(" - ")?;
+                // The list writes a space in a mount point as its octal code.
+                let at = before.split(' ').nth(4)?.replace(r"\040", " ");
+                folder
+                    .starts_with(&at)
+                    .then(|| (at.len(), after.split(' ').next().unwrap_or("").to_owned()))
+            })
+            // The longest mount point holds the folder; of two mounts at
+            // the same place the later one is on top.
+            .fold(None, |best: Option<(usize, String)>, found| match best {
+                Some(best) if best.0 > found.0 => Some(best),
+                _ => Some(found),
+            })
+            .map(|(_, kind)| kind)
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn a_frame_file_on_a_disk_is_never_mapped() {
+        // There, room that was set aside is not always a promise, and a
+        // store into a page the disk has no room for ends the program.
+        let mut on_a_disk = 0;
+        for folder in [std::env::temp_dir(), "/var/tmp".into(), "/dev/shm".into()] {
+            let (Ok(dir), Some(kind)) = (tempfile::tempdir_in(&folder), file_system_of(&folder))
+            else {
+                continue;
+            };
+            let mut frames = FrameFile::create_in(dir.path()).unwrap();
+            assert_eq!(
+                frames.mapped.is_some(),
+                kind == "tmpfs",
+                "{} is on {kind}",
+                folder.display()
+            );
+            if kind != "tmpfs" {
+                on_a_disk += 1;
+                // Its pictures are written, and found by a reader.
+                frames.show(1, 2, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+                assert_eq!(frames.reserved, [0; 3]);
+                assert_eq!(
+                    as_read(&frames, 8)[HEADER_BYTES as usize + 8..][..8],
+                    [5, 6, 7, 8, 1, 2, 3, 4]
+                );
+            }
+        }
+        if on_a_disk == 0 {
+            eprintln!("skipped in part: no folder on a disk to make a frame file in");
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn a_place_whose_memory_is_refused_is_never_touched_as_memory() {
+        let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+            eprintln!("skipped: no /dev/shm to make a frame file in");
+            return;
+        };
+        let mut frames = FrameFile::create_in(dir.path()).unwrap();
+        if frames.mapped.is_none() {
+            eprintln!("skipped: /dev/shm is not a file system in memory here");
+            return;
+        }
+        frames.show_bottom_up(1, 1, &[1, 2, 3, 4]).unwrap();
+        assert!(frames.mapped.is_some());
+        // The system refuses to set memory aside for the next place. Here
+        // it does because the file is open for reading only; a file system
+        // that is full refuses the same call, and a store into a page of it
+        // would end the program where the write is told "no space".
+        let writable = std::mem::replace(&mut frames.file, File::open(&frames.path).unwrap());
+        let before = as_read(&frames, 8);
+        assert!(frames.show_bottom_up(2, 1, &[9; 8]).is_err());
+        assert!(frames.mapped.is_none(), "the copying is over for this file");
+        assert_eq!(frames.reserved, [0, 4, 0]);
+        // Nothing was stored: the place is as it was, and so is the header,
+        // which still names the first picture.
+        assert!(as_read(&frames, 8) == before);
+        // From here on pictures are written, as into a file on a disk.
+        frames.file = writable;
+        frames.show_bottom_up(2, 1, &[9; 8]).unwrap();
+        frames.show(1, 1, &[7; 4]).unwrap();
+        assert_eq!(frames.reserved, [0, 4, 0]);
+        assert_eq!((frames.sequence, frames.place), (6, 0));
+        let read = as_read(&frames, 8);
+        assert_eq!(read[HEADER_BYTES as usize + 16..][..8], [9; 8]);
+        assert_eq!(read[HEADER_BYTES as usize..][..4], [7; 4]);
+    }
+
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1192,6 +1297,19 @@ mod tests {
             as_read(&written, 4)[HEADER_BYTES as usize + 4..][..4],
             [1, 2, 3, 4]
         );
+        // Memory is set aside where the picture goes and nowhere else: a
+        // file with one picture copied into it takes as much of the file
+        // system as a file with that picture written into it.
+        use std::os::unix::fs::MetadataExt;
+        let mut copied = FrameFile::create_in(dir.path()).unwrap();
+        let mut plain = FrameFile::create_in(dir.path()).unwrap();
+        plain.mapped = None;
+        for frames in [&mut copied, &mut plain] {
+            frames.show_bottom_up(64, 64, &[5; 64 * 64 * 4]).unwrap();
+        }
+        assert!(copied.mapped.is_some());
+        let taken = |frames: &FrameFile| frames.file.metadata().unwrap().blocks();
+        assert_eq!(taken(&copied), taken(&plain));
     }
 
     #[cfg(target_os = "linux")]

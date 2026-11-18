@@ -25,7 +25,7 @@ use any2odyssey_core::live::{self, Depth, DepthSmoother, Placement};
 use any2odyssey_core::slider::{DEPTH, POPOUT};
 use image::RgbaImage;
 
-use crate::capture::{Capture, CaptureState, Frames};
+use crate::capture::{fitted, Capture, CaptureState, Frames};
 use crate::weaver::{self, FrameSink};
 
 /// The least time from one picture to the next.
@@ -482,6 +482,10 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             let (view, place) = layout((slot.width, slot.height), found.look.lines);
             let (_, _, w, h) = place;
             if turn.scale {
+                // The buffers of the pictures kept the room of the most
+                // lines chosen since the output was started: 71 MB after
+                // 2160 lines and back to 1080.
+                fitted(&mut picture, w as usize * h as usize * 4);
                 picture.resize(w as usize * h as usize * 4, 0);
                 if !live::scale_to_rgba(slot.source(), &mut picture, w, h) {
                     return None;
@@ -577,6 +581,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         let placed = (view, x, y, w, h);
         if canvas.len() != place.bytes() || blank != Some(placed) {
             blank = Some(placed);
+            fitted(&mut canvas, place.bytes());
             canvas.clear();
             canvas.resize(place.bytes(), 0);
             for alpha in canvas.as_chunks_mut::<4>().0 {
@@ -587,6 +592,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // it they are rendered side by side first, and sharpened from
         // there into their places.
         if look.sharpness > 0 {
+            fitted(&mut pair, picture.len() * 2);
             pair.resize(picture.len() * 2, 0);
         } else if pair.capacity() > 0 {
             pair = Vec::new();

@@ -306,6 +306,8 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
       - name: Eye tracking stop tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-tracking-stop.py
+      - name: Lens stack start tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-start-stack.py
       - name: Lens setup tool check tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-setup-pgrep.py
       # The stand-ins that setup.sh compiles on the user's PC, with the MinGW of this Ubuntu release: its
@@ -324,6 +326,16 @@ jobs:
         run: |
           rustup target add x86_64-pc-windows-msvc
           cargo check --locked --workspace --target x86_64-pc-windows-msvc
+      # The oldest C library and the oldest ONNX Runtime the program takes are decided in install.sh and in
+      # the binding's feature; README.md, INSTALL.txt, docs/PLATFORMS.md and the text of the release page
+      # (release.yml) repeat them. The release pages of 0.9.5 and 0.9.6 still named the numbers of 0.9.4.
+      # First the check itself, on copies that are left behind.
+      - name: The check of the documents' numbers refuses what it should
+        if: matrix.arch == 'x86_64'
+        run: python3 scripts/tests/test-check-doc-numbers.py
+      - name: Documents and release text name the glibc and ONNX Runtime the sources name
+        if: matrix.arch == 'x86_64'
+        run: scripts/check-doc-numbers.sh
       # The archive release.yml publishes, made the same way, so a change that breaks it shows here.
       # In a locale that is not UTF-8: the script stopped there with UnicodeEncodeError up to 0.9.3.
       # The script first compares THIRD-PARTY-LICENSES.md, which is written by hand, with the crates of a
@@ -373,7 +385,7 @@ jobs:
             dist/*.sha256
 
   # The policy in deny.toml: no dependency with a security advisory or a yanked version, none from
-  # outside crates.io, none without a version requirement.
+  # outside crates.io, none without a version requirement, none under a license that is not listed there.
   dependencies:
     name: Dependency policy (cargo-deny)
     runs-on: ubuntu-latest
@@ -402,10 +414,10 @@ jobs:
           install -m755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
       # The advisory database is fetched at every run: a new advisory for a crate in Cargo.lock turns this
       # red on every branch at once, whatever the change under test.
-      - name: Advisories, banned requirements and sources
+      - name: Advisories, banned requirements, sources and licenses
         run: |
-          cargo deny --locked check advisories bans sources || {
-            echo "::error::cargo-deny refused the dependency tree (its report is above). If that is a new RustSec advisory and not this change: update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml."
+          cargo deny --locked check advisories bans sources licenses || {
+            echo "::error::cargo-deny refused the dependency tree (its report is above). If that is a new RustSec advisory and not this change: update the crate, or list the advisory with its reason under [advisories] ignore in deny.toml. If it is a license: [licenses] in deny.toml says what is allowed and why."
             exit 1
           }
       # The actions these workflows use are dependencies too, each named by a commit. GitHub serves a
@@ -418,6 +430,12 @@ jobs:
       # stand-in for GitHub that also gives the answers it has to refuse.
       - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
         run: python3 scripts/tests/test-check-action-pins.py
+      # THIRD-PARTY-LICENSES.md is written by hand, and scripts/third-party-linux.py compares it with the
+      # crates of a Windows build (in the Linux job, where the build is). What that comparison has to
+      # refuse is run here, against a stand-in for cargo: a crate that is missing, one too many, a wrong
+      # license or number, a crate named twice.
+      - name: The check of the third-party list refuses what it should (stand-in for cargo)
+        run: python3 scripts/tests/test-third-party-linux.py
       - name: Every action's commit is under a tag or on a branch of its repository
         env:
           GH_TOKEN: ${{ github.token }}

@@ -37,6 +37,130 @@ impl Source<'_> {
     }
 }
 
+/// How the picture lies in a captured frame. A screen cast may hand out the
+/// panel's own pixels for a screen that is rotated or mirrored, with a note
+/// saying what was done to the upright picture to get them (PipeWire's
+/// `SPA_META_VideoTransform`); the wlroots desktops do. The names say it as
+/// the note's numbers do: mirrored left to right first, then turned
+/// counter-clockwise.
+///
+/// Compared with sway's own screenshots, pixel for pixel, for all eight.
+/// The numbers are not the ones sway's configuration uses: for its
+/// `transform 90` the note says three quarters (and the picture's right
+/// side is at the frame's bottom), for `transform 270` one quarter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Turned {
+    #[default]
+    Upright,
+    Quarter,
+    Half,
+    ThreeQuarters,
+    Mirrored,
+    MirroredQuarter,
+    MirroredHalf,
+    MirroredThreeQuarters,
+}
+
+impl Turned {
+    /// The turn a frame's note names; `None` for a number that names none.
+    pub fn from_note(note: u32) -> Option<Turned> {
+        use Turned::*;
+        const ALL: [Turned; 8] = [
+            Upright,
+            Quarter,
+            Half,
+            ThreeQuarters,
+            Mirrored,
+            MirroredQuarter,
+            MirroredHalf,
+            MirroredThreeQuarters,
+        ];
+        ALL.get(usize::try_from(note).ok()?).copied()
+    }
+
+    /// Whether the picture lies on its side in the frame: its width is the
+    /// frame's height.
+    pub fn on_its_side(self) -> bool {
+        use Turned::*;
+        matches!(
+            self,
+            Quarter | ThreeQuarters | MirroredQuarter | MirroredThreeQuarters
+        )
+    }
+
+    /// Whether the frame's columns, and its rows, are met from their far
+    /// end when the upright picture is read from its top left.
+    fn backwards(self) -> (bool, bool) {
+        use Turned::*;
+        match self {
+            Upright | MirroredQuarter => (false, false),
+            Mirrored | ThreeQuarters => (true, false),
+            MirroredHalf | Quarter => (false, true),
+            Half | MirroredThreeQuarters => (true, true),
+        }
+    }
+}
+
+/// The upright rows that are filled side by side from one stretch of a
+/// frame's row when the picture lies on its side: sixteen pixels are one
+/// line of the processor's cache. Read a column at a time instead, every
+/// pixel would be fetched from a row, and a page of memory, of its own.
+const SIDE_ROWS: usize = 16;
+
+/// Write the upright picture of `source`, which lies in its frame as
+/// `turned` says, into `out`: its rows without gaps, the four bytes of each
+/// pixel as they were. The upright picture's width and height; `None`, and
+/// `out` as it was, for a frame that is not whole.
+pub fn turn_upright(source: Source<'_>, turned: Turned, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+    if !source.is_complete() {
+        return None;
+    }
+    let (w, h) = (source.width as usize, source.height as usize);
+    let on_its_side = turned.on_its_side();
+    let (uw, uh) = if on_its_side { (h, w) } else { (w, h) };
+    // Every byte is written below, so a buffer of the right size is left
+    // as it is: no pass over it to clear it.
+    if out.len() != uw * uh * 4 {
+        out.clear();
+        out.resize(uw * uh * 4, 0);
+    }
+    let (columns_back, rows_back) = turned.backwards();
+    let frame_row = |y: usize| &source.bytes[y * source.stride..][..w * 4];
+    in_bands(out, uw * 4, |first_row, band| {
+        if !on_its_side {
+            for (row, line) in band.chunks_exact_mut(uw * 4).enumerate() {
+                let y = first_row + row;
+                let input = frame_row(if rows_back { h - 1 - y } else { y });
+                if columns_back {
+                    let pixels = input.as_chunks::<4>().0.iter().rev();
+                    for (dst, src) in line.as_chunks_mut::<4>().0.iter_mut().zip(pixels) {
+                        *dst = *src;
+                    }
+                } else {
+                    line.copy_from_slice(input);
+                }
+            }
+            return;
+        }
+        // An upright row is a column of the frame, and an upright column a
+        // row of it.
+        for (index, block) in band.chunks_mut(uw * 4 * SIDE_ROWS).enumerate() {
+            let y = first_row + index * SIDE_ROWS;
+            let rows = block.len() / (uw * 4);
+            let first_column = if columns_back { w - y - rows } else { y };
+            for x in 0..uw {
+                let input = frame_row(if rows_back { h - 1 - x } else { x });
+                let pixels = input[first_column * 4..][..rows * 4].as_chunks::<4>().0;
+                for (row, line) in block.chunks_exact_mut(uw * 4).enumerate() {
+                    let pixel = pixels[if columns_back { rows - 1 - row } else { row }];
+                    line[x * 4..][..4].copy_from_slice(&pixel);
+                }
+            }
+        }
+    });
+    Some((uw as u32, uh as u32))
+}
+
 /// The threads a frame's rows are spread over: a quarter of the cores, at
 /// most six, and two wherever there are two cores at all (a quarter of four
 /// or six cores would be one thread, and the picture late for it). The work
@@ -1578,6 +1702,127 @@ mod tests {
             assert!(place_pair(&pair, w, h, 1.0, place, &mut sharp));
             assert!(place_pair(&pair, w, h, 0.0, place, &mut plain));
             assert!(sharp == plain, "{w}x{h}");
+        }
+    }
+
+    /// How `picture` (rows of pixels) lies in a frame whose note is `note`:
+    /// mirrored left to right for the numbers from four on, then turned
+    /// counter-clockwise by as many quarters as the number has beyond that.
+    fn turned_as_noted(picture: &[Vec<[u8; 4]>], note: u32) -> Vec<Vec<[u8; 4]>> {
+        let mut rows = picture.to_vec();
+        if note >= 4 {
+            rows.iter_mut().for_each(|row| row.reverse());
+        }
+        for _ in 0..note % 4 {
+            // The right column becomes the top row.
+            let (w, h) = (rows[0].len(), rows.len());
+            rows = (0..w)
+                .map(|y| (0..h).map(|x| rows[x][w - 1 - y]).collect())
+                .collect();
+        }
+        rows
+    }
+
+    /// `rows` as a frame whose rows are `gap` bytes apart beyond their width.
+    fn framed(rows: &[Vec<[u8; 4]>], gap: usize) -> (Vec<u8>, u32, u32, usize) {
+        let (w, h) = (rows[0].len(), rows.len());
+        let mut bytes = Vec::new();
+        for (y, row) in rows.iter().enumerate() {
+            bytes.extend(row.iter().flatten());
+            if y + 1 < h {
+                bytes.extend(std::iter::repeat_n(0xEE, gap));
+            }
+        }
+        (bytes, w as u32, h as u32, w * 4 + gap)
+    }
+
+    #[test]
+    fn a_frame_is_put_upright_from_each_of_the_eight_ways_it_can_lie() {
+        // Six pixels, by hand: the picture, and the frames that hold it.
+        let [a, b, c, d, e, f] = [b"aaaa", b"bbbb", b"cccc", b"dddd", b"eeee", b"ffff"].map(|p| *p);
+        let picture = vec![vec![a, b, c], vec![d, e, f]];
+        let frames: [&[&[[u8; 4]]]; 8] = [
+            &[&[a, b, c], &[d, e, f]],
+            // A quarter turn counter-clockwise: the right side is on top.
+            // This is what sway sends for an output with `transform 270`.
+            &[&[c, f], &[b, e], &[a, d]],
+            &[&[f, e, d], &[c, b, a]],
+            // And this for `transform 90`.
+            &[&[d, a], &[e, b], &[f, c]],
+            // Mirrored, and then turned.
+            &[&[c, b, a], &[f, e, d]],
+            &[&[a, d], &[b, e], &[c, f]],
+            &[&[d, e, f], &[a, b, c]],
+            &[&[f, c], &[e, b], &[d, a]],
+        ];
+        for (note, frame) in frames.iter().enumerate() {
+            let frame: Vec<Vec<[u8; 4]>> = frame.iter().map(|row| row.to_vec()).collect();
+            assert_eq!(turned_as_noted(&picture, note as u32), frame, "note {note}");
+            let turned = Turned::from_note(note as u32).unwrap();
+            assert_eq!(turned.on_its_side(), frame.len() == 3, "note {note}");
+            let (bytes, width, height, stride) = framed(&frame, 5);
+            let source = Source {
+                bytes: &bytes,
+                width,
+                height,
+                stride,
+                order: PixelOrder::Bgr,
+            };
+            let mut out = vec![7; 3];
+            assert_eq!(turn_upright(source, turned, &mut out), Some((3, 2)));
+            assert_eq!(out, b"aaaabbbbccccddddeeeeffff", "note {note}");
+        }
+        assert_eq!(Turned::from_note(8), None);
+        assert_eq!(Turned::from_note(u32::MAX), None);
+        assert_eq!(Turned::default(), Turned::Upright);
+    }
+
+    #[test]
+    fn frames_of_every_shape_are_put_upright_whole_and_a_frame_that_is_not_whole_is_refused() {
+        // Shapes of one row, one column, fewer rows than are filled side by
+        // side, and enough for several bands of several blocks each.
+        for (w, h) in [
+            (1, 1),
+            (1, 9),
+            (9, 1),
+            (3, 2),
+            (17, 16),
+            (31, 33),
+            (150, 70),
+        ] {
+            let pixel = |x: usize, y: usize| ((y * w + x + 1) as u32).to_le_bytes();
+            let picture: Vec<Vec<[u8; 4]>> = (0..h)
+                .map(|y| (0..w).map(|x| pixel(x, y)).collect())
+                .collect();
+            let upright: Vec<u8> = picture.iter().flatten().flatten().copied().collect();
+            // A buffer of the right size keeps nothing of what it held.
+            let mut out = vec![0xAB; upright.len()];
+            for note in 0..8 {
+                for gap in [0, 12] {
+                    let (bytes, width, height, stride) =
+                        framed(&turned_as_noted(&picture, note), gap);
+                    let source = Source {
+                        bytes: &bytes,
+                        width,
+                        height,
+                        stride,
+                        order: PixelOrder::Rgb,
+                    };
+                    let turned = Turned::from_note(note).unwrap();
+                    let size = turn_upright(source, turned, &mut out);
+                    assert_eq!(size, Some((w as u32, h as u32)), "{w}x{h} note {note}");
+                    assert!(out == upright, "{w}x{h} note {note} gap {gap}");
+
+                    let short = Source {
+                        bytes: &bytes[..bytes.len() - 1],
+                        ..source
+                    };
+                    let mut kept = vec![9; 5];
+                    assert_eq!(turn_upright(short, turned, &mut kept), None);
+                    assert_eq!(kept, [9; 5]);
+                    out.fill(0xAB);
+                }
+            }
         }
     }
 }

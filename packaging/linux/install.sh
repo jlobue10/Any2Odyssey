@@ -708,7 +708,11 @@ cmd:pgrep|procps-ng|procps|procps-ng|procps
 # apt-get does (below): RHEL 10 and its relatives have no ONNX Runtime package, and with onnxruntime-devel
 # among the names PipeWire's library was not installed either and the program did not start. Both can be
 # told to leave such a name out; dnf 5 and dnf 4 call that differently.
-if have pacman; then FAMILY=2 INSTALL="pacman -S --needed"
+# pacman asks a question of its own ("Proceed with installation? [Y/n]") after this script's: with --yes
+# it is answered like every other one. It was not, and where nobody could answer (no terminal: a script,
+# another installer) pacman installed nothing after --yes. Without --yes its question stays, with the
+# list of what it would install; the other three are told not to ask in either case, as before.
+if have pacman; then FAMILY=2 INSTALL="pacman -S --needed${YES:+ --noconfirm}"
 elif have apt-get; then FAMILY=3 INSTALL="apt-get install -y"
 elif have dnf; then
     FAMILY=4

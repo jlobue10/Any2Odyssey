@@ -2,6 +2,97 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.7 (2026-11-18)
+
+A seventh audit release: six pull requests (#154 to #159) from a round that again ran things no round had run. The Linux edition was run on KDE Plasma 6.8 and on GNOME 51 themselves, without a screen, with their own compositors, portals and file dialogs. The live screen was fed by a stand-in for the desktop's portal and a stream made for the purpose: every format, row length, size, turn and mark a desktop may send. The Wine side of the Odyssey 3D output ran under real Wine for the first time outside the one machine it was written on. The eight published files of 0.9.6 were taken apart and the documents that ship with them read against the programs. The changes of 0.9.6 were attacked with counter-examples that were run, and the defects that earlier notes list as known and not fixed were reproduced and fixed where no hardware is needed. At the end all six were merged and run together, and two of them were run on each other's rigs, which found two more faults that neither showed alone.
+
+**Linux, KDE Plasma: the live screen was taken at 1920 × 1080 whatever the screen was.** A 3840 × 2160 screen arrived shrunk and a turned one pressed into 16:9, because the program named a size and KWin gives a reader the size it names.
+
+**Linux, sway and other wlroots desktops: a rotated or mirrored screen is shown upright in the live screen.** It was shown on its side.
+
+**Both editions: window titles and file names in Chinese, Japanese and Korean are drawn in their letters**, with a typeface of the system. They were drawn as boxes. Hebrew and Arabic get their letters too, still in the wrong order.
+
+**The picture that 0.9.6 copies into the frame file's memory arrives whole under Wine.** That was the open question of 0.9.6; under real Wine 11.21 and wine-staging 11.21, of 273,884 test pictures sent, none that the Wine side kept was torn, of the wrong size or out of order, and 594 slider steps of the real program at 3840 × 2160 were the same byte for byte on both sides. Leia's own programs were stand-ins.
+
+### Fixed
+
+Linux, the live screen:
+
+- **A screen is taken at its own size on KDE Plasma.** The program wished for 1920 × 1080 inside a range of sizes, and KWin 6.8 offers every size from 200 × 200 to 10000 × 10000 and resizes the cast to the reader's wish: the page read "Live: a 1920 × 1080 screen" for a 3840 × 2160 and a 2560 × 1440 screen, and a screen turned on its side arrived pressed into 1920 × 1080. No size is wished for now, and the page reads the screen's own. On Plasma the program therefore handles up to four times the pixels it did, so the pictures a second there may differ from 0.9.6; after the update, log out and in once, because KWin keeps the size 0.9.6 asked for until then. GNOME and sway always sent the screen's size. (#159)
+- **A rotated or mirrored screen is shown upright on sway.** The stream says how the frame is turned and the program did not read it: all seven turns and flips other than none were shown turned. They are turned back now, and on sway the picture equals the compositor's own screenshot pixel for pixel for all eight, at scales 1.25 to 2, on two screens and with ten bits a colour. KDE and GNOME send no such note and hand out a turned screen upright; nothing is turned there, and their pictures are the same with and without this change. (#157)
+- **A frame that the desktop marks as no picture is not shown.** A buffer marked as corrupted, or of size nothing, was read like any other and shown: stale or unfinished contents for one picture. xdg-desktop-portal-wlr marks a frame it could not complete, KWin a pointer-only update, mutter a frame it could not record. A buffer of size nothing used to be read as the whole buffer; it is no picture now. (#157)
+- **GNOME: Start works after the portal's backend was restarted.** The first and second Start read "Live capture ended: the desktop's screen-cast portal refused: ... Unavailable cursor mode 1." The pointer is asked for by name only where it is to be drawn in. (#159)
+- **The memory of a larger screen's pictures is given back when the screen is smaller again, and that of more lines when fewer are chosen.** A session at 1920 × 1080 that had shown 7680 × 4320 for a moment stayed at 438 MB until the output was stopped; it is back at 201 MB within a second. After 2160 lines of detail and back to 1080 it kept 71 MB; it does not. (A "Known, not fixed" item of 0.9.6.) (#157)
+- **A screen faster than 60 Hz is no longer copied picture by picture.** The program named its limit in a field that desktops answer with nothing; the field they keep to was not named. A 120 Hz screen on sway delivered about 90 pictures a second and a 120 Hz screen on Plasma about 110, each copied and most thrown away. The desktop is now asked for 62 a second at the most: not 60, because mutter 51 then delivers 48 (measured; from 61 up it delivers 60), and KWin delivers exactly what is asked. A stream that names one fixed rate above sixty was refused with "no more input formats" and is taken. (#157)
+- **A screen cast with a side longer than 16384 pixels ends with a line that says so**: "Live capture ended: the screen cast is 17000 × 17000 pixels, and no more than 16384 a side can be shown." The size the program used to name carried that limit along, with the unspecific "no more input formats". (#157, #159)
+
+Linux, the Odyssey 3D set-up and its Wine side:
+
+- **Wine no longer ends Leia's service in the middle of its own start.** Wine ends a prefix's services three seconds after the last ordinary program has left, and a service does not count as one; `start-stack.sh` pauses 6, 8 and 2 seconds between short programs. Where the service reported itself running early enough, Wine stopped it, with the USB driver, during the start, and every later request was a cold start of half a minute. Wine's server is started with a minute of patience first. Seen with a stand-in for the service only: on the one machine with the monitor the start evidently wins by timing. (#158)
+- **A Wine server that was killed or crashed no longer leaves the output broken until the next login.** Its programs stay in the list of processes and can do nothing; they were found by name and taken for a running stack: eye tracking said "on" with no tracker, every stop took twelve seconds, and the output did not come back. The stack now counts as running only with a server of its prefix, and a start ends what the dead server left behind (Wine's programs of this prefix, nothing else). (#158)
+- **The output starts where the frame file's folder has letters outside Western European ones.** The Wine-side program opened the file by a path that had gone through the prefix's 8-bit code page: under a runtime or home folder with Cyrillic or Japanese letters the page read "cannot open the frame file". (#158)
+- The try-out the set-up prints, `sleep 20 | any2odyssey-lens-helper`, showed the lens for an instant on a first start, which itself takes longer than that; it is `sleep 60` in the set-up, the README and `docs/LENS-SWITCH.md`. `start-stack.sh` no longer leaves a copy of its shell beside Leia's session for as long as that runs. (#158)
+
+Linux, the viewer:
+
+- **One instance again where `XDG_RUNTIME_DIR` names something that cannot be used** (a file, a folder that cannot be written, another user's). Every launch became a window of its own and `--quit` found nothing. The instance socket is then tried in the data folder, for listening and for handing over. (A "Known, not fixed" item of 0.9.6.) (#156)
+- **An ONNX Runtime library file that is cut short is refused with a message** that names the file and its two lengths. The viewer ended with "Bus error" inside the system's loader when 2D to 3D was chosen. (A "Known, not fixed" item of 0.9.6.) (#156)
+- **KDE without zenity: Save preview PNG… opens in the current folder with the name filled in.** kdialog read the bare file name as an address, opened at "http: any2odyssey-preview.png" and left the Name box empty. (#159)
+
+Linux, installing:
+
+- **On Arch, `--yes` answers pacman's own question too.** The installer's questions were answered and pacman's "Proceed with installation? [Y/n]" was not: run from a script or another installer, with nobody to answer, it installed no packages after `--yes`. apt-get, dnf and zypper were always told not to ask. `any2odyssey-setup --yes` is the same script. (#154)
+- The Arch package names `python` among its optional dependencies (two tools of the Odyssey 3D set-up are Python scripts; `namcap` reported it as an error). (#154)
+
+Both editions, the controls and the viewer:
+
+- **Titles and names in Chinese, Japanese and Korean are drawn in their letters.** The program's own typefaces do not have them, and the Windows source list and the viewer's path box and status line showed boxes. The first time such a letter is shown, a typeface of the system is looked for on a thread of its own (on Windows in the Fonts folder: Yu Gothic, Microsoft YaHei or JhengHei, Malgun Gothic, in the order of the display language; on Linux what fontconfig names, else Noto Sans CJK) and added: nothing is read at start, each file once, eight at the most, and the program grows by the size of the file, 14 to 20 MB. Hebrew and Arabic are given their letters the same way. (A "Known, not fixed" item of 0.9.6.) (#156)
+- **A click made while the pointer still moves does not shift the page.** The interface library lets a page be dragged with the mouse like with a finger, and a press on a button counted as the start of a drag: the page moved by what the pointer travelled in that moment, some six points for a hand that is slowing down, on any page longer than its window, in every release. A page is dragged by a finger only now; the wheel, the scroll bar and Tab are as they were, and the page-sized invisible Tab stop that the drag area was is gone. (#155)
+- **The window can be made 360 points high instead of 580**, and every page scrolls below its full height. 580 was more than the whole of a 1920 × 1080 screen at 200 % or a 1366 × 768 one at 150 %: the window's lower edge lay outside the screen, with its resize handles. The smallest width is 700 as before. (A "Known, not fixed" item of 0.9.6.) (#156)
+- **Tab scrolls to a focused control whose last three points lie under the window's frame.** In the default window *Reset lens numbers* was left there. (#155)
+
+Windows:
+
+- **Uninstalling removes a shortcut that is hidden or marked as a system file.** 0.9.6 left it behind as one that "could not be removed", pointing at a program that was gone. (#155)
+
+### Documents and the release page
+
+- **The release pages of 0.9.5 and 0.9.6 named the wrong requirements**: "needs glibc 2.39 or newer" and "ONNX Runtime 1.22 or newer", where the program has needed glibc 2.35 and ONNX Runtime 1.17 since 0.9.5. Users of Debian 12, Ubuntu 22.04 and Debian 13 were told the archive, or its 2D to 3D, was not for them. Both pages were corrected by hand, the text the release workflow writes is corrected, and `scripts/check-doc-numbers.sh` now compares these two numbers in the README, `INSTALL.txt`, `docs/PLATFORMS.md` and the release text with the installer and the build. (#154)
+- **The third-party lists name the Rust standard library**, which is in every program and in no list of crates, with the crates it is built from; and the Linux list names the few functions of PipeWire's headers that are compiled into the program. A crate that a list names twice is noticed. (#154, #156)
+- `docs/PLATFORMS.md` names the Windows setup program among what is distributed, four files with provenance where it said three, and says that GNOME's output window has a title bar (it said it had none). `docs/LENS-SWITCH.md` says that the archive and the Arch package carry the Wine helper's script and source (it said no package contains it) and that the set-up needs `pgrep`. `contrib/wine-lens/README.md` named its license at a path that exists in no package. (#154, #159)
+- The notes of 0.9.6 say that the accessibility part added "about 0.4 MB". That is the Windows program; the Linux program grew by 1.8 MB in the Arch package and 2.3 MB in the archive.
+
+### Tests and releases
+
+- **The eight published files of 0.9.6 are what the release says they are.** Every checksum and every attestation holds; the ZIP, the archive and the Arch package hold the tag's files and nothing else; the setup program, decoded and not run, holds the ZIP's 27 files; every crate whose paths are in the programs is in the lists. The archive was installed, started, updated from 0.9.5 and 0.9.3 and removed in a throwaway Arch tree, and the published Linux programs are on the accessibility bus with their controls named. (#154)
+- **The licenses of the dependencies are checked** in CI and at a release: `deny.toml` lists the nine a dependency may have, and one that arrives under another fails the check. (`cargo deny check licenses` reported 383 errors before, and was not run.) (#156)
+- **The changes of 0.9.6 were reviewed by running counter-examples.** The frame file's memory held against a reader that follows the Wine side's protocol at 280 pictures a second, on a full memory disk and at every size; 180,000 resizes are the same byte for byte as the routine they replaced; the instance socket gives one instance at every path length. Each fix of 0.9.6 was taken out again: eight were not noticed by any test and have one now. (#155)
+- **The live screen has a stand-in portal and a stream producer** (kept with the round's scripts, not in the repository): 131 cases of formats, sizes, row lengths, turns, marks and paces, run under AddressSanitizer too, with nothing read outside a buffer. Every offered format arrives with every pixel as sent, the ten-bit ones included. (#157)
+- **Round 20's fixes of the live screen hold on KDE Plasma and GNOME**: a screen that is switched off or removed ends the cast with its line, Stop returns within about two seconds while the portal stands still, and Start works again. The script that lets the Odyssey show its own screen live loads in KWin 6.8 and hides the output window from the cast. (#159)
+- `start-stack.sh` and `ensure-stack.sh` have a test with stand-ins for Wine, and the guide in the Linux archive is compared with what its program exports at a release too. (#158, #154)
+- **All six pull requests were merged and run together before the release**, and two were run on each other's rigs. That found what no single one showed: a test of one failed against a script change of another although they merged without a conflict; two changes to the same request for a stream had to be made one; a limit of exactly sixty pictures a second cost a fifth of them on GNOME; and the upper size limit had gone with the wished size.
+
+### Known, not fixed
+
+- Hebrew and Arabic are drawn in the wrong order, and Arabic unjoined: the interface library places letters from the left in the order they are stored. The same holds for Thai and the Indian scripts as far as they need shaping.
+- A typeface of the system stays in memory once it was needed (14 to 20 MB), and on a Linux system whose fontconfig is not set up for a language, Chinese characters are drawn in the Korean shapes of Noto Sans CJK, as in every other program there.
+- A mouse can no longer drag a page by its background; a touch screen's page no longer glides on after the finger is lifted.
+- Linux, KDE Plasma, live screen: a change of the shown screen's rotation, scale or resolution while live keeps the old size and shape until Stop and Start; KWin tells the reader nothing.
+- Linux, GNOME, live screen: with the pointer not drawn in, moving only the pointer still brings pictures, so the page reads "5 pictures a second" where it would read "not changing".
+- Linux, live screen: a desktop that sends only buffers that cannot be read leaves the page at "Waiting for its first picture" without a reason. None is known to.
+- Linux, live screen at 2160 lines with sharpening: still below 60 pictures a second on the processor alone.
+- Linux, Wayland: `--show` cannot raise the controls (they ask for attention); GNOME's output window has the windowing library's plain title bar, not the desktop's own.
+- Linux, the Odyssey 3D: the eye tracker's pause. With a stand-in tracker under Wine 11.21 a socket hears nothing more after the first refused datagram when the set-up's own library is in Wine's server. It was left as it is because this arrangement is the one seen working on the monitor; if tracking does not come back after a second start in one login, this is where to look.
+- Linux: if another program of the same user shortens the frame file while the output is on, the viewer ends (signal 7).
+- Windows: a shortcut that another program holds open without sharing stays after an uninstall and is not named.
+- `--screenshot FILE` into a folder that cannot be written is refused where 0.9.5 overwrote an existing file in place.
+- Both Linux programs hold the build machines' paths (`makepkg` warns of it); `setup.sh --help` takes `--help` for the Windows drive; two title-bar buttons are both named "Minimize" to a screen reader on Linux.
+- The items of 0.9.6 that are not named above stand as they were.
+
+### Hardware verification
+
+Pending: these changes were made and tested without the monitor, the camera, the lens or Leia's and Samsung's software; KDE Plasma and GNOME ran without a screen or a GPU, Wine ran with stand-ins for Leia's service, tracker and weaver, and the Windows controls were drawn in tests and not in a window. `docs/TESTING.md`, "Pending hardware verification", lists the checks under "New in 0.9.7". Most in need of a real run: the Odyssey 3D set-up's start, stop and restart on the G90XF under Linux, because three of its scripts changed and they are the ones that were seen working there; the live screen on KDE Plasma, which now arrives at the screen's own size (the size named on the page, and the pictures a second on the 165 Hz Odyssey, where about sixty is expected); and a Japanese, Chinese or Korean window title in the Windows source list.
+
 ## 0.9.6 (2026-11-17)
 
 A sixth audit release: six pull requests (#146 to #151) from a round whose methods were again new. The Linux live screen was run for real under a headless desktop with PipeWire and the screen-cast portal, and the session was changed under it: modes, screens taken away, the portal and PipeWire stopped and restarted. The Linux program was run about 2,200 times with the operating system failing underneath it, one system call at a time, and on full, read-only and missing folders. Every page of the interface was drawn at every window size, display scale and zoom, walked with the keyboard, and read through the accessibility tree, on Linux and on a desktop of Windows that is never shown. The saved files of all fourteen releases were made with each release's own code and read by every other. The six Linux releases were measured against each other with one script, and the hot paths that were left were profiled. A second account and a hostile server played the attacker against the running program, and found nothing. And the changes of 0.9.5 were attacked with counter-examples that were run. Built and tested in CI; not yet run on the monitor, see Hardware verification.

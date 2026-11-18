@@ -43,15 +43,21 @@ def listed_for_windows():
 def check_windows_list():
     """Stop unless THIRD-PARTY-LICENSES.md lists exactly what a Windows build contains."""
     built = tree(WINDOWS_TARGET)
-    listed, noticed, said = {}, set(), None
+    listed, noticed, said, twice = {}, set(), None, []
     for line in open("THIRD-PARTY-LICENSES.md", encoding="utf-8"):
+        # A crate that a table names twice is said so: counted after the doubles are dropped, as they were
+        # up to 0.9.6, the tables agreed with the build and with the number in the text all the same.
         m = re.match(r"\| `([^`]+)` \| (\S+) \| (.*?) \|$", line)
-        if m: listed[(m.group(1), m.group(2))] = m.group(3).strip()
+        if m:
+            if (m.group(1), m.group(2)) in listed: twice.append("%s %s is in the table of crates twice" % m.group(1, 2))
+            listed[(m.group(1), m.group(2))] = m.group(3).strip()
         m = re.match(r"\| `([^`]+)` (\S+) \|", line)
-        if m: noticed.add((m.group(1), m.group(2)))
+        if m:
+            if (m.group(1), m.group(2)) in noticed: twice.append("%s %s is in the table of notices twice" % m.group(1, 2))
+            noticed.add((m.group(1), m.group(2)))
         m = re.match(r"The (\d+) crates below", line)
         if m: said = int(m.group(1))
-    wrong = ["%s %s is in a Windows build and not in the table of crates" % k for k in sorted(set(built) - set(listed))]
+    wrong = twice + ["%s %s is in a Windows build and not in the table of crates" % k for k in sorted(set(built) - set(listed))]
     wrong += ["%s %s is in the table of crates and not in a Windows build" % k for k in sorted(set(listed) - set(built))]
     wrong += ["%s %s is listed as %s; its manifest says %s" % (*k, listed[k], built[k])
               for k in sorted(set(built) & set(listed)) if listed[k] != built[k]]
@@ -62,6 +68,25 @@ def check_windows_list():
     if wrong:
         sys.exit("THIRD-PARTY-LICENSES.md does not match the dependencies of a Windows build "
                  f"(cargo tree -p any2odyssey --target {WINDOWS_TARGET} -e normal):\n  " + "\n  ".join(wrong))
+
+def check_standard_library():
+    """Stop unless THIRD-PARTY-LICENSES.md names the standard library of the toolchain that builds the programs.
+
+    The standard library is in every program and in no `cargo tree`, so neither table has it and neither
+    list named it up to 0.9.6. Its section is written by hand, with the crates that toolchain's library is
+    built from: it has to be looked at again when rust-toolchain.toml changes."""
+    channel = re.search(r'^channel\s*=\s*"([^"]+)"', open("rust-toolchain.toml", encoding="utf-8").read(), re.M)
+    text = open("THIRD-PARTY-LICENSES.md", encoding="utf-8").read()
+    said = re.search(r"^## The Rust standard library\n\nBoth editions are built with Rust (\S+) ", text, re.M)
+    if not channel:
+        sys.exit("rust-toolchain.toml names no channel")
+    if not said:
+        sys.exit('THIRD-PARTY-LICENSES.md has no section "## The Rust standard library" that begins '
+                 '"Both editions are built with Rust <version> "')
+    if said.group(1) != channel.group(1):
+        sys.exit(f"THIRD-PARTY-LICENSES.md describes the standard library of Rust {said.group(1)}; "
+                 f"rust-toolchain.toml builds with {channel.group(1)}. Bring the section up to that toolchain "
+                 "(its library/Cargo.lock names the crates and versions) and name it there.")
 
 def used_under(expression):
     """MIT when it is one of the choices, Apache-2.0 otherwise; a single license as it is."""
@@ -104,6 +129,7 @@ def main():
     # The file is UTF-8 whatever the locale says: the notices have letters that Latin-1 cannot write.
     sys.stdout.reconfigure(encoding="utf-8")
     check_windows_list()
+    check_standard_library()
     windows = listed_for_windows()
     extra = sorted((k, v) for k, v in tree(TARGET).items() if k not in windows)
     print("# Third-party licenses: the Linux build\n")
@@ -116,10 +142,42 @@ def main():
           "Apache 2.0, ISC and zlib licenses are in `THIRD-PARTY-LICENSES.md`. The notices are the copyright "
           "lines of the license and copyright files in each crate's source package as published on crates.io; "
           "where a package has none, the authors field of its manifest is given and marked as such.\n")
-    print("Libraries the Linux build links at run time and does not contain (PipeWire, the C library, the "
-          "desktop's graphics libraries, ONNX Runtime and cuDNN where installed) are the system's own, under "
+    print("Like the Windows program, the Linux one also contains the Rust standard library and the crates it "
+          "is built from; they are under \"The Rust standard library\" in `THIRD-PARTY-LICENSES.md`.\n")
+    print("Libraries the Linux build links at run time and does not contain (PipeWire's library, the C library, "
+          "the desktop's graphics libraries, ONNX Runtime and cuDNN where installed) are the system's own, under "
           "their own terms. Samsung's and Leia's software is not included: the Wine setup in "
           "`contrib/wine-lens` copies the user's own installation.\n")
+    # Not a crate, so not in the table: `nm` on the published 0.9.6 program shows spa_pod_parser_get and six
+    # more functions of these headers, compiled in by libspa-sys (its bindings wrap the headers' inline
+    # functions in a C file of their own), and the lists said that nothing of PipeWire is contained.
+    print("One part of PipeWire is contained: its SPA headers define small functions in the headers "
+          "themselves (`spa/pod/parser.h`, `spa/pod/iter.h` and the format headers under `spa/param`), and "
+          "the `libspa-sys` crate compiles those the program uses into it, from the PipeWire development "
+          "files of the system the program is built on. They are under PipeWire's license, with this "
+          "notice:\n")
+    print("```text\n"
+          "Copyright © 2018 Wim Taymans\n"
+          "\n"
+          "Permission is hereby granted, free of charge, to any person obtaining a\n"
+          "copy of this software and associated documentation files (the \"Software\"),\n"
+          "to deal in the Software without restriction, including without limitation\n"
+          "the rights to use, copy, modify, merge, publish, distribute, sublicense,\n"
+          "and/or sell copies of the Software, and to permit persons to whom the\n"
+          "Software is furnished to do so, subject to the following conditions:\n"
+          "\n"
+          "The above copyright notice and this permission notice (including the next\n"
+          "paragraph) shall be included in all copies or substantial portions of the\n"
+          "Software.\n"
+          "\n"
+          "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+          "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+          "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL\n"
+          "THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+          "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\n"
+          "FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\n"
+          "DEALINGS IN THE SOFTWARE.\n"
+          "```\n")
     print("Regenerate with `scripts/third-party-linux.py > THIRD-PARTY-LICENSES-LINUX.md` after changing "
           "dependencies.\n")
     print("| Crate and version | License offered | Used under | Copyright notices |")

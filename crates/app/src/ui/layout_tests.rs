@@ -14,8 +14,11 @@ use egui::{pos2, vec2, Rect};
 use super::*;
 use crate::core::WindowChoice;
 
-/// The default window and the smallest one the viewport allows.
+/// The default window and a small one: as narrow as the viewport allows,
+/// and as high as its smallest was up to 0.9.6.
 const SIZES: [(f32, f32); 2] = [(980.0, 780.0), (700.0, 580.0)];
+/// The smallest window the viewport allows.
+const SMALLEST: (f32, f32) = (SMALLEST_WINDOW[0], SMALLEST_WINDOW[1]);
 /// The window frame is drawn over the outer 12 points.
 const FRAME: f32 = 12.0;
 
@@ -49,6 +52,8 @@ struct Harness {
     /// The accessibility tree of the last frame, and what has the focus.
     widgets: Vec<Widget>,
     focus: Option<egui::accesskit::NodeId>,
+    /// The name of the tree's root: the window, as a screen reader says it.
+    window_name: Option<String>,
     /// Display scale: physical pixels per point.
     scale: f32,
     app: App,
@@ -93,6 +98,7 @@ impl Harness {
             outlines: Vec::new(),
             widgets: Vec::new(),
             focus: None,
+            window_name: None,
             scale: 1.0,
             app,
             core,
@@ -144,6 +150,13 @@ impl Harness {
         if let Some(update) = &output.platform_output.accesskit_update {
             self.focus = Some(update.focus);
             self.widgets = widgets_of(update);
+            if let Some(tree) = &update.tree {
+                self.window_name = update
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == tree.root)
+                    .and_then(|(_, node)| node.label().map(str::to_owned));
+            }
         }
         self.events = output.platform_output.events;
         painted
@@ -451,6 +464,49 @@ fn the_source_list_is_bounded_and_inside_the_window() {
     }
 }
 
+/// Window titles in letters the built-in typefaces do not have.
+const FOREIGN_TITLES: [&str; 5] = [
+    "モンスターハンターワイルズ (Monster Hunter Wilds)",
+    "照片查看器 - 写真.jpg",
+    "한국어 메모장",
+    "שלום עולם - פנקס רשימות",
+    "مرحبا بالعالم - المفكرة",
+];
+
+/// Up to 0.9.6 each of these was a row of boxes, in the box and in the open
+/// list, so that such windows could not be told apart. They are drawn with
+/// the typefaces this system has for them; where it has none (a container),
+/// the test asks for nothing.
+#[test]
+fn source_titles_in_other_scripts_are_drawn_with_typefaces_of_the_system() {
+    for size in SIZES {
+        let mut h = with_windows(size, &FOREIGN_TITLES);
+        let fonts =
+            system_fonts::install_with(&h.ctx, system_fonts::os::System::new(), |_: &str| {});
+        let start = |title: &str| title.chars().take(4).collect::<String>();
+        let painted = h.settle();
+        let shown = find(&painted, &start(FOREIGN_TITLES[0])).rect;
+        // The other titles are painted only in the open list, which is an
+        // area over the page.
+        h.click(shown.center());
+        system_fonts::tests::draw_until_settled(&fonts, || {
+            h.settle();
+        });
+        let painted = h.settle();
+        let context = format!("{}x{}", size.0, size.1);
+        assert_inside_window(&painted, size.0, &context);
+        for title in FOREIGN_TITLES {
+            find(&painted, &start(title));
+            let boxes = system_fonts::tests::undrawn(&h.ctx, title);
+            assert!(
+                boxes.is_empty(),
+                "{context}: {title:?} is drawn with boxes for {boxes:?}; added {:?}",
+                fonts.added()
+            );
+        }
+    }
+}
+
 #[test]
 fn startup_notices_stay_visible_whatever_the_status_says() {
     for size in SIZES {
@@ -544,7 +600,7 @@ fn custom_buttons_and_help_topics_have_accessible_names() {
     let mut h = Harness::new(SIZES[0], Page::Controls);
     let painted = h.settle();
     // A glyph-faced chrome button reports what it does, not its glyph.
-    let maximize = find(&painted, "□").rect.center();
+    let maximize = find(&painted, MAXIMIZE).rect.center();
     h.run(vec![egui::Event::PointerMoved(maximize)]);
     let button = |pressed| egui::Event::PointerButton {
         pos: maximize,
@@ -658,7 +714,7 @@ fn long_about_values_wrap_inside_the_window() {
     }
 }
 
-/// The viewport asks for at least 700x580, but a tiling window manager or a
+/// The viewport asks for at least 700x360, but a tiling window manager or a
 /// frame during a restore can hand over anything. Sizes derived by
 /// subtracting margins went negative there, which egui rejects with a debug
 /// assertion: a panic in debug builds.
@@ -872,6 +928,7 @@ mod sweep {
         for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0] {
             out.push((980.0, 780.0, scale));
             out.push((700.0, 580.0, scale));
+            out.push((SMALLEST.0, SMALLEST.1, scale));
         }
         out.extend([
             (1280.0, 720.0, 1.0),  // 1280x720
@@ -885,6 +942,14 @@ mod sweep {
             (3000.0, 580.0, 1.0),
             (888.0, 580.0, 1.0), // the narrowest window with two columns
             (887.0, 580.0, 1.0), // the widest with one
+            (3000.0, SMALLEST.1, 1.0),
+            (888.0, SMALLEST.1, 1.0),
+            (887.0, SMALLEST.1, 1.0),
+            // The smallest window at the largest zoom it takes.
+            (SMALLEST.0 / 1.2, SMALLEST.1 / 1.2, 1.2),
+            // Lower than the viewport allows: a program that sizes windows.
+            (700.0, 300.0, 1.0),
+            (700.0, 240.0, 1.0),
             (980.0 / 1.7, 780.0 / 1.7, 1.7),
             (980.0 / 1.5, 780.0 / 1.5, 1.5),
             (980.0 / 1.1, 780.0 / 1.1, 1.1),
@@ -913,9 +978,26 @@ mod sweep {
 
     /// The checks of one frame. Returns what is wrong, in words.
     fn faults(h: &Harness, painted: &[Painted]) -> Vec<String> {
-        let (width, _) = h.size;
+        let (width, height) = h.size;
         let mut faults = Vec::new();
         for p in painted {
+            // What can be seen of it. A page that is longer than the window
+            // scrolls, and a line at the edge of what scrolls is cut by that
+            // edge: nothing may be seen beyond the window's own frame, where
+            // no scrolling brings it back. (What scrolls is seen 3 points
+            // beyond its own edge, which is egui's margin for it; the
+            // frame's innermost line is drawn there.)
+            let seen = p.rect.intersect(p.clip);
+            if seen.is_positive()
+                && (seen.top() < FRAME - 0.5 || seen.bottom() > height - FRAME + 3.5)
+            {
+                faults.push(format!(
+                    "text over the window's upper or lower edge: {:?} is seen at y {:.0}..{:.0}",
+                    short(&p.text),
+                    seen.top(),
+                    seen.bottom()
+                ));
+            }
             let clipped =
                 p.rect.left() < p.clip.left() - 0.5 || p.rect.right() > p.clip.right() + 0.5;
             // A text field scrolls what it holds; nothing else may be cut.
@@ -934,6 +1016,25 @@ mod sweep {
                     p.rect.left(),
                     p.rect.right()
                 ));
+            }
+        }
+        // The interface's own signs are ones the built-in typefaces have.
+        // One they lack is drawn with egui's stand-in, a square, and changes
+        // its shape when a typeface of the system is added for a window
+        // title or a file name (letters are what those are added for, and
+        // the stand-in itself always reads as lacking).
+        let font = egui::FontId::proportional(14.0);
+        for p in painted {
+            for sign in p.text.chars().filter(|c| {
+                *c as u32 >= 0x100 && !c.is_alphanumeric() && !c.is_whitespace() && *c != '\u{25FB}'
+            }) {
+                if !h.ctx.fonts_mut(|fonts| fonts.has_glyph(&font, sign)) {
+                    faults.push(format!(
+                        "a sign the built-in typefaces lack: U+{:04X} in {:?}",
+                        sign as u32,
+                        short(&p.text)
+                    ));
+                }
             }
         }
         let widgets: Vec<&Widget> = h.widgets.iter().filter(|w| operable(w)).collect();
@@ -1123,6 +1224,15 @@ mod sweep {
                 Box::new(|h| h.core().update = update_available()),
             ),
             (SIZES[1], Page::Help, Box::new(|h| h.app.help.selected = 6)),
+            // The smallest window: 360 points high, of which a page has 250.
+            (SMALLEST, Page::Controls, Box::new(crowded_controls)),
+            (SMALLEST, Page::Viewer, Box::new(crowded_viewer)),
+            (
+                SMALLEST,
+                Page::About,
+                Box::new(|h| h.core().update = update_available()),
+            ),
+            (SMALLEST, Page::Help, Box::new(|h| h.app.help.selected = 6)),
         ] {
             let mut h = Harness::new(size, page);
             setup(&mut h);
@@ -1158,6 +1268,30 @@ mod sweep {
                 ],
                 "{names:?}"
             );
+            // In that order on the screen too, each to the right of the one
+            // before it.
+            for pair in stops[..7].windows(2) {
+                assert!(
+                    pair[0].rect.right() <= pair[1].rect.left(),
+                    "{:?} is not left of {:?}",
+                    pair[0].name,
+                    pair[1].name
+                );
+            }
+            // The page's background is not a stop, and neither is the
+            // scrolling area of the controls and of the viewer (it was
+            // egui's own, for dragging the page: `drag_with_a_finger`).
+            // Both had the whole page for their place, without a name.
+            let whole_page = Rect::from_min_max(
+                pos2(FRAME, FRAME + TITLEBAR_HEIGHT + 8.0),
+                pos2(size.0 - FRAME, size.1 - FRAME),
+            );
+            let near = |a: egui::Pos2, b: egui::Pos2| (a - b).length() < 1.0;
+            let over_the_page = stops
+                .iter()
+                .filter(|s| near(s.rect.min, whole_page.min) && near(s.rect.max, whole_page.max))
+                .count();
+            assert_eq!(over_the_page, 0, "{names:?}");
             for (i, stop) in stops.iter().enumerate() {
                 if stop.role == Role::Unknown {
                     // egui's own: a scrolling area and its bar. Nothing of
@@ -1191,6 +1325,91 @@ mod sweep {
                 );
             }
             assert!(operable_at_first.len() >= 8, "{names:?}");
+        }
+    }
+
+    /// The wheel over the middle of the page, far enough for any page.
+    fn wheel_to_the_end(h: &mut Harness) -> Vec<Painted> {
+        let middle = pos2(h.size.0 * 0.6, h.size.1 * 0.7);
+        h.run(vec![egui::Event::PointerMoved(middle)]);
+        for _ in 0..40 {
+            h.run(vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: vec2(0.0, -400.0),
+                modifiers: Default::default(),
+            }]);
+        }
+        h.settle()
+    }
+
+    /// In the smallest window no page is shown whole, and every page is
+    /// brought to its last line by the wheel: nothing is below the window
+    /// for good. (Up to 0.9.6 the smallest window was 580 points high.)
+    #[test]
+    fn every_page_scrolls_to_its_end_in_the_smallest_window() {
+        let last_topic = any2odyssey_core::help::topics().len() - 1;
+        let cases: [(Page, Setup, &str); 4] = [
+            (
+                Page::Controls,
+                Box::new(crowded_controls),
+                "Samsung Odyssey G90XF",
+            ),
+            (Page::Viewer, Box::new(crowded_viewer), "stereo viewer"),
+            (
+                Page::About,
+                Box::new(|h| h.core().update = update_available()),
+                "Report a problem",
+            ),
+            (
+                Page::Help,
+                Box::new(move |h| h.app.help.selected = last_topic),
+                "",
+            ),
+        ];
+        for (page, setup, last) in cases {
+            for scale in [1.0, 2.0] {
+                let mut h = Harness::new(SMALLEST, page);
+                h.scale = scale;
+                setup(&mut h);
+                let first = h.settle();
+                let context = format!("{} at scale {scale}", last);
+                // The last line of the Help article is its last paragraph.
+                let last = if page == Page::Help {
+                    let topic = &any2odyssey_core::help::topics()[last_topic];
+                    let body = any2odyssey_core::help::paragraphs(&topic.body);
+                    let line = body.last().unwrap().lines().last().unwrap();
+                    line.chars().take(30).collect::<String>()
+                } else {
+                    last.to_owned()
+                };
+                let inside = |painted: &[Painted]| {
+                    painted.iter().any(|p| {
+                        let seen = p.rect.intersect(p.clip);
+                        p.text.contains(&last)
+                            && seen.height() >= p.rect.height().min(14.0) - 0.5
+                            && seen.bottom() <= SMALLEST.1 - FRAME + 3.5
+                    })
+                };
+                assert!(
+                    !inside(&first),
+                    "{context}: the page fits, nothing to scroll"
+                );
+                let scrolled = wheel_to_the_end(&mut h);
+                assert!(
+                    inside(&scrolled),
+                    "{context}: {last:?} was not brought into the window; what is seen there: {:?}",
+                    scrolled
+                        .iter()
+                        .filter(|p| p.rect.intersect(p.clip).is_positive())
+                        .map(|p| (short(&p.text), p.rect.top().round()))
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    faults(&h, &scrolled).is_empty(),
+                    "{context}: {:?}",
+                    faults(&h, &scrolled)
+                );
+            }
         }
     }
 
@@ -1342,6 +1561,247 @@ mod sweep {
             h.run(Vec::new());
         }
         assert_eq!(h.ctx.zoom_factor(), 0.2);
+    }
+
+    /// A control that ends in the three points a scroll area may paint over
+    /// below its own edge is not in view: those points lie under the window's
+    /// frame. Whether a control ends there is a matter of the window's
+    /// height, so every height around the default is tried; at 780 to 782
+    /// "Reset lens numbers" did, and Tab left it there.
+    #[test]
+    fn the_page_follows_the_focus_to_a_control_that_ends_under_the_frame() {
+        for height in 765..=795 {
+            let size = (SIZES[0].0, height as f32);
+            let mut h = Harness::new(size, Page::Viewer);
+            h.app.viewer = viewer(Input::Pair, Output::Lens);
+            h.settle();
+            tab_to(&mut h, "Reset lens numbers");
+            // A scroll to the focused control takes up to 0.3 seconds.
+            for _ in 0..24 {
+                h.run(Vec::new());
+            }
+            let focused = h.focused().expect("the focus").rect;
+            assert!(
+                focused.bottom() <= size.1 - FRAME + 1.0,
+                "in a window {height} points high the focused button ends at {}, under the frame",
+                focused.bottom()
+            );
+            assert!(focused.top() >= FRAME + TITLEBAR_HEIGHT, "{focused:?}");
+        }
+    }
+
+    /// A gold button in a column of `Ui::columns`, where the layout hands
+    /// every widget the column's whole width: it reacts where it is drawn.
+    /// (The cards of the pages no longer lay their contents out like that,
+    /// so the pages alone do not show it.)
+    #[test]
+    fn a_gold_button_in_a_justified_column_reacts_where_it_is_drawn() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let palette = Palette::for_dark(false);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 200.0))),
+            ..Default::default()
+        };
+        let mut seen = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.columns(1, |columns| {
+                    let ui = &mut columns[0];
+                    let column = ui.available_width();
+                    let drawn = widgets::gold_button_width(ui, "Reset lens numbers");
+                    let response = widgets::gold_button(ui, "Reset lens numbers", false, &palette);
+                    seen = Some((response.rect.width(), drawn, column));
+                });
+            });
+        });
+        let (reacts, drawn, column) = seen.expect("the column was laid out");
+        assert!(column > drawn + 200.0, "{column} {drawn}");
+        assert!(
+            (reacts - drawn).abs() < 0.5,
+            "reacts over {reacts} of {drawn}"
+        );
+    }
+
+    /// The window has a name for assistive software: the tree's root has
+    /// none of its own, and on Linux the title is not taken for it.
+    #[test]
+    fn the_window_is_named_in_the_accessibility_tree() {
+        for page in [Page::Controls, Page::Viewer, Page::Help, Page::About] {
+            let mut h = Harness::new(SIZES[0], page);
+            h.settle();
+            assert_eq!(h.window_name.as_deref(), Some(APP_NAME));
+        }
+    }
+
+    /// Where the page is: the top of the banner's line, which no click on
+    /// the page moves. `None` once the page is scrolled so far that the
+    /// line is out of view.
+    fn banner_at(painted: &[Painted]) -> Option<f32> {
+        try_find(painted, "CONTINUOUS DESKTOP 3D").map(|p| p.rect.top())
+    }
+
+    /// A page in a window it does not fit: what it is called, the window's
+    /// size, and a checkbox and the primary button that are in view.
+    type ScrollingPage = (&'static str, Page, (f32, f32), [&'static str; 2]);
+
+    /// The two pages in windows they do not fit: the viewer in its default
+    /// window, and the controls in one 640 points high (they fit the
+    /// default one).
+    fn pages_that_scroll() -> [ScrollingPage; 2] {
+        [
+            (
+                "the viewer",
+                Page::Viewer,
+                SIZES[0],
+                ["Swap left and right eyes", "Start output"],
+            ),
+            (
+                "the controls",
+                Page::Controls,
+                (980.0, 640.0),
+                ["Convert automatically when this app opens", "Turn on 3D"],
+            ),
+        ]
+    }
+
+    fn button_at(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// A press on a checkbox or a button was the start of a drag of the
+    /// page (`widgets::dragged_by_touch`): the page moved as far as the
+    /// pointer had moved in the frame of the press. With a pointer that is
+    /// put on a control and pressed in one go that was all the way from
+    /// where it had been, and the page went to its end; with a hand that is
+    /// still slowing down, a few points at every click.
+    #[test]
+    fn a_click_leaves_the_page_where_it_is_however_the_pointer_comes_to_it() {
+        for (what, page, size, names) in pages_that_scroll() {
+            for name in names {
+                for arrival in ["at rest", "put there and pressed at once", "slowing down"] {
+                    let mut h = Harness::new(size, page);
+                    let painted = h.settle();
+                    let before = banner_at(&painted);
+                    assert!(before.is_some(), "{what}: no banner");
+                    let target = h
+                        .widgets
+                        .iter()
+                        .find(|w| w.name == name)
+                        .unwrap_or_else(|| panic!("{name} is not on the page"))
+                        .rect
+                        .center();
+                    // The pointer has been lower on the page, and at rest.
+                    h.run(vec![egui::Event::PointerMoved(target + vec2(40.0, 250.0))]);
+                    h.settle();
+                    let frames: Vec<Vec<egui::Event>> = match arrival {
+                        "at rest" => vec![
+                            vec![egui::Event::PointerMoved(target)],
+                            vec![button_at(target, true)],
+                            vec![button_at(target, false)],
+                        ],
+                        "put there and pressed at once" => vec![
+                            vec![egui::Event::PointerMoved(target), button_at(target, true)],
+                            vec![button_at(target, false)],
+                        ],
+                        // Up to the control at 8, 8 and 6 points a frame;
+                        // the button goes down in a frame in which the
+                        // pointer moved 4 more, and it moves 2 while held.
+                        _ => {
+                            let at = |below: f32| target + vec2(0.0, below);
+                            vec![
+                                vec![egui::Event::PointerMoved(at(20.0))],
+                                vec![egui::Event::PointerMoved(at(12.0))],
+                                vec![egui::Event::PointerMoved(at(6.0))],
+                                vec![egui::Event::PointerMoved(at(2.0)), button_at(at(2.0), true)],
+                                vec![egui::Event::PointerMoved(at(0.0))],
+                                vec![button_at(at(0.0), false)],
+                            ]
+                        }
+                    };
+                    let mut said = Vec::new();
+                    for events in frames {
+                        h.run(events);
+                        said.extend(reported(&h.events));
+                    }
+                    assert!(
+                        said.iter()
+                            .any(|(clicked, label, _)| *clicked && label == name),
+                        "{name}, {arrival}: the click said {said:?}"
+                    );
+                    // A page that was thrown goes on moving for a second.
+                    for frame in 0..60 {
+                        let painted = h.run(Vec::new());
+                        assert_eq!(
+                            banner_at(&painted),
+                            before,
+                            "{what}: a click on {name:?} with the pointer {arrival} moved the page (frame {frame})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A finger still drags the page, from anywhere on it, a checkbox
+    /// included, and a drag is not a click.
+    #[test]
+    fn a_finger_drags_the_page_and_does_not_click() {
+        for (what, page, size, names) in pages_that_scroll() {
+            let mut h = Harness::new(size, page);
+            let painted = h.settle();
+            let before = banner_at(&painted).expect("the banner");
+            let start = h
+                .widgets
+                .iter()
+                .find(|w| w.name == names[0])
+                .expect("the checkbox")
+                .rect
+                .center();
+            let touch = |phase, pos| egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(7),
+                phase,
+                pos,
+                force: None,
+            };
+            // What a touch screen sends: the touch, and a pointer with it.
+            let mut said = Vec::new();
+            let mut frames = vec![vec![
+                touch(egui::TouchPhase::Start, start),
+                egui::Event::PointerMoved(start),
+                button_at(start, true),
+            ]];
+            let mut at = start;
+            for _ in 0..5 {
+                at.y -= 10.0;
+                frames.push(vec![
+                    touch(egui::TouchPhase::Move, at),
+                    egui::Event::PointerMoved(at),
+                ]);
+            }
+            frames.push(vec![
+                touch(egui::TouchPhase::End, at),
+                button_at(at, false),
+                egui::Event::PointerGone,
+            ]);
+            for events in frames {
+                h.run(events);
+                said.extend(reported(&h.events));
+            }
+            let painted = h.settle();
+            assert!(
+                banner_at(&painted).is_none_or(|now| now <= before - 40.0),
+                "{what}: the banner is at {:?}, it was at {before}",
+                banner_at(&painted)
+            );
+            assert_eq!(said, vec![], "{what}: the drag was taken for a click");
+        }
     }
 
     /// The tree above comes from egui; whether a screen reader is given it

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use any2odyssey_core::live::{PixelOrder, Source};
+use any2odyssey_core::live::{self, PixelOrder, Source, Turned};
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::desktop::PersistMode;
 use pipewire as pw;
@@ -249,12 +249,7 @@ fn run(
             // picture; a screen shown on itself has the real one on top
             // already. Where the desktop cannot draw it into the stream,
             // the stream comes without.
-            let cursor = match proxy.available_cursor_modes().await {
-                Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => {
-                    CursorMode::Embedded
-                }
-                _ => CursorMode::Hidden,
-            };
+            let cursor = wished_cursor(pointer, proxy.available_cursor_modes().await.ok());
             proxy
                 .select_sources(
                     &session,
@@ -310,6 +305,27 @@ fn run(
         let _ = session.close().await;
     });
     streamed
+}
+
+/// The cursor mode to ask the portal for: the pointer drawn into the frames
+/// where that is wanted and the desktop can do it, and otherwise nothing,
+/// which the portal takes for "hidden".
+///
+/// "Hidden" used to be asked for by name. The portal checks a named mode
+/// against the modes its backend has told it of, and for a moment after the
+/// backend has been started again (it had ended, or was updated) it knows of
+/// none: the next Start then ended with "Unavailable cursor mode 1", on GNOME
+/// with xdg-desktop-portal 1.22. What is not named is not checked.
+fn wished_cursor(
+    pointer: bool,
+    available: Option<ashpd::enumflags2::BitFlags<CursorMode>>,
+) -> Option<CursorMode> {
+    match available {
+        Some(modes) if pointer && modes.contains(CursorMode::Embedded) => {
+            Some(CursorMode::Embedded)
+        }
+        _ => None,
+    }
 }
 
 /// How long the portal's answer to the closing of a session is waited for.
@@ -446,6 +462,231 @@ fn narrow_tens(
     }
 }
 
+/// The note a frame carries about how its picture lies in the buffer
+/// (`SPA_META_VideoTransform`): one number, read by
+/// [`Turned::from_note`]. The PipeWire library's own type for it is there
+/// only when the program is built for PipeWire 0.3.62 or newer; the note's
+/// number and its one field are the same for every version.
+#[repr(transparent)]
+struct TurnNote(u32);
+
+impl spa::buffer::meta::Metadata for TurnNote {
+    const META_TYPE: u32 = 8;
+}
+
+/// What is asked to come with every frame, each as PipeWire wants it
+/// described: the frame's header, which can say that its bytes are no
+/// picture, and the note about how the picture lies. A desktop attaches a
+/// note only for a receiver that has asked for it, so a rotated screen of
+/// a desktop that hands out the panel's own pixels (sway and the other
+/// wlroots desktops) was shown lying on its side.
+fn wanted_notes() -> Result<Vec<Vec<u8>>, String> {
+    let note = |kind: u32, size: usize| {
+        let wanted = spa::pod::Object {
+            type_: spa::utils::SpaTypes::ObjectParamMeta.as_raw(),
+            id: spa::param::ParamType::Meta.as_raw(),
+            properties: vec![
+                spa::pod::Property::new(
+                    spa::sys::SPA_PARAM_META_type,
+                    spa::pod::Value::Id(spa::utils::Id(kind)),
+                ),
+                spa::pod::Property::new(
+                    spa::sys::SPA_PARAM_META_size,
+                    spa::pod::Value::Int(size as i32),
+                ),
+            ],
+        };
+        spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(wanted),
+        )
+        .map(|done| done.0.into_inner())
+        .map_err(|e| format!("PipeWire: could not describe the wanted notes: {e:?}"))
+    };
+    use spa::buffer::meta::{MetaHeader, Metadata};
+    Ok(vec![
+        note(MetaHeader::META_TYPE, std::mem::size_of::<MetaHeader>())?,
+        note(TurnNote::META_TYPE, std::mem::size_of::<TurnNote>())?,
+    ])
+}
+
+/// What a buffer says about the picture in it.
+#[derive(Clone, Copy, Debug)]
+struct Told {
+    /// Where the picture begins in the buffer's memory, how many bytes of
+    /// it are valid, and how far its rows are apart.
+    offset: u32,
+    size: u32,
+    stride: i32,
+    /// The buffer or the frame's header is marked as corrupted.
+    spoiled: bool,
+}
+
+/// The rows of a `width` x `height` picture of four bytes a pixel in the
+/// memory `bytes` of a buffer that says `told` about it, and how far apart
+/// they are. `None` for a buffer that holds no picture or not all of one.
+///
+/// A desktop also sends buffers that are no picture, and says so: marked
+/// as corrupted (xdg-desktop-portal-wlr for a frame it could not copy, in
+/// the buffer and in the frame's header; KDE for an update of the pointer
+/// alone), or with no valid bytes at all (GNOME for a frame it could not
+/// record, from 43 on with the mark as well). The memory of such a buffer
+/// holds an older picture or none; it was read all the same, and shown.
+fn picture_in(bytes: &[u8], told: Told, width: u32, height: u32) -> Option<(&[u8], usize)> {
+    if told.spoiled || told.size == 0 {
+        return None;
+    }
+    let (offset, size) = (told.offset as usize, told.size as usize);
+    let row = width as usize * 4;
+    // A distance that cannot be one (none, backwards, shorter than a row)
+    // is taken for rows without gaps.
+    let stride = usize::try_from(told.stride)
+        .ok()
+        .filter(|s| *s >= row)
+        .unwrap_or(row);
+    let needed = match (height as usize).checked_sub(1) {
+        Some(rows) if row > 0 => stride.checked_mul(rows)?.checked_add(row)?,
+        _ => return None,
+    };
+    let end = offset.saturating_add(size.min(bytes.len()));
+    let valid = bytes.get(offset..end.min(bytes.len()))?;
+    Some((valid.get(..needed)?, stride))
+}
+
+/// The longest side of a screen that is shown, in pixels: the same as for
+/// a picture that is opened.
+const LONGEST_SIDE: u32 = 16384;
+
+/// Why a stream of `width` x `height` pixels is not shown, if it is not:
+/// one of its sides is longer than [`LONGEST_SIDE`].
+///
+/// While a size was wished for, the wish's range ended at 16384 x 16384 and
+/// PipeWire refused a stream that was larger than that on both sides ("no
+/// more input formats"); one that was larger on one side only it let
+/// through, by its way of comparing sizes. Since no size is wished for,
+/// nothing was refused: a producer with 17000 x 17000 was shown, with two
+/// frames of 1.16 GB held here. The limit is the program's own now, on
+/// each side, and has a line of its own on the page.
+fn too_large(width: u32, height: u32) -> Option<String> {
+    (width > LONGEST_SIDE || height > LONGEST_SIDE).then(|| {
+        format!(
+            "the screen cast is {width} × {height} pixels, and no more than \
+             {LONGEST_SIDE} a side can be shown"
+        )
+    })
+}
+
+/// Room a buffer may keep beyond what a frame needs: not worth giving back.
+const SMALL_ROOM: usize = 4096;
+
+/// Let go of `buffer`'s room when it is more than a frame of `wanted` bytes
+/// needs: the next frame then gets room of its own size.
+///
+/// The buffers that take the frames keep the room of the largest frame
+/// they have held. After a larger screen (another mode of the shown one, or
+/// one picture of it while the desktop changed it) the program stayed that
+/// much larger until the output was stopped: 265 MB after 7680 x 4320. A
+/// buffer that fits is left alone, so this costs a comparison a frame.
+pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
+    if buffer.capacity() > wanted.max(SMALL_ROOM) {
+        *buffer = Vec::new();
+    }
+}
+
+/// The most pictures a second a desktop is asked to send. Sixty are
+/// wanted, which is as many as are rendered, and a little more is asked
+/// for: a desktop may leave out a picture that comes a moment sooner after
+/// the last one than the limit allows.
+///
+/// Measured on a screen of 120 Hz that changed at every refresh. GNOME
+/// (mutter 51.1) sent 48 a second when asked for 60, and 60 when asked for
+/// 61, 65, 72 or 90; KDE Plasma (KWin 6.8.2) sent what it was asked for,
+/// 60, 61, 65, 72 or 90.
+const MOST_A_SECOND: u32 = 62;
+
+/// The stream that is asked for: raw video in one of the pixel formats that
+/// are read here, at whatever rate it states for itself and with
+/// [`MOST_A_SECOND`] frames a second as the most a desktop is to send. No
+/// size is wished for.
+///
+/// The size is the desktop's to say. KWin (Plasma 6.8) offers every size from
+/// 200 x 200 to 10000 x 10000 with the screen's own as its wish, and resizes
+/// the picture to whatever the reader wishes for instead; the wish here used
+/// to be 1920 x 1080, so every screen came at that size: a 2560 x 1440 one
+/// scaled down, a screen turned on its side (1080 x 1920) pressed into the
+/// wide shape. Desktops that offer one size (GNOME, wlroots) took no notice.
+fn wanted_format() -> spa::pod::Object {
+    spa::pod::object!(
+        spa::utils::SpaTypes::ObjectParamFormat,
+        spa::param::ParamType::EnumFormat,
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaType,
+            Id,
+            spa::param::format::MediaType::Video
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            spa::param::format::MediaSubtype::Raw
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRA,
+            spa::param::video::VideoFormat::RGBx,
+            spa::param::video::VideoFormat::RGBA,
+            // What a desktop that renders the screen with ten bits a colour
+            // has to offer, and all it has (`Packing::Tens`).
+            spa::param::video::VideoFormat::xRGB_210LE,
+            spa::param::video::VideoFormat::xBGR_210LE,
+            spa::param::video::VideoFormat::ARGB_210LE,
+            spa::param::video::VideoFormat::ABGR_210LE,
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction { num: 60, denom: 1 },
+            spa::utils::Fraction { num: 0, denom: 1 },
+            // Whatever rate a stream states for itself is taken. With
+            // sixty as the most here, a stream of a fixed faster rate was
+            // refused ("no more input formats"), and one that comes as the
+            // screen changes, which is what the desktops send, was not
+            // slowed by it.
+            spa::utils::Fraction {
+                num: 1000,
+                denom: 1
+            }
+        ),
+        // Sixty a second is as many as are rendered. A desktop that sends
+        // a picture when the screen has changed says how many a second
+        // that may be at the most, and is asked to keep to a little more
+        // than that (`MOST_A_SECOND`): of a faster screen (the Odyssey
+        // runs at 165) every picture was copied and more than half of
+        // them never looked at.
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoMaxFramerate,
+            Choice,
+            Range,
+            Fraction,
+            spa::utils::Fraction {
+                num: MOST_A_SECOND,
+                denom: 1
+            },
+            spa::utils::Fraction { num: 1, denom: 1 },
+            spa::utils::Fraction {
+                num: MOST_A_SECOND,
+                denom: 1
+            }
+        ),
+    )
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -453,6 +694,9 @@ struct StreamData {
     /// the slot's, so the two buffers serve every frame and the reader is
     /// kept waiting for the exchange only, not for the copy.
     spare: Vec<u8>,
+    /// Where a frame of ten bits a colour that does not lie upright is
+    /// written as bytes before it is turned; empty for every other frame.
+    narrowed: Vec<u8>,
 }
 
 fn stream(
@@ -499,6 +743,7 @@ fn stream(
     // that cannot be watched like this is shown all the same.
     let registry = core.get_registry_rc().ok();
     let node_ended = ended.clone();
+    let size_ended = ended.clone();
     let _registry_listener = registry.as_ref().map(|registry| {
         registry
             .add_listener_local()
@@ -513,7 +758,9 @@ fn stream(
         format: Default::default(),
         shared: shared.clone(),
         spare: Vec::new(),
+        narrowed: Vec::new(),
     };
+    let notes = wanted_notes()?;
     let _listener = stream
         .add_local_listener_with_user_data(data)
         .state_changed(move |_, data, old, new| {
@@ -525,7 +772,7 @@ fn stream(
                 ended(reason);
             }
         })
-        .param_changed(|_, data, id, param| {
+        .param_changed(move |stream, data, id, param| {
             let Some(param) = param else { return };
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
@@ -538,6 +785,21 @@ fn stream(
                 && media_subtype == spa::param::format::MediaSubtype::Raw
             {
                 let _ = data.format.parse(param);
+                // A size that is not shown ends the cast here, at the start
+                // and whenever the size changes: before buffers for it are
+                // agreed on, and so before one is mapped or copied.
+                let size = data.format.size();
+                if let Some(reason) = too_large(size.width, size.height) {
+                    size_ended(reason);
+                    return;
+                }
+                // The notes are asked for with every format that is agreed
+                // on: the buffers are made anew for it.
+                let mut notes: Vec<_> = notes
+                    .iter()
+                    .filter_map(|note| spa::pod::Pod::from_bytes(note))
+                    .collect();
+                let _ = stream.update_params(&mut notes);
             }
         })
         .process(|stream, data| {
@@ -548,55 +810,91 @@ fn stream(
                 return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
+            // The cast is being ended (see `param_changed`).
+            if too_large(width, height).is_some() {
+                return;
+            }
+            // A note that names no turn leaves the frame as it comes.
+            let turned = buffer
+                .find_meta::<TurnNote>()
+                .and_then(|note| Turned::from_note(note.0))
+                .unwrap_or_default();
+            let header_spoiled = buffer
+                .find_meta::<spa::buffer::meta::MetaHeader>()
+                .is_some_and(|header| {
+                    let corrupted = spa::buffer::meta::MetaHeaderFlags::CORRUPTED;
+                    header.flags().contains(corrupted)
+                });
             let datas = buffer.datas_mut();
             let Some(plane) = datas.first_mut() else {
                 return;
             };
             let chunk = plane.chunk();
-            let (offset, size) = (chunk.offset() as usize, chunk.size() as usize);
-            let row = width as usize * 4;
-            let stride = usize::try_from(chunk.stride())
-                .ok()
-                .filter(|s| *s >= row)
-                .unwrap_or(row);
+            let told = Told {
+                offset: chunk.offset(),
+                size: chunk.size(),
+                stride: chunk.stride(),
+                spoiled: header_spoiled
+                    || chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED),
+            };
             let Some(bytes) = plane.data() else { return };
-            let needed = match (height as usize).checked_sub(1) {
-                Some(rows) if row > 0 => stride * rows + row,
-                _ => return,
-            };
-            let end = offset.saturating_add(if size == 0 {
-                needed
-            } else {
-                size.min(bytes.len())
-            });
-            let Some(frame) = bytes.get(offset..end.min(bytes.len())) else {
+            let Some((frame, stride)) = picture_in(bytes, told, width, height) else {
                 return;
             };
-            if frame.len() < needed {
-                return;
+            let row = width as usize * 4;
+            let lying = |bytes, stride| Source {
+                bytes,
+                width,
+                height,
+                stride,
+                // Not looked at: a pixel's bytes are moved as they are.
+                order: PixelOrder::Bgr,
+            };
+            let (tens_wide, tens_high) = (width as usize, height as usize);
+            // What the frame takes in the buffer it is written to: its rows
+            // as they come, or without their gaps.
+            let wanted = match (packing, turned) {
+                (Packing::Bytes { .. }, Turned::Upright) => frame.len(),
+                _ => row * tens_high,
+            };
+            fitted(&mut data.spare, wanted);
+            fitted(&mut data.narrowed, wanted);
+            let (width, height, stride, bgr) = match (packing, turned) {
+                (Packing::Bytes { bgr }, Turned::Upright) => {
+                    data.spare.clear();
+                    data.spare.extend_from_slice(frame);
+                    (width, height, stride, bgr)
+                }
+                (Packing::Tens { red_high }, Turned::Upright) => {
+                    let spare = &mut data.spare;
+                    narrow_tens(frame, tens_wide, tens_high, stride, red_high, spare);
+                    (width, height, row, true)
+                }
+                (Packing::Bytes { bgr }, _) => {
+                    let upright = live::turn_upright(lying(frame, stride), turned, &mut data.spare);
+                    let Some((width, height)) = upright else {
+                        return;
+                    };
+                    (width, height, width as usize * 4, bgr)
+                }
+                (Packing::Tens { red_high }, _) => {
+                    let narrowed = &mut data.narrowed;
+                    narrow_tens(frame, tens_wide, tens_high, stride, red_high, narrowed);
+                    let upright = live::turn_upright(lying(narrowed, row), turned, &mut data.spare);
+                    let Some((width, height)) = upright else {
+                        return;
+                    };
+                    (width, height, width as usize * 4, true)
+                }
+            };
+            if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
+                data.narrowed = Vec::new();
             }
-            data.spare.clear();
-            let (stride, bgr) = match packing {
-                Packing::Bytes { bgr } => {
-                    data.spare.extend_from_slice(&frame[..needed]);
-                    (stride, bgr)
-                }
-                Packing::Tens { red_high } => {
-                    let (width, height) = (width as usize, height as usize);
-                    narrow_tens(
-                        &frame[..needed],
-                        width,
-                        height,
-                        stride,
-                        red_high,
-                        &mut data.spare,
-                    );
-                    (row, true)
-                }
-            };
             let first = {
                 let mut slot = lock(&data.shared.slot);
                 std::mem::swap(&mut slot.bytes, &mut data.spare);
+                // What was the slot's has held the frame before this one.
+                fitted(&mut data.spare, slot.bytes.len());
                 slot.width = width;
                 slot.height = height;
                 slot.stride = stride;
@@ -614,66 +912,7 @@ fn stream(
         .register()
         .map_err(failed("no stream listener"))?;
 
-    let format = spa::pod::object!(
-        spa::utils::SpaTypes::ObjectParamFormat,
-        spa::param::ParamType::EnumFormat,
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaType,
-            Id,
-            spa::param::format::MediaType::Video
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::MediaSubtype,
-            Id,
-            spa::param::format::MediaSubtype::Raw
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRx,
-            spa::param::video::VideoFormat::BGRA,
-            spa::param::video::VideoFormat::RGBx,
-            spa::param::video::VideoFormat::RGBA,
-            // What a desktop that renders the screen with ten bits a colour
-            // has to offer, and all it has (`Packing::Tens`).
-            spa::param::video::VideoFormat::xRGB_210LE,
-            spa::param::video::VideoFormat::xBGR_210LE,
-            spa::param::video::VideoFormat::ARGB_210LE,
-            spa::param::video::VideoFormat::ABGR_210LE,
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            spa::utils::Rectangle {
-                width: 1920,
-                height: 1080
-            },
-            spa::utils::Rectangle {
-                width: 1,
-                height: 1
-            },
-            spa::utils::Rectangle {
-                width: 16384,
-                height: 16384
-            }
-        ),
-        spa::pod::property!(
-            spa::param::format::FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            spa::utils::Fraction { num: 60, denom: 1 },
-            spa::utils::Fraction { num: 0, denom: 1 },
-            // Sixty a second is as many as are rendered; a faster screen
-            // would only have its extra frames copied and dropped.
-            spa::utils::Fraction { num: 60, denom: 1 }
-        ),
-    );
+    let format = wanted_format();
     let values = spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(format),
@@ -812,6 +1051,92 @@ mod tests {
     const ENDED: &str = "the screen cast was ended by the desktop";
 
     #[test]
+    fn no_size_is_wished_for_and_every_format_wished_for_can_be_read() {
+        use spa::param::format::FormatProperties as Key;
+        let format = wanted_format();
+        let has = |key: Key| format.properties.iter().any(|p| p.key == key.as_raw());
+        // KWin resizes the picture to the size a reader wishes for: with
+        // 1920 x 1080 wished for, a 2560 x 1440 screen came at 1920 x 1080.
+        assert!(!has(Key::VideoSize));
+        assert!(has(Key::MediaType) && has(Key::MediaSubtype) && has(Key::VideoFramerate));
+        assert!(has(Key::VideoMaxFramerate));
+        let formats = format
+            .properties
+            .iter()
+            .find(|p| p.key == Key::VideoFormat.as_raw())
+            .expect("the pixel formats are named");
+        let spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
+            _,
+            spa::utils::ChoiceEnum::Enum {
+                default,
+                alternatives,
+            },
+        ))) = &formats.value
+        else {
+            panic!("the pixel formats are a choice: {:?}", formats.value);
+        };
+        assert!(!alternatives.is_empty());
+        for id in alternatives.iter().chain([default]) {
+            let format = spa::param::video::VideoFormat::from_raw(id.0);
+            assert!(packing(format).is_some(), "{format:?} is wished for");
+        }
+        // And it can be written as PipeWire wants it.
+        let written = spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &spa::pod::Value::Object(format),
+        );
+        assert!(written.is_ok());
+    }
+
+    #[test]
+    fn a_little_over_sixty_a_second_is_the_most_asked_for_and_a_streams_own_rate_is_taken() {
+        use spa::param::format::FormatProperties as Key;
+        use spa::pod::{ChoiceValue, Value};
+        use spa::utils::{Choice, ChoiceEnum};
+        let format = wanted_format();
+        // A range of whole numbers a second: the wish, the least, the most.
+        let range = |key: Key| {
+            let named = format.properties.iter().find(|p| p.key == key.as_raw());
+            let Some(Value::Choice(ChoiceValue::Fraction(Choice(
+                _,
+                ChoiceEnum::Range { default, min, max },
+            )))) = named.map(|p| &p.value)
+            else {
+                panic!("{key:?} is not a range: {named:?}");
+            };
+            assert_eq!((default.denom, min.denom, max.denom), (1, 1, 1));
+            (default.num, min.num, max.num)
+        };
+        // What a desktop is to send at the most. It names its own limit as
+        // a range from 1 to the screen's rate, and the two are cut to one.
+        // Not 60: asked for exactly that, GNOME sent 48 a second.
+        assert_eq!(range(Key::VideoMaxFramerate), (62, 1, 62));
+        assert_eq!(MOST_A_SECOND, 62);
+        // The stream's own rate: 0 is "as the screen changes", and a fixed
+        // rate of 144 or 240 was refused while 60 was the most here.
+        let (_, least, most) = range(Key::VideoFramerate);
+        assert_eq!(least, 0);
+        assert!(most >= 240);
+    }
+
+    #[test]
+    fn the_pointer_is_asked_for_by_name_only_where_it_is_drawn() {
+        use ashpd::enumflags2::BitFlags;
+        let all = CursorMode::Hidden | CursorMode::Embedded | CursorMode::Metadata;
+        assert_eq!(wished_cursor(true, Some(all)), Some(CursorMode::Embedded));
+        // No pointer wanted: nothing is named, which the portal takes for
+        // hidden. Named, it was refused for a moment after the portal's
+        // backend had been started again ("Unavailable cursor mode 1").
+        assert_eq!(wished_cursor(false, Some(all)), None);
+        assert_eq!(wished_cursor(false, None), None);
+        // A desktop that cannot draw it, or does not say what it can.
+        let cannot = CursorMode::Hidden | CursorMode::Metadata;
+        assert_eq!(wished_cursor(true, Some(cannot)), None);
+        assert_eq!(wished_cursor(true, Some(BitFlags::empty())), None);
+        assert_eq!(wished_cursor(true, None), None);
+    }
+
+    #[test]
     fn a_portal_that_does_not_answer_is_not_waited_for_longer_than_said() {
         let runtime = portal_runtime().unwrap();
         // An answer that comes is waited for, however short the patience
@@ -887,6 +1212,170 @@ mod tests {
         // A frame shorter than it says gives the rows it has, and no more.
         narrow_tens(&frame[..14], 2, 2, 12, true, &mut out);
         assert_eq!(out.len(), 8);
+    }
+
+    #[test]
+    fn the_header_and_the_note_about_the_turn_are_asked_for_as_pipewire_lays_them_out() {
+        use spa::pod::{deserialize::PodDeserializer, Value};
+        // PipeWire's numbers for the two, and the bytes each of them is: a
+        // desktop does not attach a note that is asked for at another size.
+        let expected = [(1, 32), (8, 4)];
+        let notes = wanted_notes().unwrap();
+        assert_eq!(notes.len(), expected.len());
+        for (note, (kind, size)) in notes.iter().zip(expected) {
+            assert!(spa::pod::Pod::from_bytes(note).is_some());
+            let Ok((_, Value::Object(wanted))) = PodDeserializer::deserialize_any_from(note) else {
+                panic!("the note {kind} is not an object");
+            };
+            assert_eq!(wanted.type_, spa::sys::SPA_TYPE_OBJECT_ParamMeta);
+            assert_eq!(wanted.id, spa::sys::SPA_PARAM_Meta);
+            let values: Vec<_> = wanted.properties.iter().map(|p| &p.value).collect();
+            assert_eq!(
+                values,
+                [&Value::Id(spa::utils::Id(kind)), &Value::Int(size)],
+                "note {kind}"
+            );
+        }
+        assert_eq!(std::mem::size_of::<TurnNote>(), 4);
+    }
+
+    #[test]
+    fn a_buffer_gives_its_picture_only_when_it_says_it_holds_all_of_one() {
+        // A picture of 3 x 2 pixels, its rows 16 bytes apart, 8 bytes into
+        // a buffer that has 4 more at its end.
+        let bytes: Vec<u8> = (0..40).collect();
+        let told = Told {
+            offset: 8,
+            size: 32,
+            stride: 16,
+            spoiled: false,
+        };
+        let picture = |told| picture_in(&bytes, told, 3, 2);
+        assert_eq!(picture(told), Some((&bytes[8..36], 16)));
+        // The last row need not have the gap after it; one byte less than
+        // the picture is not a picture.
+        assert_eq!(
+            picture(Told { size: 28, ..told }),
+            Some((&bytes[8..36], 16))
+        );
+        assert_eq!(picture(Told { size: 27, ..told }), None);
+        // More bytes than the buffer has are as many as it has.
+        let all = Some((&bytes[8..36], 16));
+        assert_eq!(picture(Told { size: 4096, ..told }), all);
+        assert_eq!(
+            picture(Told {
+                size: u32::MAX,
+                ..told
+            }),
+            all
+        );
+        // Marked as no picture, or without a valid byte: what the memory
+        // holds is not looked at.
+        assert_eq!(
+            picture(Told {
+                spoiled: true,
+                ..told
+            }),
+            None
+        );
+        assert_eq!(picture(Told { size: 0, ..told }), None);
+        // A picture that begins where it cannot.
+        for offset in [13, 40, 41, u32::MAX] {
+            assert_eq!(picture(Told { offset, ..told }), None, "offset {offset}");
+        }
+        assert_eq!(
+            picture(Told { offset: 12, ..told }),
+            Some((&bytes[12..40], 16))
+        );
+        // A distance between rows that cannot be one is taken for none.
+        for stride in [0, -16, 11, i32::MIN] {
+            assert_eq!(
+                picture(Told { stride, ..told }),
+                Some((&bytes[8..32], 12)),
+                "stride {stride}"
+            );
+        }
+        // Rows further apart than the buffer is long.
+        assert_eq!(picture(Told { stride: 24, ..told }), None);
+        assert_eq!(
+            picture(Told {
+                stride: i32::MAX,
+                ..told
+            }),
+            None
+        );
+        // A size the buffer was not made for, and no size at all.
+        assert_eq!(picture_in(&bytes, told, 3, 3), None);
+        assert_eq!(picture_in(&bytes, told, 9, 1), None);
+        assert_eq!(picture_in(&bytes, told, 0, 2), None);
+        assert_eq!(picture_in(&bytes, told, 3, 0), None);
+        assert_eq!(picture_in(&bytes, told, u32::MAX, u32::MAX), None);
+        assert_eq!(picture_in(&[], told, 1, 1), None);
+        assert_eq!(
+            picture_in(&bytes, Told { offset: 0, ..told }, 1, 1),
+            Some((&bytes[..4], 16))
+        );
+    }
+
+    #[test]
+    fn a_screen_with_a_side_longer_than_16384_is_refused_and_says_so() {
+        // Shown: the largest there is, the largest KWin offers, and shapes
+        // of one pixel a side.
+        for (width, height) in [
+            (16384, 16384),
+            (16384, 8192),
+            (10000, 10000),
+            (7680, 4320),
+            (16384, 1),
+            (1, 16384),
+            (1, 1),
+        ] {
+            assert_eq!(too_large(width, height), None, "{width} x {height}");
+        }
+        // Refused: one pixel more on either side, however short the other.
+        for (width, height) in [
+            (16385, 16),
+            (16, 16385),
+            (16385, 16384),
+            (16400, 16400),
+            (17000, 17000),
+            (20000, 64),
+            (u32::MAX, 1),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(too_large(width, height).is_some(), "{width} x {height}");
+        }
+        // What the page says after "Live capture ended: ".
+        assert_eq!(
+            too_large(17000, 17000).as_deref(),
+            Some("the screen cast is 17000 × 17000 pixels, and no more than 16384 a side can be shown")
+        );
+    }
+
+    #[test]
+    fn a_buffer_larger_than_a_frame_needs_is_let_go_of_and_one_that_fits_is_kept() {
+        // The room of a frame of 7680 x 4320 before one of 1920 x 1080.
+        let mut buffer = Vec::with_capacity(7680 * 4320 * 4);
+        buffer.extend_from_slice(&[1, 2, 3]);
+        fitted(&mut buffer, 1920 * 1080 * 4);
+        assert_eq!((buffer.len(), buffer.capacity()), (0, 0));
+        // The next frame takes what it needs, and that is kept from then
+        // on, with what is in it.
+        buffer.extend_from_slice(&[7; 10_000]);
+        let (room, place) = (buffer.capacity(), buffer.as_ptr());
+        assert!(room < 20_000);
+        fitted(&mut buffer, 10_000);
+        fitted(&mut buffer, 16_384 * 16_384 * 4);
+        assert_eq!((buffer.capacity(), buffer.as_ptr()), (room, place));
+        assert_eq!(buffer, [7; 10_000]);
+        // A little too much room is not worth a new buffer for every frame
+        // of a screen of a few pixels.
+        let mut small = Vec::with_capacity(64);
+        fitted(&mut small, 4);
+        assert_eq!(small.capacity(), 64);
+        let mut empty = Vec::new();
+        fitted(&mut empty, 0);
+        assert_eq!(empty.capacity(), 0);
     }
 
     #[test]

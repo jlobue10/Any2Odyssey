@@ -166,6 +166,26 @@ try{
   }
  }
 
+ # A shortcut that is hidden or marked as a system file (Properties > Hidden). Nothing keeps this account
+ # from deleting it; Remove-Item alone refused, and 0.9.6 named it as one that "could not be removed" and
+ # left it, pointing at a program that was gone (the releases before stopped at it, half-way). One that
+ # leads elsewhere stays, hidden as it was.
+ foreach($attributes in @('Hidden','System','Hidden,ReadOnly')){
+  $launches.Clear()
+  New-Fixture -Elevated $false
+  $marked=Join-Path $programs 'Any2Odyssey.lnk'
+  $foreign=(New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop 'Any2Odyssey.lnk'));$foreign.TargetPath=Join-Path $engine 'ConversionWrapper.dll';$foreign.Save()
+  foreach($folder in @($desktop,$programs)){(Get-Item -LiteralPath (Join-Path $folder 'Any2Odyssey.lnk') -Force).Attributes=$attributes}
+  $notes.Clear()
+  & (Join-Path $app 'Uninstall.ps1')
+  $said=$notes -join [char]10
+  Assert (-not (Test-Path -LiteralPath $marked) -and -not $said.Contains('left in place')) "A shortcut to the installation is removed like any other when its attributes are $attributes"
+  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration)) "The rest of the installation goes with it ($attributes)"
+  $kept=Get-Item -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk') -Force
+  Assert (($kept.Attributes -band [IO.FileAttributes]$attributes) -eq [IO.FileAttributes]$attributes) "A shortcut that leads elsewhere stays, with its attributes ($attributes)"
+  $kept.Attributes='Normal'
+ }
+
  $launches.Clear()
  New-Fixture -Elevated $true
  & (Join-Path $app 'Uninstall.ps1')

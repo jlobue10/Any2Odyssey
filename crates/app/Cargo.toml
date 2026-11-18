@@ -27,6 +27,10 @@ image.workspace = true
 # once something asks for it.
 eframe = { version = "0.33", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 egui = { version = "0.33", features = ["accesskit"] }
+# The parser egui reads typefaces with, and the version egui uses: a file of
+# the system's is tried with it before egui is given the file, because egui
+# panics over one it cannot read (ui/system_fonts.rs).
+ab_glyph = "0.2.32"
 global-hotkey = "0.7"
 open = "5"
 html-escape = "0.2"
@@ -63,7 +67,7 @@ pipewire = "0.10"
 any2odyssey-windows.workspace = true
 tray-icon = "0.21"
 muda = "0.17"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Console"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Globalization", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Console"] }
 
 [build-dependencies]
 winresource = "0.1"

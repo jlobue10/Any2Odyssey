@@ -1,6 +1,6 @@
 # Third-party licenses
 
-Any2Odyssey itself is GPL-3.0-only (see `LICENSE` and `NOTICE`). This file lists the other works the Windows package contains: the Rust crates compiled into `Any2Odyssey.exe` and the fonts embedded in it. Samsung's and Leia's software is not included (see below).
+Any2Odyssey itself is GPL-3.0-only (see `LICENSE` and `NOTICE`). This file lists the other works the Windows package contains: the Rust crates compiled into `Any2Odyssey.exe`, the Rust standard library that every Rust program contains, and the fonts embedded in it. Samsung's and Leia's software is not included (see below).
 
 The Linux packages contain most of the same crates and further ones (the desktop portal and PipeWire bindings for the live screen, ONNX Runtime's bindings, the Wayland and X11 backends, and what they depend on). Those are listed, with their notices, in `THIRD-PARTY-LICENSES-LINUX.md`, which ships beside this file; the license texts they refer to are below.
 
@@ -1183,6 +1183,29 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
 ```
+
+## The Rust standard library
+
+Both editions are built with Rust 1.99.1 (`rust-toolchain.toml`), and each program contains that toolchain's standard library (`std`, `core`, `alloc` and what they are built from), linked in like the crates above. The tables above do not show it: they are what `cargo tree` prints, and the standard library is not a dependency Cargo resolves. The source paths in the published programs name it (`/rustc/<commit>/library/...` and `/rust/deps/...`).
+
+The Rust project offers the standard library under the MIT license or the Apache License 2.0; Any2Odyssey uses it under the MIT license, whose text is above. Its notices, as the toolchain's own `share/doc/rust/COPYRIGHT-library.html` gives them: `Copyright: The Rust Project Developers (see https://thanks.rust-lang.org)` for the library as a whole; `Copyright: 1991-2024 Unicode, Inc` for the Unicode tables in `library/core/src/unicode`, which are under the Unicode License v3 (text above); `Copyright: 2014 Alex Crichton` for `library/backtrace`; `Copyright: 2019 The Crossbeam Project Developers` for `library/std/src/sync/mpmc`. `compiler_builtins`, which is part of the Rust source tree, also holds routines ported from LLVM's compiler-rt (Apache License 2.0 with the LLVM exception, which asks for no notice in compiled programs) and from musl's `libm` (the notice is under "`dpi`: libm notice" above).
+
+The crates from crates.io that this standard library is built from, in the versions its own `library/Cargo.lock` names, used by the same rule as the crates above (the Windows program has the first three, the Linux program all of them):
+
+| Crate and version | License offered | Used under | Copyright notices |
+| --- | --- | --- | --- |
+| cfg-if 1.0.4 | MIT OR Apache-2.0 | MIT | `Copyright (c) 2014 Alex Crichton` |
+| hashbrown 0.17.1 | MIT OR Apache-2.0 | MIT | `Copyright (c) 2016 Amanieu d'Antras` |
+| rustc-demangle 0.1.28 | MIT/Apache-2.0 | MIT | `Copyright (c) 2014 Alex Crichton` |
+| addr2line 0.27.1 | Apache-2.0 OR MIT | MIT | `Copyright (c) 2016-2018 The gimli Developers` |
+| adler2 2.0.1 | 0BSD OR MIT OR Apache-2.0 | MIT | `Copyright (C) Jonas Schievink <jonasschievink@gmail.com>` |
+| gimli 0.34.0 | MIT OR Apache-2.0 | MIT | `Copyright (c) 2015 The Rust Project Developers` |
+| libc 0.2.189 | MIT OR Apache-2.0 | MIT | `Copyright (c) The Rust Project Developers` |
+| memchr 2.8.3 | Unlicense OR MIT | MIT | `Copyright (c) 2015 Andrew Gallant` |
+| miniz_oxide 0.9.1 | MIT OR Zlib OR Apache-2.0 | MIT | `Copyright (c) 2017 Frommi`; `Copyright (c) 2017-2024 oyvindln`; `Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC`; `Copyright 2013-2014 RAD Game Tools and Valve Software` |
+| object 0.39.1 | Apache-2.0 OR MIT | MIT | `Copyright (c) 2015 The Gimli Developers` |
+
+This section is written by hand for the toolchain named in its first sentence; `scripts/third-party-linux.py` stops when `rust-toolchain.toml` names another one, so that a change of toolchain is a change here too.
 
 ## Microsoft C runtime
 

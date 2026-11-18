@@ -366,6 +366,38 @@ pub fn unjustified<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R
     .inner
 }
 
+/// How a page is scrolled: by its bar and by the wheel. Not by dragging its
+/// contents, which egui offers to the mouse as well ([`drag_with_a_finger`]).
+pub const PAGE_SCROLL: egui::scroll_area::ScrollSource = egui::scroll_area::ScrollSource {
+    drag: false,
+    ..egui::scroll_area::ScrollSource::ALL
+};
+
+/// Let a finger drag the page to scroll it, and nothing else. Call first in
+/// the contents of a scroll area that is scrolled as [`PAGE_SCROLL`] says.
+///
+/// egui lets the contents of every scroll area be dragged ("for touch
+/// screens mostly"), by the mouse as well, and a press on a button or a
+/// checkbox, which sense no drag of their own, is the start of such a drag.
+/// The page then moved as far as the pointer moved in the frame of the
+/// press and while the button was held: six points at a click made with the
+/// mouse still slowing down, and all the way to its end under a pointer that
+/// is put somewhere and pressed in one go (`xdotool mousemove X Y click 1`),
+/// with the control that was clicked gone from under the pointer. The mouse
+/// has the wheel and the scroll bar; a screen that is touched has neither,
+/// so a finger goes on dragging. (Sensed without taking the keyboard focus:
+/// egui's own area was a Tab stop without a name, as large as the page.)
+pub fn drag_with_a_finger(ui: &Ui) {
+    // The part of the page that is in view: as wide as the contents, as
+    // high as the clip.
+    let in_view = Rect::from_x_y_ranges(ui.max_rect().x_range(), ui.clip_rect().y_range());
+    let response = ui.interact(in_view, ui.id().with("dragged-by-a-finger"), Sense::DRAG);
+    if response.dragged() && ui.input(|i| i.any_touches()) {
+        let moved = ui.input(|i| i.pointer.delta().y);
+        ui.scroll_with_delta_animation(vec2(0.0, moved), egui::style::ScrollAnimation::none());
+    }
+}
+
 /// Scroll the widget that has just been given the keyboard focus into view.
 /// Call at the end of a scroll area's contents.
 ///
@@ -391,8 +423,14 @@ pub fn keep_focus_visible(ui: &Ui) {
     let Some(rect) = ctx.read_response(id).map(|response| response.rect) else {
         return;
     };
-    // Only what belongs to these contents; the visible part is the clip.
-    if ui.min_rect().expand(1.0).contains_rect(rect) && !ui.clip_rect().contains_rect(rect) {
+    // Only what belongs to these contents. The visible part is the clip
+    // without the margin a scroll area may paint over above and below
+    // (three points): at the bottom that margin lies under the window's
+    // frame, and a control that ended in it was taken for one in view. In
+    // the default window Tab left "Reset lens numbers" there.
+    let margin = vec2(0.0, ui.visuals().clip_rect_margin);
+    let visible = ui.clip_rect().shrink2(margin);
+    if ui.min_rect().expand(1.0).contains_rect(rect) && !visible.contains_rect(rect) {
         ui.scroll_to_rect(rect.expand(12.0), None);
     }
 }
