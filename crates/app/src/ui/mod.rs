@@ -881,7 +881,9 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical()
                             .id_salt("controls-scroll")
                             .auto_shrink([false, false])
+                            .scroll_source(widgets::PAGE_SCROLL)
                             .show(&mut body, |ui| {
+                                widgets::drag_with_a_finger(ui);
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 let tray_available = self.tray_available();
@@ -901,7 +903,9 @@ impl eframe::App for App {
                         egui::ScrollArea::vertical()
                             .id_salt("viewer-scroll")
                             .auto_shrink([false, false])
+                            .scroll_source(widgets::PAGE_SCROLL)
                             .show(&mut body, |ui| {
+                                widgets::drag_with_a_finger(ui);
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 self.viewer.show(ui, &mut c, &p, self.wordmark.as_ref());

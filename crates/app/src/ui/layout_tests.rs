@@ -49,6 +49,8 @@ struct Harness {
     /// The accessibility tree of the last frame, and what has the focus.
     widgets: Vec<Widget>,
     focus: Option<egui::accesskit::NodeId>,
+    /// The name of the tree's root: the window, as a screen reader says it.
+    window_name: Option<String>,
     /// Display scale: physical pixels per point.
     scale: f32,
     app: App,
@@ -93,6 +95,7 @@ impl Harness {
             outlines: Vec::new(),
             widgets: Vec::new(),
             focus: None,
+            window_name: None,
             scale: 1.0,
             app,
             core,
@@ -144,6 +147,13 @@ impl Harness {
         if let Some(update) = &output.platform_output.accesskit_update {
             self.focus = Some(update.focus);
             self.widgets = widgets_of(update);
+            if let Some(tree) = &update.tree {
+                self.window_name = update
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == tree.root)
+                    .and_then(|(_, node)| node.label().map(str::to_owned));
+            }
         }
         self.events = output.platform_output.events;
         painted
@@ -1158,6 +1168,30 @@ mod sweep {
                 ],
                 "{names:?}"
             );
+            // In that order on the screen too, each to the right of the one
+            // before it.
+            for pair in stops[..7].windows(2) {
+                assert!(
+                    pair[0].rect.right() <= pair[1].rect.left(),
+                    "{:?} is not left of {:?}",
+                    pair[0].name,
+                    pair[1].name
+                );
+            }
+            // The page's background is not a stop, and neither is the
+            // scrolling area of the controls and of the viewer (it was
+            // egui's own, for dragging the page: `drag_with_a_finger`).
+            // Both had the whole page for their place, without a name.
+            let whole_page = Rect::from_min_max(
+                pos2(FRAME, FRAME + TITLEBAR_HEIGHT + 8.0),
+                pos2(size.0 - FRAME, size.1 - FRAME),
+            );
+            let near = |a: egui::Pos2, b: egui::Pos2| (a - b).length() < 1.0;
+            let over_the_page = stops
+                .iter()
+                .filter(|s| near(s.rect.min, whole_page.min) && near(s.rect.max, whole_page.max))
+                .count();
+            assert_eq!(over_the_page, 0, "{names:?}");
             for (i, stop) in stops.iter().enumerate() {
                 if stop.role == Role::Unknown {
                     // egui's own: a scrolling area and its bar. Nothing of
@@ -1342,6 +1376,247 @@ mod sweep {
             h.run(Vec::new());
         }
         assert_eq!(h.ctx.zoom_factor(), 0.2);
+    }
+
+    /// A control that ends in the three points a scroll area may paint over
+    /// below its own edge is not in view: those points lie under the window's
+    /// frame. Whether a control ends there is a matter of the window's
+    /// height, so every height around the default is tried; at 780 to 782
+    /// "Reset lens numbers" did, and Tab left it there.
+    #[test]
+    fn the_page_follows_the_focus_to_a_control_that_ends_under_the_frame() {
+        for height in 765..=795 {
+            let size = (SIZES[0].0, height as f32);
+            let mut h = Harness::new(size, Page::Viewer);
+            h.app.viewer = viewer(Input::Pair, Output::Lens);
+            h.settle();
+            tab_to(&mut h, "Reset lens numbers");
+            // A scroll to the focused control takes up to 0.3 seconds.
+            for _ in 0..24 {
+                h.run(Vec::new());
+            }
+            let focused = h.focused().expect("the focus").rect;
+            assert!(
+                focused.bottom() <= size.1 - FRAME + 1.0,
+                "in a window {height} points high the focused button ends at {}, under the frame",
+                focused.bottom()
+            );
+            assert!(focused.top() >= FRAME + TITLEBAR_HEIGHT, "{focused:?}");
+        }
+    }
+
+    /// A gold button in a column of `Ui::columns`, where the layout hands
+    /// every widget the column's whole width: it reacts where it is drawn.
+    /// (The cards of the pages no longer lay their contents out like that,
+    /// so the pages alone do not show it.)
+    #[test]
+    fn a_gold_button_in_a_justified_column_reacts_where_it_is_drawn() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let palette = Palette::for_dark(false);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 200.0))),
+            ..Default::default()
+        };
+        let mut seen = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.columns(1, |columns| {
+                    let ui = &mut columns[0];
+                    let column = ui.available_width();
+                    let drawn = widgets::gold_button_width(ui, "Reset lens numbers");
+                    let response = widgets::gold_button(ui, "Reset lens numbers", false, &palette);
+                    seen = Some((response.rect.width(), drawn, column));
+                });
+            });
+        });
+        let (reacts, drawn, column) = seen.expect("the column was laid out");
+        assert!(column > drawn + 200.0, "{column} {drawn}");
+        assert!(
+            (reacts - drawn).abs() < 0.5,
+            "reacts over {reacts} of {drawn}"
+        );
+    }
+
+    /// The window has a name for assistive software: the tree's root has
+    /// none of its own, and on Linux the title is not taken for it.
+    #[test]
+    fn the_window_is_named_in_the_accessibility_tree() {
+        for page in [Page::Controls, Page::Viewer, Page::Help, Page::About] {
+            let mut h = Harness::new(SIZES[0], page);
+            h.settle();
+            assert_eq!(h.window_name.as_deref(), Some(APP_NAME));
+        }
+    }
+
+    /// Where the page is: the top of the banner's line, which no click on
+    /// the page moves. `None` once the page is scrolled so far that the
+    /// line is out of view.
+    fn banner_at(painted: &[Painted]) -> Option<f32> {
+        try_find(painted, "CONTINUOUS DESKTOP 3D").map(|p| p.rect.top())
+    }
+
+    /// A page in a window it does not fit: what it is called, the window's
+    /// size, and a checkbox and the primary button that are in view.
+    type ScrollingPage = (&'static str, Page, (f32, f32), [&'static str; 2]);
+
+    /// The two pages in windows they do not fit: the viewer in its default
+    /// window, and the controls in one 640 points high (they fit the
+    /// default one).
+    fn pages_that_scroll() -> [ScrollingPage; 2] {
+        [
+            (
+                "the viewer",
+                Page::Viewer,
+                SIZES[0],
+                ["Swap left and right eyes", "Start output"],
+            ),
+            (
+                "the controls",
+                Page::Controls,
+                (980.0, 640.0),
+                ["Convert automatically when this app opens", "Turn on 3D"],
+            ),
+        ]
+    }
+
+    fn button_at(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    /// A press on a checkbox or a button was the start of a drag of the
+    /// page (`widgets::dragged_by_touch`): the page moved as far as the
+    /// pointer had moved in the frame of the press. With a pointer that is
+    /// put on a control and pressed in one go that was all the way from
+    /// where it had been, and the page went to its end; with a hand that is
+    /// still slowing down, a few points at every click.
+    #[test]
+    fn a_click_leaves_the_page_where_it_is_however_the_pointer_comes_to_it() {
+        for (what, page, size, names) in pages_that_scroll() {
+            for name in names {
+                for arrival in ["at rest", "put there and pressed at once", "slowing down"] {
+                    let mut h = Harness::new(size, page);
+                    let painted = h.settle();
+                    let before = banner_at(&painted);
+                    assert!(before.is_some(), "{what}: no banner");
+                    let target = h
+                        .widgets
+                        .iter()
+                        .find(|w| w.name == name)
+                        .unwrap_or_else(|| panic!("{name} is not on the page"))
+                        .rect
+                        .center();
+                    // The pointer has been lower on the page, and at rest.
+                    h.run(vec![egui::Event::PointerMoved(target + vec2(40.0, 250.0))]);
+                    h.settle();
+                    let frames: Vec<Vec<egui::Event>> = match arrival {
+                        "at rest" => vec![
+                            vec![egui::Event::PointerMoved(target)],
+                            vec![button_at(target, true)],
+                            vec![button_at(target, false)],
+                        ],
+                        "put there and pressed at once" => vec![
+                            vec![egui::Event::PointerMoved(target), button_at(target, true)],
+                            vec![button_at(target, false)],
+                        ],
+                        // Up to the control at 8, 8 and 6 points a frame;
+                        // the button goes down in a frame in which the
+                        // pointer moved 4 more, and it moves 2 while held.
+                        _ => {
+                            let at = |below: f32| target + vec2(0.0, below);
+                            vec![
+                                vec![egui::Event::PointerMoved(at(20.0))],
+                                vec![egui::Event::PointerMoved(at(12.0))],
+                                vec![egui::Event::PointerMoved(at(6.0))],
+                                vec![egui::Event::PointerMoved(at(2.0)), button_at(at(2.0), true)],
+                                vec![egui::Event::PointerMoved(at(0.0))],
+                                vec![button_at(at(0.0), false)],
+                            ]
+                        }
+                    };
+                    let mut said = Vec::new();
+                    for events in frames {
+                        h.run(events);
+                        said.extend(reported(&h.events));
+                    }
+                    assert!(
+                        said.iter()
+                            .any(|(clicked, label, _)| *clicked && label == name),
+                        "{name}, {arrival}: the click said {said:?}"
+                    );
+                    // A page that was thrown goes on moving for a second.
+                    for frame in 0..60 {
+                        let painted = h.run(Vec::new());
+                        assert_eq!(
+                            banner_at(&painted),
+                            before,
+                            "{what}: a click on {name:?} with the pointer {arrival} moved the page (frame {frame})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A finger still drags the page, from anywhere on it, a checkbox
+    /// included, and a drag is not a click.
+    #[test]
+    fn a_finger_drags_the_page_and_does_not_click() {
+        for (what, page, size, names) in pages_that_scroll() {
+            let mut h = Harness::new(size, page);
+            let painted = h.settle();
+            let before = banner_at(&painted).expect("the banner");
+            let start = h
+                .widgets
+                .iter()
+                .find(|w| w.name == names[0])
+                .expect("the checkbox")
+                .rect
+                .center();
+            let touch = |phase, pos| egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(7),
+                phase,
+                pos,
+                force: None,
+            };
+            // What a touch screen sends: the touch, and a pointer with it.
+            let mut said = Vec::new();
+            let mut frames = vec![vec![
+                touch(egui::TouchPhase::Start, start),
+                egui::Event::PointerMoved(start),
+                button_at(start, true),
+            ]];
+            let mut at = start;
+            for _ in 0..5 {
+                at.y -= 10.0;
+                frames.push(vec![
+                    touch(egui::TouchPhase::Move, at),
+                    egui::Event::PointerMoved(at),
+                ]);
+            }
+            frames.push(vec![
+                touch(egui::TouchPhase::End, at),
+                button_at(at, false),
+                egui::Event::PointerGone,
+            ]);
+            for events in frames {
+                h.run(events);
+                said.extend(reported(&h.events));
+            }
+            let painted = h.settle();
+            assert!(
+                banner_at(&painted).is_none_or(|now| now <= before - 40.0),
+                "{what}: the banner is at {:?}, it was at {before}",
+                banner_at(&painted)
+            );
+            assert_eq!(said, vec![], "{what}: the drag was taken for a click");
+        }
     }
 
     /// The tree above comes from egui; whether a screen reader is given it
