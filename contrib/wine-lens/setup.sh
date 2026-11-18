@@ -213,8 +213,9 @@ if [ -n "$WEAVER" ]; then ln -sf "$T/any2odyssey-weaver" "$DATA/any2odyssey-weav
 rm -f "$T/stack.started"
 
 echo "setup: done. Any2Odyssey finds the helper at $DATA/any2odyssey-lens-helper."
-echo "       Try it by hand (lens on for 20 s; the first start takes about half a minute):"
-echo "           sleep 20 | '$DATA/any2odyssey-lens-helper'"
+echo "       Try it by hand (the lens goes off a minute after the command was given, and the first start takes"
+echo "       about half of that minute):"
+echo "           sleep 60 | '$DATA/any2odyssey-lens-helper'"
 if [ -n "$TRACKING" ]; then
     echo "       Eye tracking is prepared too: '$T/tools/tracking.sh' start | stop | status"
     echo "       (start it while the lens helper is running; it needs Leia's service up)."

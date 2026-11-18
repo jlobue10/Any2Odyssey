@@ -4,7 +4,7 @@
 # Makes sure Leia's Windows SR service and session are running in the Wine prefix that setup.sh prepared,
 # then runs the Windows helper there. Contract (docs/LENS-SWITCH.md): prints "on" or "error: <reason>", and
 # switches the lens off and exits when standard input closes.
-# Try it by hand:  sleep 20 | any2odyssey-lens-helper
+# Try it by hand:  sleep 60 | any2odyssey-lens-helper   (a first start takes about half of that minute)
 T=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 export WINEPREFIX=$T/prefix WINEDLLOVERRIDES="mscoree,mshtml="
 
