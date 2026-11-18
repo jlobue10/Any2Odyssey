@@ -867,28 +867,32 @@ pub fn estimate_depth(
     )
 }
 
-pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
-    eprintln!("The conversion worker runs only on Windows.");
+/// Say that a mode exists only on Windows and fail (exit 1). Said with
+/// [`crate::complain`], not `eprintln!`: that one panics when standard
+/// error cannot be written (a reader that has gone, a full disk behind a
+/// redirection), and these modes then ended with a panic message and exit
+/// code 101 instead of 1.
+fn only_on_windows(said: &str) -> i32 {
+    crate::complain(said);
     1
+}
+pub fn run_worker(_: &str, _: u32, _: isize, _: Preferences) -> i32 {
+    only_on_windows("The conversion worker runs only on Windows.")
 }
 /// The capture diagnostics look at the Windows worker's windows. Asked for
 /// here they failed without a word.
 const WINDOWS_ONLY_DIAGNOSTIC: &str = "This diagnostic runs only on Windows.";
 pub fn inspect(_: u32) -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn layout_probe(_: u32, _: u32) -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn test_capture_exclusion() -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn test_offscreen() -> i32 {
-    eprintln!("{WINDOWS_ONLY_DIAGNOSTIC}");
-    1
+    only_on_windows(WINDOWS_ONLY_DIAGNOSTIC)
 }
 pub fn validate() -> Result<(), String> {
     Err("3D conversion needs Samsung's Odyssey 3D Hub engine, which exists only on Windows.".into())
