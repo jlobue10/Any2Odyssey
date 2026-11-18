@@ -32,7 +32,8 @@ use std::process::Command;
 use std::sync::mpsc::TryRecvError;
 use std::sync::{Arc, Mutex};
 
-use image::{imageops, RgbaImage};
+use any2odyssey_core::resample::{resize_into, Part};
+use image::RgbaImage;
 
 use crate::lens_switch::{self, Running};
 
@@ -610,39 +611,26 @@ pub fn compose_still(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
     let eye_w = if flat { pair.width() } else { pair.width() / 2 };
     let eye = (eye_w.max(1), pair.height().max(1));
     let (x, y, w, h) = place_view(eye, if flat { 1.0 } else { stretch }, view);
-    let fit = |side: u32| {
-        let part = imageops::crop_imm(pair, side * eye_w, 0, eye.0, eye.1);
-        imageops::resize(&*part, w, h, imageops::FilterType::Triangle)
-    };
-    // A flat picture is identical in both eyes: resize it once and copy the
-    // fitted pixels to both halves instead of running the same filter twice.
-    // The two views of a pair share nothing: the right one is resized on a
-    // thread of its own while this one resizes the left (here, if that
-    // thread cannot be had).
-    let (left, right) = if flat {
-        (fit(0), None)
+    let part = |side: u32| Part::of(pair, side * eye_w, eye.0);
+    // Each view is resized straight into its half, its rows shared out over
+    // the cores (`core::resample`: the image crate's triangle resize and
+    // replace, byte for byte, which made the whole resized view twice over
+    // before a pixel reached the picture and were most of what a step of a
+    // slider cost). A flat picture is the same in both eyes: it is resized
+    // once and each row copied to the other half.
+    if flat {
+        resize_into(&mut canvas, part(0), &[x, view.0 + x], y, w, h);
     } else {
-        std::thread::scope(|scope| {
-            let right = std::thread::Builder::new().spawn_scoped(scope, || fit(1));
-            let left = fit(0);
-            let right = match right {
-                Ok(right) => right
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-                Err(_) => fit(1),
-            };
-            (left, Some(right))
-        })
-    };
-    imageops::replace(&mut canvas, &left, i64::from(x), i64::from(y));
-    let right = right.as_ref().unwrap_or(&left);
-    imageops::replace(&mut canvas, right, i64::from(view.0 + x), i64::from(y));
+        resize_into(&mut canvas, part(0), &[x], y, w, h);
+        resize_into(&mut canvas, part(1), &[view.0 + x], y, w, h);
+    }
     canvas
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::imageops;
 
     #[test]
     fn a_view_is_fitted_to_the_panel_not_to_its_half() {
@@ -687,7 +675,8 @@ mod tests {
         assert_eq!(canvas.get_pixel(5, 5).0, [7, 8, 9, 255]);
     }
 
-    /// `compose_still` as it was while it resized one view after the other.
+    /// `compose_still` as it was while the image crate resized each view
+    /// whole and its pixels were then copied into the picture.
     fn compose_still_in_turn(pair: &RgbaImage, flat: bool, stretch: f64) -> RgbaImage {
         let view = STILL_VIEW;
         let mut canvas = RgbaImage::from_pixel(view.0 * 2, view.1, image::Rgba([0, 0, 0, 255]));
@@ -712,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn views_resized_side_by_side_give_the_same_bytes_as_one_after_the_other() {
+    fn views_resized_row_by_row_give_the_bytes_the_image_crate_gave() {
         // Every pixel differs from its neighbours and the two views differ.
         let noisy = |w: u32, h: u32| {
             RgbaImage::from_fn(w, h, |x, y| {
@@ -726,6 +715,17 @@ mod tests {
             (300, 400, false, 0.5),
             (1, 1, false, 1.0),
             (641, 181, true, 1.0),
+            // A view larger than its half in both directions, and one that
+            // is exactly its half (a half-width pair of the panel's size:
+            // nothing is resized).
+            (4100, 1200, false, 1.0),
+            (3840, 2160, false, 2.0),
+            (1920, 2160, true, 1.0),
+            // Pictures that have no view to show.
+            (0, 0, false, 1.0),
+            (0, 7, true, 1.0),
+            (2, 0, false, 1.0),
+            (1, 9, false, 1.0),
         ] {
             let pair = noisy(w, h);
             assert!(
@@ -1034,6 +1034,67 @@ mod tests {
             assert_eq!(
                 status,
                 WeaverStatus::Failed("the helper stopped unexpectedly".into())
+            );
+        }
+    }
+}
+
+/// Timings of a still picture's way to the Odyssey 3D output on this
+/// machine. Run by hand:
+/// `cargo test --release -p any2odyssey weaver::bench -- --ignored --nocapture`
+#[cfg(all(test, target_os = "linux"))]
+mod bench {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// The middle one of `times`, in milliseconds.
+    fn median(times: &mut [Duration]) -> f64 {
+        times.sort();
+        times[times.len() / 2].as_secs_f64() * 1e3
+    }
+
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn still_timings() {
+        let memory = Path::new("/dev/shm");
+        let dir = if memory.is_dir() {
+            tempfile::tempdir_in(memory)
+        } else {
+            tempfile::tempdir()
+        }
+        .unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        // Pairs as wide as two 1080-line, two 2160-line and two 8K-wide
+        // views, and one picture for both eyes.
+        for (w, h, flat) in [
+            (3840u32, 1080u32, false),
+            (7680, 2160, false),
+            (7680, 4320, false),
+            (3840, 2160, true),
+        ] {
+            let pair = RgbaImage::from_fn(w, h, |x, y| {
+                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).to_le_bytes();
+                image::Rgba([v[0], v[1], v[2], 255])
+            });
+            let (mut compose, mut hand_over) = (Vec::new(), Vec::new());
+            for round in 0..12 {
+                let t0 = Instant::now();
+                let picture = compose_still(&pair, flat, 1.0);
+                let t1 = Instant::now();
+                sink.show(picture.width(), picture.height(), picture.as_raw())
+                    .unwrap();
+                let t2 = Instant::now();
+                // The first rounds make the file's pages.
+                if round >= 2 {
+                    compose.push(t1 - t0);
+                    hand_over.push(t2 - t1);
+                }
+            }
+            println!(
+                "{w}x{h}{}: compose {:.1} ms, hand over {:.1} ms",
+                if flat { " for both eyes" } else { " pair" },
+                median(&mut compose),
+                median(&mut hand_over)
             );
         }
     }
