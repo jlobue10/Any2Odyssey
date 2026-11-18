@@ -418,6 +418,12 @@ jobs:
       # stand-in for GitHub that also gives the answers it has to refuse.
       - name: The check of the actions' commits refuses what it should (stand-in for GitHub)
         run: python3 scripts/tests/test-check-action-pins.py
+      # THIRD-PARTY-LICENSES.md is written by hand, and scripts/third-party-linux.py compares it with the
+      # crates of a Windows build (in the Linux job, where the build is). What that comparison has to
+      # refuse is run here, against a stand-in for cargo: a crate that is missing, one too many, a wrong
+      # license or number, a crate named twice.
+      - name: The check of the third-party list refuses what it should (stand-in for cargo)
+        run: python3 scripts/tests/test-third-party-linux.py
       - name: Every action's commit is under a tag or on a branch of its repository
         env:
           GH_TOKEN: ${{ github.token }}

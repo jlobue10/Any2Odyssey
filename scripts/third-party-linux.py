@@ -43,15 +43,21 @@ def listed_for_windows():
 def check_windows_list():
     """Stop unless THIRD-PARTY-LICENSES.md lists exactly what a Windows build contains."""
     built = tree(WINDOWS_TARGET)
-    listed, noticed, said = {}, set(), None
+    listed, noticed, said, twice = {}, set(), None, []
     for line in open("THIRD-PARTY-LICENSES.md", encoding="utf-8"):
+        # A crate that a table names twice is said so: counted after the doubles are dropped, as they were
+        # up to 0.9.6, the tables agreed with the build and with the number in the text all the same.
         m = re.match(r"\| `([^`]+)` \| (\S+) \| (.*?) \|$", line)
-        if m: listed[(m.group(1), m.group(2))] = m.group(3).strip()
+        if m:
+            if (m.group(1), m.group(2)) in listed: twice.append("%s %s is in the table of crates twice" % m.group(1, 2))
+            listed[(m.group(1), m.group(2))] = m.group(3).strip()
         m = re.match(r"\| `([^`]+)` (\S+) \|", line)
-        if m: noticed.add((m.group(1), m.group(2)))
+        if m:
+            if (m.group(1), m.group(2)) in noticed: twice.append("%s %s is in the table of notices twice" % m.group(1, 2))
+            noticed.add((m.group(1), m.group(2)))
         m = re.match(r"The (\d+) crates below", line)
         if m: said = int(m.group(1))
-    wrong = ["%s %s is in a Windows build and not in the table of crates" % k for k in sorted(set(built) - set(listed))]
+    wrong = twice + ["%s %s is in a Windows build and not in the table of crates" % k for k in sorted(set(built) - set(listed))]
     wrong += ["%s %s is in the table of crates and not in a Windows build" % k for k in sorted(set(listed) - set(built))]
     wrong += ["%s %s is listed as %s; its manifest says %s" % (*k, listed[k], built[k])
               for k in sorted(set(built) & set(listed)) if listed[k] != built[k]]
