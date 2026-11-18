@@ -278,6 +278,42 @@ fn run(
     streamed
 }
 
+/// What PipeWire tells of a running cast.
+enum Seen {
+    /// The stream went from one state to another.
+    State(pw::stream::StreamState, pw::stream::StreamState),
+    /// An object of the graph is gone: its number.
+    Removed(u32),
+}
+
+/// Why the cast of the screen that is node `node` is over, if `seen` means
+/// that it is.
+///
+/// A stream that pauses is not over: it pauses for a moment whenever the
+/// screen's mode changes, and for as long as the session manager is being
+/// restarted, and runs again by itself. It also pauses, and that is all it
+/// is told, when the screen's node is taken away: the output was unplugged
+/// or switched off, the desktop ended the cast, or the portal's own program
+/// went away (xdg-desktop-portal-wlr 0.8 does at a change of the screen's
+/// mode). No frame comes after that, which looks like a screen on which
+/// nothing changes, so the page went on saying that it showed one. The
+/// node going is what tells the two apart.
+fn ending(node: u32, seen: &Seen) -> Option<String> {
+    use pw::stream::StreamState::{Error, Paused, Streaming, Unconnected};
+    match seen {
+        Seen::State(_, Error(reason)) => Some(reason.clone()),
+        // The connection to PipeWire itself was lost after the stream had
+        // been running.
+        Seen::State(Streaming | Paused, Unconnected) => {
+            Some("the screen cast was ended by the desktop".to_owned())
+        }
+        Seen::Removed(id) if *id == node => {
+            Some("the screen cast was ended by the desktop".to_owned())
+        }
+        _ => None,
+    }
+}
+
 struct StreamData {
     format: spa::param::video::VideoInfoRaw,
     shared: Arc<Shared>,
@@ -315,7 +351,32 @@ fn stream(
     .map_err(failed("no stream"))?;
 
     let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let (state_error, state_loop, state_shared) = (error.clone(), mainloop.clone(), shared.clone());
+    // Whatever ends the cast says why (unless it was stopped from here)
+    // and has the loop left.
+    let ended = {
+        let (error, mainloop, shared) = (error.clone(), mainloop.clone(), shared.clone());
+        move |reason: String| {
+            if !shared.stop.load(Ordering::Relaxed) {
+                lock(&error).get_or_insert(reason);
+            }
+            mainloop.quit();
+        }
+    };
+    // The screen's node is watched as well as the stream: when the node
+    // goes, the stream is told nothing but to pause (see `ending`). A cast
+    // that cannot be watched like this is shown all the same.
+    let registry = core.get_registry_rc().ok();
+    let node_ended = ended.clone();
+    let _registry_listener = registry.as_ref().map(|registry| {
+        registry
+            .add_listener_local()
+            .global_remove(move |id| {
+                if let Some(reason) = ending(node, &Seen::Removed(id)) {
+                    node_ended(reason);
+                }
+            })
+            .register()
+    });
     let data = StreamData {
         format: Default::default(),
         shared: shared.clone(),
@@ -324,25 +385,8 @@ fn stream(
     let _listener = stream
         .add_local_listener_with_user_data(data)
         .state_changed(move |_, _, old, new| {
-            let over = match &new {
-                pw::stream::StreamState::Error(reason) => Some(reason.clone()),
-                // The source went away (the screen was unplugged, or the
-                // desktop ended the cast) after it had been running.
-                pw::stream::StreamState::Unconnected
-                    if matches!(
-                        old,
-                        pw::stream::StreamState::Streaming | pw::stream::StreamState::Paused
-                    ) =>
-                {
-                    Some("the screen cast was ended by the desktop".to_owned())
-                }
-                _ => None,
-            };
-            if let Some(reason) = over {
-                if !state_shared.stop.load(Ordering::Relaxed) {
-                    *lock(&state_error) = Some(reason);
-                }
-                state_loop.quit();
+            if let Some(reason) = ending(node, &Seen::State(old, new)) {
+                ended(reason);
             }
         })
         .param_changed(|_, data, id, param| {
@@ -597,6 +641,43 @@ impl Drop for Fed {
     fn drop(&mut self) {
         self.0.stop.store(true, Ordering::Relaxed);
         self.0.arrived.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pw::stream::StreamState::{Connecting, Error, Paused, Streaming, Unconnected};
+
+    const ENDED: &str = "the screen cast was ended by the desktop";
+
+    #[test]
+    fn a_cast_whose_screen_is_taken_away_is_over_and_one_that_pauses_is_not() {
+        let state = |old, new| ending(44, &Seen::State(old, new));
+        // What a sway session with xdg-desktop-portal-wlr sends when the
+        // shown output is unplugged or switched off, or when the portal's
+        // program goes away: the stream pauses, and the link, the port and
+        // the node of the screen are removed. Only the node says that it
+        // is over.
+        assert_eq!(state(Streaming, Paused), None);
+        assert_eq!(ending(44, &Seen::Removed(49)), None);
+        assert_eq!(ending(44, &Seen::Removed(45)), None);
+        assert_eq!(ending(44, &Seen::Removed(44)).as_deref(), Some(ENDED));
+        // A change of the screen's mode, and a session manager that is
+        // restarted (its link goes and comes back): the cast runs on.
+        assert_eq!(state(Paused, Streaming), None);
+        // Starting up.
+        assert_eq!(state(Unconnected, Connecting), None);
+        assert_eq!(state(Connecting, Paused), None);
+        // A stream that was never connected has not been ended.
+        assert_eq!(state(Connecting, Unconnected), None);
+        // PipeWire itself is gone, or says what went wrong.
+        assert_eq!(state(Streaming, Unconnected).as_deref(), Some(ENDED));
+        assert_eq!(state(Paused, Unconnected).as_deref(), Some(ENDED));
+        assert_eq!(
+            state(Paused, Error("no more input formats".into())).as_deref(),
+            Some("no more input formats")
+        );
     }
 }
 
