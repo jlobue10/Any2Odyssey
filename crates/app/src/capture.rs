@@ -274,8 +274,36 @@ fn run(
         Some(_) if shared.stop.load(Ordering::Relaxed) => Ok(()),
         Some(node) => stream(shared, node, fd, wake),
     };
-    let _ = runtime.block_on(session.close());
+    finished_within(runtime, CLOSE_PATIENCE, async move {
+        let _ = session.close().await;
+    });
     streamed
+}
+
+/// How long the portal's answer to the closing of a session is waited for.
+/// It comes within milliseconds from a portal that is well.
+const CLOSE_PATIENCE: Duration = Duration::from_millis(1500);
+
+/// Run `work` on `runtime` and wait until it is through, but for `patience`
+/// at the longest: whether it was through by then. It is left to finish by
+/// itself otherwise.
+///
+/// The window's thread waits for this thread when the output is stopped
+/// (`Capture::drop`). A portal that does not answer (its program, or the
+/// program behind it, stopped or hung) kept this thread in the closing of
+/// the session and the window with it: the page stood still for as long as
+/// the portal did, and `--quit` was accepted and not acted on.
+fn finished_within(
+    runtime: &tokio::runtime::Runtime,
+    patience: Duration,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) -> bool {
+    let (done, finished) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        work.await;
+        let _ = done.send(());
+    });
+    finished.recv_timeout(patience).is_ok()
 }
 
 /// What PipeWire tells of a running cast.
@@ -650,6 +678,24 @@ mod tests {
     use pw::stream::StreamState::{Connecting, Error, Paused, Streaming, Unconnected};
 
     const ENDED: &str = "the screen cast was ended by the desktop";
+
+    #[test]
+    fn a_portal_that_does_not_answer_is_not_waited_for_longer_than_said() {
+        let runtime = portal_runtime().unwrap();
+        // An answer that comes is waited for, however short the patience
+        // would have been for one that does not.
+        let asked = std::time::Instant::now();
+        assert!(finished_within(runtime, Duration::from_secs(30), async {}));
+        assert!(asked.elapsed() < Duration::from_secs(10));
+        // One that never comes: the wait ends when the patience does.
+        let patience = Duration::from_millis(200);
+        let asked = std::time::Instant::now();
+        assert!(!finished_within(runtime, patience, std::future::pending()));
+        assert!(asked.elapsed() >= patience);
+        assert!(asked.elapsed() < Duration::from_secs(10));
+        // The runtime serves the next request all the same.
+        assert!(finished_within(runtime, Duration::from_secs(30), async {}));
+    }
 
     #[test]
     fn a_cast_whose_screen_is_taken_away_is_over_and_one_that_pauses_is_not() {
