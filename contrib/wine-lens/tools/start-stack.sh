@@ -18,6 +18,20 @@ if ! command -v wineserver >/dev/null; then
 fi
 WINEDEBUG=-all wineserver -k 2>/dev/null
 sleep 3
+# A server asked to leave takes the prefix's programs with it. One that was killed outright, or crashed,
+# leaves them behind, and they can do nothing without it; but Leia's service, session and tracker are looked
+# for by name (tools/ensure-stack.sh, tools/tracking.sh), and the ones left behind were taken for running.
+# What is still there of this prefix now is ended: Wine's own programs only (the camera bridge and the
+# serial port's keeper have the prefix in their environment too, and are looked after elsewhere).
+for pid in $(pgrep -u "$(id -u)" -f '\.exe' 2>/dev/null); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
+    # (Wine's loader under the names it has had; "(deleted)" after an upgrade of Wine)
+    case ${exe##*/} in
+        wine | wine32 | wine64 | wine-preloader | wine32-preloader | wine64-preloader | wine*' (deleted)') ;;
+        *) continue ;;
+    esac
+    tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q -x -F "WINEPREFIX=$WINEPREFIX" && kill -9 "$pid" 2>/dev/null
+done
 # Wine ends its services three seconds after the last ordinary program of the prefix has left, and a service
 # counts as none. Until SRSession.exe runs (the last line here), the only ordinary programs are the short
 # ones below, with pauses of 6, 8 and 2 seconds between them: where "wine sc start" came back early enough,

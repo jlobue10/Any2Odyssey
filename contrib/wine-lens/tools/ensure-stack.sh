@@ -12,9 +12,20 @@ STAMP=$T/stack.started
 [ -d "$WINEPREFIX" ] || { echo "error: the Wine prefix is missing; run contrib/wine-lens/setup.sh"; exit 1; }
 [ -e "$BOARD" ] || { echo "error: the lens board is not present (is the Odyssey 3D awake?)"; exit 1; }
 
+# Whether Wine's server of this prefix is among this user's processes. A server that was killed outright
+# (or crashed) leaves the prefix's programs behind: they stay in the list of processes, Leia's service and
+# session among them, and can do nothing any more. Found by name alone they passed for a running stack, at
+# every request, until the next login. (Some distributions call the server wineserver64.)
+server_runs() {
+    for pid in $(pgrep -u "$(id -u)" wineserver 2>/dev/null); do
+        tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q -x -F "WINEPREFIX=$WINEPREFIX" && return 0
+    done
+    return 1
+}
+
 stack_ok() {
     pgrep -u "$(id -u)" -f 'bin.SRService\.exe' >/dev/null && pgrep -u "$(id -u)" -f 'SRSession\.exe' >/dev/null &&
-        [ -e "$STAMP" ] && [ "$(stat -c %Y "$BOARD")" -le "$(stat -c %Y "$STAMP")" ]
+        [ -e "$STAMP" ] && [ "$(stat -c %Y "$BOARD")" -le "$(stat -c %Y "$STAMP")" ] && server_runs
     # (the link itself, not the tty behind it: udev makes it anew when the board returns after a monitor sleep)
 }
 
