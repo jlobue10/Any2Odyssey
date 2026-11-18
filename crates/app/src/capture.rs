@@ -553,6 +553,29 @@ fn picture_in(bytes: &[u8], told: Told, width: u32, height: u32) -> Option<(&[u8
     Some((valid.get(..needed)?, stride))
 }
 
+/// The longest side of a screen that is shown, in pixels: the same as for
+/// a picture that is opened.
+const LONGEST_SIDE: u32 = 16384;
+
+/// Why a stream of `width` x `height` pixels is not shown, if it is not:
+/// one of its sides is longer than [`LONGEST_SIDE`].
+///
+/// While a size was wished for, the wish's range ended at 16384 x 16384 and
+/// PipeWire refused a stream that was larger than that on both sides ("no
+/// more input formats"); one that was larger on one side only it let
+/// through, by its way of comparing sizes. Since no size is wished for,
+/// nothing was refused: a producer with 17000 x 17000 was shown, with two
+/// frames of 1.16 GB held here. The limit is the program's own now, on
+/// each side, and has a line of its own on the page.
+fn too_large(width: u32, height: u32) -> Option<String> {
+    (width > LONGEST_SIDE || height > LONGEST_SIDE).then(|| {
+        format!(
+            "the screen cast is {width} × {height} pixels, and no more than \
+             {LONGEST_SIDE} a side can be shown"
+        )
+    })
+}
+
 /// Room a buffer may keep beyond what a frame needs: not worth giving back.
 const SMALL_ROOM: usize = 4096;
 
@@ -701,6 +724,7 @@ fn stream(
     // that cannot be watched like this is shown all the same.
     let registry = core.get_registry_rc().ok();
     let node_ended = ended.clone();
+    let size_ended = ended.clone();
     let _registry_listener = registry.as_ref().map(|registry| {
         registry
             .add_listener_local()
@@ -742,6 +766,14 @@ fn stream(
                 && media_subtype == spa::param::format::MediaSubtype::Raw
             {
                 let _ = data.format.parse(param);
+                // A size that is not shown ends the cast here, at the start
+                // and whenever the size changes: before buffers for it are
+                // agreed on, and so before one is mapped or copied.
+                let size = data.format.size();
+                if let Some(reason) = too_large(size.width, size.height) {
+                    size_ended(reason);
+                    return;
+                }
                 // The notes are asked for with every format that is agreed
                 // on: the buffers are made anew for it.
                 let mut notes: Vec<_> = notes
@@ -759,6 +791,10 @@ fn stream(
                 return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
+            // The cast is being ended (see `param_changed`).
+            if too_large(width, height).is_some() {
+                return;
+            }
             // A note that names no turn leaves the frame as it comes.
             let turned = buffer
                 .find_meta::<TurnNote>()
@@ -1257,6 +1293,41 @@ mod tests {
         assert_eq!(
             picture_in(&bytes, Told { offset: 0, ..told }, 1, 1),
             Some((&bytes[..4], 16))
+        );
+    }
+
+    #[test]
+    fn a_screen_with_a_side_longer_than_16384_is_refused_and_says_so() {
+        // Shown: the largest there is, the largest KWin offers, and shapes
+        // of one pixel a side.
+        for (width, height) in [
+            (16384, 16384),
+            (16384, 8192),
+            (10000, 10000),
+            (7680, 4320),
+            (16384, 1),
+            (1, 16384),
+            (1, 1),
+        ] {
+            assert_eq!(too_large(width, height), None, "{width} x {height}");
+        }
+        // Refused: one pixel more on either side, however short the other.
+        for (width, height) in [
+            (16385, 16),
+            (16, 16385),
+            (16385, 16384),
+            (16400, 16400),
+            (17000, 17000),
+            (20000, 64),
+            (u32::MAX, 1),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(too_large(width, height).is_some(), "{width} x {height}");
+        }
+        // What the page says after "Live capture ended: ".
+        assert_eq!(
+            too_large(17000, 17000).as_deref(),
+            Some("the screen cast is 17000 × 17000 pixels, and no more than 16384 a side can be shown")
         );
     }
 
