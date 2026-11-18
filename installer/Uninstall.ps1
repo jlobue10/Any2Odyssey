@@ -109,8 +109,13 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
  # The same for a shortcut that cannot be deleted, read-only or not (a Desktop that has become
  # read-only, a file another program holds open): it stays and is named. Every release up to 0.9.5
  # stopped here, half-way, and stopped at the same place however often the uninstall was run again.
+ # -Force, for a shortcut that is hidden or marked as a system file: nothing keeps this account from
+ # deleting it, but without the switch Remove-Item refuses ("... or the item is hidden, system, or
+ # read only"), and 0.9.6 left it behind as one that could not be removed, pointing at a program that
+ # was gone. The read-only attribute is already off here, and the target is known to be this
+ # installation's.
  if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){
-  try{Remove-Item -LiteralPath $link}
+  try{Remove-Item -LiteralPath $link -Force}
   catch{
    $notices++;Write-Host "The shortcut $link could not be removed ($($_.Exception.Message)); it is left in place."
    if($wasReadOnly){try{$file.IsReadOnly=$true}catch{}}
