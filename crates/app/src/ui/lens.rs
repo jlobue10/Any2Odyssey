@@ -189,35 +189,36 @@ impl LensState {
             egui::Label::new(RichText::new(LENS_NOTICE).color(color(p.muted)).size(12.0)).wrap(),
         );
         let mut lens = self.lens;
-        row(ui, "Lens pitch", |ui| {
+        row(ui, "Lens pitch", |ui, name| {
             ui.add(
                 egui::DragValue::new(&mut lens.pitch)
                     .speed(0.0005)
                     .range(PITCH_RANGE.0..=PITCH_RANGE.1)
                     .max_decimals(9)
                     .min_decimals(4),
-            );
+            ).labelled_by(name);
             ui.label(RichText::new("pixels per lens").color(color(p.muted)));
         })
         .on_hover_text("The lens period along a row of pixels. Wrong by a little: broad bands across the pattern. Wrong by a lot: fine stripes.");
-        row(ui, "Slant", |ui| {
+        row(ui, "Slant", |ui, name| {
             ui.add(
                 egui::DragValue::new(&mut lens.slant)
                     .speed(0.0005)
                     .range(SLANT_RANGE.0..=SLANT_RANGE.1)
                     .max_decimals(9)
                     .min_decimals(4),
-            );
+            ).labelled_by(name);
             ui.label(RichText::new("pixels per row").color(color(p.muted)));
         })
         .on_hover_text("How far the lenses move sideways from one row to the next. Wrong: the bands tilt. Negative when the lenses lean the other way.");
-        row(ui, "Offset", |ui| {
+        row(ui, "Offset", |ui, name| {
             ui.add(
                 egui::DragValue::new(&mut lens.offset)
                     .speed(0.002)
                     .max_decimals(4)
                     .min_decimals(3),
-            );
+            )
+            .labelled_by(name);
             ui.label(RichText::new("of a lens (0–1)").color(color(p.muted)));
         })
         .on_hover_text(

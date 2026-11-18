@@ -28,6 +28,31 @@ use viewer::ViewerState;
 
 const TITLEBAR_HEIGHT: f32 = 54.0;
 const EDGE: f32 = 9.0;
+/// The side of the square title bar buttons.
+const CHROME_BUTTON: f32 = 34.0;
+/// The narrowest page, in points, whose title bar holds its seven buttons
+/// beside the title. Below it About runs over the title, and from about 400
+/// points About and Help leave the window on the left.
+const NARROWEST_PAGE: f32 = 560.0;
+
+/// The largest zoom a window `width` points wide at zoom 1 can take.
+///
+/// Ctrl+Plus, Ctrl+Minus and Ctrl+0 zoom every eframe window (0.2 to 5.0),
+/// and the window keeps its pixels: at 2.0 the default window is a page of
+/// 490 points, at 3.0 one of 327 with two title bar buttons outside it. The
+/// zoom stops where the page is still whole; a wider window zooms further.
+fn largest_zoom(width: f32) -> f32 {
+    ((width / NARROWEST_PAGE * 10.0).floor() / 10.0).max(1.0)
+}
+
+/// Bring a zoom the window is too narrow for back to [`largest_zoom`].
+fn limit_zoom(ctx: &egui::Context) {
+    let zoom = ctx.zoom_factor();
+    let most = largest_zoom(ctx.viewport_rect().width() * zoom);
+    if zoom > most + 0.001 {
+        ctx.set_zoom_factor(most);
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -448,7 +473,9 @@ impl App {
             widgets::display_font(14.0),
             color(p.text),
         );
-        let response = ui.interact(bar, ui.id().with("titlebar"), Sense::click_and_drag());
+        // Dragged and double-clicked, never focused: as a Tab stop it was the
+        // first one of the window, with nothing to show for it and no name.
+        let response = ui.interact(bar, ui.id().with("titlebar"), Sense::CLICK | Sense::DRAG);
         if response.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
@@ -456,13 +483,25 @@ impl App {
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
+        // The buttons end 14 points from the right edge and are made from
+        // left to right, which is the order Tab visits them in. Laid out
+        // from the right they were made, and visited, Close first.
+        let theme_label = if p.dark { "Light" } else { "Dark" };
+        let gap = ui.spacing().item_spacing.x;
+        let width = ["About", "Help", theme_label]
+            .iter()
+            .map(|text| widgets::gold_button_width(ui, text))
+            .sum::<f32>()
+            + 4.0 * CHROME_BUTTON
+            + 6.0 * gap;
+        let right = bar.right() - 14.0;
         let mut actions = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_max(
-                    pos2(bar.left() + 8.0, bar.top() + 6.0),
-                    pos2(bar.right() - 14.0, bar.bottom() - 8.0),
+                    pos2(right - width, bar.top() + 6.0),
+                    pos2(right, bar.bottom() - 8.0),
                 ))
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         let chrome = |ui: &mut egui::Ui, text: &str, tip: &str| {
             widgets::gold_button_named(
@@ -471,20 +510,26 @@ impl App {
                 tip,
                 false,
                 &p,
-                Some(vec2(34.0, 34.0)),
+                Some(vec2(CHROME_BUTTON, CHROME_BUTTON)),
                 FontId::proportional(15.0),
             )
             .on_hover_text(tip)
         };
-        if chrome(&mut actions, "×", "Close").clicked() {
-            self.close_requested(ctx);
+        if widgets::gold_button(&mut actions, "About", false, &p)
+            .on_hover_text("Version, installation and credits")
+            .clicked()
+        {
+            self.page = Page::About;
         }
-        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
-            self.hide_to_tray(ctx);
+        if widgets::gold_button(&mut actions, "Help", false, &p).clicked() {
+            self.help.select("start");
+            self.page = Page::Help;
         }
-        if chrome(&mut actions, "□", "Maximize / restore").clicked() {
-            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        if widgets::gold_button(&mut actions, theme_label, false, &p)
+            .on_hover_text("Toggle light / dark mode")
+            .clicked()
+        {
+            self.set_dark(ctx, !p.dark);
         }
         if chrome(&mut actions, "—", "Minimize").clicked() {
             if self.hides_to_tray() {
@@ -493,22 +538,15 @@ impl App {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
             }
         }
-        let theme_label = if p.dark { "Light" } else { "Dark" };
-        if widgets::gold_button(&mut actions, theme_label, false, &p)
-            .on_hover_text("Toggle light / dark mode")
-            .clicked()
-        {
-            self.set_dark(ctx, !p.dark);
+        if chrome(&mut actions, "□", "Maximize / restore").clicked() {
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
-        if widgets::gold_button(&mut actions, "Help", false, &p).clicked() {
-            self.help.select("start");
-            self.page = Page::Help;
+        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
+            self.hide_to_tray(ctx);
         }
-        if widgets::gold_button(&mut actions, "About", false, &p)
-            .on_hover_text("Version, installation and credits")
-            .clicked()
-        {
-            self.page = Page::About;
+        if chrome(&mut actions, "×", "Close").clicked() {
+            self.close_requested(ctx);
         }
         ui.add_space(TITLEBAR_HEIGHT);
     }
@@ -765,6 +803,11 @@ impl eframe::App for App {
         if self.screenshot_step(ctx) {
             return;
         }
+        limit_zoom(ctx);
+        // The window's name for assistive software. The tree's root has none
+        // of its own, and on Linux the title is not taken for it: a screen
+        // reader was given a frame without a name.
+        ctx.accesskit_node_builder(egui::accesskit_root_id(), |node| node.set_label(APP_NAME));
         self.handle_requests(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
             let exiting = self.core.lock().expect("core").exiting;
@@ -826,10 +869,11 @@ impl eframe::App for App {
                 );
                 self.titlebar(&mut body, ctx);
                 body.add_space(8.0);
+                // For the right click only: not a Tab stop.
                 let background = body.interact(
                     body.available_rect_before_wrap(),
                     body.id().with("body-bg"),
-                    Sense::click(),
+                    Sense::CLICK,
                 );
                 background.context_menu(|ui| self.context_menu(ui));
                 match self.page {
@@ -850,6 +894,7 @@ impl eframe::App for App {
                                     tray_available,
                                     &notices,
                                 );
+                                widgets::keep_focus_visible(ui);
                             });
                     }
                     Page::Viewer => {
@@ -860,6 +905,7 @@ impl eframe::App for App {
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 self.viewer.show(ui, &mut c, &p, self.wordmark.as_ref());
+                                widgets::keep_focus_visible(ui);
                             });
                     }
                     Page::Help => {

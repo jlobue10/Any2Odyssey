@@ -1,7 +1,7 @@
 //! Ornamental widgets: gold buttons, section cards with filigree borders,
 //! flourishes and the window frame. Drawing follows Any2Odd's DesktopTheme.
 
-use any2odyssey_core::theme::{Palette, PRIMARY_BUTTON, PRIMARY_BUTTON_HOVER, PRIMARY_BUTTON_TEXT};
+use any2odyssey_core::theme::{Palette, PRIMARY_BUTTON, PRIMARY_BUTTON_TEXT};
 use egui::epaint::CubicBezierShape;
 use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Shape,
@@ -161,6 +161,14 @@ pub fn window_frame(painter: &Painter, r: Rect, p: &Palette, radius: u8) {
     );
 }
 
+/// How wide [`gold_button`] makes a button with this text.
+pub fn gold_button_width(ui: &Ui, text: &str) -> f32 {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), display_font(13.0), Color32::PLACEHOLDER);
+    galley.size().x + 26.0
+}
+
 /// A gold-edged button. `primary` uses the teal "Turn on 3D" fill.
 pub fn gold_button(ui: &mut Ui, text: &str, primary: bool, p: &Palette) -> Response {
     gold_button_sized(ui, text, primary, p, None, display_font(13.0))
@@ -195,7 +203,14 @@ pub fn gold_button_named(
         .layout_no_wrap(text.to_owned(), font, Color32::PLACEHOLDER);
     let padding = vec2(13.0, 7.0);
     let size = fixed.unwrap_or(galley.size() + padding * 2.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    // The button reacts where it is drawn and nowhere else. A column of
+    // `Ui::columns` is a justified layout: the space it hands out is as wide
+    // as the column, and a response for that space made the whole row the
+    // button. A click on the empty card beside "Reset lens numbers" reset
+    // the calibration, one beside "Save preview PNG…" opened the dialog.
+    let (id, space) = ui.allocate_space(size);
+    let rect = ui.layout().align_size_within_rect(size, space);
+    let response = ui.interact(rect, id, Sense::click());
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), name));
     if ui.is_rect_visible(rect) {
@@ -203,7 +218,7 @@ pub fn gold_button_named(
         let pressed = response.is_pointer_button_down_on();
         let mut fill = if primary {
             if hovered {
-                PRIMARY_BUTTON_HOVER
+                p.primary_hover()
             } else {
                 PRIMARY_BUTTON
             }
@@ -280,15 +295,24 @@ pub fn section<R>(
 ) -> R {
     let background = ui.painter().add(Shape::Noop);
     let frame = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(16, 16));
+    let justified = ui.layout().horizontal_justify();
     let out = frame.show(ui, |ui| {
-        ui.label(
-            egui::RichText::new(title)
-                .font(display_font(13.0))
-                .color(color(p.text))
-                .strong(),
-        );
-        ui.add_space(6.0);
-        add_contents(ui)
+        let contents = |ui: &mut Ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .font(display_font(13.0))
+                    .color(color(p.text))
+                    .strong(),
+            );
+            ui.add_space(6.0);
+            add_contents(ui)
+        };
+        // The card stays as wide as its column; what is in it does not.
+        if justified {
+            unjustified(ui, contents)
+        } else {
+            contents(ui)
+        }
     });
     let rect = out.response.rect;
     let painter = ui.painter();
@@ -300,24 +324,77 @@ pub fn section<R>(
     out.inner
 }
 
-/// Heading used above slider rows and combo rows (26 % label column).
-pub fn row(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui)) -> Response {
+/// A labelled row: the label, then the slider, box or field it names.
+///
+/// `add_contents` is given the label's id. A slider, a drop-down box, a text
+/// field or a number field has no name of its own, only a value: the control
+/// the row is about takes `.labelled_by(id)`, and assistive software then
+/// reads "Depth strength, slider, 90" where it read "slider, 90".
+pub fn row(ui: &mut Ui, label: &str, add_contents: impl FnOnce(&mut Ui, egui::Id)) -> Response {
     ui.horizontal(|ui| {
         let label_width = (ui.available_width() * 0.26).max(90.0);
-        ui.allocate_ui_with_layout(
-            vec2(label_width, 26.0),
-            egui::Layout::left_to_right(Align2::LEFT_CENTER.y()),
-            |ui| {
-                ui.label(label);
-            },
-        );
+        let name = ui
+            .allocate_ui_with_layout(
+                vec2(label_width, 26.0),
+                egui::Layout::left_to_right(Align2::LEFT_CENTER.y()),
+                |ui| ui.label(label).id,
+            )
+            .inner;
         ui.allocate_ui_with_layout(
             vec2(ui.available_width(), 26.0),
             egui::Layout::left_to_right(Align2::LEFT_CENTER.y()),
-            add_contents,
+            |ui| add_contents(ui, name),
         );
     })
     .response
+}
+
+/// Lay the contents out top-down at their own widths, in all of the width
+/// there is. Inside a column of `Ui::columns`, which is a justified layout:
+/// there every widget is given the column's whole width to react in, so a
+/// click on the empty card beside a checkbox's text ticked the checkbox.
+pub fn unjustified<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let width = ui.available_width();
+    ui.allocate_ui_with_layout(
+        vec2(width, 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_width(width);
+            add_contents(ui)
+        },
+    )
+    .inner
+}
+
+/// Scroll the widget that has just been given the keyboard focus into view.
+/// Call at the end of a scroll area's contents.
+///
+/// egui moves the focus with Tab and leaves the page where it is, so the
+/// focus went to controls below the window's edge and Space or Enter then
+/// pressed a button nobody could see. A click also gives the focus, to
+/// something already under the pointer: only the keyboard scrolls.
+pub fn keep_focus_visible(ui: &Ui) {
+    let ctx = ui.ctx();
+    let focused = ctx.memory(|m| m.focused());
+    let remembered = ui.id().with("focus-followed");
+    let before = ctx.data_mut(|d| {
+        let before = d.get_temp::<Option<egui::Id>>(remembered).flatten();
+        d.insert_temp(remembered, focused);
+        before
+    });
+    let Some(id) = focused.filter(|id| before != Some(*id)) else {
+        return;
+    };
+    if ctx.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+        return;
+    }
+    let Some(rect) = ctx.read_response(id).map(|response| response.rect) else {
+        return;
+    };
+    // Only what belongs to these contents; the visible part is the clip.
+    if ui.min_rect().expand(1.0).contains_rect(rect) && !ui.clip_rect().contains_rect(rect) {
+        ui.scroll_to_rect(rect.expand(12.0), None);
+    }
 }
 
 /// The branded banner: wordmark on the left, tagline on the right.

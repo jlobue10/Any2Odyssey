@@ -75,7 +75,6 @@ pub const NIGHT: Palette = Palette {
 
 /// The primary-action button fill, the same in both themes.
 pub const PRIMARY_BUTTON: Rgb = Rgb(29, 104, 119);
-pub const PRIMARY_BUTTON_HOVER: Rgb = Rgb(62, 145, 162);
 pub const PRIMARY_BUTTON_TEXT: Rgb = Rgb(250, 245, 230);
 
 impl Palette {
@@ -85,6 +84,25 @@ impl Palette {
         } else {
             LIGHT
         }
+    }
+    /// The primary button's fill under the pointer. Its text has to stay
+    /// readable on it (4.5:1, also on the lighter band across the button's
+    /// upper half): the lighter teal used before, (62, 145, 162) in both
+    /// themes, left 3.3:1. No lighter fill passes on the light theme, where
+    /// the band is strongest, so it darkens there, as the other buttons do.
+    pub const fn primary_hover(&self) -> Rgb {
+        if self.dark {
+            Rgb(40, 117, 133)
+        } else {
+            Rgb(25, 88, 101)
+        }
+    }
+    /// The fill behind a selected list entry and behind selected text. The
+    /// text on it keeps the theme's text colour, so it is the accent taken
+    /// most of the way to the panel: on the accent itself the text had a
+    /// contrast of 2.6:1 (light) and 1.7:1 (dark).
+    pub fn selection(&self) -> Rgb {
+        self.accent.blend(self.panel, 0.55)
     }
     /// Shadow colour drawn under ornamental borders.
     pub const fn frame_shadow(&self) -> Rgb {
@@ -96,9 +114,74 @@ impl Palette {
     }
 }
 
+/// Contrast of two colours as WCAG 2 defines it: 1 (none) to 21.
+pub fn contrast(a: Rgb, b: Rgb) -> f64 {
+    fn luminance(c: Rgb) -> f64 {
+        let channel = |v: u8| {
+            let v = f64::from(v) / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(c.0) + 0.7152 * channel(c.1) + 0.0722 * channel(c.2)
+    }
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every pair of text and background the controls paint, in both themes,
+    /// meets WCAG's 4.5:1 for body text.
+    #[test]
+    fn text_is_readable_on_every_background_it_is_painted_on() {
+        for p in [LIGHT, NIGHT] {
+            let theme = if p.dark { "dark" } else { "light" };
+            // The upper half of a button carries a lighter band (`gold_button`).
+            let band = |fill: Rgb| {
+                let top = fill.blend(Rgb(255, 255, 255), if p.dark { 0.03 } else { 0.18 });
+                fill.blend(top, 0.55)
+            };
+            let pairs = [
+                ("text on the page", p.text, p.background),
+                ("text on a card", p.text, p.panel),
+                ("text on the title bar", p.text, p.header),
+                ("text on a button", p.text, band(p.button)),
+                ("text on a button under the pointer", p.text, band(p.hover)),
+                ("small print on the page", p.muted, p.background),
+                ("small print on a card", p.muted, p.panel),
+                ("a disabled button", p.muted, band(p.button)),
+                ("headings and links", p.accent, p.panel),
+                ("capital headings", p.border, p.panel),
+                (
+                    "the primary button",
+                    PRIMARY_BUTTON_TEXT,
+                    band(PRIMARY_BUTTON),
+                ),
+                (
+                    "the primary button under the pointer",
+                    PRIMARY_BUTTON_TEXT,
+                    band(p.primary_hover()),
+                ),
+                ("a selected list entry", p.text, p.selection()),
+            ];
+            for (what, text, background) in pairs {
+                let ratio = contrast(text, background);
+                assert!(ratio >= 4.5, "{theme}: {what} has a contrast of {ratio:.2}");
+            }
+            // What these two replaced, so the measure is known to measure.
+            assert!(contrast(p.text, p.accent) < 3.0, "{theme}");
+            assert!(contrast(PRIMARY_BUTTON_TEXT, Rgb(62, 145, 162)) < 3.5);
+            // The hover fill is still a different fill.
+            assert_ne!(p.primary_hover(), PRIMARY_BUTTON);
+        }
+        assert!((contrast(Rgb(0, 0, 0), Rgb(255, 255, 255)) - 21.0).abs() < 1e-9);
+        assert!((contrast(Rgb(119, 119, 119), Rgb(255, 255, 255)) - 4.48).abs() < 0.01);
+    }
 
     #[test]
     fn hex_decoding_and_blend() {
