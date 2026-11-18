@@ -100,7 +100,9 @@ if(-not $ControlsOnly){
  $operations+=[pscustomobject]@{Source=$ownerSource;Destination=$ownerFile}
 }
 $operations+=[pscustomobject]@{Source=Join-Path $PSScriptRoot 'assets\Any2Odyssey.ico';Destination=Join-Path $app 'Any2Odyssey.ico'}
-$record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionText;PreviousVersion=$(if($installed){$installed.Version.ToString()}else{$null});Action=$action;App=$app;ControlsOnly=[bool]$ControlsOnly;Worker=$(if(-not $ControlsOnly){Join-Path $engine $workerName}else{$null});Hash=(Get-FileHash -LiteralPath $binary).Hash}
+# The replaced version is recorded as the releases are named (0.9.4), not in the four parts of a
+# file version (0.9.4.0): the About page shows it beside the installed version.
+$record=[pscustomobject]@{Installed=(Get-Date).ToString('o');Version=$versionText;PreviousVersion=$(if($installed){Format-Any2OdysseyVersion $installed.Version}else{$null});Action=$action;App=$app;ControlsOnly=[bool]$ControlsOnly;Worker=$(if(-not $ControlsOnly){Join-Path $engine $workerName}else{$null});Hash=(Get-FileHash -LiteralPath $binary).Hash}
 # UTF-8 with a byte-order mark under every PowerShell: Windows PowerShell's -Encoding UTF8 writes one,
 # PowerShell 7's does not, and the uninstaller (Windows PowerShell) reads a file without one in the
 # ANSI code page, where a profile folder with other letters can make the record unreadable.

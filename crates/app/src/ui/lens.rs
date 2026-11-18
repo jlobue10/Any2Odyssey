@@ -514,6 +514,44 @@ mod tests {
         assert_eq!((lens.pitch, lens.offset), (PITCH_RANGE.0, 0.25));
     }
 
+    /// The lens files of every release that has had them (the corpus of
+    /// `crates/core/tests/state_compat.rs`: each release's own writer, and
+    /// the published Linux program driven through its window), loaded the
+    /// way the viewer loads them. A calibration is the user's own work.
+    #[test]
+    fn the_lens_files_of_earlier_releases_load_without_a_problem() {
+        let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/releases");
+        let mut loaded = 0;
+        for release in std::fs::read_dir(&corpus).unwrap().flatten() {
+            let Ok(states) = std::fs::read_dir(release.path()) else {
+                continue;
+            };
+            for state in states.flatten() {
+                let file = state.path().join("lens.json");
+                if !file.is_file() {
+                    continue;
+                }
+                let bytes = std::fs::read(&file).unwrap();
+                let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let mut lens = LensState::load(file.clone());
+                assert_eq!(lens.problem, None, "{}", file.display());
+                for (number, value) in [
+                    ("pitch", lens.lens.pitch),
+                    ("slant", lens.lens.slant),
+                    ("offset", lens.lens.offset),
+                ] {
+                    assert_eq!(saved[number].as_f64(), Some(value), "{}", file.display());
+                }
+                assert_eq!(saved["bgr"].as_bool(), Some(lens.lens.bgr));
+                // Nothing changed, so leaving the output writes nothing.
+                lens.store();
+                assert_eq!(std::fs::read(&file).unwrap(), bytes, "{}", file.display());
+                loaded += 1;
+            }
+        }
+        assert!(loaded >= 30, "{loaded} lens files");
+    }
+
     #[test]
     fn the_pattern_needs_no_image_and_an_image_needs_one() {
         let lens = Lens {

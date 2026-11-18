@@ -1,0 +1,11 @@
+{
+  "Mode": "Window",
+  "SideBySide": false,
+  "AutoConvert": true,
+  "MinimizeToTray": true,
+  "Recover": true,
+  "KeepOverlayOnTop": true,
+  "CheckUpdates": true,
+  "Depth": 0.5,
+  "Popout": 0.0
+}

@@ -1,0 +1,20 @@
+{
+  "pid": 4242,
+  "time": "2026-11-08T10:00:00.000+01:00",
+  "backend": "wgc",
+  "frames": 18446744073709551615,
+  "fps": 119.88,
+  "averageCaptureMilliseconds": 1.25,
+  "bounds": {
+    "x": 0,
+    "y": 0,
+    "width": 3840,
+    "height": 2160
+  },
+  "sourceBounds": {
+    "x": -1920,
+    "y": -1080,
+    "width": 1920,
+    "height": 1080
+  }
+}
