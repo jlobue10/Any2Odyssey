@@ -249,12 +249,7 @@ fn run(
             // picture; a screen shown on itself has the real one on top
             // already. Where the desktop cannot draw it into the stream,
             // the stream comes without.
-            let cursor = match proxy.available_cursor_modes().await {
-                Ok(modes) if pointer && modes.contains(CursorMode::Embedded) => {
-                    CursorMode::Embedded
-                }
-                _ => CursorMode::Hidden,
-            };
+            let cursor = wished_cursor(pointer, proxy.available_cursor_modes().await.ok());
             proxy
                 .select_sources(
                     &session,
@@ -310,6 +305,27 @@ fn run(
         let _ = session.close().await;
     });
     streamed
+}
+
+/// The cursor mode to ask the portal for: the pointer drawn into the frames
+/// where that is wanted and the desktop can do it, and otherwise nothing,
+/// which the portal takes for "hidden".
+///
+/// "Hidden" used to be asked for by name. The portal checks a named mode
+/// against the modes its backend has told it of, and for a moment after the
+/// backend has been started again (it had ended, or was updated) it knows of
+/// none: the next Start then ended with "Unavailable cursor mode 1", on GNOME
+/// with xdg-desktop-portal 1.22. What is not named is not checked.
+fn wished_cursor(
+    pointer: bool,
+    available: Option<ashpd::enumflags2::BitFlags<CursorMode>>,
+) -> Option<CursorMode> {
+    match available {
+        Some(modes) if pointer && modes.contains(CursorMode::Embedded) => {
+            Some(CursorMode::Embedded)
+        }
+        _ => None,
+    }
 }
 
 /// How long the portal's answer to the closing of a session is waited for.
@@ -841,6 +857,23 @@ mod tests {
             &spa::pod::Value::Object(format),
         );
         assert!(written.is_ok());
+    }
+
+    #[test]
+    fn the_pointer_is_asked_for_by_name_only_where_it_is_drawn() {
+        use ashpd::enumflags2::BitFlags;
+        let all = CursorMode::Hidden | CursorMode::Embedded | CursorMode::Metadata;
+        assert_eq!(wished_cursor(true, Some(all)), Some(CursorMode::Embedded));
+        // No pointer wanted: nothing is named, which the portal takes for
+        // hidden. Named, it was refused for a moment after the portal's
+        // backend had been started again ("Unavailable cursor mode 1").
+        assert_eq!(wished_cursor(false, Some(all)), None);
+        assert_eq!(wished_cursor(false, None), None);
+        // A desktop that cannot draw it, or does not say what it can.
+        let cannot = CursorMode::Hidden | CursorMode::Metadata;
+        assert_eq!(wished_cursor(true, Some(cannot)), None);
+        assert_eq!(wished_cursor(true, Some(BitFlags::empty())), None);
+        assert_eq!(wished_cursor(true, None), None);
     }
 
     #[test]
