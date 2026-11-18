@@ -1,0 +1,11 @@
+{
+  "Mode": "Desktop",
+  "SideBySide": false,
+  "AutoConvert": false,
+  "MinimizeToTray": true,
+  "Recover": true,
+  "KeepOverlayOnTop": true,
+  "CheckUpdates": true,
+  "Depth": 0.0,
+  "Popout": -1.0
+}

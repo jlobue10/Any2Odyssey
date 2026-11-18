@@ -12,6 +12,8 @@ cargo fmt --all --check
 
 The core tests port Any2Odd's checks: the `--self-test` geometry (fit, offscreen placement across monitor arrangements), `SliderValidation` (slider position/value/readout mapping), `RecoveryValidation` (queued retry cancelled by disabling recovery, re-enabling does not start, running worker left alone) and `test_portable.py`'s stereo assertions (anaglyph channel mapping, SBS eye swap, half-width geometry, flat pass-through, invalid input). Help content is checked for rebranding and the absence of donation material.
 
+`crates/core/tests/state_compat.rs` reads what every release since 0.8.0 saved: `crates/core/tests/fixtures/releases/<tag>/` holds `settings.json`, `ui-settings.json`, `lens.json`, the worker's status files and the installer's `version.json` as that release's own code wrote them (the README there says how each was made, and how to add a release). Every value must load as it was saved, nothing may be called damaged, a save by this release must keep all of it, and the installation records must show on the About page. Two tests look the other way, for the user who goes back to an older release: this release must write, byte for byte, what the newest release in the corpus wrote, and those files must still have every key an older release wrote, with a value of the same kind. `crates/app/src/ui/lens.rs` loads the same lens files the way the viewer does, and `installer/tests/test-record-compat.ps1` reads the installation records the way the installer and the uninstaller do, under both PowerShells.
+
 On Linux the Windows crate is only compile-checked: `cargo check --workspace --target x86_64-pc-windows-msvc`. The pinned toolchain in `rust-toolchain.toml` does not ship that target; add it once with `rustup target add x86_64-pc-windows-msvc --toolchain 1.99.1` before the cross-check or clippy run.
 
 ## Linux
@@ -102,6 +104,7 @@ Build the release, copy `target\release\Any2Odyssey.exe` to `build\`, then run f
 
 ```powershell
 .\installer\tests\test-installer.ps1
+.\installer\tests\test-record-compat.ps1   # version.json of every release since 0.8.0, and this one's; needs no build
 .\installer\tests\test-install-launcher.ps1
 .\installer\tests\test-controls-install.ps1
 .\installer\tests\test-install-flow.ps1 [-PreviousPackage <extracted older release>]
