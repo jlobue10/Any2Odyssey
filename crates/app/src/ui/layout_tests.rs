@@ -49,6 +49,8 @@ struct Harness {
     /// The accessibility tree of the last frame, and what has the focus.
     widgets: Vec<Widget>,
     focus: Option<egui::accesskit::NodeId>,
+    /// The name of the tree's root: the window, as a screen reader says it.
+    window_name: Option<String>,
     /// Display scale: physical pixels per point.
     scale: f32,
     app: App,
@@ -93,6 +95,7 @@ impl Harness {
             outlines: Vec::new(),
             widgets: Vec::new(),
             focus: None,
+            window_name: None,
             scale: 1.0,
             app,
             core,
@@ -144,6 +147,13 @@ impl Harness {
         if let Some(update) = &output.platform_output.accesskit_update {
             self.focus = Some(update.focus);
             self.widgets = widgets_of(update);
+            if let Some(tree) = &update.tree {
+                self.window_name = update
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == tree.root)
+                    .and_then(|(_, node)| node.label().map(str::to_owned));
+            }
         }
         self.events = output.platform_output.events;
         painted
@@ -1158,6 +1168,33 @@ mod sweep {
                 ],
                 "{names:?}"
             );
+            // In that order on the screen too, each to the right of the one
+            // before it.
+            for pair in stops[..7].windows(2) {
+                assert!(
+                    pair[0].rect.right() <= pair[1].rect.left(),
+                    "{:?} is not left of {:?}",
+                    pair[0].name,
+                    pair[1].name
+                );
+            }
+            // The page's background is not a stop. Only the scrolling area
+            // of the controls and of the viewer has the whole page for its
+            // place; the background had it too, on every page.
+            let whole_page = Rect::from_min_max(
+                pos2(FRAME, FRAME + TITLEBAR_HEIGHT + 8.0),
+                pos2(size.0 - FRAME, size.1 - FRAME),
+            );
+            let near = |a: egui::Pos2, b: egui::Pos2| (a - b).length() < 1.0;
+            let over_the_page = stops
+                .iter()
+                .filter(|s| near(s.rect.min, whole_page.min) && near(s.rect.max, whole_page.max))
+                .count();
+            assert_eq!(
+                over_the_page,
+                usize::from(matches!(page, Page::Controls | Page::Viewer)),
+                "{names:?}"
+            );
             for (i, stop) in stops.iter().enumerate() {
                 if stop.role == Role::Unknown {
                     // egui's own: a scrolling area and its bar. Nothing of
@@ -1342,6 +1379,50 @@ mod sweep {
             h.run(Vec::new());
         }
         assert_eq!(h.ctx.zoom_factor(), 0.2);
+    }
+
+    /// A gold button in a column of `Ui::columns`, where the layout hands
+    /// every widget the column's whole width: it reacts where it is drawn.
+    /// (The cards of the pages no longer lay their contents out like that,
+    /// so the pages alone do not show it.)
+    #[test]
+    fn a_gold_button_in_a_justified_column_reacts_where_it_is_drawn() {
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let palette = Palette::for_dark(false);
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 200.0))),
+            ..Default::default()
+        };
+        let mut seen = None;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.columns(1, |columns| {
+                    let ui = &mut columns[0];
+                    let column = ui.available_width();
+                    let drawn = widgets::gold_button_width(ui, "Reset lens numbers");
+                    let response = widgets::gold_button(ui, "Reset lens numbers", false, &palette);
+                    seen = Some((response.rect.width(), drawn, column));
+                });
+            });
+        });
+        let (reacts, drawn, column) = seen.expect("the column was laid out");
+        assert!(column > drawn + 200.0, "{column} {drawn}");
+        assert!(
+            (reacts - drawn).abs() < 0.5,
+            "reacts over {reacts} of {drawn}"
+        );
+    }
+
+    /// The window has a name for assistive software: the tree's root has
+    /// none of its own, and on Linux the title is not taken for it.
+    #[test]
+    fn the_window_is_named_in_the_accessibility_tree() {
+        for page in [Page::Controls, Page::Viewer, Page::Help, Page::About] {
+            let mut h = Harness::new(SIZES[0], page);
+            h.settle();
+            assert_eq!(h.window_name.as_deref(), Some(APP_NAME));
+        }
     }
 
     /// The tree above comes from egui; whether a screen reader is given it
