@@ -548,7 +548,7 @@ const SMALL_ROOM: usize = 4096;
 /// one picture of it while the desktop changed it) the program stayed that
 /// much larger until the output was stopped: 265 MB after 7680 x 4320. A
 /// buffer that fits is left alone, so this costs a comparison a frame.
-fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
+pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
     if buffer.capacity() > wanted.max(SMALL_ROOM) {
         *buffer = Vec::new();
     }
