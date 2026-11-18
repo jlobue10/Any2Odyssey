@@ -31,7 +31,10 @@ optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
             'libxi: input in an X11 session'
             'xdg-utils: View logs and Help links'
             'xdg-desktop-portal: live screen capture, with the portal backend of your desktop'
-            'wine: the Odyssey 3D lens, eye tracker and weaver (any2odyssey-setup prepares them; also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)')
+            'wine: the Odyssey 3D lens, eye tracker and weaver (any2odyssey-setup prepares them; also needs mingw-w64-gcc, clang, python, xorg-xrandr and rsync)'
+            # Named once more by itself: two of the Wine setup's tools are Python scripts, and namcap
+            # reports a package whose scripts need an interpreter that it names nowhere as its own entry.
+            'python: the Odyssey 3D set-up (two of its tools are Python scripts)')
 # The release profile already strips debug information; there is nothing for a -debug package.
 # No LTO flags from makepkg: they reach the C file the PipeWire bindings compile, as compiler-specific
 # bytecode the Rust linker cannot read, and the link then fails over its functions. The Rust code is
