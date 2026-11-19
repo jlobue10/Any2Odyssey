@@ -5,6 +5,12 @@
  * treats the desktop as locked. The answer given is always: active, unlocked. Everything else goes to Wine's
  * own wtsapi32 (renamed wtsapiw.dll). Memory is taken from the process heap, as Wine's WTSFreeMemory expects.
  */
+/* The headers of mingw-w64 before version 9 take Windows XP as the target unless told otherwise (Ubuntu
+ * 22.04 has 8.0), and then leave out GetTickCount64: taken for a function that returns an int, it gave a
+ * wrong time for the logon. Later versions take Windows 10, which this says for all of them. */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include <windows.h>
 #include <wtsapi32.h>
 

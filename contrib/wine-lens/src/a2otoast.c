@@ -12,6 +12,11 @@
  * convention, where a callee may ignore arguments it does not know about.
  * Every call is logged to the file named by A2OTOAST_LOG, when that is set.
  */
+/* The headers of mingw-w64 before version 9 take Windows XP as the target unless told otherwise (Ubuntu
+ * 22.04 has 8.0), and then leave out InitOnceExecuteOnce. Later versions take Windows 10, which this says for all of them. */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #define COBJMACROS
 #include <windows.h>
 #include <stdarg.h>
