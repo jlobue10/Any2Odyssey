@@ -7,13 +7,14 @@
 //! it had been set the evening before. They are written to a small file in
 //! the data folder a moment after the last change, and read at the start.
 //!
-//! The file is read leniently: a value that is missing, unknown or out of
-//! range is the default for that one choice, and a file that cannot be read
-//! at all is all defaults. Nothing here is worth a message to the user.
+//! The file is read leniently: a value that is missing, unknown, of the
+//! wrong kind or out of range is the default for that one choice, and a
+//! file that cannot be read at all is all defaults. Nothing here is worth a
+//! message to the user.
 use super::viewer::{Input, Options, Output, DEPTH_DETAIL, LIVE_LINES};
 use any2odyssey_core::fsutil;
 use any2odyssey_core::slider::{DEPTH, POPOUT};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -22,8 +23,8 @@ use std::time::{Duration, Instant};
 const SAVE_DELAY: Duration = Duration::from_secs(1);
 
 /// The file's contents. Every field may be missing.
-#[derive(Serialize, Deserialize, Default)]
-#[serde(default, rename_all = "PascalCase")]
+#[derive(Serialize, Default)]
+#[serde(rename_all = "PascalCase")]
 struct Saved {
     input: Option<String>,
     output: Option<String>,
@@ -66,6 +67,42 @@ fn named<T: Copy>(names: &[(T, &'static str)], name: Option<&str>) -> Option<T> 
 }
 
 impl Saved {
+    /// The values in a file's bytes, each one by itself: one of the wrong
+    /// kind (a word where a number belongs, a number that is not a whole
+    /// one or too large for this program) is missing, and the others stand.
+    /// Read as a whole, such a value made every choice the default, the
+    /// ones beside it too; so did a name that is there twice (the later one
+    /// counts). Bytes that are no JSON object hold nothing.
+    fn parse(bytes: &[u8]) -> Saved {
+        let Ok(serde_json::Value::Object(values)) =
+            serde_json::from_slice::<serde_json::Value>(fsutil::strip_utf8_bom(bytes))
+        else {
+            return Saved::default();
+        };
+        let word = |name: &str| values.get(name).and_then(|v| v.as_str()).map(str::to_owned);
+        let yes_or_no = |name: &str| values.get(name).and_then(|v| v.as_bool());
+        let number = |name: &str| {
+            values
+                .get(name)
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+        };
+        // The names are the ones `Saved` is written with.
+        Saved {
+            input: word("Input"),
+            output: word("Output"),
+            half_width: yes_or_no("HalfWidth"),
+            swap: yes_or_no("Swap"),
+            depth: number("Depth"),
+            popout: number("Popout"),
+            sharpness: number("Sharpness"),
+            depth_steadiness: number("DepthSteadiness"),
+            lines: number("Lines"),
+            depth_detail: number("DepthDetail").and_then(|v| u32::try_from(v).ok()),
+            pointer: yes_or_no("Pointer"),
+        }
+    }
+
     fn of(options: Options) -> Saved {
         Saved {
             input: name_of(&INPUTS, options.input),
@@ -119,8 +156,7 @@ impl Saved {
 /// The choices in `path`, or the defaults where it has none.
 pub fn read(path: &Path) -> Options {
     fsutil::read_limited(path, fsutil::SMALL_FILE_LIMIT)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Saved>(fsutil::strip_utf8_bom(&bytes)).ok())
+        .map(|bytes| Saved::parse(&bytes))
         .unwrap_or_default()
         .options()
 }
@@ -249,6 +285,23 @@ mod tests {
         assert_eq!(read(&path), live);
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn a_live_screen_in_the_file_is_no_choice_where_the_page_has_none() {
+        // (a file brought over from the Linux edition: its other choices stand)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        std::fs::write(&path, r#"{"Input":"Desktop","Output":"Sbs","Lines":1440}"#).unwrap();
+        assert_eq!(
+            read(&path),
+            Options {
+                output: Output::Sbs,
+                lines: 1440,
+                ..Options::default()
+            }
+        );
+    }
+
     #[test]
     fn a_dragged_slider_is_written_once_it_stands_still() {
         let dir = tempfile::tempdir().unwrap();
@@ -303,6 +356,120 @@ mod tests {
         let mut memory = OptionsFile::default();
         assert_eq!(memory.save_when_settled(changed(), now), None);
         memory.store(changed());
+    }
+
+    #[test]
+    fn a_value_of_the_wrong_kind_is_missing_and_the_ones_beside_it_stand() {
+        // 0.9.8 read the file as a whole: one such value, or a name twice,
+        // and every choice in the file was the default.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        let read_text = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            read(&path)
+        };
+        let good = r#""Input":"Ai","Output":"Sbs","Swap":true,"Sharpness":40"#;
+        let expected = Options {
+            input: Input::Ai,
+            output: Output::Sbs,
+            swap: true,
+            sharp_pos: 40,
+            ..Options::default()
+        };
+        for odd in [
+            r#""Lines":"many""#,
+            r#""Lines":[1440]"#,
+            r#""Lines":null"#,
+            r#""Depth":100000000000"#,
+            r#""Depth":90.5"#,
+            r#""Depth":1e2"#,
+            r#""Popout":"-40""#,
+            r#""DepthSteadiness":{"Value":80}"#,
+            r#""DepthDetail":-1"#,
+            r#""DepthDetail":770.0"#,
+            r#""HalfWidth":"no""#,
+            r#""Pointer":0"#,
+            // Not the numbers they are when their upper half is cut off
+            // (1440 and 770).
+            r#""Lines":4294968736"#,
+            r#""DepthDetail":4294968066"#,
+        ] {
+            assert_eq!(read_text(&format!("{{{good},{odd}}}")), expected, "{odd}");
+            assert_eq!(read_text(&format!("{{{odd},{good}}}")), expected, "{odd}");
+        }
+        // Of the wrong kind where a word belongs.
+        for odd in [r#""Input":3"#, r#""Input":["Ai"]"#, r#""Input":null"#] {
+            assert_eq!(
+                read_text(&format!("{{{odd},\"Lines\":1440,\"Pointer\":false}}")),
+                Options {
+                    lines: 1440,
+                    pointer: false,
+                    ..Options::default()
+                },
+                "{odd}"
+            );
+        }
+        // A name twice: the later one counts, and the rest stands.
+        assert_eq!(
+            read_text(r#"{"Lines":1440,"Input":"Ai","Lines":2160}"#),
+            Options {
+                input: Input::Ai,
+                lines: 2160,
+                ..Options::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_ends_of_each_slider_are_taken_and_one_step_past_them_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        let default = Options::default();
+        type Position = fn(&Options) -> i32;
+        let sliders: [(&str, i32, i32, Position); 4] = [
+            ("Depth", DEPTH.min, DEPTH.max, |o| o.depth_pos),
+            ("Popout", POPOUT.min, POPOUT.max, |o| o.pop_pos),
+            ("Sharpness", 0, 100, |o| o.sharp_pos),
+            ("DepthSteadiness", 0, 95, |o| o.steady_pos),
+        ];
+        for (name, min, max, position) in sliders {
+            let read_at = |value: i32| {
+                std::fs::write(&path, format!("{{\"{name}\":{value}}}")).unwrap();
+                position(&read(&path))
+            };
+            assert_eq!(read_at(min), min, "{name}");
+            assert_eq!(read_at(max), max, "{name}");
+            assert_eq!(read_at(min - 1), position(&default), "{name}");
+            assert_eq!(read_at(max + 1), position(&default), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_file_belongs_is_not_waited_on() {
+        // Opening a pipe that nobody writes to waits for a writer: the
+        // program read its choices before it had a window, and never got one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (no mkfifo on this system: `fsutil` has the same check)
+            return;
+        }
+        let (done, read_it) = std::sync::mpsc::channel();
+        let pipe = path.clone();
+        std::thread::spawn(move || done.send(read(&pipe)));
+        let options = read_it.recv_timeout(Duration::from_secs(10));
+        // Let a reader that does wait go, so that the test ends either way.
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path);
+        assert_eq!(
+            options,
+            Ok(Options::default()),
+            "the read waited on the pipe"
+        );
     }
 
     #[test]
