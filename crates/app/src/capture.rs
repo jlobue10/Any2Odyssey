@@ -264,7 +264,13 @@ fn run(
                         .set_restore_token(restore_token.as_deref())
                         .set_persist_mode(PersistMode::ExplicitlyRevoked),
                 )
-                .await?;
+                .await?
+                // What the desktop answers to this is looked at: where it
+                // is "no", the portal has closed the session by now, and a
+                // start asked for all the same is refused with "Invalid
+                // session", which says nothing (Hyprland's portal backend
+                // on a desktop that is not Hyprland answers so).
+                .response()?;
             let start = async {
                 proxy
                     .start(&session, None, Default::default())
