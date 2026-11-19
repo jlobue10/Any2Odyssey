@@ -663,6 +663,18 @@ fn gist(message: &str) -> String {
     format!("…{tail}")
 }
 
+/// What a depth map is asked for, which decides what becomes of the room
+/// the runtime took for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    /// A still image: no other map is wanted until the user opens another
+    /// image or changes the depth detail.
+    Still,
+    /// A frame of a live screen: the next one follows at once, at the same
+    /// size.
+    Live,
+}
+
 /// Start the model on the GPU where the installed runtime has the CUDA
 /// provider, and on the processor where it has none or the GPU cannot be
 /// used; `open(true)` asks for the GPU. Fails with what the processor's
@@ -722,6 +734,22 @@ pub struct Estimator {
     input: String,
     model: PathBuf,
     runs_on: RunsOn,
+    /// The pixels of the picture the model was last given.
+    last_pixels: u64,
+    /// The runtime takes the request to give room back (`GIVE_BACK`).
+    gives_back: bool,
+}
+
+/// The one model, shared by still images and live sessions.
+static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
+
+/// Let the model go, with everything the runtime holds for it; the next
+/// map loads it again. A live screen that has ended does this: its model
+/// held 0.9 GB of a GPU's memory at standard detail and 2.8 GB at the
+/// finest for as long as the program stayed open, output or none. Waits
+/// for a map that is being made: not for the UI's thread.
+pub fn unload() {
+    *ESTIMATOR.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Share one model between still images and live sessions. A stopped live
@@ -730,9 +758,9 @@ pub struct Estimator {
 pub fn estimate_unless_cancelled(
     image: &RgbaImage,
     long_side: u32,
+    purpose: Purpose,
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<DepthMap>, String> {
-    static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
     with_model(
         &ESTIMATOR,
         cancelled,
@@ -741,7 +769,7 @@ pub fn estimate_unless_cancelled(
             verify_installed(&model, origin, MODEL_SHA256)?;
             Estimator::load(&model)
         },
-        |estimator| estimator.estimate(image, long_side),
+        |estimator| estimator.estimate(image, long_side, purpose),
     )
 }
 
@@ -803,6 +831,10 @@ fn open_session(model: &Path, gpu: bool) -> Result<Session, String> {
     builder.commit_from_file(model).map_err(|e| said(&e))
 }
 
+/// The run setting that has the runtime give back, when the run is over,
+/// the room it took for it and no longer uses.
+const GIVE_BACK: &str = "memory.enable_memory_arena_shrinkage";
+
 impl Estimator {
     pub fn load(model: &Path) -> Result<Estimator, String> {
         // A runtime that is missing is not a GPU that refused.
@@ -823,6 +855,8 @@ impl Estimator {
             input,
             model: model.to_owned(),
             runs_on,
+            last_pixels: 0,
+            gives_back: true,
         })
     }
 
@@ -830,21 +864,60 @@ impl Estimator {
     /// shown with its long side at about `long_side` pixels (one of
     /// [`DETAIL`]). The map comes back at that working size; the renderer
     /// stretches it to the image.
-    pub fn estimate(&mut self, image: &RgbaImage, long_side: u32) -> Result<DepthMap, String> {
+    pub fn estimate(
+        &mut self,
+        image: &RgbaImage,
+        long_side: u32,
+        purpose: Purpose,
+    ) -> Result<DepthMap, String> {
         let (width, height) = image.dimensions();
         if width == 0 || height == 0 {
             return Err("The source contains no image.".into());
         }
         let (w, h) = model_size(width, height, long_side);
+        // The runtime keeps the room of the largest picture it has worked
+        // on, for the next one: on a GPU 0.9 GB of the card's memory at
+        // standard detail, 2.8 GB at the finest and 6.9 GB after one square
+        // picture at the finest, until the program ended. It is given back
+        // after a still image, which is not followed by another, and after
+        // the first frame of a live screen that is smaller than the one
+        // before (a coarser depth detail, a smaller screen). Not after
+        // every frame: taking the room anew for each costs half as much
+        // time again as the model itself.
+        let pixels = u64::from(w) * u64::from(h);
+        let give_back = self.gives_back && (purpose == Purpose::Still || pixels < self.last_pixels);
+        self.last_pixels = pixels;
         let input = self.input.clone();
         let model = self.model.clone();
         let was = self.runs_on.clone();
+        let not_taken = std::cell::Cell::new(false);
         let map = run_or_fall_back(
             &mut self.session,
             &mut self.runs_on,
-            |session, _| run(session, &input, image, (w, h)),
+            |session, runs_on| {
+                // The room is the GPU's where the model runs there.
+                let room = give_back.then_some(match runs_on {
+                    RunsOn::Gpu => "gpu:0",
+                    RunsOn::Processor { .. } => "cpu:0",
+                });
+                match run(session, &input, image, (w, h), room) {
+                    // A runtime built without that kind of room refuses the
+                    // request before it runs anything. The map matters
+                    // more: it is made without the request, and when that
+                    // works the request is not made again.
+                    Err(_) if room.is_some() => {
+                        let map = run(session, &input, image, (w, h), None);
+                        not_taken.set(map.is_ok());
+                        map
+                    }
+                    done => done,
+                }
+            },
             || open_session(&model, false),
         );
+        if not_taken.get() {
+            self.gives_back = false;
+        }
         if self.runs_on != was {
             note_runs_on(&self.runs_on);
         }
@@ -852,21 +925,31 @@ impl Estimator {
     }
 }
 
-/// One run of the model on `image` at a size (width, height).
+/// One run of the model on `image` at a size (width, height), after which
+/// the runtime gives back what it no longer uses of `give_back` ("gpu:0",
+/// "cpu:0"), if that is named.
 fn run(
     session: &mut Session,
     input: &str,
     image: &RgbaImage,
     (w, h): (u32, u32),
+    give_back: Option<&str>,
 ) -> Result<DepthMap, String> {
     let tensor = Tensor::from_array((
         [1usize, 3, h as usize, w as usize],
         planar_input(image, w, h),
     ))
     .map_err(|e| format!("Could not prepare the image for the depth model: {e}"))?;
+    let failed = |e: &dyn std::fmt::Display| {
+        format!("The depth model failed: {}", without_trace(&e.to_string()))
+    };
+    let mut options = ort::session::RunOptions::new().map_err(|e| failed(&e))?;
+    if let Some(room) = give_back {
+        options.set(GIVE_BACK, room).map_err(|e| failed(&e))?;
+    }
     let outputs = session
-        .run(ort::inputs![input => tensor])
-        .map_err(|e| format!("The depth model failed: {}", without_trace(&e.to_string())))?;
+        .run_with_options(ort::inputs![input => tensor], &options)
+        .map_err(|e| failed(&e))?;
     let (shape, values) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("The depth model returned an unexpected result: {e}"))?;
@@ -1234,6 +1317,46 @@ mod tests {
 
     fn plain_text(message: &str) -> String {
         without_trace(message).to_owned()
+    }
+
+    /// The model itself, where it runs and what becomes of a GPU that
+    /// fails. Needs the depth model and ONNX Runtime, and says more with a
+    /// runtime that has the CUDA provider. Run by hand:
+    /// `cargo test --release -p any2odyssey depth::tests::the_model -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs the depth model and ONNX Runtime"]
+    fn the_model_runs_where_it_says_it_does() {
+        let image = RgbaImage::from_fn(640, 360, |x, y| {
+            image::Rgba([(x / 3) as u8, (y / 2) as u8, ((x + y) / 5) as u8, 255])
+        });
+        assert_eq!(
+            runs_on(),
+            None,
+            "nothing is said before the model is loaded"
+        );
+        for (purpose, detail) in [
+            (Purpose::Still, 518),
+            (Purpose::Live, 770),
+            (Purpose::Live, 518),
+            (Purpose::Still, 518),
+        ] {
+            let started = std::time::Instant::now();
+            let map = estimate_unless_cancelled(&image, detail, purpose, || false)
+                .expect("the depth model")
+                .expect("not cancelled");
+            assert_eq!((map.width(), map.height()), model_size(640, 360, detail));
+            println!(
+                "{purpose:?} at {detail}: {:?}; {}",
+                started.elapsed(),
+                runs_on().expect("said once loaded").for_log()
+            );
+        }
+        let said = runs_on().unwrap();
+        if has_gpu_provider() {
+            assert_ne!(said, RunsOn::Processor { gpu_refused: None });
+        } else {
+            assert_eq!(said, RunsOn::Processor { gpu_refused: None });
+        }
     }
 
     #[test]

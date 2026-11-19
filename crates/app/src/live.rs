@@ -650,11 +650,21 @@ fn render_loop(frames: &Frames, shared: &Shared) {
 }
 
 fn depth_loop(shared: &Shared) {
+    // How many live screens have a depth thread at this moment: a stopped
+    // one's thread may still be inside the model when the next has begun.
+    static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    RUNNING.fetch_add(1, Ordering::SeqCst);
     depth_loop_with(shared, |frame, detail| {
-        crate::depth::estimate_unless_cancelled(frame, detail, || {
+        crate::depth::estimate_unless_cancelled(frame, detail, crate::depth::Purpose::Live, || {
             shared.stop.load(Ordering::Relaxed)
         })
-    })
+    });
+    // The last live screen has ended: the model goes, and with it what it
+    // holds of the GPU's memory or the processor's. The next start loads
+    // it again, in about a second, while the output comes up.
+    if RUNNING.fetch_sub(1, Ordering::SeqCst) == 1 {
+        crate::depth::unload();
+    }
 }
 
 /// [`depth_loop`] with the model as `estimate`, which is given a frame and
@@ -1879,12 +1889,24 @@ mod bench {
                 let (mw, mh) = crate::depth::model_size(sw, sh, detail);
                 let mut small = RgbaImage::new(mw, mh);
                 live::scale_to_rgba(source, &mut small, mw, mh);
+                // As the live screen's thread asks: no room is given back
+                // between two frames of one size.
+                let estimate = || {
+                    crate::depth::estimate_unless_cancelled(
+                        &small,
+                        detail,
+                        crate::depth::Purpose::Live,
+                        || false,
+                    )
+                    .expect("depth model")
+                    .expect("not cancelled")
+                };
                 let first = Instant::now();
-                map = Some(crate::platform::estimate_depth(&small, detail).expect("depth model"));
+                map = Some(estimate());
                 let first = first.elapsed();
                 let start = Instant::now();
                 for _ in 0..20 {
-                    crate::platform::estimate_depth(&small, detail).unwrap();
+                    estimate();
                 }
                 println!(
                     "{sw}x{sh} depth {name} ({mw}x{mh}): first {first:?}, then {:?} each",
