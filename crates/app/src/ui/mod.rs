@@ -4,6 +4,7 @@ mod about;
 mod controls;
 mod help;
 mod lens;
+mod options_file;
 mod system_fonts;
 mod theme;
 mod viewer;
@@ -311,7 +312,13 @@ impl App {
             core,
             page,
             controls,
-            viewer: ViewerState::with_saved_lens(),
+            viewer: if preview {
+                // A preview's picture is of the page as it comes, whatever
+                // this user last chose, and it leaves their file alone.
+                ViewerState::with_saved_lens().without_saved_options()
+            } else {
+                ViewerState::with_saved_lens()
+            },
             help: HelpState::default(),
             about: AboutState::new(),
             palette,

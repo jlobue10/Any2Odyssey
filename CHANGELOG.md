@@ -2,6 +2,33 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.8 (2026-11-18)
+
+Two fixes and one addition, from an evening with 0.9.7 on the monitor's own machine.
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive): a package or archive update does not replace the scripts of the Odyssey 3D set-up in the data folder, and the set-up does.
+
+### Fixed
+
+- **Linux, the Odyssey 3D: an upgrade of Wine no longer breaks the output until the set-up is run again.** At its first program after an upgrade Wine updates the prefix, and that registers Wine's own toast library again for two of the three classes the set-up's stand-in answers for. Wine's has no notifier yet, and Leia's session (`SRSession.exe`) ended within a second of every start. With no session nothing counted as running: every Start was a cold start of half a minute that ended the stack the Start before it had brought up. Seen on the monitor's machine after Wine 11.21 became 11.22. `start-stack.sh` now writes the stand-in's three entries at every start, with the monitors' entries it writes there anyway. An installation that is in this state is repaired by `any2odyssey-setup` (or `setup.sh`), which also brings the new script.
+- **Linux, live screen: the depth of a large screen is steadier.** The screen is shrunk for the depth model, and that read four pixels for each of the model's, however many it stood for: all of them down to half size, one in fourteen of a 3840 × 2160 screen at standard depth detail. Since 0.9.7 a screen on KDE Plasma arrives at its own size (0.9.6 and before were sent 1920 × 1080), so small text and thin lines came and went in the model's picture with every pixel they moved, and the depth with them. Measured on a 5120 × 1440 desktop with text: moved by one pixel, the depth map changed by 6.7 % of its range on average, where the way of 0.9.1 gave 1.5 %; it is 0.8 % now. Every pixel of the screen is counted, at a cost of two to four milliseconds a depth map. On a 3840 × 2160 screen with little small detail the three were the same (0.2 to 0.3 %).
+
+### Added
+
+- **The viewer keeps its choices between runs**: what the image is and how it is shown, depth strength and pop-out, depth detail, and a live screen's sharpness, depth steadiness, lines and pointer. Every launch began at the defaults, a live screen at standard depth detail and 1080 lines. They are written to `viewer-settings.json` in the data folder a second after the last change and when the program ends; a value in the file that the page could not have chosen counts as the default for that choice. The output is not started by it. Both editions.
+
+### Known, not fixed
+
+- Linux, live screen: a window that takes a small part of the screen has a small part of the depth model's picture, and its depth is coarse (edges inside it bend). *Depth detail* at Fine or Finer gives it more.
+
+- Linux, the Odyssey 3D: after an upgrade of Wine the set-up's copies of five of Wine's own libraries (the ones its stand-ins pass calls on to) stay those of the Wine before it, until the set-up is run again. Seen working across 11.21 to 11.22; "run it again after a Wine upgrade" still stands.
+- An update of the program does not update the Odyssey 3D set-up's scripts in the data folder; the set-up has to be run again for that.
+- The items of 0.9.7 stand as they were.
+
+### Hardware verification
+
+This one was made on the hardware: Wine 11.22, the G90XF and Leia's own programs. With the entries as Wine's update left them `SRSession.exe` ended at each of its starts with an access violation after `toast_manager_factory_QueryInterface ... E_NOINTERFACE`; with the three entries written by the script's new lines it stayed. The depth map's steadiness was measured with the model on this machine's GPU and screenshots of its two screens; the live picture with it was looked at on the G90XF's own screen (a full-screen picture looked right). The saved choices were run in tests only, not yet through the window. Not yet seen: the picture itself after a start with the new script, and the tests under a shell other than this machine's (CI's `sh` is dash).
+
 ## 0.9.7 (2026-11-18)
 
 A seventh audit release: six pull requests (#154 to #159) from a round that again ran things no round had run. The Linux edition was run on KDE Plasma 6.8 and on GNOME 51 themselves, without a screen, with their own compositors, portals and file dialogs. The live screen was fed by a stand-in for the desktop's portal and a stream made for the purpose: every format, row length, size, turn and mark a desktop may send. The Wine side of the Odyssey 3D output ran under real Wine for the first time outside the one machine it was written on. The eight published files of 0.9.6 were taken apart and the documents that ship with them read against the programs. The changes of 0.9.6 were attacked with counter-examples that were run, and the defects that earlier notes list as known and not fixed were reproduced and fixed where no hardware is needed. At the end all six were merged and run together, and two of them were run on each other's rigs, which found two more faults that neither showed alone.

@@ -492,9 +492,14 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                 }
             }
             let for_model = turn.submit.then(|| {
-                let (mw, mh) = crate::depth::model_size(slot.width, slot.height, found.detail);
+                let model = crate::depth::model_size(slot.width, slot.height, found.detail);
+                // A screen much larger than the model's picture goes to the
+                // depth thread at twice that size, every pixel counted, and
+                // is brought down the rest of the way there
+                // (`live::model_input_size`).
+                let (mw, mh) = live::model_input_size((slot.width, slot.height), model);
                 small.resize(mw as usize * mh as usize * 4, 0);
-                live::scale_to_rgba(slot.source(), &mut small, mw, mh).then_some((mw, mh))
+                live::shrink_to_rgba(slot.source(), &mut small, mw, mh).then_some((mw, mh))
             });
             Some((found, sink, turn, view, place, for_model.flatten()))
         });
