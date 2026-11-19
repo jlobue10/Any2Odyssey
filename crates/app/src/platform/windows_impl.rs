@@ -360,6 +360,9 @@ pub fn estimate_depth(
 ) -> Result<any2odyssey_core::dibr::DepthMap, String> {
     Err(NO_VIEWER.into())
 }
+pub fn depth_runs_on() -> Option<(String, String)> {
+    None
+}
 const NO_VIEWER: &str = "The stereo viewer is part of the Linux build.";
 
 pub fn install_jump_list() {

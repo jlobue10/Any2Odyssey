@@ -980,6 +980,12 @@ pub fn estimate_depth(
     )
 }
 
+/// Where the depth model runs, once it has been loaded: a line for the
+/// page and one for the log.
+pub fn depth_runs_on() -> Option<(String, String)> {
+    crate::depth::runs_on().map(|runs_on| (runs_on.describe(), runs_on.for_log()))
+}
+
 /// Say that a mode exists only on Windows and fail (exit 1). Said with
 /// [`crate::complain`], not `eprintln!`: that one panics when standard
 /// error cannot be written (a reader that has gone, a full disk behind a
