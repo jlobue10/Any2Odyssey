@@ -17,6 +17,7 @@ they are found by name: Leia's service and session passed for a running stack at
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,25 @@ class EnsureStackTests(StackTests):
         # With this prefix's server the stack is as it should be, and is left alone.
         self.stays("wineserver")
         self.assertEqual(self.starts(), 0)
+        self.assertEqual(self.starts(), 0)
+
+    def test_a_server_whose_wine_was_replaced_is_not_a_running_stack(self):
+        # Seen with Wine 11.21 replaced by 11.22 (WineHQ's packages) while the stack was up: Leia's programs
+        # and the old server ran on, every program started afterwards was the new Wine's and was refused by
+        # that server ("version mismatch"), and the stack counted as running at every request.
+        old = self.root / "the-wine-before"
+        old.mkdir()
+        shutil.copy2(Path(self.built.name) / "wineserver", old / "wineserver")
+        server = subprocess.Popen([str(old / "wineserver"), f"({self.root})"],
+                                  env=dict(self.environment, WINEPREFIX=str(self.root / "prefix")))
+        self.addCleanup(server.wait)
+        self.addCleanup(server.kill)
+        self.assertEqual(self.starts(), 0)
+        # What a package manager does with the file of a program that runs: the name goes, the program stays.
+        (old / "wineserver").unlink()
+        self.assertEqual(self.starts(), 1)
+        # A server of the Wine that is installed now makes it a stack again.
+        self.stays("wineserver")
         self.assertEqual(self.starts(), 0)
 
 
