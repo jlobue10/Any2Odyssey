@@ -196,6 +196,11 @@ pub fn ui_settings_file() -> PathBuf {
 pub fn lens_file() -> PathBuf {
     data_dir().join("lens.json")
 }
+/// The viewer's choices (what the image is, how it is shown, the picture
+/// controls), kept between runs.
+pub fn viewer_settings_file() -> PathBuf {
+    data_dir().join("viewer-settings.json")
+}
 /// The desktop portal's token for the screen last chosen for live capture
 /// (Linux), so its dialog is not shown at every start.
 pub fn capture_token_file() -> PathBuf {
@@ -316,6 +321,7 @@ mod tests {
             (settings_file(), "settings.json"),
             (ui_settings_file(), "ui-settings.json"),
             (lens_file(), "lens.json"),
+            (viewer_settings_file(), "viewer-settings.json"),
             (capture_token_file(), "capture-token"),
             (log_file(), "companion.log"),
             (worker_status_file(), "worker-status.json"),

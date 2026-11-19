@@ -68,14 +68,14 @@ const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 2 * MAX_DECODE_BYTES;
 /// How large the depth model sees the picture (`depth::DETAIL`): the long
 /// side in pixels, and its name.
-const DEPTH_DETAIL: [(u32, &str); 4] = [
+pub(super) const DEPTH_DETAIL: [(u32, &str); 4] = [
     (518, "Standard"),
     (770, "Fine"),
     (1022, "Finer"),
     (1274, "Finest (slow without a GPU)"),
 ];
 /// The lines-per-view choices of the live screen (`live::LINES`).
-const LIVE_LINES: [(i32, &str); 4] = [
+pub(super) const LIVE_LINES: [(i32, &str); 4] = [
     (720, "720 lines (fastest)"),
     (1080, "1080 lines"),
     (1440, "1440 lines"),
@@ -690,6 +690,8 @@ pub struct ViewerState {
     /// The capture's token as last written to its file.
     #[cfg(target_os = "linux")]
     saved_token: Option<String>,
+    /// Where the choices are kept between runs (`options_file`).
+    options_file: super::options_file::OptionsFile,
 }
 
 impl Default for ViewerState {
@@ -722,6 +724,8 @@ impl Default for ViewerState {
             forget_screen: false,
             #[cfg(target_os = "linux")]
             saved_token: None,
+            // In memory only: tests and previews write nothing.
+            options_file: super::options_file::OptionsFile::default(),
         }
     }
 }
@@ -746,10 +750,14 @@ impl ViewerState {
         state
     }
 
-    /// The viewer with the user's saved lens numbers; changes are saved
-    /// back. `default()` keeps them in memory only.
+    /// The viewer with the user's saved lens numbers and choices; changes
+    /// are saved back. `default()` keeps them in memory only.
     pub fn with_saved_lens() -> ViewerState {
+        let (options_file, options) =
+            super::options_file::OptionsFile::load(any2odyssey_core::paths::viewer_settings_file());
         ViewerState {
+            options,
+            options_file,
             lens: LensState::load(any2odyssey_core::paths::lens_file()),
             lens_switch: LensSwitch::new(),
             weaver: Weaver::new(),
@@ -757,10 +765,21 @@ impl ViewerState {
         }
     }
 
+    /// The same viewer with the choices it has by default, kept in memory
+    /// only.
+    pub fn without_saved_options(self) -> ViewerState {
+        ViewerState {
+            options: Options::default(),
+            options_file: super::options_file::OptionsFile::default(),
+            ..self
+        }
+    }
+
     /// Flush calibration changes when the application exits, even if their
     /// settling delay has not elapsed or the viewer page is no longer shown.
     pub fn save_lens(&mut self) {
         self.lens.store();
+        self.options_file.store(self.options);
     }
 
     /// The calibration pattern is a picture of its own: it needs no image.
@@ -1747,6 +1766,12 @@ impl ViewerState {
         }
         self.options_edited(before);
         self.lens.save_when_settled(&ctx, std::time::Instant::now());
+        if let Some(wait) = self
+            .options_file
+            .save_when_settled(self.options, std::time::Instant::now())
+        {
+            ctx.request_repaint_after(wait);
+        }
         self.ensure_depth(&ctx);
         self.sync_texture(&ctx);
         ui.add_space(5.0);
