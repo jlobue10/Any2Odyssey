@@ -134,6 +134,10 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 The changes made in 0.9.1 to 0.9.7 (audit rounds 11 to 21, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
+New in 0.9.8:
+
+- Linux, the G90XF, after the next upgrade of Wine (or after `wine reg add "HKLM\Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager" /v DllPath /d "C:\windows\system32\wpnapps.dll" /f` in the set-up's prefix): Start output brings the picture after one cold start, `SRSession.exe` is among the processes, and a second Start is immediate.
+
 New in 0.9.7:
 
 - Linux, the G90XF, the Odyssey 3D set-up (three of its scripts changed, and they are the ones seen working there): a cold start of the lens helper and of the Odyssey 3D output takes about half a minute as before, and a second request is warm. `ps` shows `wineserver -p60` and no `start-stack.sh` left beside `SRSession.exe`.

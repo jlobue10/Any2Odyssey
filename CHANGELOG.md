@@ -2,11 +2,25 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## Unreleased
+## 0.9.8 (2026-11-18)
+
+One fix, found on the monitor's own machine on the day 0.9.7 was released.
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive): a package or archive update does not replace the scripts of the Odyssey 3D set-up in the data folder, and the set-up does.
 
 ### Fixed
 
 - **Linux, the Odyssey 3D: an upgrade of Wine no longer breaks the output until the set-up is run again.** At its first program after an upgrade Wine updates the prefix, and that registers Wine's own toast library again for two of the three classes the set-up's stand-in answers for. Wine's has no notifier yet, and Leia's session (`SRSession.exe`) ended within a second of every start. With no session nothing counted as running: every Start was a cold start of half a minute that ended the stack the Start before it had brought up. Seen on the monitor's machine after Wine 11.21 became 11.22. `start-stack.sh` now writes the stand-in's three entries at every start, with the monitors' entries it writes there anyway. An installation that is in this state is repaired by `any2odyssey-setup` (or `setup.sh`), which also brings the new script.
+
+### Known, not fixed
+
+- Linux, the Odyssey 3D: after an upgrade of Wine the set-up's copies of five of Wine's own libraries (the ones its stand-ins pass calls on to) stay those of the Wine before it, until the set-up is run again. Seen working across 11.21 to 11.22; "run it again after a Wine upgrade" still stands.
+- An update of the program does not update the Odyssey 3D set-up's scripts in the data folder; the set-up has to be run again for that.
+- The items of 0.9.7 stand as they were.
+
+### Hardware verification
+
+This one was made on the hardware: Wine 11.22, the G90XF and Leia's own programs. With the entries as Wine's update left them `SRSession.exe` ended at each of its starts with an access violation after `toast_manager_factory_QueryInterface ... E_NOINTERFACE`; with the three entries written by the script's new lines it stayed. Not yet seen: the picture itself after a start with the new script, and the tests under a shell other than this machine's (CI's `sh` is dash).
 
 ## 0.9.7 (2026-11-18)
 
