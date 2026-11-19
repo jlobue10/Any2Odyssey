@@ -46,7 +46,7 @@ const SMALLEST_WINDOW: [f32; 2] = [700.0, 360.0];
 /// would be drawn with that typeface's own, larger square from then on.
 const MAXIMIZE: &str = "\u{25FB}";
 /// The narrowest page, in points, whose title bar holds its seven buttons
-/// (six where there is no tray) beside the title. Below it About runs over the title, and from about 400
+/// beside the title. Below it About runs over the title, and from about 400
 /// points About and Help leave the window on the left.
 const NARROWEST_PAGE: f32 = 560.0;
 
@@ -103,14 +103,6 @@ pub struct App {
     /// The notification icon should exist on this build and could not be
     /// created; see [`startup_notices`]. Never set where there is no tray.
     tray_failed: bool,
-    /// The title bar has the button that hides the controls in the tray:
-    /// only where there is a notification icon to bring them back from.
-    /// Without one (always on Linux, and on Windows when the icon could not
-    /// be created) the button was made all the same and minimized the
-    /// window, as the Minimize button two places to its left does: two
-    /// buttons with one name and one effect, to the eye and to a screen
-    /// reader.
-    tray_button: bool,
     _hotkeys: Option<global_hotkey::GlobalHotKeyManager>,
     hidden: bool,
     preview: bool,
@@ -332,10 +324,6 @@ impl App {
             palette,
             wordmark,
             #[cfg(windows)]
-            tray_button: tray.is_some(),
-            #[cfg(not(windows))]
-            tray_button: false,
-            #[cfg(windows)]
             tray,
             tray_failed,
             _hotkeys: hotkeys,
@@ -531,14 +519,12 @@ impl App {
         // from the right they were made, and visited, Close first.
         let theme_label = if p.dark { "Light" } else { "Dark" };
         let gap = ui.spacing().item_spacing.x;
-        // Minimize, Maximize and Close, and the tray's where there is one.
-        let squares = if self.tray_button { 4.0 } else { 3.0 };
         let width = ["About", "Help", theme_label]
             .iter()
             .map(|text| widgets::gold_button_width(ui, text))
             .sum::<f32>()
-            + squares * CHROME_BUTTON
-            + (2.0 + squares) * gap;
+            + 4.0 * CHROME_BUTTON
+            + 6.0 * gap;
         let right = bar.right() - 14.0;
         let mut actions = ui.new_child(
             egui::UiBuilder::new()
@@ -587,7 +573,7 @@ impl App {
             let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
         }
-        if self.tray_button && chrome(&mut actions, "▾", minimize_label(true)).clicked() {
+        if chrome(&mut actions, "▾", minimize_label(self.tray_available())).clicked() {
             self.hide_to_tray(ctx);
         }
         if chrome(&mut actions, "×", "Close").clicked() {
@@ -1056,7 +1042,6 @@ mod tests {
             #[cfg(windows)]
             tray: None, // Tray creation failed, regardless of platform support.
             tray_failed: true,
-            tray_button: false,
             _hotkeys: None, // Global shortcuts may also be unavailable.
             hidden: false,
             preview: false,
@@ -1119,7 +1104,6 @@ mod tests {
             #[cfg(windows)]
             tray: None,
             tray_failed: true,
-            tray_button: false,
             _hotkeys: None,
             hidden: false,
             preview: false,
