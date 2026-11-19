@@ -2320,6 +2320,37 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn an_export_replaces_a_picture_in_a_folder_that_takes_no_new_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("handed over");
+        std::fs::create_dir(&folder).unwrap();
+        let picture = folder.join("picture.png");
+        std::fs::write(&picture, b"old export").unwrap();
+        let mut document = Document::default();
+        document.set_source(pair(), Options::default()).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // (Whoever may write everything, root, is not kept out.)
+        let kept_out = std::fs::write(folder.join("probe"), b"").is_err();
+        let saved = document.save_png(&picture);
+        let new = document.save_png(&folder.join("new.png"));
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The file may be written to, and the folder is asked nothing: it
+        // was "Could not save ...: Permission denied" from 0.9.6 to 0.9.8.
+        saved.unwrap();
+        assert_eq!(
+            image::open(&picture).unwrap().to_rgba8(),
+            *document.result().unwrap()
+        );
+        if kept_out {
+            let error = new.unwrap_err();
+            assert!(error.contains("new.png"), "{error}");
+            assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        }
+    }
+
     #[test]
     fn a_folder_is_refused_before_any_question_and_a_new_file_needs_none() {
         let dir = tempfile::tempdir().unwrap();
