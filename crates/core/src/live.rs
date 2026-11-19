@@ -1642,6 +1642,78 @@ mod tests {
     }
 
     #[test]
+    fn shrinking_is_the_rounded_mean_whichever_side_is_shrunk_by_more_than_half() {
+        // Against the same thing written out plainly, a pixel at a time
+        // with wide sums: sizes where only the width, only the height or
+        // both go down by more than half, and values whose means are not
+        // whole numbers.
+        let plain = |source: Source<'_>, w: usize, h: usize| -> Vec<u8> {
+            let (sw, sh) = (source.width as usize, source.height as usize);
+            let cover = |at: usize, from: usize, to: usize| {
+                let first = (at * from / to).min(from - 1);
+                (first, ((at + 1) * from / to).max(first + 1).min(from))
+            };
+            let mut out = Vec::new();
+            for y in 0..h {
+                let (top, bottom) = cover(y, sh, h);
+                for x in 0..w {
+                    let (left, right) = cover(x, sw, w);
+                    let count = ((right - left) * (bottom - top)) as u64;
+                    for channel in [2, 1, 0] {
+                        let mut sum = 0u64;
+                        for row in top..bottom {
+                            for column in left..right {
+                                sum +=
+                                    source.bytes[row * source.stride + column * 4 + channel] as u64;
+                            }
+                        }
+                        out.push(((sum * 2 + count) / (count * 2)) as u8);
+                    }
+                    out.push(255);
+                }
+            }
+            out
+        };
+        for (sw, sh, w, h) in [
+            (9usize, 4usize, 2usize, 3usize),
+            (4, 9, 3, 2),
+            (7, 7, 3, 3),
+            (5, 1, 1, 1),
+            (1, 5, 1, 1),
+            (64, 48, 9, 30),
+            (48, 64, 30, 9),
+            (100, 3, 7, 5),
+        ] {
+            let stride = sw * 4 + 8;
+            let bytes: Vec<u8> = (0..stride * sh)
+                .map(|i| (i as u32).wrapping_mul(2_654_435_761).to_be_bytes()[0])
+                .collect();
+            let source = Source {
+                bytes: &bytes[..stride * (sh - 1) + sw * 4],
+                width: sw as u32,
+                height: sh as u32,
+                stride,
+                order: PixelOrder::Bgr,
+            };
+            let mut out = vec![0u8; w * h * 4];
+            assert!(shrink_to_rgba(source, &mut out, w as u32, h as u32));
+            assert_eq!(out, plain(source, w, h), "{sw} x {sh} to {w} x {h}");
+        }
+        // Three pixels of 0, 0 and 2: two thirds, which is 1 and not 0.
+        let bytes = [0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 0];
+        let source = Source {
+            bytes: &bytes,
+            width: 3,
+            height: 1,
+            stride: 12,
+            order: PixelOrder::Rgb,
+        };
+        let mut out = [0u8; 4];
+        assert!(shrink_to_rgba(source, &mut out, 1, 1));
+        assert_eq!(out, [1, 1, 1, 255]);
+    }
+
+    #[test]
     fn a_large_screen_goes_to_the_model_at_twice_its_size_and_a_small_one_at_its_own() {
         assert_eq!(model_input_size((3840, 2160), (518, 294)), (1036, 588));
         assert_eq!(model_input_size((5120, 1440), (518, 140)), (1036, 280));

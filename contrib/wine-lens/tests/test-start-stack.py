@@ -190,6 +190,47 @@ class StartStackTests(StackTests):
         self.assertIn(f"regedit /S {self.root}/edid.reg", [call[2] for call in calls])
         self.assertEqual((self.root / "edid.reg").read_bytes().decode(), monitors)
 
+    def test_what_wine_imports_is_what_the_set_up_wrote_for_the_three_classes(self):
+        # The set-up's file as tools/mkboard.py itself writes it, from a stand-in for the lens board's folder
+        # in sysfs: Windows line ends, five lines an entry, and after the three the entries of the board, one
+        # of which removes a key. With bare line ends in its place nothing here read the "\r" the script takes
+        # off: left on, no entry ever ends, and every start imports the rest of the file with the three.
+        board = self.root / "board-in-sysfs"
+        board.mkdir()
+        device = bytes([18, 1, 0, 2, 2, 0, 0, 64, 0x4B, 0x35, 0x16, 0x01, 0x01, 0x02, 1, 2, 3, 1])
+        (board / "descriptors").write_bytes(device + bytes([9, 2, 9, 0, 1, 1, 0, 0x80, 50]))
+        for name, text in (("idVendor", "354b"), ("idProduct", "0116"), ("serial", "A2O0001"), ("devnum", "7"),
+                           ("manufacturer", "A maker"), ("product", "A lens board")):
+            (board / name).write_text(text + "\n")
+        source = (TOOLS / "mkboard.py").read_text()
+        run_it = "main(*sys.argv[1:4])"
+        self.assertEqual(source.count(run_it), 1)
+        tool = {}
+        exec(compile(source.replace(run_it, ""), "mkboard.py", "exec"), tool)
+        tool["usb_device"] = lambda tty: str(board)
+        tool["main"]("/dev/odyssey-lens", str(self.root / "build/board.h"), str(self.root / "build/device.reg"))
+        written = (self.root / "build/device.reg").read_bytes().decode()
+        self.assertNotIn("\n", written.replace("\r\n", ""), "the set-up's file has Windows line ends")
+        wanted = [entry for entry in written.split("\r\n\r\n") if "\\WindowsRuntime\\ActivatableClassId\\" in entry]
+        self.assertEqual(len(wanted), 3, written)
+        self.assertTrue(all("a2otoast.dll" in entry and len(entry.split("\r\n")) == 5 for entry in wanted), wanted)
+        self.assertIn("\r\n[-HKEY_LOCAL_MACHINE\\", written)
+
+        monitors = 'REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\System\\Monitors]\r\n"Linked"=dword:00000001\r\n'
+        (self.root / "tools/mkedid.py").write_text(
+            f"import sys\nopen(sys.argv[2], 'w', newline='').write({monitors!r})\n")
+        # What counts is the file at the moment Wine is asked to import it, not as the script leaves it.
+        (self.root / "bin/wine").write_text("#!/bin/sh\n" + NOTE.format("wine")
+                                            + '[ "$1" = regedit ] && cp "$3" "$ROOT/imported.reg"\nexit 0\n')
+        self.calls()
+        imported = (self.root / "imported.reg").read_bytes().decode()
+        self.assertTrue(imported.startswith(monitors), imported)
+        added = imported[len(monitors):]
+        self.assertNotIn("\n", added.replace("\r\n", ""), "a bare line end")
+        self.assertNotIn("\r", added.replace("\r\n", ""), "a line end with a second \\r")
+        self.assertEqual(added.strip("\r\n").split("\r\n\r\n"), wanted)
+        self.assertEqual((self.root / "edid.reg").read_bytes().decode(), imported, "changed after the import")
+
     def test_what_a_killed_server_left_behind_is_ended_and_nothing_else(self):
         self.needs_pgrep()
         service = r"C:\Program Files\LeiaSR\Platform\bin\SRService.exe"
@@ -217,7 +258,9 @@ class EnsureStackTests(StackTests):
         text = (TOOLS / "ensure-stack.sh").read_text()
         # The one thing changed in the script: where the lens board is.
         self.assertEqual(text.count(BOARD), 1)
-        (self.root / "tools/ensure-stack.sh").write_text(text.replace(BOARD, f"BOARD={self.root}/board"))
+        # (in quotes: a temporary folder with a blank in its name cut the path short, and the test said
+        # that the board was missing)
+        (self.root / "tools/ensure-stack.sh").write_text(text.replace(BOARD, f'BOARD="{self.root}/board"'))
         (self.root / "board").write_text("")
         for name, body in (("start-stack.sh", 'echo started >>"$ROOT/starts"'), ("noxon.sh", "exit 0")):
             (self.root / "tools" / name).write_text(f"#!/bin/sh\n{body}\n")
