@@ -79,6 +79,39 @@ class SetupPgrepTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["bin", "home", "win"])
 
 
+class SetupHelpTests(unittest.TestCase):
+    """--help was taken for the Windows drive: "no Leia SR runtime in --help/Program Files/LeiaSR/Platform"."""
+
+    def test_help_prints_the_usage_and_looks_for_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Through a link too, which is how a package's command reaches the script.
+            (root / "any2odyssey-lens-setup").symlink_to(SETUP)
+            environment = dict(os.environ, ANY2ODYSSEY_DATA_DIR=str(root / "data"))
+            for script in (SETUP, root / "any2odyssey-lens-setup"):
+                for option in ("--help", "-h"):
+                    with self.subTest(script=script.name, option=option):
+                        done = subprocess.run(["sh", str(script), option], cwd=root, env=environment,
+                                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        self.assertEqual(done.stderr, "")
+                        lines = done.stdout.splitlines()
+                        self.assertIn("usage: setup.sh <windows-root>", lines)
+                        self.assertTrue(lines[0].startswith("Prepare the Wine route"), lines[0])
+                        self.assertTrue(lines[-1].startswith("Run it again after a Wine upgrade"), lines[-1])
+                        self.assertFalse(any(line.startswith("#") or "SPDX" in line for line in lines), lines)
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["any2odyssey-lens-setup"])
+
+    def test_no_argument_and_two_arguments_still_name_the_usage_and_fail(self):
+        for arguments in ([], ["a", "b"], ["a", "--help"]):
+            with self.subTest(arguments=arguments):
+                done = subprocess.run(["sh", str(SETUP), *arguments], stdin=subprocess.DEVNULL, capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(done.returncode, 1)
+                self.assertIn("usage: setup.sh <windows-root>", done.stderr)
+                self.assertEqual(done.stdout, "")
+
+
 class SetupExportListTests(unittest.TestCase):
     """setup.sh reads a Wine library's exports from objdump's listing, whatever language the user's locale is."""
 
