@@ -152,6 +152,44 @@ class StartStackTests(StackTests):
         # And not for ever: a server that never gives up would keep Leia's service after the session has gone.
         self.assertLessEqual(patience, 600)
 
+    def test_the_toast_stand_in_is_registered_again_at_every_start(self):
+        # Seen on the monitor's machine after Wine 11.21 became 11.22: the prefix's update registered Wine's
+        # own toast library for two of the stand-in's three classes, and Leia's session ended at every start.
+        winrt = "[HKEY_LOCAL_MACHINE\\Software\\Microsoft\\WindowsRuntime\\ActivatableClassId\\"
+        classes = ("Windows.UI.Notifications.ToastNotification", "Windows.UI.Notifications.ToastNotificationManager",
+                   "Windows.Data.Xml.Dom.XmlDocument")
+        stand_in = '"DllPath"="C:\\\\windows\\\\system32\\\\a2otoast.dll"'
+        # As tools/mkboard.py writes it: the set-up's other entries first, which a start must not write again.
+        device = ["REGEDIT4", "", "[HKEY_LOCAL_MACHINE\\Software\\Wine\\Ports]", '"COM3"="/dev/odyssey-lens"', ""]
+        for name in classes:
+            device += [f"{winrt}{name}]", stand_in, '"Threading"=dword:00000000', ""]
+        device += ["[HKEY_LOCAL_MACHINE\\Software\\Any2Odyssey\\After]", '"Later"=dword:00000001', ""]
+        (self.root / "build/device.reg").write_text("\n".join(device))
+        # The monitors' entries, as tools/mkedid.py writes them: Windows line ends, no empty line at the end.
+        monitors = 'REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\System\\Monitors]\r\n"Linked"=dword:00000001\r\n'
+        (self.root / "tools/mkedid.py").write_text(
+            f"import sys\nopen(sys.argv[2], 'w', newline='').write({monitors!r})\n")
+        calls = self.calls()
+        imported = [call[2] for call in calls if call[1] == "wine" and call[2].startswith("regedit")]
+        self.assertEqual(imported, [f"regedit /S {self.root}/edid.reg"])
+        text = (self.root / "edid.reg").read_bytes().decode()
+        self.assertTrue(text.startswith(monitors), text)
+        added = text[len(monitors):]
+        self.assertEqual(added.replace("\r\n", ""), added.replace("\r\n", "").replace("\n", ""), "a bare line end")
+        sections = [block.split("\r\n") for block in added.strip("\r\n").split("\r\n\r\n")]
+        self.assertEqual([block[0] for block in sections], [f"{winrt}{name}]" for name in classes])
+        for block in sections:
+            self.assertEqual(block[1:], [stand_in, '"Threading"=dword:00000000'])
+
+    def test_a_start_without_the_set_ups_entries_imports_the_monitors_alone(self):
+        # (an installation whose build folder is from before the entries were kept there)
+        monitors = 'REGEDIT4\r\n\r\n[HKEY_LOCAL_MACHINE\\System\\Monitors]\r\n"Linked"=dword:00000001\r\n'
+        (self.root / "tools/mkedid.py").write_text(
+            f"import sys\nopen(sys.argv[2], 'w', newline='').write({monitors!r})\n")
+        calls = self.calls()
+        self.assertIn(f"regedit /S {self.root}/edid.reg", [call[2] for call in calls])
+        self.assertEqual((self.root / "edid.reg").read_bytes().decode(), monitors)
+
     def test_what_a_killed_server_left_behind_is_ended_and_nothing_else(self):
         self.needs_pgrep()
         service = r"C:\Program Files\LeiaSR\Platform\bin\SRService.exe"

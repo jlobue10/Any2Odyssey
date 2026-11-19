@@ -2,6 +2,12 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+### Fixed
+
+- **Linux, the Odyssey 3D: an upgrade of Wine no longer breaks the output until the set-up is run again.** At its first program after an upgrade Wine updates the prefix, and that registers Wine's own toast library again for two of the three classes the set-up's stand-in answers for. Wine's has no notifier yet, and Leia's session (`SRSession.exe`) ended within a second of every start. With no session nothing counted as running: every Start was a cold start of half a minute that ended the stack the Start before it had brought up. Seen on the monitor's machine after Wine 11.21 became 11.22. `start-stack.sh` now writes the stand-in's three entries at every start, with the monitors' entries it writes there anyway. An installation that is in this state is repaired by `any2odyssey-setup` (or `setup.sh`), which also brings the new script.
+
 ## 0.9.7 (2026-11-18)
 
 A seventh audit release: six pull requests (#154 to #159) from a round that again ran things no round had run. The Linux edition was run on KDE Plasma 6.8 and on GNOME 51 themselves, without a screen, with their own compositors, portals and file dialogs. The live screen was fed by a stand-in for the desktop's portal and a stream made for the purpose: every format, row length, size, turn and mark a desktop may send. The Wine side of the Odyssey 3D output ran under real Wine for the first time outside the one machine it was written on. The eight published files of 0.9.6 were taken apart and the documents that ship with them read against the programs. The changes of 0.9.6 were attacked with counter-examples that were run, and the defects that earlier notes list as known and not fixed were reproduced and fixed where no hardware is needed. At the end all six were merged and run together, and two of them were run on each other's rigs, which found two more faults that neither showed alone.

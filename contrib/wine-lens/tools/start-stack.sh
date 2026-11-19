@@ -46,6 +46,15 @@ sleep 8
 # Wine rewrites its monitor entries at every start, so the EDIDs go in now, paired by desktop position.
 WINEDEBUG=-all timeout 30 wine "$T/build/monprobe.exe" >"$T/monprobe.txt" 2>/dev/null </dev/null
 python3 "$T/tools/mkedid.py" "$T/monprobe.txt" "$T/edid.reg" "$T/odyssey.place" 2>"$T/edid.pairs" || exit 1
+# The toast stand-in's three classes go in with them, at every start. An upgrade of Wine updates the prefix
+# at the first program run in it, and that registers Wine's own toast library for two of the classes again.
+# Wine's has no notifier yet: Leia's session then uses one it was never given and ends within a second of
+# its start, at every start. With no session nothing counted as a running stack (tools/ensure-stack.sh), so
+# every request for the lens or the picture was a cold start of half a minute, until setup.sh was run again.
+# (The entries are the set-up's own, from build/device.reg; edid.reg has Windows line ends.)
+[ -f "$T/build/device.reg" ] && [ -f "$T/edid.reg" ] &&
+    awk 'BEGIN { printf "\r\n" } { sub(/\r$/, "") } /WindowsRuntime.ActivatableClassId/ { p = 1 } p { printf "%s\r\n", $0 } /^$/ { p = 0 }' \
+        "$T/build/device.reg" >>"$T/edid.reg"
 WINEDEBUG=-all setsid timeout 60 wine regedit /S "$T/edid.reg" >/dev/null 2>&1 </dev/null
 sleep 2
 # (exec: without it a copy of this script's shell stays behind for as long as the session runs, and reads
