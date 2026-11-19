@@ -92,6 +92,55 @@ impl Shared {
         }
     }
 
+    /// A frame has come: `frame` holds its `width` x `height` pixels, rows
+    /// `stride` bytes apart. It changes places with the slot's, and the
+    /// reader is told; unless it is the picture the slot holds already.
+    ///
+    /// A desktop sends a frame for every time it has drawn the screen,
+    /// whether or not anything on it changed: GNOME while only the pointer
+    /// moves and the pointer is not drawn into the picture (it is drawn
+    /// onto the screen there, so the screen is drawn again), and any
+    /// desktop whose windows redraw themselves with what they showed
+    /// before. Each of those was a new picture here: shrunk, given to the
+    /// depth model, woven and handed over again, and the page read "5
+    /// pictures a second" over a screen on which nothing changed. The
+    /// comparison ends at the first byte that differs, and a frame that is
+    /// the same to its last byte costs less than the work it saves.
+    fn frame_arrived(
+        &self,
+        frame: &mut Vec<u8>,
+        width: u32,
+        height: u32,
+        stride: usize,
+        bgr: bool,
+    ) {
+        *lock(&self.unread) = (0, "");
+        let first = {
+            let mut slot = lock(&self.slot);
+            if slot.serial != 0
+                && (slot.width, slot.height, slot.stride, slot.bgr) == (width, height, stride, bgr)
+                && slot.bytes == *frame
+            {
+                return;
+            }
+            std::mem::swap(&mut slot.bytes, frame);
+            // What was the slot's has held the frame before this one.
+            fitted(frame, slot.bytes.len());
+            slot.width = width;
+            slot.height = height;
+            slot.stride = stride;
+            slot.bgr = bgr;
+            slot.serial += 1;
+            slot.serial == 1
+        };
+        self.arrived.notify_all();
+        let mut state = lock(&self.state);
+        let running = CaptureState::Running { width, height };
+        if first || *state != running {
+            *state = running;
+        }
+    }
+
     /// A buffer has come that holds no picture, because of `why`.
     fn no_picture(&self, why: &'static str) {
         let mut unread = lock(&self.unread);
@@ -939,25 +988,8 @@ fn stream(
             if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
                 data.narrowed = Vec::new();
             }
-            let first = {
-                let mut slot = lock(&data.shared.slot);
-                std::mem::swap(&mut slot.bytes, &mut data.spare);
-                // What was the slot's has held the frame before this one.
-                fitted(&mut data.spare, slot.bytes.len());
-                slot.width = width;
-                slot.height = height;
-                slot.stride = stride;
-                slot.bgr = bgr;
-                slot.serial += 1;
-                slot.serial == 1
-            };
-            *lock(&data.shared.unread) = (0, "");
-            data.shared.arrived.notify_all();
-            let mut state = lock(&data.shared.state);
-            let running = CaptureState::Running { width, height };
-            if first || *state != running {
-                *state = running;
-            }
+            data.shared
+                .frame_arrived(&mut data.spare, width, height, stride, bgr);
         })
         .register()
         .map_err(failed("no stream listener"))?;
@@ -1181,6 +1213,61 @@ mod tests {
         let (_, least, most) = range(Key::VideoFramerate);
         assert_eq!(least, 0);
         assert!(most >= 240);
+    }
+
+    #[test]
+    fn a_frame_that_is_the_picture_already_there_is_not_a_new_one() {
+        let shared = Shared::new();
+        let serial = || lock(&shared.slot).serial;
+        let picture: Vec<u8> = (0..2 * 3 * 4).collect();
+        let arrive = |bytes: &[u8], width, height, stride, bgr| {
+            let mut frame = bytes.to_vec();
+            shared.frame_arrived(&mut frame, width, height, stride, bgr);
+        };
+        arrive(&picture, 2, 3, 8, true);
+        assert_eq!(serial(), 1);
+        assert_eq!(
+            *lock(&shared.state),
+            CaptureState::Running {
+                width: 2,
+                height: 3
+            }
+        );
+        // The same picture again, as often as the desktop likes: the reader
+        // is not told, and what it reads is what it had.
+        for _ in 0..3 {
+            arrive(&picture, 2, 3, 8, true);
+        }
+        assert_eq!(serial(), 1);
+        assert_eq!(lock(&shared.slot).source().bytes, &picture[..]);
+        // One byte of it differs, the last one: a new picture.
+        let mut changed = picture.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        arrive(&changed, 2, 3, 8, true);
+        assert_eq!(serial(), 2);
+        assert_eq!(lock(&shared.slot).source().bytes, &changed[..]);
+        // And back: new again.
+        arrive(&picture, 2, 3, 8, true);
+        assert_eq!(serial(), 3);
+        // The same bytes as another picture: other sides, the colours the
+        // other way round.
+        arrive(&picture, 3, 2, 12, true);
+        assert_eq!(serial(), 4);
+        assert_eq!(
+            *lock(&shared.state),
+            CaptureState::Running {
+                width: 3,
+                height: 2
+            }
+        );
+        arrive(&picture, 3, 2, 12, false);
+        assert_eq!(serial(), 5);
+        // A buffer without a picture between two frames that are the same
+        // does not make the second one new, and is forgotten with it.
+        shared.no_picture(NOT_A_PICTURE);
+        arrive(&picture, 3, 2, 12, false);
+        assert_eq!(serial(), 5);
+        assert_eq!(*lock(&shared.unread), (0, ""));
     }
 
     #[test]
