@@ -1796,6 +1796,53 @@ mod sweep {
         }
     }
 
+    /// The right-click menu opens on the page itself, whether the page fits
+    /// its window or scrolls. From 0.9.7 on it opened nowhere on the two
+    /// home pages: the area a finger drags the page by lies over all of the
+    /// page, and a click does not reach what is under an area that senses
+    /// only drags, which is where the window senses its right click. (Up to
+    /// 0.9.6 egui's own drag area did the same, while a page scrolled.)
+    #[test]
+    fn a_right_click_on_the_page_opens_the_menu() {
+        let secondary = |at: egui::Pos2, pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // Only the menu says this: the title bar's button says Dark.
+        let entry = "Toggle light / dark mode";
+        let fits = [(
+            "the controls in their default window",
+            Page::Controls,
+            SIZES[0],
+        )];
+        let scrolls = pages_that_scroll().map(|(what, page, size, _)| (what, page, size));
+        for (what, page, size) in fits.into_iter().chain(scrolls) {
+            let mut h = Harness::new(size, page);
+            let painted = h.settle();
+            assert!(try_find(&painted, entry).is_none(), "{what}: open at once");
+            // On the banner, between the wordmark and the tag line.
+            let banner = banner_at(&painted).expect("the banner");
+            let at = pos2(size.0 * 0.6, banner + 10.0);
+            assert!(
+                !h.widgets.iter().any(|w| w.rect.contains(at)),
+                "{what}: a control lies at {at:?}"
+            );
+            h.run(vec![egui::Event::PointerMoved(at)]);
+            h.run(vec![secondary(at, true)]);
+            h.run(vec![secondary(at, false)]);
+            let painted = h.settle();
+            assert!(
+                try_find(&painted, entry).is_some(),
+                "{what}: a right click on the page opened no menu"
+            );
+            // And a click beside it closes it again.
+            let painted = h.click(pos2(at.x - 300.0, at.y));
+            assert!(try_find(&painted, entry).is_none(), "{what}: still open");
+        }
+    }
+
     /// A finger still drags the page, from anywhere on it, a checkbox
     /// included, and a drag is not a click.
     #[test]

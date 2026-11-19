@@ -933,7 +933,8 @@ impl eframe::App for App {
                 );
                 self.titlebar(&mut body, ctx);
                 body.add_space(8.0);
-                // For the right click only: not a Tab stop.
+                // For the right click only: not a Tab stop. A page that
+                // scrolls senses its own (`widgets::drag_with_a_finger`).
                 let background = body.interact(
                     body.available_rect_before_wrap(),
                     body.id().with("body-bg"),
@@ -947,7 +948,10 @@ impl eframe::App for App {
                             .auto_shrink([false, false])
                             .scroll_source(widgets::PAGE_SCROLL)
                             .show(&mut body, |ui| {
-                                widgets::drag_with_a_finger(ui);
+                                // The right click on the page itself (the
+                                // one above is for what lies around it).
+                                widgets::drag_with_a_finger(ui)
+                                    .context_menu(|ui| self.context_menu(ui));
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 let tray_available = self.tray_available();
@@ -969,7 +973,8 @@ impl eframe::App for App {
                             .auto_shrink([false, false])
                             .scroll_source(widgets::PAGE_SCROLL)
                             .show(&mut body, |ui| {
-                                widgets::drag_with_a_finger(ui);
+                                widgets::drag_with_a_finger(ui)
+                                    .context_menu(|ui| self.context_menu(ui));
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 self.viewer.show(ui, &mut c, &p, self.wordmark.as_ref());
