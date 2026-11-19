@@ -69,6 +69,38 @@ fn limit_zoom(ctx: &egui::Context) {
     }
 }
 
+/// Name the smallest window again when the display's scale has changed.
+///
+/// The window system is told the smallest size in pixels, worked out once
+/// for the display the window was made on, and a window that comes onto a
+/// display of another scale keeps those pixels (dragged to a second
+/// monitor, or the scale changed in Settings while the program is in the
+/// tray). Seen in the window on Windows, which was sent what Windows sends
+/// at such a change: made at 100 %, it still named 700 x 360 pixels as its
+/// smallest size at 150 % and at 200 %, where that is 350 x 180 points and
+/// the title bar's buttons lie outside the window. The other way round the
+/// same pixels are too many: a window made at 200 % keeps 1400 x 720 of
+/// them, which at 100 % is as many points. The size in the command is in
+/// points of the page as it is zoomed, and the limit is in the display's
+/// own.
+fn keep_smallest_window(ctx: &egui::Context) {
+    let Some(scale) = ctx.native_pixels_per_point() else {
+        return;
+    };
+    let id = egui::Id::new("smallest-window-scale");
+    let before = ctx.data_mut(|data| {
+        let before = data.get_temp::<f32>(id);
+        data.insert_temp(id, scale);
+        before
+    });
+    // The window was made with the size that fits the display it was made
+    // on: only a change is told.
+    if before.is_some_and(|before| before != scale) {
+        let smallest = egui::Vec2::from(SMALLEST_WINDOW) / ctx.zoom_factor();
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(smallest));
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Controls,
@@ -835,6 +867,7 @@ impl eframe::App for App {
             return;
         }
         limit_zoom(ctx);
+        keep_smallest_window(ctx);
         // The window's name for assistive software. The tree's root has none
         // of its own, and on Linux the title is not taken for it: a screen
         // reader was given a frame without a name.
