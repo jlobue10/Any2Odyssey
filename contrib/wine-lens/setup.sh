@@ -110,9 +110,26 @@ case $BRIDGE_PID in '' | *[!0-9]*) ;; *)
 esac
 
 echo "setup: Wine prefix in $WINEPREFIX"
+# A prefix with no finished set-up behind it (this script puts its tools into place last) is what a first run
+# left that did not get through: Ctrl+C while Wine made the prefix, or a disk that filled up. Wine does not
+# complete such a prefix, and with it every later run ended as the first had, some of them without a word
+# (after a full disk: exit 53 in a fifth of a second, at every run). It is made anew.
+if [ -d "$WINEPREFIX" ] && [ ! -f "$T/tools/start-stack.sh" ]; then rm -rf "$WINEPREFIX"; fi
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
-    setsid wineboot -i >/dev/null 2>&1 </dev/null
+    setsid wineboot -i >/dev/null 2>&1 </dev/null ||
+        die "Wine could not make the prefix $WINEPREFIX (wineboot ended with $?). It needs about 2 GB there: is the disk full?"
     wineserver -w
+else
+    # A prefix from an earlier set-up, and maybe from an earlier Wine: Wine updates it at the first program
+    # run in it, and has to get past the stand-ins that are in it. With a prefix set up under Wine 11.17 and
+    # Wine then 11.22 that update never ended while the cfgmgr32 stand-in was in its way: this script stopped
+    # two minutes later at its first program below, without a word, and left a prefix in which nothing
+    # started. So Wine updates the prefix here, by a program that does nothing, with its own five libraries
+    # in place of the stand-ins for that one run (tools/start-stack.sh does the same after an upgrade).
+    WINEDLLOVERRIDES="cfgmgr32,dxva2,wtsapi32,mf,mfreadwrite=b;$WINEDLLOVERRIDES" \
+        setsid timeout 300 wine cmd /c exit >/dev/null 2>&1 </dev/null ||
+        die "Wine did not get the prefix $WINEPREFIX ready (it updates a prefix that an earlier Wine made). Moved out of the way, a new one is made by this script: mv '$WINEPREFIX' '$WINEPREFIX.old'"
+    wineserver -k 2>/dev/null || true
 fi
 
 echo "setup: copying Leia's runtime from $WIN"
