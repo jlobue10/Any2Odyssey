@@ -106,6 +106,24 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
   try{$file.IsReadOnly=$false}catch{$notices++;Write-Host "The shortcut $link is read-only and could not be changed; it is left in place.";continue}
  }
  $item=$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk')
+ $target=if($item -and $item.IsLink){[string]$item.GetLink.Path}else{$null}
+ # The link object opens the file for reading and writing, and reports no target, and no error, when
+ # it cannot: while another program holds the shortcut open without sharing it for both, and where
+ # the file's permissions keep this account from writing to it. Such a shortcut was taken for
+ # somebody else's and stayed without a word, pointing at a program that was gone. Whose it is cannot
+ # be told, so it still stays; it is named. (Opened and closed here, nothing is written.)
+ if($target -eq ''){
+  try{
+   ([IO.File]::Open($link,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]'ReadWrite,Delete')).Dispose()
+   # It can be opened now: the other program has let go of it in this moment.
+   $target=[string]$shellApp.Namespace($folder).ParseName('Any2Odyssey.lnk').GetLink.Path
+  }catch{
+   $reason=if($_.Exception.InnerException){$_.Exception.InnerException.Message}else{$_.Exception.Message}
+   $notices++;Write-Host "The shortcut $link could not be read ($reason), so it cannot be told whether it is this installation's; it is left in place."
+   if($wasReadOnly){try{$file.IsReadOnly=$true}catch{}}
+   continue
+  }
+ }
  # The same for a shortcut that cannot be deleted, read-only or not (a Desktop that has become
  # read-only, a file another program holds open): it stays and is named. Every release up to 0.9.5
  # stopped here, half-way, and stopped at the same place however often the uninstall was run again.
@@ -114,7 +132,7 @@ foreach($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetF
  # read only"), and 0.9.6 left it behind as one that could not be removed, pointing at a program that
  # was gone. The read-only attribute is already off here, and the target is known to be this
  # installation's.
- if($item -and $item.IsLink -and $item.GetLink.Path -eq $exe){
+ if($target -eq $exe){
   try{Remove-Item -LiteralPath $link -Force}
   catch{
    $notices++;Write-Host "The shortcut $link could not be removed ($($_.Exception.Message)); it is left in place."
