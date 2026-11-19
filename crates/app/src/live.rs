@@ -393,6 +393,12 @@ impl Live {
         self.capture.paused_for()
     }
 
+    /// Buffers the desktop has sent that held no picture
+    /// (`Capture::unread`).
+    pub fn unread(&self) -> Option<(u32, &'static str)> {
+        self.capture.unread()
+    }
+
     /// A live screen around `capture` with nothing at work on it, for tests
     /// of what the page says.
     #[cfg(test)]

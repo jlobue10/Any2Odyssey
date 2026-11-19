@@ -1173,7 +1173,17 @@ impl ViewerState {
                 self.status = "Choose the screen to show in 3D in the desktop's dialog (asked once and remembered). On KDE Plasma 6 it can be the Odyssey itself; on other desktops choose another screen.".into();
             }
             CaptureState::Starting => {
-                self.status = LIVE_STARTING.into();
+                self.status = match live.unread() {
+                    // The desktop sends, and what it sends is no picture.
+                    Some((count, why)) => {
+                        // The number is worth a look now and then.
+                        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                        format!(
+                            "The screen was chosen, but no picture of it has come yet: the desktop has sent {count} so far that cannot be shown (the last one was {why}). Still waiting for the first one that can."
+                        )
+                    }
+                    None => LIVE_STARTING.into(),
+                };
             }
             CaptureState::Running { width, height } => {
                 self.status = match &stats.output_error {
@@ -3657,6 +3667,16 @@ mod tests {
         // screen to be chosen in a dialog that was no longer there.
         fed.chosen();
         assert_eq!(said(&mut state), LIVE_STARTING);
+        // Buffers come, and none of them holds a picture: the page stayed
+        // at "Waiting for its first picture" and gave no reason.
+        fed.feed_no_picture();
+        fed.feed_no_picture();
+        let nothing_yet = said(&mut state);
+        assert!(
+            nothing_yet.contains("has sent 2 so far that cannot be shown")
+                && nothing_yet.contains("marked by the desktop as holding no picture"),
+            "{nothing_yet}"
+        );
         fed.feed(16, 9, &[0; 16 * 9 * 4]);
         let running = said(&mut state);
         assert!(
