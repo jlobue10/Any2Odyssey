@@ -87,6 +87,9 @@ impl Harness {
             #[cfg(windows)]
             tray: None,
             tray_failed: false,
+            // The title bar as most users of each edition have it: with
+            // the tray's button on Windows, without it on Linux.
+            tray_button: cfg!(windows),
             _hotkeys: None,
             hidden: false,
             preview: true,
@@ -1206,6 +1209,50 @@ mod sweep {
         stops
     }
 
+    /// The names of the title bar's buttons from left to right, with and
+    /// without the one that hides the controls in the tray.
+    fn title_bar_buttons(tray_button: bool) -> Vec<&'static str> {
+        let mut names = vec!["About", "Help", "Dark", "Minimize", "Maximize / restore"];
+        if tray_button {
+            names.push("Minimize to tray");
+        }
+        names.push("Close");
+        names
+    }
+
+    #[test]
+    fn the_title_bar_has_no_two_buttons_of_one_name() {
+        // Without a tray the button that hides the controls there was made
+        // all the same, and minimized the window under the name of the
+        // Minimize button: on Linux a screen reader said "Minimize" twice.
+        for tray_button in [false, true] {
+            for size in [SIZES[0], SMALLEST] {
+                let mut h = Harness::new(size, home());
+                h.app.tray_button = tray_button;
+                h.settle();
+                let bar =
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(size.0, FRAME + TITLEBAR_HEIGHT));
+                let mut buttons: Vec<&Widget> = h
+                    .widgets
+                    .iter()
+                    .filter(|w| w.role == Role::Button && bar.contains_rect(w.rect))
+                    .collect();
+                buttons.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+                let names: Vec<&str> = buttons.iter().map(|w| w.name.as_str()).collect();
+                assert_eq!(names, title_bar_buttons(tray_button), "{size:?}");
+                let different: HashSet<&str> = names.iter().copied().collect();
+                assert_eq!(different.len(), names.len(), "{names:?}");
+                // The last one ends where it always did, 14 points from the
+                // window's frame.
+                let last = buttons.last().unwrap().rect;
+                assert!(
+                    (last.right() - (size.0 - FRAME - 14.0)).abs() < 0.5,
+                    "{last:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn tab_goes_left_to_right_through_the_title_bar_and_the_page_follows_the_focus() {
         // The smallest window, where every page is longer than the window,
@@ -1255,22 +1302,12 @@ mod sweep {
             let names: Vec<&str> = stops.iter().map(|w| w.name.as_str()).collect();
             // Reading order, and nothing before About: the title bar's drag
             // area and the page's background used to be stops of their own.
-            assert_eq!(
-                names[..7],
-                [
-                    "About",
-                    "Help",
-                    "Dark",
-                    "Minimize",
-                    "Maximize / restore",
-                    "Minimize",
-                    "Close"
-                ],
-                "{names:?}"
-            );
+            let title_bar = title_bar_buttons(h.app.tray_button);
+            let in_bar = title_bar.len();
+            assert_eq!(names[..in_bar], title_bar, "{names:?}");
             // In that order on the screen too, each to the right of the one
             // before it.
-            for pair in stops[..7].windows(2) {
+            for pair in stops[..in_bar].windows(2) {
                 assert!(
                     pair[0].rect.right() <= pair[1].rect.left(),
                     "{:?} is not left of {:?}",
@@ -1296,7 +1333,7 @@ mod sweep {
                 if stop.role == Role::Unknown {
                     // egui's own: a scrolling area and its bar. Nothing of
                     // this program's is a stop without a name.
-                    assert!(i >= 7, "an unnamed stop in the title bar: {names:?}");
+                    assert!(i >= in_bar, "an unnamed stop in the title bar: {names:?}");
                     continue;
                 }
                 assert!(!stop.name.is_empty(), "stop {i} has no name: {stop:?}");
@@ -1306,7 +1343,7 @@ mod sweep {
                     stop.name,
                     stop.rect
                 );
-                if i >= 7 {
+                if i >= in_bar {
                     assert!(
                         content.expand(1.0).contains_rect(stop.rect),
                         "{:?} has the focus at {:?}, under the title bar or the frame",
