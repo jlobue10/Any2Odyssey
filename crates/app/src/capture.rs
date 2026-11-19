@@ -244,6 +244,10 @@ fn run(
     let portal = async {
         let proxy = Screencast::new().await?;
         let session = proxy.create_session(Default::default()).await?;
+        // Listened for from before the desktop is asked to start (see
+        // `unless_ended`). A desktop that cannot be listened to is asked
+        // all the same.
+        let closed = session.receive_closed().await.ok();
         let started = async {
             // A screen shown somewhere else needs its pointer in the
             // picture; a screen shown on itself has the real one on top
@@ -261,16 +265,22 @@ fn run(
                         .set_persist_mode(PersistMode::ExplicitlyRevoked),
                 )
                 .await?;
-            let response = proxy
-                .start(&session, None, Default::default())
-                .await?
-                .response()?;
+            let start = async {
+                proxy
+                    .start(&session, None, Default::default())
+                    .await?
+                    .response()
+            };
+            let response = match closed {
+                Some(closed) => unless_ended(start, closed).await.ok_or(Refused::Closed)??,
+                None => start.await?,
+            };
             let node = response.streams().first().map(|s| s.pipe_wire_node_id());
             let token = response.restore_token().map(str::to_owned);
             let fd = proxy
                 .open_pipe_wire_remote(&session, Default::default())
                 .await?;
-            ashpd::Result::Ok((node, token, fd))
+            Ok::<_, Refused>((node, token, fd))
         }
         .await;
         match started {
@@ -285,12 +295,7 @@ fn run(
             }
         }
     };
-    let (session, node, token, fd) = runtime.block_on(portal).map_err(|e| match e {
-        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
-            "no screen was chosen".to_owned()
-        }
-        other => format!("the desktop's screen-cast portal refused: {other}"),
-    })?;
+    let (session, node, token, fd) = runtime.block_on(portal).map_err(|refused| refused.said())?;
     *lock(&shared.token) = token;
     // The dialog is over: the page stops asking for a screen to be chosen.
     shared.chosen();
@@ -326,6 +331,147 @@ fn wished_cursor(
         }
         _ => None,
     }
+}
+
+/// Why the desktop gave no screen cast.
+#[derive(Debug)]
+enum Refused {
+    /// The portal said so, or could not be asked.
+    Portal(ashpd::Error),
+    /// The desktop closed the session while it was asked to start the cast.
+    Closed,
+}
+
+impl From<ashpd::Error> for Refused {
+    fn from(error: ashpd::Error) -> Refused {
+        Refused::Portal(error)
+    }
+}
+
+/// The portal runs and has no screen cast: none of its backends offers one
+/// for this desktop. So it is in an X11 session of Xfce or i3 with the GTK
+/// backend, which has file dialogs and no screen cast.
+const NO_SCREEN_CAST: &str = "this desktop's portal cannot share a screen. A live screen needs \
+    xdg-desktop-portal with the backend of the desktop in use: GNOME, KDE Plasma, COSMIC, \
+    Hyprland, niri and the wlroots desktops (sway, labwc, river, Wayfire) each have one; a plain \
+    X11 session has none";
+
+/// Nothing owns the portal's name on the bus and nothing can be started
+/// for it.
+const NO_PORTAL: &str = "no desktop portal answers. A live screen is asked for through \
+    xdg-desktop-portal, which is not installed or could not be started";
+
+const NO_BUS: &str =
+    "the session's D-Bus cannot be reached, and the desktop is asked for a screen through it";
+
+/// The portal answered "other" and nothing more. So do GNOME's and KDE's
+/// backends in an X11 session, and GNOME's on niri when niri was started
+/// without its session services.
+const NO_REASON: &str = "the desktop's portal could not share a screen and gave no reason. If \
+    it never works here: a portal backend shares screens only on the desktop it was made for \
+    (GNOME's on GNOME and niri, KDE's on Plasma with Wayland)";
+
+const CLOSED_UNSTARTED: &str = "the desktop gave up the screen cast before it had started, \
+    without an answer; its own log may say why";
+
+impl Refused {
+    /// The reason as the page says it, after "Live capture ended: ".
+    ///
+    /// All but a cancelled dialog used to be the portal client's own words
+    /// after "the desktop's screen-cast portal refused: ": "A portal frontend
+    /// implementing `org.freedesktop.portal.ScreenCast` was not found" (an
+    /// X11 session with the GTK backend alone), "Portal request didn't
+    /// succeed with no information" (GNOME's or KDE's backend in an X11
+    /// session), "Portal request failed: org.freedesktop.zbus.Error: The
+    /// name org.freedesktop.portal.Desktop was not provided by any .service
+    /// files" (no portal installed). None of them says what is missing.
+    fn said(&self) -> String {
+        use ashpd::desktop::ResponseError::{Cancelled, Other};
+        use ashpd::zbus::{fdo, Error as Bus};
+        let error = match self {
+            Refused::Closed => return CLOSED_UNSTARTED.to_owned(),
+            Refused::Portal(error) => error,
+        };
+        let bus = match error {
+            ashpd::Error::Zbus(bus) | ashpd::Error::Portal(ashpd::PortalError::ZBus(bus)) => {
+                Some(bus)
+            }
+            _ => None,
+        };
+        const UNOWNED: [&str; 2] = [
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "org.freedesktop.DBus.Error.NameHasNoOwner",
+        ];
+        match (error, bus) {
+            (ashpd::Error::Response(Cancelled), _) => "no screen was chosen".to_owned(),
+            (ashpd::Error::Response(Other), _) => NO_REASON.to_owned(),
+            (ashpd::Error::PortalNotFound(_), _) => NO_SCREEN_CAST.to_owned(),
+            (_, Some(Bus::FDO(unowned)))
+                if matches!(
+                    **unowned,
+                    fdo::Error::ServiceUnknown(_) | fdo::Error::NameHasNoOwner(_)
+                ) =>
+            {
+                NO_PORTAL.to_owned()
+            }
+            (_, Some(Bus::MethodError(name, _, _))) if UNOWNED.contains(&name.as_str()) => {
+                NO_PORTAL.to_owned()
+            }
+            (
+                _,
+                Some(
+                    lost @ (Bus::Connection(..)
+                    | Bus::Address(_)
+                    | Bus::InputOutput(_)
+                    | Bus::Handshake(_)),
+                ),
+            ) => format!("{NO_BUS} ({lost})"),
+            (other, _) => format!("the desktop's screen-cast portal refused: {other}"),
+        }
+    }
+}
+
+/// What `work` comes to, or `None` when `ended` brings something before it
+/// is through.
+///
+/// The desktop answers the request to start a cast, and it may instead close
+/// the session and never answer: niri 26.04 does when it cannot start the
+/// cast (its screen cast needs a GPU device and PipeWire), with GNOME's
+/// portal backend passing the closing on. Only the answer was waited for, so
+/// the page went on asking for a screen to be chosen in a dialog that had
+/// long gone, until the output was stopped.
+///
+/// A dialog that is cancelled is answered first and its session closed
+/// after that: an answer that is there when the closing is seen counts.
+async fn unless_ended<T>(
+    work: impl std::future::Future<Output = T>,
+    ended: impl ashpd::zbus::export::futures_core::Stream,
+) -> Option<T> {
+    use std::task::Poll;
+    let mut work = std::pin::pin!(work);
+    let mut ended = std::pin::pin!(ended);
+    // A source of endings that is itself over is not asked again.
+    let mut listening = true;
+    std::future::poll_fn(|context| {
+        if let Poll::Ready(done) = work.as_mut().poll(context) {
+            return Poll::Ready(Some(done));
+        }
+        if !listening {
+            return Poll::Pending;
+        }
+        match ended.as_mut().poll_next(context) {
+            Poll::Ready(Some(_)) => Poll::Ready(match work.as_mut().poll(context) {
+                Poll::Ready(done) => Some(done),
+                Poll::Pending => None,
+            }),
+            Poll::Ready(None) => {
+                listening = false;
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// How long the portal's answer to the closing of a session is waited for.
@@ -1134,6 +1280,139 @@ mod tests {
         assert_eq!(wished_cursor(true, Some(cannot)), None);
         assert_eq!(wished_cursor(true, Some(BitFlags::empty())), None);
         assert_eq!(wished_cursor(true, None), None);
+    }
+
+    /// What a session's "closed" signals are in a test: each poll takes the
+    /// next of these, and after the last nothing more comes.
+    struct Signals(std::collections::VecDeque<std::task::Poll<Option<()>>>);
+
+    impl ashpd::zbus::export::futures_core::Stream for Signals {
+        type Item = ();
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<()>> {
+            self.0.pop_front().unwrap_or(std::task::Poll::Pending)
+        }
+    }
+
+    /// An answer that is there at the `after`th time it is looked for.
+    struct Answer {
+        after: u32,
+        polled: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl std::future::Future for Answer {
+        type Output = &'static str;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<&'static str> {
+            self.polled.set(self.polled.get() + 1);
+            if self.polled.get() >= self.after {
+                return std::task::Poll::Ready("answered");
+            }
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    #[test]
+    fn a_session_closed_while_its_start_is_asked_for_ends_the_wait() {
+        use std::task::Poll::{Pending, Ready};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let outcome = |after: u32, signals: &[std::task::Poll<Option<()>>]| {
+            let polled = std::rc::Rc::new(std::cell::Cell::new(0));
+            let answer = Answer {
+                after,
+                polled: polled.clone(),
+            };
+            let signals = Signals(signals.iter().copied().collect());
+            (
+                runtime.block_on(unless_ended(answer, signals)),
+                polled.get(),
+            )
+        };
+        // niri 26.04 where it cannot start the cast: the session is closed
+        // and the request to start is never answered. The wait used to go
+        // on until the output was stopped.
+        assert_eq!(outcome(u32::MAX, &[Ready(Some(()))]).0, None);
+        assert_eq!(
+            outcome(u32::MAX, &[Pending, Pending, Ready(Some(()))]).0,
+            None
+        );
+        // The ordinary case: an answer, and no closing.
+        assert_eq!(outcome(1, &[]), (Some("answered"), 1));
+        assert_eq!(outcome(4, &[]), (Some("answered"), 4));
+        // A cancelled dialog: the answer is sent first and the session
+        // closed after it. An answer that is there when the closing is seen
+        // counts, so the page says that no screen was chosen.
+        assert_eq!(outcome(2, &[Ready(Some(()))]), (Some("answered"), 2));
+        // The closings are over (the bus went away): the answer is still
+        // waited for, and they are not asked for again.
+        assert_eq!(outcome(5, &[Pending, Ready(None)]), (Some("answered"), 5));
+    }
+
+    #[test]
+    fn the_page_says_what_is_missing_where_no_screen_cast_can_be_had() {
+        use ashpd::desktop::ResponseError;
+        use ashpd::zbus;
+        let said = |error: ashpd::Error| Refused::Portal(error).said();
+        // An X11 session of Xfce or i3 with the GTK portal backend alone.
+        let interface = "org.freedesktop.portal.ScreenCast";
+        let no_cast = said(ashpd::Error::PortalNotFound(
+            zbus::names::OwnedInterfaceName::try_from(interface).unwrap(),
+        ));
+        assert_eq!(no_cast, NO_SCREEN_CAST);
+        assert!(no_cast.contains("xdg-desktop-portal") && no_cast.contains("X11"));
+        // No portal installed: the bus knows nobody of that name, said in
+        // either of the two ways the bus library has for it.
+        let unknown = || zbus::fdo::Error::ServiceUnknown("no .service file".to_owned());
+        let wrapped = zbus::Error::FDO(Box::new(unknown()));
+        assert_eq!(said(ashpd::Error::Zbus(wrapped)), NO_PORTAL);
+        let wrapped = zbus::Error::FDO(Box::new(unknown()));
+        let through_portal = ashpd::PortalError::ZBus(wrapped);
+        assert_eq!(said(ashpd::Error::Portal(through_portal)), NO_PORTAL);
+        // No session bus: the address is named, so that it can be looked at.
+        let no_bus = said(ashpd::Error::Zbus(zbus::Error::Address(
+            "unix:path=/nowhere".to_owned(),
+        )));
+        assert!(
+            no_bus.starts_with(NO_BUS) && no_bus.contains("/nowhere"),
+            "{no_bus}"
+        );
+        // GNOME's or KDE's backend in an X11 session answers "other".
+        assert_eq!(
+            said(ashpd::Error::Response(ResponseError::Other)),
+            NO_REASON
+        );
+        // As before: the dialog was cancelled.
+        assert_eq!(
+            said(ashpd::Error::Response(ResponseError::Cancelled)),
+            "no screen was chosen"
+        );
+        assert_eq!(Refused::Closed.said(), CLOSED_UNSTARTED);
+        // Anything else is passed on in the portal client's words.
+        assert_eq!(
+            said(ashpd::Error::NoResponse),
+            "the desktop's screen-cast portal refused: Portal request didn't receive a response"
+        );
+        // Each is the end of a sentence that begins "Live capture ended: "
+        // and is closed with a full stop by the page.
+        for text in [
+            NO_SCREEN_CAST,
+            NO_PORTAL,
+            NO_BUS,
+            NO_REASON,
+            CLOSED_UNSTARTED,
+        ] {
+            assert!(!text.ends_with('.') && !text.contains("  "), "{text}");
+            assert!(text.starts_with(char::is_lowercase), "{text}");
+        }
     }
 
     #[test]
