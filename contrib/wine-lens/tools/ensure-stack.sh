@@ -49,8 +49,15 @@ if ! stack_ok; then
     case $old in '' | *[!0-9]*) ;; *) grep -q -a -e 'noxon\.sh' -e 'any2odyssey-noxon' "/proc/$old/cmdline" 2>/dev/null && kill "$old" 2>/dev/null ;; esac
     setsid "$T/tools/noxon.sh" </dev/null >/dev/null 2>&1 9>&- &
     echo $! >"$NOXON"
-    "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- ||
-        { echo "error: could not start Leia's service (see $T/edid.pairs)"; exit 1; }
+    "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- || {
+        # (start-stack.sh leaves its reason there when it has one of its own)
+        if [ -s "$T/stack.error" ]; then
+            echo "error: $(cat "$T/stack.error")"
+        else
+            echo "error: could not start Leia's service (see $T/edid.pairs)"
+        fi
+        exit 1
+    }
     i=0
     until grep -a -q 'responded to initial disable' "$(ls -t "$LOGDIR"/*.txt 2>/dev/null | head -1)" 2>/dev/null; do
         i=$((i + 1))

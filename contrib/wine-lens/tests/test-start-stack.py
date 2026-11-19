@@ -191,6 +191,125 @@ class StartStackTests(StackTests):
         self.assertIn(f"regedit /S {self.root}/edid.reg", [call[2] for call in calls])
         self.assertEqual((self.root / "edid.reg").read_bytes().decode(), monitors)
 
+    # Wine's library folder as the script lists it first, and the names by which setup.sh keeps copies of
+    # Wine's libraries in the prefix.
+    WINE_LIBRARIES = "for d in /usr/lib/wine/x86_64-windows "
+    # objdump -p, as far as the script reads it: the export names of a "library" whose first line lists them.
+    OBJDUMP = """#!/bin/sh
+echo "[Ordinal/Name Pointer] Table -- Ordinal Base 1"
+echo "              Ordinal   Hint Name"
+for name in $(sed -n '1s/^names: //p' "$2"); do echo "    [   0] +base[   1]  0000 $name"; done
+echo
+echo "The Function Table (interpreted .pdata section contents)"
+"""
+
+    def wine_libraries(self, installed, copies, listed):
+        """Wine's libraries as installed now, the copies the set-up made, and the names its stand-ins list."""
+        text = (TOOLS / "start-stack.sh").read_text()
+        self.assertEqual(text.count(self.WINE_LIBRARIES), 1)
+        (self.root / "tools/start-stack.sh").write_text(
+            text.replace(self.WINE_LIBRARIES, f"for d in {self.root}/wine-libraries "))
+        self.system32 = self.root / "prefix/drive_c/windows/system32"
+        for folder in (self.root / "wine-libraries", self.system32):
+            folder.mkdir(parents=True)
+        for name, (names, build) in installed.items():
+            (self.root / "wine-libraries" / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
+        for name, (names, build) in copies.items():
+            (self.system32 / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
+        for name, names in listed.items():
+            lines = [f"LIBRARY {name}.dll", "EXPORTS"] + [f"    {entry} = copy.{entry}" for entry in names.split()]
+            (self.root / "build" / f"{name}.def").write_text("\n".join(lines) + "\n")
+        (self.root / "bin/x86_64-w64-mingw32-objdump").write_text(self.OBJDUMP)
+        (self.root / "bin/x86_64-w64-mingw32-objdump").chmod(0o755)
+        # Every program of Wine notes with which libraries it ran: the overrides it was given, and which copy
+        # of cfgmgr32 was in the prefix. The program that only lets Wine update the prefix can be made to fail.
+        for name in ("wine", "wineserver"):
+            (self.root / "bin" / name).write_text(
+                "#!/bin/sh\n" + NOTE.format(name) +
+                'case $1 in -k*) exit 0 ;; esac\n'
+                'echo "$WINEDLLOVERRIDES with $(sed -n 2p "$ROOT/prefix/drive_c/windows/system32/cfgmgw.dll")" >>"$ROOT/libraries seen"\n'
+                'if [ "$1" = cmd ] && [ -e "$ROOT/the update fails" ]; then exit 1; fi\n'
+                "exit 0\n")
+
+    OWN = "cfgmgr32,dxva2,wtsapi32,mf,mfreadwrite=b;mscoree,mshtml="
+    STAND_INS = "mscoree,mshtml="
+
+    def test_after_an_upgrade_wine_updates_the_prefix_with_its_own_libraries_first(self):
+        # Seen with set-ups made under Wine 11.10, 11.14 and 11.17 and Wine then 11.22: with the cfgmgr32
+        # stand-in in its way the new Wine's update of the prefix never ended, and with it no program of the
+        # prefix; with Wine's own cfgmgr32 answering it took 14 seconds.
+        same = "CM_Get_Child CM_Get_Parent CM_Locate_DevNodeW"
+        self.wine_libraries(
+            installed={"cfgmgr32": (same, "Wine 11.22"), "dxva2": ("DestroyPhysicalMonitor", "Wine 11.22"),
+                       "wtsapi32": ("WTSFreeMemory", "the same in both"), "mf": ("MFGetService", "Wine 11.22")},
+            copies={"cfgmgw": (same, "Wine 11.17"), "dxva2w": ("DestroyPhysicalMonitor", "Wine 11.17"),
+                    "wtsapiw": ("WTSFreeMemory", "the same in both")},
+            listed={"cfgmgr32": same, "dxva2": "DestroyPhysicalMonitor", "wtsapi32": "WTSFreeMemory"})
+        untouched = (self.system32 / "wtsapiw.dll").stat().st_mtime_ns
+        self.calls()
+        # The first program of the new Wine is one that does nothing, given Wine's own five libraries; its
+        # server is ended before the start proper, which runs with the stand-ins and the installed Wine's copies.
+        seen = (self.root / "libraries seen").read_text().splitlines()
+        self.assertEqual(seen[0], f"{self.OWN} with Wine 11.17")
+        self.assertGreaterEqual(len(seen), 6, seen)
+        self.assertEqual(set(seen[1:]), {f"{self.STAND_INS} with Wine 11.22"})
+        asked = [line.split(" ", 1)[1] for line in (self.root / "calls").read_text().splitlines()]
+        self.assertEqual(asked[:4], ["wineserver -k", "wine cmd /c exit", "wineserver -k", "wineserver -p60"])
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.22\n")
+        self.assertEqual((self.system32 / "dxva2w.dll").read_text(), "names: DestroyPhysicalMonitor\nWine 11.22\n")
+        # A copy that is the installed Wine's is left as it is; a library the set-up made no copy of gets none
+        # (eye tracking was not set up); and nothing is left of the copying.
+        self.assertEqual((self.system32 / "wtsapiw.dll").stat().st_mtime_ns, untouched)
+        self.assertEqual(sorted(path.name for path in self.system32.iterdir()), ["cfgmgw.dll", "dxva2w.dll", "wtsapiw.dll"])
+        self.assertFalse((self.root / "stack.error").exists())
+        # The next start finds nothing to do: no update of its own, the stand-ins from the first program on.
+        (self.root / "libraries seen").unlink()
+        (self.root / "calls").unlink()
+        self.calls()
+        seen = (self.root / "libraries seen").read_text().splitlines()
+        self.assertEqual(set(seen), {f"{self.STAND_INS} with Wine 11.22"})
+        self.assertNotIn("wine cmd /c exit", (self.root / "calls").read_text())
+
+    def test_an_update_of_the_prefix_that_does_not_end_well_is_tried_again_at_the_next_start(self):
+        same = "CM_Get_Child CM_Get_Parent"
+        self.wine_libraries(installed={"cfgmgr32": (same, "Wine 11.22")}, copies={"cfgmgw": (same, "Wine 11.17")},
+                            listed={"cfgmgr32": same})
+        (self.root / "the update fails").write_text("")
+        self.calls()
+        # The start went on (as it always did), with the copy it had: that copy is what says an update is due.
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.17\n")
+        (self.root / "the update fails").unlink()
+        (self.root / "libraries seen").unlink()
+        self.calls()
+        seen = (self.root / "libraries seen").read_text().splitlines()
+        self.assertEqual(seen[0], f"{self.OWN} with Wine 11.17")
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.22\n")
+
+    def test_a_stand_in_that_no_longer_fits_wines_library_ends_the_start_with_its_reason(self):
+        # Seen with a set-up made under Wine 11.0 and Wine then 11.22: Wine's setupapi asked the stand-in for a
+        # name its library has had since, and no program of the prefix started any more.
+        self.wine_libraries(
+            installed={"cfgmgr32": ("CM_Get_Child CM_Get_Class_PropertyW CM_Get_Parent", "Wine 11.22")},
+            copies={"cfgmgw": ("CM_Get_Child CM_Get_Parent", "Wine 11.0")},
+            listed={"cfgmgr32": "CM_Get_Child CM_Get_Parent"})
+        (self.root / "stack.error").write_text("the reason of an earlier start\n")
+        result = subprocess.run([*SHELL, str(self.root / "tools/start-stack.sh")], env=self.environment,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        reason = (self.root / "stack.error").read_text()
+        self.assertIn("Wine has been upgraded", reason)
+        self.assertIn("cfgmgr32.dll", reason)
+        self.assertIn("any2odyssey-setup", reason)
+        self.assertEqual(len(reason.splitlines()), 1, reason)
+        # Nothing of the new Wine was started on the way, and the copy is as it was.
+        self.assertFalse((self.root / "libraries seen").exists())
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), "names: CM_Get_Child CM_Get_Parent\nWine 11.0\n")
+        # With the names as the stand-in lists them the start goes on, and the old reason is gone.
+        (self.root / "wine-libraries/cfgmgr32.dll").write_text("names: CM_Get_Parent CM_Get_Child\nWine 11.22\n")
+        self.calls()
+        self.assertFalse((self.root / "stack.error").exists())
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), "names: CM_Get_Parent CM_Get_Child\nWine 11.22\n")
+
     def test_what_a_killed_server_left_behind_is_ended_and_nothing_else(self):
         self.needs_pgrep()
         service = r"C:\Program Files\LeiaSR\Platform\bin\SRService.exe"
@@ -258,6 +377,20 @@ class EnsureStackTests(StackTests):
         self.stays("wineserver")
         self.assertEqual(self.starts(), 0)
         self.assertEqual(self.starts(), 0)
+
+    def test_a_start_that_ends_with_a_reason_of_its_own_is_reported_with_it(self):
+        def asked(body):
+            (self.root / "tools/start-stack.sh").write_text(f"#!/bin/sh\n{body}\n")
+            return subprocess.run([*SHELL, str(self.root / "tools/ensure-stack.sh")], env=self.environment,
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+        result = asked('echo "Wine has been upgraded: run the set-up again." >"$ROOT/stack.error"; exit 1')
+        self.assertEqual((result.returncode, result.stdout), (1, "error: Wine has been upgraded: run the set-up again.\n"))
+        # Without one it is the line it always was (the reason of a start before is not this start's: the
+        # script removes it first, as the stand-in does here).
+        result = asked('rm -f "$ROOT/stack.error"; exit 1')
+        self.assertEqual((result.returncode, result.stdout),
+                         (1, f"error: could not start Leia's service (see {self.root}/edid.pairs)\n"))
 
     def test_a_server_whose_wine_was_replaced_is_not_a_running_stack(self):
         # Seen with Wine 11.21 replaced by 11.22 (WineHQ's packages) while the stack was up: Leia's programs
