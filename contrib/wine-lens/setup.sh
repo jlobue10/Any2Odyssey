@@ -58,6 +58,25 @@ fi
 for tool in wine wineserver $CC x86_64-w64-mingw32-objdump python3 xrandr rsync stty flock setsid; do
     command -v "$tool" >/dev/null || die "'$tool' is needed (Arch: wine mingw-w64-gcc python xorg-xrandr rsync; Debian and Ubuntu: wine gcc-mingw-w64-x86-64 python3 x11-xserver-utils rsync; Fedora: wine mingw64-gcc python3 xrandr rsync; openSUSE: wine mingw64-cross-gcc python3 xrandr rsync)"
 done
+# The cfgmgr32 stand-in (src/cfgshim.c) leaves it to Wine's own cfgmgr32 to find a device by its name and to
+# name the device it is given, and links parent and child itself. Wine does both since 11.6; before that
+# its functions answer without doing the work (or are not there at all), Leia's service cannot walk from the
+# lens board to its serial port, and the set-up was made without a complaint: every request then ended after
+# 80 seconds with "Leia's service did not get the lens board ready". Debian 12 and 13 and Ubuntu up to 26.04
+# have Wine 8.0 to 10.0. A version that cannot be read (a build with a name of its own) is let through.
+wine_too_old() { # <what "wine --version" says>
+    case $1 in wine-[0-9]*.[0-9]*) ;; *) return 1 ;; esac
+    number=${1#wine-}
+    major=${number%%.*}
+    minor=${number#*.}
+    minor=${minor%%[!0-9]*}
+    case $major in *[!0-9]*) return 1 ;; esac
+    [ "$major" -lt 11 ] || { [ "$major" -eq 11 ] && [ "${minor:-0}" -lt 6 ]; }
+}
+WINE_IS=$(wine --version 2>/dev/null | head -n 1) || WINE_IS=
+if wine_too_old "$WINE_IS"; then
+    die "this Wine is too old for the Odyssey 3D set-up: $WINE_IS, and Wine 11.6 or newer is needed (older ones cannot tell Leia's service where the lens board is). Where the distribution's own Wine is older, WineHQ's packages (wine-devel or wine-staging) are new enough."
+fi
 # The tools tell whether Leia's service runs by looking among this user's own processes. BusyBox's pgrep
 # cannot (it has no -u) and fails instead: every start of the lens helper would restart the service.
 pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
