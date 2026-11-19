@@ -279,6 +279,86 @@ pub fn scale_to_rgba(source: Source<'_>, out: &mut [u8], width: u32, height: u32
     true
 }
 
+/// Shrink `source` to `width` x `height` RGBA (alpha 255) in `out`, each
+/// output pixel the mean of every source pixel it covers. This is the
+/// model's input: [`scale_to_rgba`] reads four pixels for an output pixel
+/// however many it stands for, which is all of them down to half size and
+/// one in fourteen where a 3840 x 2160 screen becomes the model's 518 x 294.
+/// Text and thin lines then come and go with every pixel the screen moves,
+/// and the depth map with them. Where nothing is shrunk by more than half,
+/// this is [`scale_to_rgba`]. False (and `out` untouched) when the sizes do
+/// not fit.
+pub fn shrink_to_rgba(source: Source<'_>, out: &mut [u8], width: u32, height: u32) -> bool {
+    let (w, h) = (width as usize, height as usize);
+    if !source.is_complete() || w == 0 || h == 0 || out.len() != w * h * 4 {
+        return false;
+    }
+    let (sw, sh) = (source.width as usize, source.height as usize);
+    if sw <= w * 2 && sh <= h * 2 {
+        return scale_to_rgba(source, out, width, height);
+    }
+    let (r, b) = match source.order {
+        PixelOrder::Rgb => (0, 2),
+        PixelOrder::Bgr => (2, 0),
+    };
+    // The source columns and rows an output one stands for: at least one.
+    let span = |at: usize, from: usize, to: usize| {
+        let first = (at * from / to).min(from - 1);
+        (first, ((at + 1) * from / to).clamp(first + 1, from))
+    };
+    let columns: Vec<(usize, usize)> = (0..w).map(|x| span(x, sw, w)).collect();
+    in_bands(out, w * 4, |first_row, band| {
+        // One row of sums at a time: red, green and blue of each column.
+        let mut sums = vec![[0u32; 3]; w];
+        for (row, line) in band.chunks_exact_mut(w * 4).enumerate() {
+            let (top, bottom) = span(first_row + row, sh, h);
+            sums.fill([0; 3]);
+            for y in top..bottom {
+                let input = &source.bytes[y * source.stride..];
+                for (sum, &(x0, x1)) in sums.iter_mut().zip(&columns) {
+                    for pixel in input[x0 * 4..x1 * 4].as_chunks::<4>().0 {
+                        sum[0] += pixel[r] as u32;
+                        sum[1] += pixel[1] as u32;
+                        sum[2] += pixel[b] as u32;
+                    }
+                }
+            }
+            for ((pixel, sum), &(x0, x1)) in line
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(&sums)
+                .zip(&columns)
+            {
+                let count = ((x1 - x0) * (bottom - top)) as u32;
+                let mean = |c: usize| ((sum[c] + count / 2) / count) as u8;
+                *pixel = [mean(0), mean(1), mean(2), 255];
+            }
+        }
+    });
+    true
+}
+
+/// The size a `source`-sized screen is handed to the depth model's thread
+/// at, where the model is shown it at `model` (both width, height).
+///
+/// A screen at least twice the model's size each way goes there at exactly
+/// twice the model's size, made with [`shrink_to_rgba`], and the estimator
+/// halves it with a filter that reaches over neighbouring pixels. Measured
+/// on a 5120 x 1440 desktop with text, at the model's 518 x 140: moved by
+/// one pixel, the depth map changed by 6.7 % of its range on average with
+/// four samples a pixel (0.9.7, which takes a KDE screen at its own size),
+/// by 1.5 % as 0.9.1 had it (KWin halved the screen first), and by 0.8 %
+/// this way. A smaller screen is scaled to the model's size as before.
+pub fn model_input_size(source: (u32, u32), model: (u32, u32)) -> (u32, u32) {
+    let twice = (model.0.saturating_mul(2), model.1.saturating_mul(2));
+    if source.0 >= twice.0 && source.1 >= twice.1 {
+        twice
+    } else {
+        model
+    }
+}
+
 /// How near to its end a depth map eased towards a still picture's own map
 /// counts as there. At the widest view and the strongest depth this much
 /// nearness moves a pixel by about a tenth of its width.
@@ -1458,6 +1538,118 @@ mod tests {
         assert_eq!(canvas[2 * row + 8..2 * row + 24], source[..16]);
         assert_eq!(canvas[2 * row + 24 + 8..2 * row + 48], source[..16]);
         assert_eq!(canvas[3 * row..], untouched[3 * row..]);
+    }
+
+    #[test]
+    fn a_shrunk_screen_is_the_mean_of_all_its_pixels_not_of_four() {
+        // Columns of black and white one pixel wide, as small text is: what
+        // four samples make of them depends on where they happen to fall.
+        let (sw, sh, w, h) = (3840usize, 64usize, 518u32, 8u32);
+        let stripes = |shift: usize| -> Vec<u8> {
+            (0..sw * sh)
+                .flat_map(|i| {
+                    [if (i % sw + shift).is_multiple_of(2) {
+                        255u8
+                    } else {
+                        0
+                    }; 4]
+                })
+                .collect()
+        };
+        let shrunk = |bytes: &[u8], by: fn(Source<'_>, &mut [u8], u32, u32) -> bool| {
+            let source = Source {
+                bytes,
+                width: sw as u32,
+                height: sh as u32,
+                stride: sw * 4,
+                order: PixelOrder::Rgb,
+            };
+            let mut out = vec![0u8; (w * h * 4) as usize];
+            assert!(by(source, &mut out, w, h));
+            out
+        };
+        for shift in [0, 1] {
+            let out = shrunk(&stripes(shift), shrink_to_rgba);
+            for pixel in out.as_chunks::<4>().0 {
+                // Seven or eight columns each: 3 of 7 to 4 of 7 are white.
+                assert!((109..=146).contains(&pixel[0]), "{pixel:?}");
+                assert_eq!(pixel[3], 255);
+            }
+        }
+        // Moved by one pixel, the picture stays what it was.
+        let (still, moved) = (
+            shrunk(&stripes(0), shrink_to_rgba),
+            shrunk(&stripes(1), shrink_to_rgba),
+        );
+        let change = |a: &[u8], b: &[u8]| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| x.abs_diff(*y) as u32)
+                .max()
+                .unwrap()
+        };
+        assert!(change(&still, &moved) <= 40, "{}", change(&still, &moved));
+        // (what the four samples do with the same two frames)
+        assert!(
+            change(
+                &shrunk(&stripes(0), scale_to_rgba),
+                &shrunk(&stripes(1), scale_to_rgba)
+            ) >= 127
+        );
+    }
+
+    #[test]
+    fn shrinking_keeps_to_the_rows_and_colours_of_the_frame() {
+        // 6 x 4 with padded rows, blue first: thirds of the width, halves of
+        // the height... of 9 x 6, so that more than half is taken away.
+        let (sw, sh, stride) = (9usize, 6usize, 9 * 4 + 12);
+        let mut bytes = vec![0xEEu8; stride * sh];
+        for y in 0..sh {
+            for x in 0..sw {
+                let at = y * stride + x * 4;
+                // blue, green, red, padding
+                bytes[at..at + 4].copy_from_slice(&[(x * 10) as u8, (y * 20) as u8, 200, 7]);
+            }
+        }
+        let source = Source {
+            bytes: &bytes[..stride * (sh - 1) + sw * 4],
+            width: sw as u32,
+            height: sh as u32,
+            stride,
+            order: PixelOrder::Bgr,
+        };
+        let mut out = vec![0u8; 3 * 2 * 4];
+        assert!(shrink_to_rgba(source, &mut out, 3, 2));
+        // Columns 0-2, 3-5, 6-8 and rows 0-2, 3-5: their means.
+        assert_eq!(
+            &out[..12],
+            &[200, 20, 10, 255, 200, 20, 40, 255, 200, 20, 70, 255]
+        );
+        assert_eq!(
+            &out[12..],
+            &[200, 80, 10, 255, 200, 80, 40, 255, 200, 80, 70, 255]
+        );
+        // Sizes that do not fit leave the picture alone.
+        let mut wrong = vec![9u8; 5];
+        assert!(!shrink_to_rgba(source, &mut wrong, 3, 2));
+        assert_eq!(wrong, [9; 5]);
+        // Down to half size it is the scaling there was.
+        let (mut ours, mut theirs) = (vec![0u8; 5 * 3 * 4], vec![0u8; 5 * 3 * 4]);
+        assert!(
+            shrink_to_rgba(source, &mut ours, 5, 3) && scale_to_rgba(source, &mut theirs, 5, 3)
+        );
+        assert_eq!(ours, theirs);
+    }
+
+    #[test]
+    fn a_large_screen_goes_to_the_model_at_twice_its_size_and_a_small_one_at_its_own() {
+        assert_eq!(model_input_size((3840, 2160), (518, 294)), (1036, 588));
+        assert_eq!(model_input_size((5120, 1440), (518, 140)), (1036, 280));
+        assert_eq!(model_input_size((1036, 588), (518, 294)), (1036, 588));
+        // Not twice the model's size both ways: scaled to the model's size.
+        assert_eq!(model_input_size((1920, 1080), (1274, 714)), (1274, 714));
+        assert_eq!(model_input_size((1035, 2000), (518, 294)), (518, 294));
+        assert_eq!(model_input_size((0, 0), (518, 294)), (518, 294));
     }
 
     #[test]
