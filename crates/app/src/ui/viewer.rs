@@ -692,6 +692,9 @@ pub struct ViewerState {
     saved_token: Option<String>,
     /// Where the choices are kept between runs (`options_file`).
     options_file: super::options_file::OptionsFile,
+    /// Where the depth model runs, as the page says it under *Depth
+    /// detail*; nothing until the model has been loaded.
+    depth_line: Option<String>,
 }
 
 impl Default for ViewerState {
@@ -726,6 +729,7 @@ impl Default for ViewerState {
             saved_token: None,
             // In memory only: tests and previews write nothing.
             options_file: super::options_file::OptionsFile::default(),
+            depth_line: None,
         }
     }
 }
@@ -748,6 +752,13 @@ impl ViewerState {
         };
         state.lens.problem = lens_problem.map(str::to_owned);
         state
+    }
+
+    /// The page with this line about where the depth model runs.
+    #[cfg(test)]
+    pub fn with_depth_line(mut self, line: &str) -> ViewerState {
+        self.depth_line = Some(line.to_owned());
+        self
     }
 
     /// The viewer with the user's saved lens numbers and choices; changes
@@ -780,6 +791,19 @@ impl ViewerState {
     pub fn save_lens(&mut self) {
         self.lens.store();
         self.options_file.store(self.options);
+    }
+
+    /// Write the choices to their file once they have stood still for a
+    /// moment (`options_file`), and ask for the frame at which that is.
+    /// Call at every frame, whether or not the page is drawn: called from
+    /// the page alone, a choice made just before the controls were
+    /// minimized, hidden in the tray or turned to another page waited in
+    /// memory for as long as that lasted, and was lost with a program that
+    /// ended without leaving (a session that ends, a signal).
+    pub fn keep_choices(&mut self, ctx: &egui::Context, now: std::time::Instant) {
+        if let Some(wait) = self.options_file.save_when_settled(self.options, now) {
+            ctx.request_repaint_after(wait);
+        }
     }
 
     /// The calibration pattern is a picture of its own: it needs no image.
@@ -1524,6 +1548,15 @@ impl ViewerState {
     ) {
         let ctx = ui.ctx().clone();
         self.collect_input(&ctx);
+        // Where the depth model runs, once it has been loaded: on the page
+        // from then on, and in the log whenever it changes (a GPU that
+        // fails in the middle of a live screen leaves the processor).
+        if let Some((line, for_log)) = platform::depth_runs_on() {
+            if self.depth_line.as_deref() != Some(line.as_str()) {
+                core.log(&for_log);
+                self.depth_line = Some(line);
+            }
+        }
         banner(ui, wordmark, p);
         ui.add_space(4.0);
         section(ui, "STEREO VIEWER", p, |ui| {
@@ -1660,6 +1693,15 @@ impl ViewerState {
                             }).response.labelled_by(name);
                     })
                     .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
+                    // Whether that GPU is used: a runtime that could not
+                    // start its GPU part falls back to the processor, and
+                    // nothing else on the page tells the two apart.
+                    if let Some(line) = &state.depth_line {
+                        ui.add(
+                            egui::Label::new(RichText::new(line).color(color(p.muted)).size(12.0))
+                                .wrap(),
+                        );
+                    }
                 } else {
                     ui.checkbox(
                         &mut state.options.half_width,
@@ -1766,12 +1808,7 @@ impl ViewerState {
         }
         self.options_edited(before);
         self.lens.save_when_settled(&ctx, std::time::Instant::now());
-        if let Some(wait) = self
-            .options_file
-            .save_when_settled(self.options, std::time::Instant::now())
-        {
-            ctx.request_repaint_after(wait);
-        }
+        self.keep_choices(&ctx, std::time::Instant::now());
         self.ensure_depth(&ctx);
         self.sync_texture(&ctx);
         ui.add_space(5.0);
@@ -2450,6 +2487,72 @@ mod tests {
         state.lens.nudge(lens::Knob::Pitch, 2.0);
         state.save_lens();
         assert_eq!(lens::read_lens(&file).unwrap(), state.lens.lens);
+    }
+
+    /// A viewer whose choices are kept in `file`, as `with_saved_lens` makes
+    /// one for the user's own file.
+    fn with_choices_in(file: &Path) -> ViewerState {
+        let (options_file, options) = crate::ui::options_file::OptionsFile::load(file.to_owned());
+        ViewerState {
+            options,
+            options_file,
+            ..ViewerState::default()
+        }
+    }
+
+    #[test]
+    fn shutdown_writes_the_choices_before_their_settling_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("viewer-settings.json");
+        let mut state = with_choices_in(&file);
+        assert_eq!(state.options, Options::default());
+        state.options.input = Input::Ai;
+        state.options.detail = 1022;
+        state.save_lens();
+        assert_eq!(crate::ui::options_file::read(&file), state.options);
+        // The next start has them, and its output is off.
+        let next = with_choices_in(&file);
+        assert_eq!(next.options, state.options);
+        assert!(!next.output_open);
+    }
+
+    #[test]
+    fn the_choices_are_written_while_the_page_is_not_drawn() {
+        // The page was the only thing that wrote them: a choice made just
+        // before the controls were minimized, hidden or turned to another
+        // page stayed in memory until the page was drawn again.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("viewer-settings.json");
+        let mut state = with_choices_in(&file);
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        state.options.lines = 2160;
+        state.keep_choices(&ctx, start);
+        assert!(!file.exists(), "written before the choice stood still");
+        state.keep_choices(&ctx, start + std::time::Duration::from_millis(999));
+        assert!(!file.exists(), "written before the choice stood still");
+        state.keep_choices(&ctx, start + std::time::Duration::from_secs(1));
+        assert_eq!(crate::ui::options_file::read(&file).lines, 2160);
+    }
+
+    #[test]
+    fn a_preview_has_the_default_choices_and_leaves_the_file_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("viewer-settings.json");
+        let text = r#"{"Input":"Ai","Output":"Sbs","Lines":1440}"#;
+        std::fs::write(&file, text).unwrap();
+        let saved = with_choices_in(&file);
+        assert_eq!(saved.options.input, Input::Ai);
+        let mut preview = saved.without_saved_options();
+        assert_eq!(preview.options, Options::default());
+        // Whatever happens to its choices, nothing of it reaches the file.
+        preview.options.swap = true;
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        preview.keep_choices(&ctx, start);
+        preview.keep_choices(&ctx, start + std::time::Duration::from_secs(5));
+        preview.save_lens();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
     }
 
     #[test]

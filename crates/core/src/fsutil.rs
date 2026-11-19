@@ -17,7 +17,18 @@ pub const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
 /// runs. `fs::read` would load whatever size it finds, some of them four
 /// times a second. An oversized file is an `InvalidData` error naming the
 /// file; a missing one keeps its `NotFound`.
+///
+/// On Unix only a regular file is opened. A named pipe where the file
+/// belongs has no writer, and opening it waits for one: a program that
+/// reads its settings before it has a window never got one.
 pub fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file and was not read", path.display()),
+        ));
+    }
     let file = fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
@@ -443,6 +454,41 @@ mod tests {
         assert_eq!(
             read_to_string_limited(&path, 8).unwrap_err().kind(),
             io::ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_limited_read_does_not_wait_on_a_pipe_where_the_file_belongs() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder is no file either, and is said to be none.
+        let folder = dir.path().join("settings.json");
+        fs::create_dir(&folder).unwrap();
+        let error = read_limited(&folder, 8).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        // A link to a file is read as the file.
+        fs::write(dir.path().join("real.json"), b"12").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink("real.json", &link).unwrap();
+        assert_eq!(read_limited(&link, 8).unwrap(), b"12");
+
+        let pipe = dir.path().join("status.json");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (a system without mkfifo: nothing to try it with)
+            return;
+        }
+        let (done, read_it) = std::sync::mpsc::channel();
+        let path = pipe.clone();
+        std::thread::spawn(move || done.send(read_limited(&path, 8).map_err(|e| e.kind())));
+        let read = read_it.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a reader that does wait go, so that the test ends either way.
+        let _ = fs::OpenOptions::new().read(true).write(true).open(&pipe);
+        assert_eq!(
+            read,
+            Ok(Err(io::ErrorKind::InvalidInput)),
+            "the read waited on the pipe"
         );
     }
 
