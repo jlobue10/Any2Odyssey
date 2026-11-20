@@ -21,3 +21,6 @@ same-file = "1"
 # Runtime dependency, not a test helper: atomic writes and the one-time
 # backups publish through exclusively created temporary files.
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

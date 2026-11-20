@@ -212,6 +212,7 @@ version = "0.9.9"
 dependencies = [
  "dirs",
  "image",
+ "libc",
  "same-file",
  "serde",
  "serde_json",
