@@ -136,9 +136,18 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 0.9.9 (audit rounds 11 to 22, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 1.0.0 (audit rounds 11 to 22, the Windows setup program, and the five pull requests of 1.0.0) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
+
+New in 1.0.0:
+
+- Linux, live screen at *Standard*, *Depth steadiness* at its default (60), a window dragged across the shown screen or a video with a figure that crosses the picture: the depth of what moves is where it is, and no shape of it stays behind where it was a moment ago. The same at steadiness 95. This is the change of the release that only eyes can judge.
+- Linux, live screen, the same settings with nothing moving for a minute (a desktop with windows at different depths, then a paused video): flat surfaces and the edges between near and far are as calm as in 0.9.9. If an edge or a surface now jumps between two depths where it was calm before, note the steadiness and what was shown: a change of more than about a tenth of the depth range is no longer calmed.
+- Linux, live screen of a screen more than twice as wide or high as the picture (a 5120 × 1440 screen at 1080 lines, a 3840 × 2160 screen at 720 lines), a page of small text or a spreadsheet scrolled slowly: thin lines and small letters keep their weight as they move, and do not come and go. The page still reads about 60 pictures a second.
+- Linux, live screen of a 3840 × 2160 screen at 1080 lines, or of a 1920 × 1080 screen: as in 0.9.9 (these are made as before).
+- Linux, `install.sh` started in two terminals at once over an installation: the second says that another installation is at work and waits; when the first is done it goes on and ends with its usual lines. (That a run which has waited five minutes now stops with "could not acquire the busy lock" needs a first run that hangs, and is covered by the tests.)
+- Linux, the G90XF, `any2odyssey-setup` once after the update (`tools/mkboard.py` of the Odyssey 3D set-up changed): it ends with "done", and the lens helper and the Odyssey 3D output start as before.
 
 New in 0.9.9:
 

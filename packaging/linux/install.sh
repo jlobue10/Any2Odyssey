@@ -241,7 +241,9 @@ drop_the_old_setup() {
 # setup's files gone, or with a second copy of it inside the first, while a run said Done. A run racing
 # --uninstall left half an installation. The lock is on the prefix folder itself (no file of its own to
 # leave behind) and goes with this process however it ends. Without flock (util-linux), or in a folder
-# that has no locks, the run goes on unlocked, as before.
+# that has no locks, the run goes on unlocked, as before. A run that has waited five minutes for another
+# one, or whose wait fails, stops and changes nothing: up to 0.9.9 it went on beside the other run, which
+# is what the lock is there to prevent.
 lock_prefix() {
     [ -z "$DRY" ] && have flock && [ -d "$PREFIX" ] || return 0
     # (asked first: a redirection that fails on exec ends the whole script)
@@ -258,10 +260,12 @@ lock_prefix() {
         # BusyBox's timeout does not know the option and stays in this group anyway.
         waiting="timeout 300"
         if timeout --foreground 300 true 2>/dev/null; then waiting="timeout --foreground 300"; fi
-        $waiting flock 9 2>/dev/null || warn "it has not finished in five minutes; going on beside it"
+        if $waiting flock 9 2>/dev/null; then return 0; fi
     else
-        flock 9 2>/dev/null || true
+        if flock 9 2>/dev/null; then return 0; fi
     fi
+    echo "install: could not acquire the busy lock on $PREFIX; retry when the other run finishes" >&2
+    exit 1
 }
 # Before anything is started that stays (the program, the Wine setup) or asks a question.
 unlock_prefix() { exec 9<&-; }

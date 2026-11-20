@@ -9,6 +9,27 @@ use std::path::Path;
 /// kilobytes.
 pub const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
 
+/// Open local settings or status input without waiting for a FIFO writer.
+/// Check the opened file so a path replacement cannot invalidate the check.
+pub(crate) fn open_regular(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file and was not read", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
 /// Read a whole file that should be small, refusing one over `limit` bytes.
 ///
 /// The files read this way can be written by other programs: Samsung's
@@ -22,14 +43,7 @@ pub const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
 /// belongs has no writer, and opening it waits for one: a program that
 /// reads its settings before it has a window never got one.
 pub fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    #[cfg(unix)]
-    if !fs::metadata(path)?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not a regular file and was not read", path.display()),
-        ));
-    }
-    let file = fs::File::open(path)?;
+    let file = open_regular(path)?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
@@ -548,14 +562,23 @@ mod tests {
         }
         let (done, read_it) = std::sync::mpsc::channel();
         let path = pipe.clone();
-        std::thread::spawn(move || done.send(read_limited(&path, 8).map_err(|e| e.kind())));
+        std::thread::spawn(move || {
+            let read = read_limited(&path, 8).map_err(|e| e.kind());
+            let recover = crate::prefs::Preferences::default()
+                .save_recovering_to(&path)
+                .map_err(|e| e.kind());
+            done.send((read, recover))
+        });
         let read = read_it.recv_timeout(std::time::Duration::from_secs(10));
         // Let a reader that does wait go, so that the test ends either way.
         let _ = fs::OpenOptions::new().read(true).write(true).open(&pipe);
         assert_eq!(
             read,
-            Ok(Err(io::ErrorKind::InvalidInput)),
-            "the read waited on the pipe"
+            Ok((
+                Err(io::ErrorKind::InvalidInput),
+                Err(io::ErrorKind::InvalidInput)
+            )),
+            "reading or recovering settings waited on the pipe"
         );
     }
 
