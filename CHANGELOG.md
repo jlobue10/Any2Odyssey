@@ -2,6 +2,52 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 1.0.0 (2026-11-20)
+
+Five pull requests (#172 to #176) that did not come from an audit round of this project: one changes how the depth of the Linux live screen follows what moves and how a large screen is shrunk for the picture, and four close gaps that fixes of earlier releases had left. Each was read against the code it changes; all five were merged and run together, on Windows and on Linux. One of the five (#176) failed the Arch package as it came and was corrected before it went in. There was no audit round for this release.
+
+This is the first release numbered 1.0. The number changes nothing about what has been seen on the monitor and what has not: that is in the README's status line and in `docs/TESTING.md`, as before.
+
+**Linux, live screen: the depth of something that moves no longer trails behind it.** Each new depth map is blended into the one before it, by as much as *Depth steadiness* says. Where something had moved, that left the old depth standing for a while: at the default steadiness (60) a place that went from near to far kept 60 % of its old depth after the next map, and at 95 the depth had not reached a new scene after five seconds (a "Known, not fixed" item of 0.9.9). What is kept of the old depth is now at most a sixteenth of the range. A small change is calmed as before; a large one is followed with the next map. The other side of it: a place whose depth the model itself puts near in one map and far in the next was calmed by the blend, and is not any more once the two are more than about a tenth of the range apart. Whether that shows on a real picture has not been seen; it is the first thing to look at on the monitor. (#172)
+
+**Linux, live screen: a screen shown at less than half its size is shrunk with every pixel counted.** For the picture, four pixels of the screen were read for each pixel of the view, however many it stood for: four of seven where a 5120 × 1440 screen is shown at 1080 lines, four of nine where a 3840 × 2160 screen is shown at 720. Thin lines and small text came and went as they moved across the pixels that were read. The depth model's picture has been made with every pixel since 0.9.8; the picture that is shown is now made the same way. It costs time where it applies: on the development PC, 1.8 ms where it was 0.6 for a 3840 × 2160 screen at 720 lines, and 1.7 ms where it was 0.6 for a 5120 × 1440 screen at 1080 lines (six threads; about 3 ms on four of its cores). The pull request's own measurement, on a slower machine, was 11.1 ms against 2.1 and 7.9 ms against 2.0. The loop has 15 ms for a picture. A screen shown at half its size or more (3840 × 2160 at 1080 lines, 1920 × 1080 at any) is made as before. (#172)
+
+### Fixed
+
+Linux, the live screen:
+
+- **The depth follows what moves**, and **a screen shown at less than half its size keeps its thin lines**, as above. (#172)
+- **A frame that differs from the last one only in the unused bytes after its rows is not a new picture.** 0.9.9 stopped taking a frame that is the picture already shown for a new one, by comparing the frame's bytes; where a desktop sends rows with unused bytes after them, those were compared too, and what they hold is not the desktop's to keep the same. The rows are now taken without them before the comparison. No desktop that was run in the rounds sends such rows. (#174)
+
+Linux, the settings:
+
+- **A named pipe where a saved file belongs is refused by what was opened, not by its name.** 0.9.9 refused to read one, by looking at the name and then opening it: a pipe put there between the two was opened all the same, and the program waited for a writer that never comes. The step that replaces damaged settings had no such look at all. A saved file is now opened without waiting and what was opened is looked at, for reading and for the replacement; both say that it is not a regular file. (#175)
+
+Linux, the Odyssey 3D set-up:
+
+- **The set-up stops with a message when the lens board's USB descriptors are cut short or are no descriptors.** `tools/mkboard.py` wrote `board.h` and `device.reg` from whatever it had read; with fewer bytes than the board's descriptors have, the Wine side was built with what was there. Both files are now left as they were. (#173)
+
+Linux, installing:
+
+- **`install.sh` stops when it cannot get its turn.** A run that found another one at work in the same prefix waited for it, and after five minutes went on beside it with a note; where there is no `timeout` it went on when the wait failed for any reason. Two runs at once is what the lock is there to prevent (0.9.4: half an installation, or a second copy of the Wine set-up inside the first). It now ends with "could not acquire the busy lock" and changes nothing; the run can be started again. (#176)
+
+### Tests and releases
+
+- **The link check of the packaged documents follows symbolic links, and a link has to end inside the package.** A link to a file that is beside the documents on the machine that builds the package, and not in it, passed. The Arch package's license files are links from the documents' folder to `usr/share/licenses`, on purpose: the check takes the package's folder as a second argument for that, and `PKGBUILD` and the workflows give it. (#176; as it came, the check refused those links and the package was not built, and with BusyBox's `realpath` it reported every link.)
+- **The lock of `install.sh` is tried with a lock that is really held**, by the test itself as another run holds it, and only the five minutes are stood in for. (#176)
+- **The shared check of a captured frame's size no longer counts past the largest number**: a frame whose rows cannot all be there is refused for that, not by luck. No desktop can send one; the buffer's own size is looked at before. (#172)
+- **All five were merged and run together before the release**: every gate on Windows and on Linux.
+
+### Known, not fixed
+
+- Linux, live screen: the pictures between two depth maps are still made with the older map, which is about one and a half times as old as the model takes for a map (0.2 s at *Standard* on the processor, a few hundredths on a graphics card). #172 changes what a new map does when it arrives, not when it arrives.
+- Linux, live screen: what #172 gives up, as above: a depth that changes by more than about a tenth of the range from one map to the next is not calmed at any steadiness.
+- The items of 0.9.9 that are not named above stand as they were.
+
+### Hardware verification
+
+Pending: nothing of this release was run with the monitor, the camera, the lens or Leia's and Samsung's software. `docs/TESTING.md` lists the checks under "New in 1.0.0". Most in need of a real run, and the only way to judge it: the live screen with something moving on the shown screen, at *Depth steadiness* 60 and 95 (the depth should be where the moving thing is, with no shape left behind), and the same screen with nothing moving (edges between near and far should be as calm as in 0.9.9). The checks of 0.9.9 are still to do as well.
+
 ## 0.9.9 (2026-11-19)
 
 An eighth audit release: seven pull requests (#163 to #169) from a round that began with 0.9.8, the first release in a long while that no round had looked at. It found a defect of 0.9.8 that every user of the live screen has, three times over and independently; ran the depth model on a real graphics card for the first time; took the Odyssey 3D set-up across upgrades of Wine with fourteen real Wine versions; ran the Windows controls in a window of their own for the first time since 0.9.1; and ran the Linux edition on the desktops that were left. At the end all seven were merged and run together, on Windows and on Linux.
