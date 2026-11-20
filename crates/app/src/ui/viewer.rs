@@ -692,6 +692,9 @@ pub struct ViewerState {
     saved_token: Option<String>,
     /// Where the choices are kept between runs (`options_file`).
     options_file: super::options_file::OptionsFile,
+    /// Where the depth model runs, as the page says it under *Depth
+    /// detail*; nothing until the model has been loaded.
+    depth_line: Option<String>,
 }
 
 impl Default for ViewerState {
@@ -726,6 +729,7 @@ impl Default for ViewerState {
             saved_token: None,
             // In memory only: tests and previews write nothing.
             options_file: super::options_file::OptionsFile::default(),
+            depth_line: None,
         }
     }
 }
@@ -748,6 +752,13 @@ impl ViewerState {
         };
         state.lens.problem = lens_problem.map(str::to_owned);
         state
+    }
+
+    /// The page with this line about where the depth model runs.
+    #[cfg(test)]
+    pub fn with_depth_line(mut self, line: &str) -> ViewerState {
+        self.depth_line = Some(line.to_owned());
+        self
     }
 
     /// The viewer with the user's saved lens numbers and choices; changes
@@ -1534,6 +1545,15 @@ impl ViewerState {
     ) {
         let ctx = ui.ctx().clone();
         self.collect_input(&ctx);
+        // Where the depth model runs, once it has been loaded: on the page
+        // from then on, and in the log whenever it changes (a GPU that
+        // fails in the middle of a live screen leaves the processor).
+        if let Some((line, for_log)) = platform::depth_runs_on() {
+            if self.depth_line.as_deref() != Some(line.as_str()) {
+                core.log(&for_log);
+                self.depth_line = Some(line);
+            }
+        }
         banner(ui, wordmark, p);
         ui.add_space(4.0);
         section(ui, "STEREO VIEWER", p, |ui| {
@@ -1670,6 +1690,15 @@ impl ViewerState {
                             }).response.labelled_by(name);
                     })
                     .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
+                    // Whether that GPU is used: a runtime that could not
+                    // start its GPU part falls back to the processor, and
+                    // nothing else on the page tells the two apart.
+                    if let Some(line) = &state.depth_line {
+                        ui.add(
+                            egui::Label::new(RichText::new(line).color(color(p.muted)).size(12.0))
+                                .wrap(),
+                        );
+                    }
                 } else {
                     ui.checkbox(
                         &mut state.options.half_width,

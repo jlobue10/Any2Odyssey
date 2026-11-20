@@ -974,10 +974,19 @@ pub fn estimate_depth(
     image: &image::RgbaImage,
     long_side: u32,
 ) -> Result<any2odyssey_core::dibr::DepthMap, String> {
-    Ok(
-        crate::depth::estimate_unless_cancelled(image, long_side, || false)?
-            .expect("this request cannot be cancelled"),
-    )
+    Ok(crate::depth::estimate_unless_cancelled(
+        image,
+        long_side,
+        crate::depth::Purpose::Still,
+        || false,
+    )?
+    .expect("this request cannot be cancelled"))
+}
+
+/// Where the depth model runs, once it has been loaded: a line for the
+/// page and one for the log.
+pub fn depth_runs_on() -> Option<(String, String)> {
+    crate::depth::runs_on().map(|runs_on| (runs_on.describe(), runs_on.for_log()))
 }
 
 /// Say that a mode exists only on Windows and fail (exit 1). Said with

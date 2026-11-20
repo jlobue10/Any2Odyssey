@@ -835,7 +835,10 @@ mod sweep {
             Some(&format!(
                 "Could not save {path}: Permission denied (os error 13)"
             )),
-        );
+        )
+        // The longest the line under Depth detail gets: a GPU that could
+        // not be used, with the end of what the runtime said.
+        .with_depth_line("Depth is computed on the processor, which is several times slower: the NVIDIA GPU could not be used (…Failed to load library libonnxruntime_providers_cuda.so with error: libcublasLt.so.13: cannot open shared object file: No such file or directory). View logs has the whole message; the GPU is tried again when the program is started again.");
     }
 
     fn installed_somewhere_deep(h: &mut Harness) {
