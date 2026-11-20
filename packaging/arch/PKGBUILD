@@ -53,15 +53,33 @@ pkgver() {
   tr -d '[:space:]' < "$(_repo)/VERSION"
 }
 
+# The program names the source files of its dependencies in its panic messages, by the paths they have
+# where it is built: under cargo's folder, this checkout and $srcdir (makepkg: "Package contains reference
+# to $srcdir"). Those folders are given other names, on top of the flags makepkg.conf has, and in build()
+# and check() alike: with other flags check() would build the program a second time, and package() would
+# take that one. (The last name that fits a path is the one used, so $srcdir comes after the checkout it
+# is in.)
+_paths() {
+  local -a flags
+  read -r -a flags <<< "${RUSTFLAGS:-}"
+  flags+=("--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          "--remap-path-prefix=$(_repo)=/any2odyssey"
+          "--remap-path-prefix=$srcdir=/any2odyssey")
+  local IFS=$'\x1f'
+  export CARGO_ENCODED_RUSTFLAGS="${flags[*]}"
+}
+
 build() {
   cd "$(_repo)"
   export CARGO_TARGET_DIR="$srcdir/target"
+  _paths
   cargo build --locked --release -p any2odyssey
 }
 
 check() {
   cd "$(_repo)"
   export CARGO_TARGET_DIR="$srcdir/target"
+  _paths
   cargo test --locked --release -p any2odyssey-core -p any2odyssey
 }
 

@@ -74,6 +74,9 @@ struct Shared {
     stop: AtomicBool,
     /// Since when the stream of a cast that was running has been paused.
     paused: Mutex<Option<Instant>>,
+    /// How many buffers have come since the last one that held a picture,
+    /// and why the newest of them held none.
+    unread: Mutex<(u32, &'static str)>,
 }
 
 impl Shared {
@@ -85,7 +88,63 @@ impl Shared {
             token: Mutex::new(None),
             stop: AtomicBool::new(false),
             paused: Mutex::new(None),
+            unread: Mutex::new((0, "")),
         }
+    }
+
+    /// A frame has come: `frame` holds its `width` x `height` pixels, rows
+    /// `stride` bytes apart. It changes places with the slot's, and the
+    /// reader is told; unless it is the picture the slot holds already.
+    ///
+    /// A desktop sends a frame for every time it has drawn the screen,
+    /// whether or not anything on it changed: GNOME while only the pointer
+    /// moves and the pointer is not drawn into the picture (it is drawn
+    /// onto the screen there, so the screen is drawn again), and any
+    /// desktop whose windows redraw themselves with what they showed
+    /// before. Each of those was a new picture here: shrunk, given to the
+    /// depth model, woven and handed over again, and the page read "5
+    /// pictures a second" over a screen on which nothing changed. The
+    /// comparison ends at the first byte that differs, and a frame that is
+    /// the same to its last byte costs less than the work it saves.
+    fn frame_arrived(
+        &self,
+        frame: &mut Vec<u8>,
+        width: u32,
+        height: u32,
+        stride: usize,
+        bgr: bool,
+    ) {
+        *lock(&self.unread) = (0, "");
+        let first = {
+            let mut slot = lock(&self.slot);
+            if slot.serial != 0
+                && (slot.width, slot.height, slot.stride, slot.bgr) == (width, height, stride, bgr)
+                && slot.bytes == *frame
+            {
+                return;
+            }
+            std::mem::swap(&mut slot.bytes, frame);
+            // What was the slot's has held the frame before this one.
+            fitted(frame, slot.bytes.len());
+            slot.width = width;
+            slot.height = height;
+            slot.stride = stride;
+            slot.bgr = bgr;
+            slot.serial += 1;
+            slot.serial == 1
+        };
+        self.arrived.notify_all();
+        let mut state = lock(&self.state);
+        let running = CaptureState::Running { width, height };
+        if first || *state != running {
+            *state = running;
+        }
+    }
+
+    /// A buffer has come that holds no picture, because of `why`.
+    fn no_picture(&self, why: &'static str) {
+        let mut unread = lock(&self.unread);
+        *unread = (unread.0.saturating_add(1), why);
     }
 
     /// The desktop has answered with a screen.
@@ -153,6 +212,18 @@ impl Capture {
     /// time no frame can have come; `None` while it runs.
     pub fn paused_for(&self) -> Option<Duration> {
         lock(&self.shared.paused).map(|since| since.elapsed())
+    }
+
+    /// How many buffers the desktop has sent since the last one that held
+    /// a picture, and what was wrong with the newest of them; `None` when
+    /// the last buffer was a picture, or none has come.
+    ///
+    /// A stream of nothing but such buffers (marked as no picture, in
+    /// memory that is not mapped, smaller than the stream's size needs)
+    /// left the page at "Waiting for its first picture" for as long as the
+    /// output was on, with nothing to say why none came.
+    pub fn unread(&self) -> Option<(u32, &'static str)> {
+        Some(*lock(&self.shared.unread)).filter(|(count, _)| *count > 0)
     }
 
     /// The portal's token for the screen that was picked, once there is one.
@@ -553,6 +624,25 @@ fn picture_in(bytes: &[u8], told: Told, width: u32, height: u32) -> Option<(&[u8
     Some((valid.get(..needed)?, stride))
 }
 
+/// Why [`picture_in`] found no picture in a buffer that says `told` about
+/// itself, for the page.
+fn no_picture_in(told: Told) -> &'static str {
+    if told.spoiled {
+        NOT_A_PICTURE
+    } else if told.size == 0 {
+        "empty"
+    } else {
+        TOO_SMALL
+    }
+}
+
+/// What can be wrong with a buffer, said after "the last one was".
+const NOT_A_PICTURE: &str = "marked by the desktop as holding no picture";
+const TOO_SMALL: &str = "smaller than a picture of the size the desktop named";
+const NOT_READABLE: &str =
+    "in memory this program cannot read, as a buffer of the graphics card is";
+const NOT_ASKED_FOR: &str = "in a pixel format that was not asked for";
+
 /// The longest side of a screen that is shown, in pixels: the same as for
 /// a picture that is opened.
 const LONGEST_SIDE: u32 = 16384;
@@ -807,6 +897,7 @@ fn stream(
                 return;
             };
             let Some(packing) = packing(data.format.format()) else {
+                data.shared.no_picture(NOT_ASKED_FOR);
                 return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
@@ -827,6 +918,7 @@ fn stream(
                 });
             let datas = buffer.datas_mut();
             let Some(plane) = datas.first_mut() else {
+                data.shared.no_picture(NOT_READABLE);
                 return;
             };
             let chunk = plane.chunk();
@@ -837,8 +929,12 @@ fn stream(
                 spoiled: header_spoiled
                     || chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED),
             };
-            let Some(bytes) = plane.data() else { return };
+            let Some(bytes) = plane.data() else {
+                data.shared.no_picture(NOT_READABLE);
+                return;
+            };
             let Some((frame, stride)) = picture_in(bytes, told, width, height) else {
+                data.shared.no_picture(no_picture_in(told));
                 return;
             };
             let row = width as usize * 4;
@@ -873,6 +969,7 @@ fn stream(
                 (Packing::Bytes { bgr }, _) => {
                     let upright = live::turn_upright(lying(frame, stride), turned, &mut data.spare);
                     let Some((width, height)) = upright else {
+                        data.shared.no_picture(TOO_SMALL);
                         return;
                     };
                     (width, height, width as usize * 4, bgr)
@@ -882,6 +979,7 @@ fn stream(
                     narrow_tens(frame, tens_wide, tens_high, stride, red_high, narrowed);
                     let upright = live::turn_upright(lying(narrowed, row), turned, &mut data.spare);
                     let Some((width, height)) = upright else {
+                        data.shared.no_picture(TOO_SMALL);
                         return;
                     };
                     (width, height, width as usize * 4, true)
@@ -890,24 +988,8 @@ fn stream(
             if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
                 data.narrowed = Vec::new();
             }
-            let first = {
-                let mut slot = lock(&data.shared.slot);
-                std::mem::swap(&mut slot.bytes, &mut data.spare);
-                // What was the slot's has held the frame before this one.
-                fitted(&mut data.spare, slot.bytes.len());
-                slot.width = width;
-                slot.height = height;
-                slot.stride = stride;
-                slot.bgr = bgr;
-                slot.serial += 1;
-                slot.serial == 1
-            };
-            data.shared.arrived.notify_all();
-            let mut state = lock(&data.shared.state);
-            let running = CaptureState::Running { width, height };
-            if first || *state != running {
-                *state = running;
-            }
+            data.shared
+                .frame_arrived(&mut data.spare, width, height, stride, bgr);
         })
         .register()
         .map_err(failed("no stream listener"))?;
@@ -934,16 +1016,24 @@ fn stream(
         .map_err(failed("could not connect the stream"))?;
 
     // The loop runs until the capture is stopped; it looks ten times a
-    // second, and tells the page when the first frame has come.
+    // second, and tells the page when the first frame has come, or the
+    // first buffer that is none.
     let (timer_loop, timer_shared) = (mainloop.clone(), shared.clone());
     let announced = AtomicBool::new(false);
+    let no_picture_told = AtomicBool::new(false);
     let wake_once = {
         let shared = shared.clone();
         move || {
-            if !announced.load(Ordering::Relaxed)
-                && matches!(*lock(&shared.state), CaptureState::Running { .. })
-            {
+            if announced.load(Ordering::Relaxed) {
+                return false;
+            }
+            if matches!(*lock(&shared.state), CaptureState::Running { .. }) {
                 announced.store(true, Ordering::Relaxed);
+                return true;
+            }
+            // Buffers come and none of them holds a picture: the page is
+            // told that as well, once; it then looks again by itself.
+            if lock(&shared.unread).0 > 0 && !no_picture_told.swap(true, Ordering::Relaxed) {
                 return true;
             }
             false
@@ -1008,6 +1098,11 @@ impl Fed {
         *lock(&self.0.paused) = since;
     }
 
+    /// A buffer that the desktop marks as holding no picture.
+    pub fn feed_no_picture(&self) {
+        self.0.no_picture(NOT_A_PICTURE);
+    }
+
     pub fn frames(&self) -> Frames {
         Frames(self.0.clone())
     }
@@ -1030,6 +1125,7 @@ impl Fed {
         slot.bgr = true;
         slot.serial += 1;
         drop(slot);
+        *lock(&self.0.unread) = (0, "");
         *lock(&self.0.state) = CaptureState::Running { width, height };
         self.0.arrived.notify_all();
     }
@@ -1117,6 +1213,98 @@ mod tests {
         let (_, least, most) = range(Key::VideoFramerate);
         assert_eq!(least, 0);
         assert!(most >= 240);
+    }
+
+    #[test]
+    fn a_frame_that_is_the_picture_already_there_is_not_a_new_one() {
+        let shared = Shared::new();
+        let serial = || lock(&shared.slot).serial;
+        let picture: Vec<u8> = (0..2 * 3 * 4).collect();
+        let arrive = |bytes: &[u8], width, height, stride, bgr| {
+            let mut frame = bytes.to_vec();
+            shared.frame_arrived(&mut frame, width, height, stride, bgr);
+        };
+        arrive(&picture, 2, 3, 8, true);
+        assert_eq!(serial(), 1);
+        assert_eq!(
+            *lock(&shared.state),
+            CaptureState::Running {
+                width: 2,
+                height: 3
+            }
+        );
+        // The same picture again, as often as the desktop likes: the reader
+        // is not told, and what it reads is what it had.
+        for _ in 0..3 {
+            arrive(&picture, 2, 3, 8, true);
+        }
+        assert_eq!(serial(), 1);
+        assert_eq!(lock(&shared.slot).source().bytes, &picture[..]);
+        // One byte of it differs, the last one: a new picture.
+        let mut changed = picture.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        arrive(&changed, 2, 3, 8, true);
+        assert_eq!(serial(), 2);
+        assert_eq!(lock(&shared.slot).source().bytes, &changed[..]);
+        // And back: new again.
+        arrive(&picture, 2, 3, 8, true);
+        assert_eq!(serial(), 3);
+        // The same bytes as another picture: other sides, the colours the
+        // other way round.
+        arrive(&picture, 3, 2, 12, true);
+        assert_eq!(serial(), 4);
+        assert_eq!(
+            *lock(&shared.state),
+            CaptureState::Running {
+                width: 3,
+                height: 2
+            }
+        );
+        arrive(&picture, 3, 2, 12, false);
+        assert_eq!(serial(), 5);
+        // A buffer without a picture between two frames that are the same
+        // does not make the second one new, and is forgotten with it.
+        shared.no_picture(NOT_A_PICTURE);
+        arrive(&picture, 3, 2, 12, false);
+        assert_eq!(serial(), 5);
+        assert_eq!(*lock(&shared.unread), (0, ""));
+    }
+
+    #[test]
+    fn buffers_that_hold_no_picture_are_counted_with_the_reason_until_one_does() {
+        let fed = Fed::start();
+        let capture = fed.capture();
+        assert_eq!(capture.unread(), None);
+        fed.feed_no_picture();
+        fed.feed_no_picture();
+        assert_eq!(capture.unread(), Some((2, NOT_A_PICTURE)));
+        fed.0.no_picture(NOT_READABLE);
+        assert_eq!(capture.unread(), Some((3, NOT_READABLE)));
+        fed.feed(1, 1, &[0; 4]);
+        assert_eq!(capture.unread(), None);
+        // What is said of each buffer that `picture_in` finds no picture in.
+        let whole = Told {
+            offset: 0,
+            size: 2 * 2 * 4,
+            stride: 8,
+            spoiled: false,
+        };
+        let memory = [0u8; 2 * 2 * 4];
+        assert!(picture_in(&memory, whole, 2, 2).is_some());
+        for (told, why) in [
+            (
+                Told {
+                    spoiled: true,
+                    ..whole
+                },
+                NOT_A_PICTURE,
+            ),
+            (Told { size: 0, ..whole }, "empty"),
+            (Told { size: 12, ..whole }, TOO_SMALL),
+        ] {
+            assert!(picture_in(&memory, told, 2, 2).is_none(), "{told:?}");
+            assert_eq!(no_picture_in(told), why, "{told:?}");
+        }
     }
 
     #[test]

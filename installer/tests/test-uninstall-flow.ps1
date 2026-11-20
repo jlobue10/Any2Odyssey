@@ -186,6 +186,40 @@ try{
   $kept.Attributes='Normal'
  }
 
+ # A shortcut whose target cannot be read. The shell's link object opens the file for reading and
+ # writing and reports no target when it cannot: while another program holds the file open without
+ # sharing it for both, and where its permissions keep this account from writing to it. Such a shortcut
+ # was taken for somebody else's and stayed without a word, pointing at a program that was gone. Whose
+ # it is cannot be told, so it still stays; it is named, and everything else is removed.
+ foreach($case in @('None','Read','Delete','None, read-only','permissions')){
+  $launches.Clear()
+  New-Fixture -Elevated $false
+  $held=Join-Path $desktop 'Any2Odyssey.lnk'
+  $readOnly=$case -eq 'None, read-only'
+  if($readOnly){(Get-Item -LiteralPath $held).IsReadOnly=$true}
+  $hold=$null
+  if($case -eq 'permissions'){& icacls.exe $held /deny ('*'+$sid+':(WD,AD)') | Out-Null}
+  else{$hold=[IO.File]::Open($held,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]($case -replace ', read-only',''))}
+  try{
+   $notes.Clear()
+   & (Join-Path $app 'Uninstall.ps1')
+   $said=$notes -join [char]10
+   Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $app) -and -not (Test-Path -LiteralPath $registration) -and -not (Test-Path -LiteralPath $worker)) "A shortcut whose target cannot be read does not stop the uninstall ($case)"
+   Assert (-not (Test-Path -LiteralPath (Join-Path $programs 'Any2Odyssey.lnk'))) "The other shortcut is still removed ($case)"
+   Assert ((Test-Path -LiteralPath $held) -and (Get-Item -LiteralPath $held).IsReadOnly -eq $readOnly -and $said.Contains($held) -and $said.Contains('could not be read') -and $said.Contains('left in place')) "The shortcut whose target cannot be read stays as it was and is named ($case)"
+  }finally{
+   if($hold){$hold.Dispose()}
+   if($case -eq 'permissions'){& icacls.exe $held /remove:d ('*'+$sid) | Out-Null}
+   if(Test-Path -LiteralPath $held){(Get-Item -LiteralPath $held).IsReadOnly=$false}
+  }
+ }
+ # Once the other program has let go of it, the next uninstall (of a new installation) removes it.
+ $launches.Clear()
+ New-Fixture -Elevated $false
+ $notes.Clear()
+ & (Join-Path $app 'Uninstall.ps1')
+ Assert (-not (Test-Path -LiteralPath (Join-Path $desktop 'Any2Odyssey.lnk')) -and -not ($notes -join [char]10).Contains('left in place')) 'A shortcut that is free again is removed without a notice'
+
  $launches.Clear()
  New-Fixture -Elevated $true
  & (Join-Path $app 'Uninstall.ps1')

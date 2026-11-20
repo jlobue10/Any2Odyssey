@@ -403,6 +403,21 @@ impl FrameFile {
         file.write_all(&header)?;
         // From here on the file is removed with the `FrameFile`.
         let (file, path) = named.keep().map_err(|e| e.error)?;
+        // Nobody else is to open it for writing. The pictures are copied
+        // into the file's memory, and a store into a page that is no
+        // longer part of the file ends the process (SIGBUS), where a
+        // `write` would have made the file longer again: a program of this
+        // user that shortened the file (`truncate`, `: > file`) ended the
+        // viewer at its next picture. The handle held here was opened for
+        // writing and stays so; the helper only ever reads. (Whoever
+        // changes the mode back first can still do it, as can root: this
+        // keeps accidents out, and nothing else is to be kept out of a
+        // file of one's own.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o400));
+        }
         let mapped = mapped::Places::of(&file, FILE_BYTES);
         Ok(FrameFile {
             file,
@@ -1057,13 +1072,47 @@ mod tests {
             );
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&file.path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600, "{name}");
+            assert_eq!(mode & 0o777, 0o400, "{name}");
         }
         let (kept, gone) = (second.path.clone(), first.path.clone());
         drop(first);
         assert!(!gone.exists() && kept.exists());
         // A folder that is not there is an error, not a file somewhere else.
         assert!(FrameFile::create_in(&dir.path().join("none")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_frame_file_is_not_opened_for_writing_by_anybody_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut frames = FrameFile::create_in(dir.path()).unwrap();
+        frames.show(2, 2, &[1; 16]).unwrap();
+        // Another program of this user that would shorten the file, by its
+        // name or through a handle: with the pictures copied into the
+        // file's memory, that ended the viewer at its next picture
+        // (signal 7). It is not let in. (Root is; nothing is shortened
+        // here, so the test's own process stays whole.)
+        let opened = std::fs::OpenOptions::new().write(true).open(&frames.path);
+        let appended = std::fs::OpenOptions::new().append(true).open(&frames.path);
+        if let (Err(opened), Err(appended)) = (&opened, &appended) {
+            assert_eq!(opened.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(appended.kind(), std::io::ErrorKind::PermissionDenied);
+        } else {
+            // Whoever may open every file may open this one both ways.
+            assert!(opened.is_ok() && appended.is_ok());
+        }
+        // Reading it is what the helper does, and the viewer goes on
+        // writing through the handle it has.
+        assert!(File::open(&frames.path).is_ok());
+        frames.show(2, 2, &[2; 16]).unwrap();
+        frames.show_bottom_up(2, 2, &[3; 16]).unwrap();
+        let read = as_read(&frames, 16);
+        let place = HEADER_BYTES as usize + frames.place as usize * 16;
+        assert_eq!(read[place..place + 16], [3; 16]);
+        // And it is removed with its owner, mode or no mode.
+        let path = frames.path.clone();
+        drop(frames);
+        assert!(!path.exists());
     }
 
     /// The header and the first `bytes` bytes of each place of `frames`,

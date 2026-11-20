@@ -31,6 +31,11 @@ CC=x86_64-w64-mingw32-gcc
 
 die() { echo "setup: $*" >&2; exit 1; }
 
+# --help prints the lines at the top of this file. It was taken for the Windows drive: "no Leia SR runtime
+# in --help/Program Files/LeiaSR/Platform".
+case ${1:-} in
+    -h | --help) awk 'NR >= 3 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$(readlink -f "$0")"; exit 0 ;;
+esac
 [ $# -eq 1 ] || die "usage: setup.sh <windows-root>"
 WIN=${1%/}
 RUNTIME="$WIN/Program Files/LeiaSR/Platform"
