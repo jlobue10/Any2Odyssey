@@ -12,14 +12,17 @@ set -eu
 
 [ $# -eq 1 ] && [ -d "$1" ] || { echo "usage: check-doc-links.sh FOLDER" >&2; exit 2; }
 
-broken=$(find "$1" -type f -name '*.md' | sort | while IFS= read -r doc; do
+root=$(cd -- "$1" && pwd -P)
+broken=$(find "$root" -type f -name '*.md' | sort | while IFS= read -r doc; do
     # A document without a link makes grep fail; that is not an error here.
     # Markdown's ](target) and, for the pictures and links written as HTML (README.md's first picture is
     # one, and 0.9.2 shipped it leading nowhere), src="target" and href="target".
     { grep -o -e '\]([^)#[:space:]]*' -e 'src="[^"#]*' -e 'href="[^"#]*' "$doc" || true; } |
         sed -e 's/^](//' -e 's/^src="//' -e 's/^href="//' | sort -u | while IFS= read -r target; do
         case $target in '' | *:*) continue ;; esac
-        [ -e "$(dirname "$doc")/$target" ] || printf '%s links to %s\n' "$doc" "$target"
+        resolved=$(realpath -e -- "$(dirname "$doc")/$target" 2>/dev/null) || resolved=
+        case $resolved in "$root" | "${root%/}"/*) continue ;; esac
+        printf '%s links to %s\n' "$doc" "$target"
     done
 done)
 if [ -n "$broken" ]; then

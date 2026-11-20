@@ -258,10 +258,12 @@ lock_prefix() {
         # BusyBox's timeout does not know the option and stays in this group anyway.
         waiting="timeout 300"
         if timeout --foreground 300 true 2>/dev/null; then waiting="timeout --foreground 300"; fi
-        $waiting flock 9 2>/dev/null || warn "it has not finished in five minutes; going on beside it"
+        if $waiting flock 9 2>/dev/null; then return 0; fi
     else
-        flock 9 2>/dev/null || true
+        if flock 9 2>/dev/null; then return 0; fi
     fi
+    echo "install: could not acquire the busy lock on $PREFIX; retry when the other run finishes" >&2
+    exit 1
 }
 # Before anything is started that stays (the program, the Wine setup) or asks a question.
 unlock_prefix() { exec 9<&-; }
