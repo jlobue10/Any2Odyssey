@@ -1099,16 +1099,13 @@ fn stream(
                 order: PixelOrder::Bgr,
             };
             let (tens_wide, tens_high) = (width as usize, height as usize);
-            // What the frame takes in the buffer it is written to: its rows
-            // as they come, or without their gaps.
-            let wanted = match (packing, turned) {
-                (Packing::Bytes { .. }, Turned::Upright) => frame.len(),
-                _ => row * tens_high,
-            };
+            // Keep only visible rows. Padding can change on an otherwise
+            // identical frame, which would wake the renderer and depth model.
+            let wanted = row * tens_high;
             fitted(&mut data.spare, wanted);
             fitted(&mut data.narrowed, wanted);
             let (width, height, stride, bgr) = match (packing, turned) {
-                (Packing::Bytes { bgr }, Turned::Upright) => {
+                (Packing::Bytes { bgr }, Turned::Upright) if stride == row => {
                     data.spare.clear();
                     data.spare.extend_from_slice(frame);
                     (width, height, stride, bgr)
