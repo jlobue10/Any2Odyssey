@@ -528,7 +528,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                 // 2160 lines and back to 1080.
                 fitted(&mut picture, w as usize * h as usize * 4);
                 picture.resize(w as usize * h as usize * 4, 0);
-                if !live::scale_to_rgba(slot.source(), &mut picture, w, h) {
+                if !live::shrink_to_rgba(slot.source(), &mut picture, w, h) {
                     return None;
                 }
             }
@@ -1895,8 +1895,8 @@ mod tests {
         // Several of the loop's waits for a frame (150 ms each).
         let a_while = Duration::from_millis(600);
 
-        // A 4:3 screen, so the view has black at its sides.
-        let (sw, sh) = (48u32, 36u32);
+        // This 4:3 screen needs both side bars and a reduction beyond 2:1.
+        let (sw, sh) = (1000u32, 750u32);
         let screen: Vec<u8> = (0..sw * sh * 4).map(|i| (i * 7 % 251) as u8).collect();
         capture.feed(sw, sh, &screen);
         // The frame goes to the model at once, and nowhere else: there is
@@ -1933,7 +1933,7 @@ mod tests {
             stride: sw as usize * 4,
             order: PixelOrder::Bgr,
         };
-        assert!(live::scale_to_rgba(source, &mut picture, w, h));
+        assert!(live::shrink_to_rgba(source, &mut picture, w, h));
         let mut look = shared.find(1).0.look;
         let (_, width, height, bytes) = sink.written();
         assert_eq!((width, height), (view.0 * 2, view.1));
@@ -2157,7 +2157,7 @@ mod bench {
                 let n = 20;
                 let t = Instant::now();
                 for _ in 0..n {
-                    live::scale_to_rgba(source, &mut picture, w, h);
+                    live::shrink_to_rgba(source, &mut picture, w, h);
                 }
                 let scale = t.elapsed() / n;
                 let t = Instant::now();
@@ -2260,7 +2260,7 @@ mod bench {
                     };
                     let params = Params::default();
                     let t0 = Instant::now();
-                    live::scale_to_rgba(source, &mut picture, w, h);
+                    live::shrink_to_rgba(source, &mut picture, w, h);
                     let t1 = Instant::now();
                     if sharpness > 0 {
                         live::render_pair(&picture, w, h, depth, params, &mut pair);

@@ -33,7 +33,17 @@ impl Source<'_> {
     /// Whether the rows the header describes are all there.
     pub fn is_complete(&self) -> bool {
         let (w, h) = (self.width as usize, self.height as usize);
-        w > 0 && h > 0 && self.stride >= w * 4 && self.bytes.len() >= self.stride * (h - 1) + w * 4
+        let Some(row_bytes) = w.checked_mul(4) else {
+            return false;
+        };
+        w > 0
+            && h > 0
+            && self.stride >= row_bytes
+            && self
+                .stride
+                .checked_mul(h - 1)
+                .and_then(|offset| offset.checked_add(row_bytes))
+                .is_some_and(|required| required <= self.bytes.len())
     }
 }
 
@@ -364,6 +374,10 @@ pub fn model_input_size(source: (u32, u32), model: (u32, u32)) -> (u32, u32) {
 /// nearness moves a pixel by about a tenth of its width.
 pub const SETTLED: f32 = 1.0 / 2048.0;
 
+// Limit the old silhouette left behind by a moving depth boundary, in
+// normalized depth units. Small fluctuations still use the chosen steadiness.
+const MAX_DEPTH_LAG: f32 = 1.0 / 16.0;
+
 /// Depth that stays put between frames.
 ///
 /// The model sees every frame afresh: its scale drifts and its surfaces
@@ -422,7 +436,8 @@ impl DepthSmoother {
         } else {
             for (old, &v) in self.values.iter_mut().zip(raw) {
                 let new = ((v - low) * scale).clamp(0.0, 1.0);
-                *old = *old * keep + new * (1.0 - keep);
+                let blended = *old * keep + new * (1.0 - keep);
+                *old = blended.clamp(new - MAX_DEPTH_LAG, new + MAX_DEPTH_LAG);
             }
         }
         true
@@ -1051,10 +1066,10 @@ mod tests {
         // The same scene again changes nothing.
         assert!(smoother.update(2, 1, &[2.0, 6.0], 0.5));
         assert_eq!(smoother.values(), [0.0, 1.0]);
-        // The scene flips: the map moves halfway, not all the way.
+        // The scene flips: history at either edge is bounded.
         assert!(smoother.update(2, 1, &[6.0, 2.0], 0.5));
         let values = smoother.values();
-        assert!((values[0] - 0.5).abs() < 1e-6 && (values[1] - 0.5).abs() < 1e-6);
+        assert_eq!(values, [1.0 - MAX_DEPTH_LAG, MAX_DEPTH_LAG]);
         // Unusable maps are refused and leave the last one in place.
         assert!(!smoother.update(2, 1, &[1.0], 0.5));
         assert!(!smoother.update(2, 1, &[1.0, f32::NAN], 0.5));
@@ -1063,6 +1078,19 @@ mod tests {
         // A new size starts afresh; a flat scene is all far.
         assert!(smoother.update(1, 3, &[4.0, 4.0, 4.0], 0.9));
         assert_eq!(smoother.values(), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_moving_foreground_tracks_both_edges_while_small_fluctuations_stay_smooth() {
+        for keep in [0.6, 0.95] {
+            let mut smoother = DepthSmoother::default();
+            assert!(smoother.update(6, 1, &[0.0, 1.0, 1.0, 0.0, 0.4, 0.0], keep));
+            assert!(smoother.update(6, 1, &[0.0, 0.0, 1.0, 1.0, 0.42, 0.0], keep));
+            let d = smoother.values();
+            assert!(d[1] <= MAX_DEPTH_LAG && d[3] >= 1.0 - MAX_DEPTH_LAG);
+            assert_eq!((d[0], d[2], d[5]), (0.0, 1.0, 0.0));
+            assert!((d[4] - (0.4 * keep + 0.42 * (1.0 - keep))).abs() < 1e-6);
+        }
     }
 
     #[test]
@@ -1782,6 +1810,8 @@ mod tests {
             (4, 4, 15),
             (4, 4, 5),
             (4, 2, 0),
+            (4, 2, usize::MAX),
+            (4, 3, 1usize << (usize::BITS - 1)),
         ] {
             let source = frame(width, height, stride);
             assert!(!source.is_complete(), "{width}x{height}, stride {stride}");
