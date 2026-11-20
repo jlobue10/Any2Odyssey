@@ -136,9 +136,28 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 0.9.7 (audit rounds 11 to 21, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 0.9.9 (audit rounds 11 to 22, and the Windows setup program) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
+
+New in 0.9.9:
+
+- Linux, the G90XF, the Odyssey 3D set-up (`setup.sh`, `start-stack.sh` and `ensure-stack.sh` changed, and they are the ones seen working there): run `any2odyssey-setup` once after the update; it ends with "done". A cold start of the lens helper and of the Odyssey 3D output takes about half a minute as before, a second request is immediate, and eye tracking comes.
+- Linux, the G90XF, after the next upgrade of Wine: the first Start takes about 36 seconds (Wine updates the prefix by itself first), the picture comes, and the next Start is immediate. With the output used in the session before the upgrade: the first request afterwards is one cold start, not "the helper stopped unexpectedly".
+- Linux, the G90XF, Odyssey 3D output with a still picture and with a live screen: the picture is there as in 0.9.8, and `ls -l $XDG_RUNTIME_DIR/any2odyssey-weaver-*.frames` shows `-r--------`.
+- Linux, 2D to 3D on an image: under *Depth detail* the page reads "Depth is computed on the NVIDIA GPU.", and View logs has "Depth model: runs on the NVIDIA GPU". With `CUDA_VISIBLE_DEVICES= any2odyssey`: 2D to 3D works, and the line says that the processor is used and why.
+- Linux, live screen at *Standard*, something moving on the shown screen: the page's "depth … times a second" is several times what 0.9.8 showed, the depth of what moves follows it sooner, and *Fine*, *Finer* and *Finest* differ from each other again. The depth of a page of small text scrolling slowly does not shimmer.
+- Linux, `nvidia-smi` while a live screen runs at *Finest*, after Stop output, and after *Standard* is chosen again: the program's memory on the card goes down each time. `top -H`: how busy the `live-depth` thread is while a map is computed on the card (one core was busy in WSL).
+- Linux, KDE Plasma, live screen with the 165 Hz Odyssey or another screen faster than 60 Hz as the shown screen, a video or a scrolling page on it: the page reads 62 to 64 pictures a second, and the motion has no small hitch a few times a second.
+- Linux, KDE Plasma, live screen with the Odyssey's own screen: as before, the 3D picture is not in the capture and the page carries no warning. On a desktop that is not KDE: the page reads "This desktop cannot keep the 3D picture out of a capture: do not show the Odyssey's own screen." for as long as a live screen shows.
+- Linux, GNOME, live screen of another screen with *Draw the pointer into the picture* off: move only the pointer for ten seconds: the page reads "not changing, so nothing is redrawn". A clock or a blinking cursor on any desktop still shows each change.
+- Linux, Save preview PNG… with zenity installed: the dialog opens in the folder the program was started in (the home folder from the launcher), not at "/".
+- Linux, Hyprland, if one is at hand: a live screen runs there at all, which no round has seen; Start, then Esc in the picker, reads "Live capture ended: no screen was chosen."
+- Either edition: right-click the Controls page (Windows) or the viewer (Linux), on the page background and on an empty part of a card: the menu opens; choose *About*. On a touch screen a finger still drags the page, and holding a finger on the page opens the menu.
+- Linux: change a choice of the viewer, minimize the controls within a second, wait two seconds: `viewer-settings.json` has the change.
+- Windows, two monitors with different scaling, or one whose scale is changed in Settings while the controls are open: on each display the window can be dragged down to 700 × 360 points and no further.
+- Windows, any PC: open the desktop shortcut's Properties in a program that holds the file (or deny yourself Write on it), uninstall from Settings > Apps: the window names the shortcut and waits for a key.
+- After the release: `strings /usr/bin/any2odyssey | grep -c /home/` gives 0, and `makepkg` prints no warning about `$srcdir`.
 
 New in 0.9.8:
 
