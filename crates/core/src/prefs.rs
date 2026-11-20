@@ -176,7 +176,7 @@ impl Preferences {
     /// Explicit recovery after a load error: preserve the existing bytes in a
     /// unique backup before replacing the file with settings chosen in the UI.
     pub fn save_recovering_to(&mut self, path: &Path) -> io::Result<Option<PathBuf>> {
-        let backup = match std::fs::File::open(path) {
+        let backup = match crate::fsutil::open_regular(path) {
             Ok(mut original) => {
                 let parent = path
                     .parent()
