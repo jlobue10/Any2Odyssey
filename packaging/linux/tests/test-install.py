@@ -928,6 +928,51 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(seen, ["update-desktop-database 0", "gtk-update-icon-cache 0", "wineserver 0"],
                          result.stdout + result.stderr)
 
+    def test_an_update_says_when_the_wine_side_still_runs_another_versions_scripts(self):
+        # Seen with the published archives and Arch packages of 0.9.7 and 0.9.8: after the update the data
+        # folder's start-stack.sh was still 0.9.7's, in every run that did not make the Wine side again, and
+        # no line of the installer's or of any2odyssey-setup's said so.
+        data = Path(self.env["ANY2ODYSSEY_DATA_DIR"])
+        scripts = ("tools/start-stack.sh", "tools/ensure-stack.sh", "tools/tracking.sh", "any2odyssey-lens-helper")
+        for name in scripts:
+            (self.archive / "wine-lens" / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.archive / "wine-lens" / name).write_text(f"#!/bin/sh\n# {name} of this version\n")
+        # The setup, as far as this goes: it puts its scripts into the data folder.
+        (self.archive / "wine-lens/setup.sh").write_text(
+            '#!/bin/sh\nprintf "%s\\000" "$@" > "$A2O_INSTALL_TEST_SETUP_LOG"\nhere=$(dirname "$0")\n'
+            'mkdir -p "$ANY2ODYSSEY_DATA_DIR/wine-lens/tools"\n'
+            'cp "$here"/tools/*.sh "$ANY2ODYSSEY_DATA_DIR/wine-lens/tools/"\n'
+            'cp "$here/any2odyssey-lens-helper" "$ANY2ODYSSEY_DATA_DIR/wine-lens/"\n')
+        prefix = self.root / "prefix"
+        flags = ["--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model"]
+
+        def said(*extra):
+            result = self.run_installer(*flags, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return [line for line in result.stdout.splitlines() if "another version" in line]
+
+        # No Wine side at all: nothing to say.
+        self.assertEqual(said("--no-odyssey"), [])
+        # One that an earlier version made.
+        for name in scripts:
+            (data / "wine-lens" / name).parent.mkdir(parents=True, exist_ok=True)
+            (data / "wine-lens" / name).write_text(f"#!/bin/sh\n# {name} of this version\n")
+        (data / "wine-lens/tools/start-stack.sh").write_text("#!/bin/sh\n# start-stack.sh of the version before\n")
+        lines = said("--no-odyssey")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn(f"{data}/wine-lens was made by another version", lines[0])
+        self.assertTrue(lines[0].endswith(f"{prefix}/share/any2odyssey/wine-lens/setup.sh /path/to/that/drive"), lines[0])
+        # The monitor is there and no Windows drive is mounted: the Wine side is not made again.
+        (self.system / "dev/odyssey-lens").touch()
+        self.assertEqual(len(said("--yes")), 1)
+        self.assertIsNone(self.setup_ran_with())
+        # Nothing is said of what a run would do, nor after a run that made the Wine side again.
+        self.assertEqual(said("--yes", "--dry-run"), [])
+        drive = self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        self.assertEqual(said("--yes"), [])
+        self.assertEqual(self.setup_ran_with(), [str(drive)])
+        self.assertEqual(said("--no-odyssey"), [])
+
     def test_the_packages_setup_says_that_an_installation_from_the_archive_is_still_in_the_way(self):
         # Seen with the published Arch package over a 0.9.1 installation in ~/.local: the old menu entry and
         # program went on being used, and any2odyssey-setup named the old program as the one to start.

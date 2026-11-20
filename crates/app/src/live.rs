@@ -28,8 +28,40 @@ use image::RgbaImage;
 use crate::capture::{fitted, Capture, CaptureState, Frames};
 use crate::weaver::{self, FrameSink};
 
-/// The least time from one picture to the next.
-const FRAME_TIME: Duration = Duration::from_micros(16_000);
+/// The time from one picture to the next that is kept to over any stretch
+/// of pictures ([`next_turn`]): 66 a second at the most.
+///
+/// It has to be shorter than the time a desktop leaves between the frames
+/// it sends, or the frames come faster than they are taken: each then waits
+/// longer than the one before, until one is left out and the wait begins
+/// again from nothing. A desktop is asked for `capture::MOST_A_SECOND` (62)
+/// frames at the most, and KDE Plasma spaces its frames by whole
+/// milliseconds, 16 for 62 a second, which is 62.5; 62 to 64 a second were
+/// counted arriving there. With 16 ms here the frames of a screen that
+/// sent 62.5 or 64 a second were 13 ms old in the middle when their
+/// pictures reached the output, where those of a screen of 60 were 5, and
+/// 24 to 69 of them were left out in 40 seconds.
+const FRAME_TIME: Duration = Duration::from_micros(15_000);
+
+/// When the turn of the render loop may begin that follows one which was
+/// due at `due` and began at `began`: [`FRAME_TIME`] after that one was
+/// due, so that no more pictures are made than that allows, however fast
+/// the frames come. A turn that began late is forgiven up to one
+/// `FRAME_TIME`: the turn after it may begin that much sooner after it.
+///
+/// The time used to be counted from each turn's own beginning. A turn that
+/// began late (the machine was busy for a moment, and the frame was there
+/// before the loop was) then kept the next one 16 ms away from itself, and
+/// with it from the frame that came 16.7 ms after the late one: that frame
+/// waited almost as long, and the lateness of one turn was worked off at
+/// 0.7 ms a frame. Measured with a screen of 60 frames a second and the
+/// program held for 60 ms once a second: the frames were back to their
+/// usual age from the eleventh and the seventeenth picture after a hold in
+/// two runs, and from the third and the fourth with this.
+fn next_turn(due: Instant, began: Instant) -> Instant {
+    let forgiven = began.checked_sub(FRAME_TIME).unwrap_or(began);
+    due.max(forgiven) + FRAME_TIME
+}
 
 /// What the user can change while the picture runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -393,6 +425,12 @@ impl Live {
         self.capture.paused_for()
     }
 
+    /// Buffers the desktop has sent that held no picture
+    /// (`Capture::unread`).
+    pub fn unread(&self) -> Option<(u32, &'static str)> {
+        self.capture.unread()
+    }
+
     /// A live screen around `capture` with nothing at work on it, for tests
     /// of what the page says.
     #[cfg(test)]
@@ -462,15 +500,18 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     // Since when there has been no picture to make, and whether the page
     // has been told that the screen is still.
     let (mut resting, mut still) = (None::<Instant>, false);
-    let mut started = Instant::now();
+    // When the next turn may begin.
+    let mut due = Instant::now();
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
-        // Sixty pictures a second at most: a faster screen (the Odyssey
-        // runs at 120) would double the work for depth the eye cannot tell
-        // apart, on the processor and the GPU.
-        if let Some(early) = FRAME_TIME.checked_sub(started.elapsed()) {
+        // A little more than sixty pictures a second at most: a faster
+        // screen (the Odyssey runs at 165) would double the work for depth
+        // the eye cannot tell apart, on the processor and the GPU. A
+        // desktop is asked to send no more than that, and keeps to it; this
+        // is for a stream that does not (`next_turn`).
+        if let Some(early) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(early);
         }
-        started = Instant::now();
+        due = next_turn(due, Instant::now());
         // A still screen sends no frames. Its last one is looked at again a
         // few times a second all the same: the depth map of a picture that
         // has just appeared arrives after it, and the controls must take
@@ -650,6 +691,29 @@ fn render_loop(frames: &Frames, shared: &Shared) {
 }
 
 fn depth_loop(shared: &Shared) {
+    // How many live screens have a depth thread at this moment: a stopped
+    // one's thread may still be inside the model when the next has begun.
+    static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    RUNNING.fetch_add(1, Ordering::SeqCst);
+    depth_loop_with(shared, |frame, detail| {
+        crate::depth::estimate_unless_cancelled(frame, detail, crate::depth::Purpose::Live, || {
+            shared.stop.load(Ordering::Relaxed)
+        })
+    });
+    // The last live screen has ended: the model goes, and with it what it
+    // holds of the GPU's memory or the processor's. The next start loads
+    // it again, in about a second, while the output comes up.
+    if RUNNING.fetch_sub(1, Ordering::SeqCst) == 1 {
+        crate::depth::unload();
+    }
+}
+
+/// [`depth_loop`] with the model as `estimate`, which is given a frame and
+/// the long side the model is to see it at.
+fn depth_loop_with(
+    shared: &Shared,
+    estimate: impl Fn(&RgbaImage, u32) -> Result<Option<DepthMap>, String>,
+) {
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
     let mut pixels = Vec::new();
@@ -686,14 +750,18 @@ fn depth_loop(shared: &Shared) {
         if counted == 0 && since.elapsed() >= RATE_TIME {
             since = Instant::now();
         }
-        // The frame was made at the size the model is to see it at.
+        // The frame was made for this depth detail: at the size the model
+        // is to see it at, or at twice that size for a large screen, which
+        // the estimator halves (`live::model_input_size`). So the model is
+        // asked for the detail and not, as it was, for the frame's own long
+        // side: a frame of twice the size then went through the model as it
+        // came. Every screen of 1036 pixels or more across was estimated
+        // at twice the chosen detail, in four to five times the time on a
+        // processor, and Fine, Finer and Finest were one and the same on a
+        // 3840 x 2160 screen.
         let estimated = match RgbaImage::from_raw(width, height, std::mem::take(&mut pixels)) {
             Some(frame) => {
-                let estimated = crate::depth::estimate_unless_cancelled(
-                    &frame,
-                    frame.width().max(frame.height()),
-                    || shared.stop.load(Ordering::Relaxed),
-                );
+                let estimated = estimate(&frame, detail);
                 pixels = frame.into_raw();
                 estimated
             }
@@ -879,6 +947,68 @@ mod tests {
         // Recovery must begin with the new map, without blending the old scene.
         assert!(depth.update(2, 1, &[1.0, 0.0], 0.9));
         assert_eq!(depth.values(), &[1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_large_screen_is_estimated_at_the_chosen_depth_detail() {
+        let capture = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        // What the model is asked: the frame's size and the long side it
+        // is to see the frame at. It answers as the estimator does, with
+        // a map of the size it worked at.
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (frames, render_state) = (capture.frames(), shared.clone());
+        let render = std::thread::spawn(move || render_loop(&frames, &render_state));
+        let (depth_state, seen) = (shared.clone(), asked.clone());
+        let depth = std::thread::spawn(move || {
+            depth_loop_with(&depth_state, |frame, long_side| {
+                lock(&seen).push((frame.dimensions(), long_side));
+                let (w, h) = crate::depth::model_size(frame.width(), frame.height(), long_side);
+                let values = (0..w * h).map(|i| i as f32).collect();
+                Ok(Some(DepthMap::normalized(w, h, values).unwrap()))
+            })
+        });
+        for ((sw, sh), detail, frame) in [
+            // At least twice the model's picture each way: handed over at
+            // twice its size, and the map is of the chosen detail all the
+            // same. (It was of twice the detail: 1036 x 588 for Standard.)
+            ((2560u32, 1440u32), 518u32, (1036u32, 588u32)),
+            ((2560, 1440), 770, (1540, 868)),
+            ((2560, 1440), 1274, (2548, 1428)),
+            // A 32:9 screen, and one that stands upright.
+            ((5120, 1440), 518, (1036, 280)),
+            ((1440, 2560), 518, (588, 1036)),
+            // Smaller than twice the model's picture: at the model's size.
+            ((1920, 1080), 1022, (1022, 574)),
+            ((1000, 562), 518, (518, 294)),
+        ] {
+            shared.detail.store(detail as i32, Ordering::Relaxed);
+            let screen = vec![90u8; sw as usize * sh as usize * 4];
+            capture.feed(sw, sh, &screen);
+            let wanted = crate::depth::model_size(sw, sh, detail);
+            eventually("the map of this screen at this detail", || {
+                lock(&shared.depth)
+                    .latest
+                    .as_ref()
+                    .is_some_and(|(_, made_for, map)| {
+                        *made_for == detail && (map.width(), map.height()) == wanted
+                    })
+            });
+            assert_eq!(
+                lock(&asked).last().copied(),
+                Some((frame, detail)),
+                "a {sw} x {sh} screen at detail {detail}"
+            );
+            // Not more than twice the model's picture goes through the
+            // thread's hands, and the long side of the map is the detail.
+            assert_eq!(wanted.0.max(wanted.1), detail);
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.model_wanted.notify_all();
+        drop(capture);
+        render.join().unwrap();
+        depth.join().unwrap();
     }
 
     fn a_look() -> Look {
@@ -1452,6 +1582,116 @@ mod tests {
         assert!(!plan(Some(&shown), &found).submit);
     }
 
+    /// The render loop's turns as far as their times go, on a clock of the
+    /// test's own: a frame arrives every `every` microseconds, a turn works
+    /// for `work`, and the turns named in `held` are kept from finishing
+    /// for that much longer. For each turn: when it took its frame, which
+    /// frame that was, and how long the frame had been waiting.
+    fn paced(
+        every: u64,
+        work: u64,
+        turns: usize,
+        held: &[(usize, u64)],
+    ) -> Vec<(Duration, u64, Duration)> {
+        let micros = Duration::from_micros;
+        let start = Instant::now();
+        let (mut now, mut due) = (start, start);
+        let mut seen = None;
+        let mut taken = Vec::new();
+        for turn in 0..turns {
+            // The loop sleeps until the turn is due...
+            now = now.max(due);
+            due = next_turn(due, now);
+            // ...and waits for a frame it has not seen.
+            let newest = (now - start).as_micros() as u64 / every;
+            let frame = if seen == Some(newest) {
+                newest + 1
+            } else {
+                newest
+            };
+            let arrived = start + micros(frame * every);
+            now = now.max(arrived);
+            seen = Some(frame);
+            taken.push((now - start, frame, now - arrived));
+            let more = held.iter().find(|(at, _)| *at == turn).map_or(0, |h| h.1);
+            now += micros(work + more);
+        }
+        taken
+    }
+
+    #[test]
+    fn a_frame_is_taken_as_it_arrives_and_a_late_turn_is_made_up_for_at_once() {
+        // A screen of 60 frames a second, a turn of 5 ms, and one turn that
+        // takes 20 ms longer (the machine was busy).
+        let taken = paced(16_667, 5_000, 40, &[(10, 20_000)]);
+        for (turn, (_, frame, waited)) in taken.iter().enumerate() {
+            match turn {
+                // The frame that came while the long turn was at work has
+                // waited (8.3 ms); the one after it is taken as it arrives
+                // again. Counted from each turn's own beginning, with
+                // 16 ms, the frames after it waited 7.7, 7.0, 6.3 ms and so
+                // on, twelve of them.
+                11 => assert!(*waited > Duration::from_millis(8), "{waited:?}"),
+                _ => assert_eq!(*waited, Duration::ZERO, "turn {turn}"),
+            }
+            // No frame is left out.
+            assert_eq!(*frame, turn as u64);
+        }
+        // A turn held for longer than a frame's time costs the frames that
+        // came meanwhile and nothing after them.
+        let taken = paced(16_667, 5_000, 40, &[(10, 50_000)]);
+        assert_eq!((taken[11].1, taken[12].1), (13, 14));
+        assert!(taken[12..].iter().all(|t| t.2 == Duration::ZERO));
+        // The fastest a desktop sends when it is asked for 62 at the most
+        // (KDE Plasma: 62 to 64 a second): every frame, none waiting.
+        for every in [16_129, 16_000, 15_625] {
+            let taken = paced(every, 5_000, 200, &[]);
+            for (turn, (_, frame, waited)) in taken.iter().enumerate() {
+                assert_eq!((*frame, *waited), (turn as u64, Duration::ZERO), "{every}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_that_keeps_to_no_limit_is_taken_at_the_loops_own_pace() {
+        // 165 frames a second, as a screen cast of the Odyssey would be
+        // from a source that is not a desktop.
+        let taken = paced(6_061, 5_000, 400, &[(100, 40_000), (200, 200_000)]);
+        let turns_in = |from: Duration, to: Duration| {
+            taken.iter().filter(|t| t.0 >= from && t.0 < to).count() as u32
+        };
+        // Over any second no more pictures than `FRAME_TIME` allows, and
+        // one more after each turn that was late.
+        let a_second = Duration::from_secs(1);
+        let most = (a_second.as_micros() / FRAME_TIME.as_micros()) as u32 + 1;
+        let end = taken.last().unwrap().0;
+        let mut from = Duration::ZERO;
+        while from + a_second <= end {
+            let count = turns_in(from, from + a_second);
+            assert!(count <= most + 2, "{count} pictures from {from:?}");
+            from += Duration::from_millis(100);
+        }
+        // Never two turns closer than a turn's own work, and after the one
+        // that makes up for a late turn the pace is `FRAME_TIME` again.
+        let gaps: Vec<Duration> = taken.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        let short = gaps.iter().filter(|gap| **gap < FRAME_TIME).count();
+        // (The turn that is forgiven comes after 5 ms, and the one after it
+        // 10 ms later: back on the pace of the turns before the late one.)
+        assert_eq!(short, 4, "{gaps:?}");
+        // Frames are left out, never taken twice or out of order.
+        assert!(taken.windows(2).all(|w| w[1].1 > w[0].1));
+    }
+
+    #[test]
+    fn the_loop_is_faster_than_the_frames_a_desktop_is_asked_for() {
+        // KDE Plasma spaces the frames it sends by whole milliseconds.
+        let desktop = Duration::from_millis(1000 / u64::from(crate::capture::MOST_A_SECOND));
+        assert!(
+            FRAME_TIME + Duration::from_micros(500) <= desktop,
+            "{FRAME_TIME:?} against {desktop:?}"
+        );
+    }
+
     #[test]
     fn the_output_is_let_go_of_with_the_live_screen_whatever_the_model_is_doing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1766,6 +2006,79 @@ mod tests {
     }
 
     #[test]
+    fn the_model_is_shown_a_large_screen_at_the_detail_chosen_not_at_twice_it() {
+        // Both loops as the program runs them, the capture fed by hand and
+        // the model played by the test. 0.9.8 handed a large screen over at
+        // twice the model's size for the estimator to halve, and told the
+        // estimator that frame's long side for the detail: the model was
+        // shown 1036 x 588 at "Standard" and 1274 x 714 at "Fine".
+        for ((sw, sh), detail, twice) in [
+            ((1920u32, 1080u32), 518u32, true),
+            ((1920, 1080), 770, true),
+            ((1920, 1080), 1022, false),
+            ((2560, 1440), 1274, true),
+            ((5120, 1440), 518, true),
+            ((1000, 600), 518, false),
+        ] {
+            let what = format!("{sw} x {sh} at {detail}");
+            let capture = crate::capture::Fed::start();
+            let shared = Arc::new(Shared::new());
+            shared.detail.store(detail as i32, Ordering::Relaxed);
+            // (the frame's size, the detail, and its darkest and lightest red)
+            type Asked = ((u32, u32), u32, (u8, u8));
+            let asked: Arc<Mutex<Vec<Asked>>> = Arc::default();
+            let (frames, state) = (capture.frames(), shared.clone());
+            let render = std::thread::spawn(move || render_loop(&frames, &state));
+            let (state, seen) = (shared.clone(), asked.clone());
+            let depth = std::thread::spawn(move || {
+                depth_loop_with(&state, |frame, detail| {
+                    let reds = frame.pixels().map(|pixel| pixel.0[0]);
+                    let range = (reds.clone().min().unwrap(), reds.max().unwrap());
+                    lock(&seen).push((frame.dimensions(), detail, range));
+                    // The map comes back at the size the estimator shows the
+                    // model the frame at (`Estimator::estimate`).
+                    let (w, h) = crate::depth::model_size(frame.width(), frame.height(), detail);
+                    Ok(DepthMap::normalized(w, h, vec![0.0; (w * h) as usize]).ok())
+                })
+            });
+            // Columns of black and white one pixel wide, as small text is.
+            let screen: Vec<u8> = (0..sw * sh)
+                .flat_map(|i| [if i % sw % 2 == 0 { 255u8 } else { 0 }; 4])
+                .collect();
+            capture.feed(sw, sh, &screen);
+            eventually(&what, || lock(&shared.depth).latest.is_some());
+            shared.stop.store(true, Ordering::Relaxed);
+            shared.model_wanted.notify_all();
+            render.join().unwrap();
+            depth.join().unwrap();
+
+            let model = crate::depth::model_size(sw, sh, detail);
+            let (frame, told, (darkest, lightest)) = lock(&asked)[0];
+            if sw > frame.0 * 2 {
+                // Shrunk by more than half: every pixel is counted, four
+                // or five columns to one, so nothing is left black or
+                // white. Four samples of it leave both.
+                assert!(
+                    darkest >= 80 && lightest <= 175,
+                    "{what}: {darkest} to {lightest}"
+                );
+            }
+            let expected = if twice {
+                (model.0 * 2, model.1 * 2)
+            } else {
+                model
+            };
+            assert_eq!(frame, expected, "{what}: the frame handed over");
+            assert_eq!(told, detail, "{what}: the detail the estimator is told");
+            let answer = lock(&shared.depth)
+                .latest
+                .as_ref()
+                .map(|(_, _, map)| (map.width(), map.height()));
+            assert_eq!(answer, Some(model), "{what}: the size the model saw");
+        }
+    }
+
+    #[test]
     fn the_defaults_match_the_still_viewer() {
         let controls = Controls::default();
         assert_eq!(DEPTH.value(controls.depth_pos), Params::default().strength);
@@ -1800,12 +2113,24 @@ mod bench {
                 let (mw, mh) = crate::depth::model_size(sw, sh, detail);
                 let mut small = RgbaImage::new(mw, mh);
                 live::scale_to_rgba(source, &mut small, mw, mh);
+                // As the live screen's thread asks: no room is given back
+                // between two frames of one size.
+                let estimate = || {
+                    crate::depth::estimate_unless_cancelled(
+                        &small,
+                        detail,
+                        crate::depth::Purpose::Live,
+                        || false,
+                    )
+                    .expect("depth model")
+                    .expect("not cancelled")
+                };
                 let first = Instant::now();
-                map = Some(crate::platform::estimate_depth(&small, detail).expect("depth model"));
+                map = Some(estimate());
                 let first = first.elapsed();
                 let start = Instant::now();
                 for _ in 0..20 {
-                    crate::platform::estimate_depth(&small, detail).unwrap();
+                    estimate();
                 }
                 println!(
                     "{sw}x{sh} depth {name} ({mw}x{mh}): first {first:?}, then {:?} each",

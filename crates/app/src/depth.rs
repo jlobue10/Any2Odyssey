@@ -348,7 +348,8 @@ pub fn model_size(width: u32, height: u32, long_side: u32) -> (u32, u32) {
 
 /// `image` as the model's input: planar RGB, normalized, at `width` x `height`.
 fn planar_input(image: &RgbaImage, width: u32, height: u32) -> Vec<f32> {
-    // A live screen's frames come at the model's size already.
+    // A live screen's frames come at the model's size already, or at twice
+    // it (`live::model_input_size`): those are halved here.
     let resized = if image.dimensions() == (width, height) {
         std::borrow::Cow::Borrowed(image)
     } else {
@@ -550,11 +551,10 @@ fn runtime() -> Result<&'static Environment, String> {
                     ort::MINOR_VERSION
                 )
             })?;
-            // An NVIDIA GPU when the installed runtime has the CUDA provider
-            // and it starts; otherwise the runtime's CPU provider, silently.
+            // The GPU is asked for where the model is loaded
+            // (`Estimator::load`), which hears what the runtime answers.
             builder
                 .with_name("any2odyssey")
-                .with_execution_providers([ort::ep::CUDA::default().build().fail_silently()])
                 .build()
                 .map_err(|e| format!("ONNX Runtime could not be started: {e}"))
         })
@@ -569,9 +569,188 @@ fn model_threads() -> usize {
     (cores / 4).clamp(2, 6)
 }
 
+/// Where the model runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunsOn {
+    /// On an NVIDIA GPU, through the runtime's CUDA provider.
+    Gpu,
+    /// On the processor. `gpu_refused` is what the runtime said when the
+    /// GPU could not be used although the installed runtime is one with
+    /// the CUDA provider: it was installed for the GPU, and the model is
+    /// several times slower than its user expects.
+    Processor { gpu_refused: Option<String> },
+}
+
+impl RunsOn {
+    /// One line for the page, under *Depth detail*.
+    pub fn describe(&self) -> String {
+        match self {
+            RunsOn::Gpu => "Depth is computed on the NVIDIA GPU.".into(),
+            RunsOn::Processor { gpu_refused: None } => "Depth is computed on the processor.".into(),
+            RunsOn::Processor {
+                gpu_refused: Some(why),
+            } => format!(
+                "Depth is computed on the processor, which is several times slower: the NVIDIA GPU could not be used ({}). View logs has the whole message; the GPU is tried again when the program is started again.",
+                gist(why)
+            ),
+        }
+    }
+
+    /// The same for the log, with all of what the runtime said.
+    pub fn for_log(&self) -> String {
+        match self {
+            RunsOn::Gpu => "Depth model: runs on the NVIDIA GPU (ONNX Runtime's CUDA provider).".into(),
+            RunsOn::Processor { gpu_refused: None } => {
+                "Depth model: runs on the processor (the installed ONNX Runtime has no CUDA provider).".into()
+            }
+            RunsOn::Processor {
+                gpu_refused: Some(why),
+            } => format!(
+                "Depth model: runs on the processor, because the NVIDIA GPU could not be used. ONNX Runtime's CUDA provider said: {why}"
+            ),
+        }
+    }
+}
+
+/// Where the model was last seen to run; nothing until it has been loaded.
+static RUNS_ON: Mutex<Option<RunsOn>> = Mutex::new(None);
+
+/// Where the model runs, once it has been loaded.
+pub fn runs_on() -> Option<RunsOn> {
+    RUNS_ON.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn note_runs_on(runs_on: &RunsOn) {
+    *RUNS_ON.lock().unwrap_or_else(|e| e.into_inner()) = Some(runs_on.clone());
+}
+
+/// One of the runtime's messages without the list of addresses it appends
+/// ("Stacktrace:" and a line for each frame): forty lines that say nothing
+/// to the reader, in a status line.
+fn without_trace(message: &str) -> &str {
+    message
+        .split("\nStacktrace:")
+        .next()
+        .unwrap_or(message)
+        .trim_end()
+}
+
+/// The part of one of the runtime's messages that says what went wrong, at
+/// a length the page can show. The runtime puts the names of its source
+/// files and functions first and the cause last: CUDA's own complaint
+/// where there is one, a library that could not be loaded, memory that
+/// was not to be had, otherwise the end of the message.
+fn gist(message: &str) -> String {
+    const LENGTH: usize = 160;
+    let message = without_trace(message);
+    let from = |start: &str| message.rfind(start).map(|at| &message[at..]);
+    let cause = if let Some(cuda) = from("CUDA failure") {
+        // "CUDA failure 100: no CUDA-capable device is detected ; GPU=-1 ; ..."
+        cuda.split(" ; ").next().unwrap_or(cuda)
+    } else {
+        from("Failed to load library")
+            .or_else(|| from("Available memory of"))
+            .or_else(|| from("Failed to allocate memory"))
+            .unwrap_or(message)
+    };
+    let cause = cause.lines().last().unwrap_or(cause).trim();
+    if cause.chars().count() <= LENGTH {
+        return cause.to_owned();
+    }
+    let skip = cause.chars().count() - LENGTH;
+    let tail: String = cause.chars().skip(skip).collect();
+    // From a whole word on.
+    let tail = tail.split_once(' ').map_or(tail.as_str(), |(_, rest)| rest);
+    format!("…{tail}")
+}
+
+/// What a depth map is asked for, which decides what becomes of the room
+/// the runtime took for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    /// A still image: no other map is wanted until the user opens another
+    /// image or changes the depth detail.
+    Still,
+    /// A frame of a live screen: the next one follows at once, at the same
+    /// size.
+    Live,
+}
+
+/// Start the model on the GPU where the installed runtime has the CUDA
+/// provider, and on the processor where it has none or the GPU cannot be
+/// used; `open(true)` asks for the GPU. Fails with what the processor's
+/// attempt said: that is the one that has to work.
+///
+/// The provider used to be asked for where the runtime is started, with
+/// its failure to load thrown away. Two things came of that. A runtime
+/// installed for the GPU that could not load the provider (cuDNN or CUDA's
+/// libraries missing or of another version) ran the model on the processor
+/// without a word. And one that could load it and then found no usable
+/// card (none visible, the driver's module not loaded after an update)
+/// failed every load of the model with CUDA's message, where the processor
+/// would have done.
+fn load_with<S>(
+    gpu_provider: bool,
+    mut open: impl FnMut(bool) -> Result<S, String>,
+) -> Result<(S, RunsOn), String> {
+    let mut gpu_refused = None;
+    if gpu_provider {
+        match open(true) {
+            Ok(session) => return Ok((session, RunsOn::Gpu)),
+            Err(e) => gpu_refused = Some(e),
+        }
+    }
+    Ok((open(false)?, RunsOn::Processor { gpu_refused }))
+}
+
+/// Run the model, and when it fails on the GPU, once more on the processor
+/// with a session opened for it (`reopen`), which then stays. A GPU can
+/// fail long after the model was loaded there: its memory taken by a game,
+/// the card gone, a cuDNN the provider opens only at the first picture.
+/// Every map failed from then on, a live screen went flat, and the
+/// processor was never tried.
+fn run_or_fall_back<S, R>(
+    session: &mut S,
+    runs_on: &mut RunsOn,
+    run: impl Fn(&mut S, &RunsOn) -> Result<R, String>,
+    reopen: impl FnOnce() -> Result<S, String>,
+) -> Result<R, String> {
+    let failed = match run(session, runs_on) {
+        Err(e) if *runs_on == RunsOn::Gpu => e,
+        done => return done,
+    };
+    // No processor either: the first failure is the one to tell.
+    let Ok(on_processor) = reopen() else {
+        return Err(failed);
+    };
+    *session = on_processor;
+    *runs_on = RunsOn::Processor {
+        gpu_refused: Some(failed),
+    };
+    run(session, runs_on)
+}
+
 pub struct Estimator {
     session: Session,
     input: String,
+    model: PathBuf,
+    runs_on: RunsOn,
+    /// The pixels of the picture the model was last given.
+    last_pixels: u64,
+    /// The runtime takes the request to give room back (`GIVE_BACK`).
+    gives_back: bool,
+}
+
+/// The one model, shared by still images and live sessions.
+static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
+
+/// Let the model go, with everything the runtime holds for it; the next
+/// map loads it again. A live screen that has ended does this: its model
+/// held 0.9 GB of a GPU's memory at standard detail and 2.8 GB at the
+/// finest for as long as the program stayed open, output or none. Waits
+/// for a map that is being made: not for the UI's thread.
+pub fn unload() {
+    *ESTIMATOR.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Share one model between still images and live sessions. A stopped live
@@ -580,9 +759,9 @@ pub struct Estimator {
 pub fn estimate_unless_cancelled(
     image: &RgbaImage,
     long_side: u32,
+    purpose: Purpose,
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<DepthMap>, String> {
-    static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
     with_model(
         &ESTIMATOR,
         cancelled,
@@ -591,7 +770,7 @@ pub fn estimate_unless_cancelled(
             verify_installed(&model, origin, MODEL_SHA256)?;
             Estimator::load(&model)
         },
-        |estimator| estimator.estimate(image, long_side),
+        |estimator| estimator.estimate(image, long_side, purpose),
     )
 }
 
@@ -622,23 +801,47 @@ fn with_model<T, R>(
     run(slot.as_mut().expect("loaded above")).map(Some)
 }
 
+/// Whether the installed runtime was built with the CUDA provider. That
+/// says nothing yet about whether the provider can be loaded or finds a
+/// card: only that this is a runtime installed for a GPU.
+fn has_gpu_provider() -> bool {
+    use ort::ep::ExecutionProvider as _;
+    ort::ep::CUDA::is_available().unwrap_or(false)
+}
+
+/// A session for the model, on the GPU through the CUDA provider if `gpu`,
+/// where every failure of the provider is an error.
+fn open_session(model: &Path, gpu: bool) -> Result<Session, String> {
+    let said = |e: &dyn std::fmt::Display| without_trace(&e.to_string()).to_owned();
+    // On the processor the model is given a few cores, not all of them:
+    // it runs beside whatever shows its result (a live screen's
+    // renderer, Leia's eye tracker under Wine), and a model that takes
+    // every core makes all of those late. On a GPU the setting is moot.
+    let mut builder = Session::builder(runtime()?)
+        .map_err(|e| said(&e))?
+        .with_intra_threads(model_threads())
+        .map_err(|e| said(&e))?
+        // Idle model threads sleep instead of spinning on their cores.
+        .with_intra_op_spinning(false)
+        .map_err(|e| said(&e))?;
+    if gpu {
+        builder = builder
+            .with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])
+            .map_err(|e| said(&e))?;
+    }
+    builder.commit_from_file(model).map_err(|e| said(&e))
+}
+
+/// The run setting that has the runtime give back, when the run is over,
+/// the room it took for it and no longer uses.
+const GIVE_BACK: &str = "memory.enable_memory_arena_shrinkage";
+
 impl Estimator {
     pub fn load(model: &Path) -> Result<Estimator, String> {
-        let failed = |e: &dyn std::fmt::Display| {
-            format!("Could not load the depth model {}: {e}", model.display())
-        };
-        // On the processor the model is given a few cores, not all of them:
-        // it runs beside whatever shows its result (a live screen's
-        // renderer, Leia's eye tracker under Wine), and a model that takes
-        // every core makes all of those late. On a GPU the setting is moot.
-        let mut builder = Session::builder(runtime()?)
-            .map_err(|e| failed(&e))?
-            .with_intra_threads(model_threads())
-            .map_err(|e| failed(&e))?
-            // Idle model threads sleep instead of spinning on their cores.
-            .with_intra_op_spinning(false)
-            .map_err(|e| failed(&e))?;
-        let session = builder.commit_from_file(model).map_err(|e| failed(&e))?;
+        // A runtime that is missing is not a GPU that refused.
+        runtime()?;
+        let (session, runs_on) = load_with(has_gpu_provider(), |gpu| open_session(model, gpu))
+            .map_err(|e| format!("Could not load the depth model {}: {e}", model.display()))?;
         let input = session
             .inputs()
             .first()
@@ -647,41 +850,119 @@ impl Estimator {
         if session.outputs().is_empty() {
             return Err("The depth model has no output.".into());
         }
-        Ok(Estimator { session, input })
+        note_runs_on(&runs_on);
+        Ok(Estimator {
+            session,
+            input,
+            model: model.to_owned(),
+            runs_on,
+            last_pixels: 0,
+            gives_back: true,
+        })
     }
 
     /// Estimate the nearness of every pixel of `image`, which the model is
     /// shown with its long side at about `long_side` pixels (one of
     /// [`DETAIL`]). The map comes back at that working size; the renderer
     /// stretches it to the image.
-    pub fn estimate(&mut self, image: &RgbaImage, long_side: u32) -> Result<DepthMap, String> {
+    pub fn estimate(
+        &mut self,
+        image: &RgbaImage,
+        long_side: u32,
+        purpose: Purpose,
+    ) -> Result<DepthMap, String> {
         let (width, height) = image.dimensions();
         if width == 0 || height == 0 {
             return Err("The source contains no image.".into());
         }
         let (w, h) = model_size(width, height, long_side);
-        let tensor = Tensor::from_array((
-            [1usize, 3, h as usize, w as usize],
-            planar_input(image, w, h),
-        ))
-        .map_err(|e| format!("Could not prepare the image for the depth model: {e}"))?;
-        let outputs = self
-            .session
-            .run(ort::inputs![self.input.as_str() => tensor])
-            .map_err(|e| format!("The depth model failed: {e}"))?;
-        let (shape, values) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("The depth model returned an unexpected result: {e}"))?;
-        // [1, H, W] or [1, 1, H, W]: the last two dimensions are the map.
-        let dims: Vec<i64> = shape.iter().copied().collect();
-        let (out_h, out_w) = match dims.as_slice() {
-            [.., h, w] if *h > 0 && *w > 0 => (*h as u32, *w as u32),
-            _ => return Err(format!("The depth model returned shape {dims:?}.")),
-        };
-        // Depth Anything's output grows with nearness, which is what the
-        // renderer's map means too.
-        DepthMap::normalized(out_w, out_h, values.to_vec()).map_err(|e| e.to_string())
+        // The runtime keeps the room of the largest picture it has worked
+        // on, for the next one: on a GPU 0.9 GB of the card's memory at
+        // standard detail, 2.8 GB at the finest and 6.9 GB after one square
+        // picture at the finest, until the program ended. It is given back
+        // after a still image, which is not followed by another, and after
+        // the first frame of a live screen that is smaller than the one
+        // before (a coarser depth detail, a smaller screen). Not after
+        // every frame: taking the room anew for each costs half as much
+        // time again as the model itself.
+        let pixels = u64::from(w) * u64::from(h);
+        let give_back = self.gives_back && (purpose == Purpose::Still || pixels < self.last_pixels);
+        self.last_pixels = pixels;
+        let input = self.input.clone();
+        let model = self.model.clone();
+        let was = self.runs_on.clone();
+        let not_taken = std::cell::Cell::new(false);
+        let map = run_or_fall_back(
+            &mut self.session,
+            &mut self.runs_on,
+            |session, runs_on| {
+                // The room is the GPU's where the model runs there.
+                let room = give_back.then_some(match runs_on {
+                    RunsOn::Gpu => "gpu:0",
+                    RunsOn::Processor { .. } => "cpu:0",
+                });
+                match run(session, &input, image, (w, h), room) {
+                    // A runtime built without that kind of room refuses the
+                    // request before it runs anything. The map matters
+                    // more: it is made without the request, and when that
+                    // works the request is not made again.
+                    Err(_) if room.is_some() => {
+                        let map = run(session, &input, image, (w, h), None);
+                        not_taken.set(map.is_ok());
+                        map
+                    }
+                    done => done,
+                }
+            },
+            || open_session(&model, false),
+        );
+        if not_taken.get() {
+            self.gives_back = false;
+        }
+        if self.runs_on != was {
+            note_runs_on(&self.runs_on);
+        }
+        map
     }
+}
+
+/// One run of the model on `image` at a size (width, height), after which
+/// the runtime gives back what it no longer uses of `give_back` ("gpu:0",
+/// "cpu:0"), if that is named.
+fn run(
+    session: &mut Session,
+    input: &str,
+    image: &RgbaImage,
+    (w, h): (u32, u32),
+    give_back: Option<&str>,
+) -> Result<DepthMap, String> {
+    let tensor = Tensor::from_array((
+        [1usize, 3, h as usize, w as usize],
+        planar_input(image, w, h),
+    ))
+    .map_err(|e| format!("Could not prepare the image for the depth model: {e}"))?;
+    let failed = |e: &dyn std::fmt::Display| {
+        format!("The depth model failed: {}", without_trace(&e.to_string()))
+    };
+    let mut options = ort::session::RunOptions::new().map_err(|e| failed(&e))?;
+    if let Some(room) = give_back {
+        options.set(GIVE_BACK, room).map_err(|e| failed(&e))?;
+    }
+    let outputs = session
+        .run_with_options(ort::inputs![input => tensor], &options)
+        .map_err(|e| failed(&e))?;
+    let (shape, values) = outputs[0]
+        .try_extract_tensor::<f32>()
+        .map_err(|e| format!("The depth model returned an unexpected result: {e}"))?;
+    // [1, H, W] or [1, 1, H, W]: the last two dimensions are the map.
+    let dims: Vec<i64> = shape.iter().copied().collect();
+    let (out_h, out_w) = match dims.as_slice() {
+        [.., h, w] if *h > 0 && *w > 0 => (*h as u32, *w as u32),
+        _ => return Err(format!("The depth model returned shape {dims:?}.")),
+    };
+    // Depth Anything's output grows with nearness, which is what the
+    // renderer's map means too.
+    DepthMap::normalized(out_w, out_h, values.to_vec()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -838,6 +1119,248 @@ mod tests {
     }
 
     #[test]
+    fn the_gpu_is_asked_for_first_and_the_processor_takes_over_with_the_reason() {
+        use std::cell::RefCell;
+        let asked = RefCell::new(Vec::new());
+        let open = |works: [bool; 2]| {
+            let asked = &asked;
+            move |gpu: bool| {
+                asked.borrow_mut().push(gpu);
+                if works[usize::from(gpu)] {
+                    Ok(if gpu {
+                        "gpu session"
+                    } else {
+                        "processor session"
+                    })
+                } else if gpu {
+                    Err("libcudnn.so.9: cannot open shared object file".to_owned())
+                } else {
+                    Err("the model is damaged".to_owned())
+                }
+            }
+        };
+        let asked_for = || std::mem::take(&mut *asked.borrow_mut());
+        // A runtime without the provider is never asked for the GPU, and
+        // has nothing to say about one.
+        assert_eq!(
+            load_with(false, open([true, true])),
+            Ok(("processor session", RunsOn::Processor { gpu_refused: None }))
+        );
+        assert_eq!(asked_for(), [false]);
+        // One with the provider: the GPU, and nothing else is opened.
+        assert_eq!(
+            load_with(true, open([true, true])),
+            Ok(("gpu session", RunsOn::Gpu))
+        );
+        assert_eq!(asked_for(), [true]);
+        // The provider cannot start: the processor, with what was said.
+        assert_eq!(
+            load_with(true, open([true, false])),
+            Ok((
+                "processor session",
+                RunsOn::Processor {
+                    gpu_refused: Some("libcudnn.so.9: cannot open shared object file".into())
+                }
+            ))
+        );
+        assert_eq!(asked_for(), [true, false]);
+        // Neither: the processor's failure is the one that is told.
+        assert_eq!(
+            load_with(true, open([false, false])),
+            Err("the model is damaged".to_owned())
+        );
+        assert_eq!(
+            load_with(false, open([false, true])),
+            Err("the model is damaged".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_gpu_that_fails_after_the_model_was_loaded_is_left_for_the_processor() {
+        use std::cell::Cell;
+        // A session is the place it runs at; the GPU's fails every run.
+        let run = |session: &mut &str, on: &RunsOn| {
+            assert_eq!(*on == RunsOn::Gpu, *session == "gpu");
+            match *session {
+                "gpu" => Err("CUDA failure 2: out of memory".to_owned()),
+                "broken" => Err("the model failed".to_owned()),
+                place => Ok(format!("a map from the {place}")),
+            }
+        };
+        let reopened = Cell::new(0);
+        let reopen = |to: Result<&'static str, String>| {
+            let reopened = &reopened;
+            move || {
+                reopened.set(reopened.get() + 1);
+                to
+            }
+        };
+        let (mut session, mut runs_on) = ("gpu", RunsOn::Gpu);
+        assert_eq!(
+            run_or_fall_back(&mut session, &mut runs_on, run, reopen(Ok("processor"))),
+            Ok("a map from the processor".to_owned())
+        );
+        assert_eq!(session, "processor");
+        assert_eq!(
+            runs_on,
+            RunsOn::Processor {
+                gpu_refused: Some("CUDA failure 2: out of memory".into())
+            }
+        );
+        assert_eq!(reopened.get(), 1);
+        // From then on the processor's session is the one that is run, and
+        // a failure there is told as it is, with nothing opened anew.
+        assert_eq!(
+            run_or_fall_back(&mut session, &mut runs_on, run, reopen(Ok("another"))),
+            Ok("a map from the processor".to_owned())
+        );
+        let (mut session, mut runs_on) = ("broken", RunsOn::Processor { gpu_refused: None });
+        assert_eq!(
+            run_or_fall_back(&mut session, &mut runs_on, run, reopen(Ok("another"))),
+            Err("the model failed".to_owned())
+        );
+        assert_eq!((session, reopened.get()), ("broken", 1));
+        // No processor either: the GPU's failure is told, and the GPU's
+        // session stays for the next try.
+        let (mut session, mut runs_on) = ("gpu", RunsOn::Gpu);
+        assert_eq!(
+            run_or_fall_back(
+                &mut session,
+                &mut runs_on,
+                run,
+                reopen(Err("no runtime".into()))
+            ),
+            Err("CUDA failure 2: out of memory".to_owned())
+        );
+        assert_eq!((session, &runs_on), ("gpu", &RunsOn::Gpu));
+        // And one that works is run once, where it is.
+        let runs = Cell::new(0);
+        let (mut session, mut runs_on) = ("gpu", RunsOn::Gpu);
+        let counted = |_: &mut &str, _: &RunsOn| {
+            runs.set(runs.get() + 1);
+            Ok::<_, String>(7)
+        };
+        assert_eq!(
+            run_or_fall_back(&mut session, &mut runs_on, counted, reopen(Ok("processor"))),
+            Ok(7)
+        );
+        assert_eq!((session, runs.get(), reopened.get()), ("gpu", 1, 2));
+    }
+
+    #[test]
+    fn what_the_runtime_said_is_told_without_its_trace_and_briefly_on_the_page() {
+        // As ONNX Runtime 1.29 words it with no card to be seen (shortened
+        // in the middle only).
+        let no_card = "/usr/src/debug/onnxruntime/onnxruntime-cuda/onnxruntime/core/providers/cuda/cuda_call.cc:154 std::conditional_t<THRW, void, onnxruntime::common::Status> onnxruntime::CudaCall(ERRTYPE, const char*, const char*, SUCCTYPE, const char*, const char*, int) [with ERRTYPE = cudaError; bool THRW = true] CUDA failure 100: no CUDA-capable device is detected ; GPU=-1 ; hostname=box ; file=/usr/src/debug/onnxruntime/cuda_execution_provider.cc ; line=341 ; expr=cudaSetDevice(info_.device_id); \n\nStacktrace:\n[unknown] [0x76f202a8abca]\n[unknown] [0x76f202a8ed15]\n";
+        let plain = without_trace(no_card);
+        assert!(
+            plain.ends_with("expr=cudaSetDevice(info_.device_id);"),
+            "{plain}"
+        );
+        assert!(!plain.contains("Stacktrace") && !plain.contains("0x76f2"));
+        assert_eq!(without_trace("nothing to cut"), "nothing to cut");
+        assert_eq!(
+            gist(no_card),
+            "CUDA failure 100: no CUDA-capable device is detected"
+        );
+        // A library that is missing: the end of the message names it.
+        let missing = "/onnxruntime_src/onnxruntime/core/session/provider_bridge_ort.cc:1778 onnxruntime::Provider& onnxruntime::ProviderLibrary::Get() [ONNXRuntimeError] : 1 : FAIL : Failed to load library libonnxruntime_providers_cuda.so with error: libcublasLt.so.12: cannot open shared object file: No such file or directory";
+        assert_eq!(
+            gist(missing),
+            "Failed to load library libonnxruntime_providers_cuda.so with error: libcublasLt.so.12: cannot open shared object file: No such file or directory"
+        );
+        // Longer than the page has room for: its end, from a whole word on.
+        let long_path = missing.replace(
+            "libonnxruntime_providers_cuda.so",
+            "/opt/a/folder/with/a/long/name/and/another/one/inside/it/lib/libonnxruntime_providers_cuda.so",
+        );
+        let short = gist(&long_path);
+        assert!(
+            short.starts_with('…') && short.chars().count() <= 161,
+            "{short}"
+        );
+        assert!(
+            short.ends_with(
+                "libcublasLt.so.12: cannot open shared object file: No such file or directory"
+            ),
+            "{short}"
+        );
+        // The card's memory refused, as the runtime's own store says it.
+        assert_eq!(
+            gist("Non-zero status code returned while running Softmax node. Name:'/blocks.0/attn/Softmax' Status Message: /usr/src/debug/onnxruntime/core/framework/bfc_arena.cc:359 void* onnxruntime::BFCArena::AllocateRawInternal(size_t, bool, onnxruntime::Stream*) Available memory of 451936256 is smaller than requested bytes of 517156096"),
+            "Available memory of 451936256 is smaller than requested bytes of 517156096"
+        );
+        // Cut between words, and between letters of more than one byte.
+        let long = "é".repeat(100) + " " + &"ü".repeat(100);
+        assert_eq!(gist(&long), format!("…{}", "ü".repeat(100)));
+        assert_eq!(gist("short"), "short");
+
+        let on_gpu = RunsOn::Gpu;
+        assert_eq!(on_gpu.describe(), "Depth is computed on the NVIDIA GPU.");
+        assert!(on_gpu.for_log().contains("NVIDIA GPU"));
+        let plain = RunsOn::Processor { gpu_refused: None };
+        assert_eq!(plain.describe(), "Depth is computed on the processor.");
+        let refused = RunsOn::Processor {
+            gpu_refused: Some(plain_text(no_card)),
+        };
+        let line = refused.describe();
+        assert!(
+            line.contains("on the processor")
+                && line.contains(
+                    "could not be used (CUDA failure 100: no CUDA-capable device is detected)"
+                )
+                && line.contains("View logs"),
+            "{line}"
+        );
+        // The log has all of it.
+        assert!(refused.for_log().contains("expr=cudaSetDevice"));
+    }
+
+    fn plain_text(message: &str) -> String {
+        without_trace(message).to_owned()
+    }
+
+    /// The model itself, where it runs and what becomes of a GPU that
+    /// fails. Needs the depth model and ONNX Runtime, and says more with a
+    /// runtime that has the CUDA provider. Run by hand:
+    /// `cargo test --release -p any2odyssey depth::tests::the_model -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs the depth model and ONNX Runtime"]
+    fn the_model_runs_where_it_says_it_does() {
+        let image = RgbaImage::from_fn(640, 360, |x, y| {
+            image::Rgba([(x / 3) as u8, (y / 2) as u8, ((x + y) / 5) as u8, 255])
+        });
+        assert_eq!(
+            runs_on(),
+            None,
+            "nothing is said before the model is loaded"
+        );
+        for (purpose, detail) in [
+            (Purpose::Still, 518),
+            (Purpose::Live, 770),
+            (Purpose::Live, 518),
+            (Purpose::Still, 518),
+        ] {
+            let started = std::time::Instant::now();
+            let map = estimate_unless_cancelled(&image, detail, purpose, || false)
+                .expect("the depth model")
+                .expect("not cancelled");
+            assert_eq!((map.width(), map.height()), model_size(640, 360, detail));
+            println!(
+                "{purpose:?} at {detail}: {:?}; {}",
+                started.elapsed(),
+                runs_on().expect("said once loaded").for_log()
+            );
+        }
+        let said = runs_on().unwrap();
+        if has_gpu_provider() {
+            assert_ne!(said, RunsOn::Processor { gpu_refused: None });
+        } else {
+            assert_eq!(said, RunsOn::Processor { gpu_refused: None });
+        }
+    }
+
+    #[test]
     fn stopped_requests_skip_model_loading_and_inference() {
         let model = Mutex::new(None::<u32>);
         let result: Result<Option<u32>, String> = with_model(
@@ -939,6 +1462,35 @@ mod tests {
                 assert!(mw.max(mh) <= long_side + PATCH, "{w}x{h} -> {mw}x{mh}");
             }
         }
+    }
+
+    #[test]
+    fn a_frame_made_at_the_models_size_or_at_twice_it_is_shown_at_the_models_size() {
+        // A live screen's frame comes at the size the model is to see it
+        // at, or at twice that size (`live::model_input_size`). Told the
+        // detail the frame was made for, the estimator comes to the same
+        // size again; told the frame's long side, it took a frame of twice
+        // the size for a request for twice the detail.
+        let widths = (1..=16384)
+            .step_by(89)
+            .chain([1036, 1920, 2560, 3840, 5120, 7680, 16384]);
+        for width in widths {
+            for height in [1, 14, 200, 588, 1080, 1440, 1600, 2160, 4320, 16384] {
+                for detail in DETAIL.map(|(side, _)| side) {
+                    let model = model_size(width, height, detail);
+                    let what = format!("{width} x {height} at {detail}");
+                    assert_eq!(model_size(model.0, model.1, detail), model, "{what}");
+                    assert_eq!(
+                        model_size(model.0 * 2, model.1 * 2, detail),
+                        model,
+                        "{what}, at twice the size"
+                    );
+                }
+            }
+        }
+        // (what 0.9.8 asked for: the frame's long side)
+        assert_eq!(model_size(1036, 588, 1036), (1036, 588));
+        assert_eq!(model_size(1540, 868, 1540), (1274, 714));
     }
 
     #[test]

@@ -74,6 +74,9 @@ struct Shared {
     stop: AtomicBool,
     /// Since when the stream of a cast that was running has been paused.
     paused: Mutex<Option<Instant>>,
+    /// How many buffers have come since the last one that held a picture,
+    /// and why the newest of them held none.
+    unread: Mutex<(u32, &'static str)>,
 }
 
 impl Shared {
@@ -85,7 +88,63 @@ impl Shared {
             token: Mutex::new(None),
             stop: AtomicBool::new(false),
             paused: Mutex::new(None),
+            unread: Mutex::new((0, "")),
         }
+    }
+
+    /// A frame has come: `frame` holds its `width` x `height` pixels, rows
+    /// `stride` bytes apart. It changes places with the slot's, and the
+    /// reader is told; unless it is the picture the slot holds already.
+    ///
+    /// A desktop sends a frame for every time it has drawn the screen,
+    /// whether or not anything on it changed: GNOME while only the pointer
+    /// moves and the pointer is not drawn into the picture (it is drawn
+    /// onto the screen there, so the screen is drawn again), and any
+    /// desktop whose windows redraw themselves with what they showed
+    /// before. Each of those was a new picture here: shrunk, given to the
+    /// depth model, woven and handed over again, and the page read "5
+    /// pictures a second" over a screen on which nothing changed. The
+    /// comparison ends at the first byte that differs, and a frame that is
+    /// the same to its last byte costs less than the work it saves.
+    fn frame_arrived(
+        &self,
+        frame: &mut Vec<u8>,
+        width: u32,
+        height: u32,
+        stride: usize,
+        bgr: bool,
+    ) {
+        *lock(&self.unread) = (0, "");
+        let first = {
+            let mut slot = lock(&self.slot);
+            if slot.serial != 0
+                && (slot.width, slot.height, slot.stride, slot.bgr) == (width, height, stride, bgr)
+                && slot.bytes == *frame
+            {
+                return;
+            }
+            std::mem::swap(&mut slot.bytes, frame);
+            // What was the slot's has held the frame before this one.
+            fitted(frame, slot.bytes.len());
+            slot.width = width;
+            slot.height = height;
+            slot.stride = stride;
+            slot.bgr = bgr;
+            slot.serial += 1;
+            slot.serial == 1
+        };
+        self.arrived.notify_all();
+        let mut state = lock(&self.state);
+        let running = CaptureState::Running { width, height };
+        if first || *state != running {
+            *state = running;
+        }
+    }
+
+    /// A buffer has come that holds no picture, because of `why`.
+    fn no_picture(&self, why: &'static str) {
+        let mut unread = lock(&self.unread);
+        *unread = (unread.0.saturating_add(1), why);
     }
 
     /// The desktop has answered with a screen.
@@ -153,6 +212,18 @@ impl Capture {
     /// time no frame can have come; `None` while it runs.
     pub fn paused_for(&self) -> Option<Duration> {
         lock(&self.shared.paused).map(|since| since.elapsed())
+    }
+
+    /// How many buffers the desktop has sent since the last one that held
+    /// a picture, and what was wrong with the newest of them; `None` when
+    /// the last buffer was a picture, or none has come.
+    ///
+    /// A stream of nothing but such buffers (marked as no picture, in
+    /// memory that is not mapped, smaller than the stream's size needs)
+    /// left the page at "Waiting for its first picture" for as long as the
+    /// output was on, with nothing to say why none came.
+    pub fn unread(&self) -> Option<(u32, &'static str)> {
+        Some(*lock(&self.shared.unread)).filter(|(count, _)| *count > 0)
     }
 
     /// The portal's token for the screen that was picked, once there is one.
@@ -244,6 +315,10 @@ fn run(
     let portal = async {
         let proxy = Screencast::new().await?;
         let session = proxy.create_session(Default::default()).await?;
+        // Listened for from before the desktop is asked to start (see
+        // `unless_ended`). A desktop that cannot be listened to is asked
+        // all the same.
+        let closed = session.receive_closed().await.ok();
         let started = async {
             // A screen shown somewhere else needs its pointer in the
             // picture; a screen shown on itself has the real one on top
@@ -260,17 +335,29 @@ fn run(
                         .set_restore_token(restore_token.as_deref())
                         .set_persist_mode(PersistMode::ExplicitlyRevoked),
                 )
-                .await?;
-            let response = proxy
-                .start(&session, None, Default::default())
                 .await?
+                // What the desktop answers to this is looked at: where it
+                // is "no", the portal has closed the session by now, and a
+                // start asked for all the same is refused with "Invalid
+                // session", which says nothing (Hyprland's portal backend
+                // on a desktop that is not Hyprland answers so).
                 .response()?;
+            let start = async {
+                proxy
+                    .start(&session, None, Default::default())
+                    .await?
+                    .response()
+            };
+            let response = match closed {
+                Some(closed) => unless_ended(start, closed).await.ok_or(Refused::Closed)??,
+                None => start.await?,
+            };
             let node = response.streams().first().map(|s| s.pipe_wire_node_id());
             let token = response.restore_token().map(str::to_owned);
             let fd = proxy
                 .open_pipe_wire_remote(&session, Default::default())
                 .await?;
-            ashpd::Result::Ok((node, token, fd))
+            Ok::<_, Refused>((node, token, fd))
         }
         .await;
         match started {
@@ -285,12 +372,7 @@ fn run(
             }
         }
     };
-    let (session, node, token, fd) = runtime.block_on(portal).map_err(|e| match e {
-        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
-            "no screen was chosen".to_owned()
-        }
-        other => format!("the desktop's screen-cast portal refused: {other}"),
-    })?;
+    let (session, node, token, fd) = runtime.block_on(portal).map_err(|refused| refused.said())?;
     *lock(&shared.token) = token;
     // The dialog is over: the page stops asking for a screen to be chosen.
     shared.chosen();
@@ -326,6 +408,147 @@ fn wished_cursor(
         }
         _ => None,
     }
+}
+
+/// Why the desktop gave no screen cast.
+#[derive(Debug)]
+enum Refused {
+    /// The portal said so, or could not be asked.
+    Portal(ashpd::Error),
+    /// The desktop closed the session while it was asked to start the cast.
+    Closed,
+}
+
+impl From<ashpd::Error> for Refused {
+    fn from(error: ashpd::Error) -> Refused {
+        Refused::Portal(error)
+    }
+}
+
+/// The portal runs and has no screen cast: none of its backends offers one
+/// for this desktop. So it is in an X11 session of Xfce or i3 with the GTK
+/// backend, which has file dialogs and no screen cast.
+const NO_SCREEN_CAST: &str = "this desktop's portal cannot share a screen. A live screen needs \
+    xdg-desktop-portal with the backend of the desktop in use: GNOME, KDE Plasma, COSMIC, \
+    Hyprland, niri and the wlroots desktops (sway, labwc, river, Wayfire) each have one; a plain \
+    X11 session has none";
+
+/// Nothing owns the portal's name on the bus and nothing can be started
+/// for it.
+const NO_PORTAL: &str = "no desktop portal answers. A live screen is asked for through \
+    xdg-desktop-portal, which is not installed or could not be started";
+
+const NO_BUS: &str =
+    "the session's D-Bus cannot be reached, and the desktop is asked for a screen through it";
+
+/// The portal answered "other" and nothing more. So do GNOME's and KDE's
+/// backends in an X11 session, and GNOME's on niri when niri was started
+/// without its session services.
+const NO_REASON: &str = "the desktop's portal could not share a screen and gave no reason. If \
+    it never works here: a portal backend shares screens only on the desktop it was made for \
+    (GNOME's on GNOME and niri, KDE's on Plasma with Wayland)";
+
+const CLOSED_UNSTARTED: &str = "the desktop gave up the screen cast before it had started, \
+    without an answer; its own log may say why";
+
+impl Refused {
+    /// The reason as the page says it, after "Live capture ended: ".
+    ///
+    /// All but a cancelled dialog used to be the portal client's own words
+    /// after "the desktop's screen-cast portal refused: ": "A portal frontend
+    /// implementing `org.freedesktop.portal.ScreenCast` was not found" (an
+    /// X11 session with the GTK backend alone), "Portal request didn't
+    /// succeed with no information" (GNOME's or KDE's backend in an X11
+    /// session), "Portal request failed: org.freedesktop.zbus.Error: The
+    /// name org.freedesktop.portal.Desktop was not provided by any .service
+    /// files" (no portal installed). None of them says what is missing.
+    fn said(&self) -> String {
+        use ashpd::desktop::ResponseError::{Cancelled, Other};
+        use ashpd::zbus::{fdo, Error as Bus};
+        let error = match self {
+            Refused::Closed => return CLOSED_UNSTARTED.to_owned(),
+            Refused::Portal(error) => error,
+        };
+        let bus = match error {
+            ashpd::Error::Zbus(bus) | ashpd::Error::Portal(ashpd::PortalError::ZBus(bus)) => {
+                Some(bus)
+            }
+            _ => None,
+        };
+        const UNOWNED: [&str; 2] = [
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "org.freedesktop.DBus.Error.NameHasNoOwner",
+        ];
+        match (error, bus) {
+            (ashpd::Error::Response(Cancelled), _) => "no screen was chosen".to_owned(),
+            (ashpd::Error::Response(Other), _) => NO_REASON.to_owned(),
+            (ashpd::Error::PortalNotFound(_), _) => NO_SCREEN_CAST.to_owned(),
+            (_, Some(Bus::FDO(unowned)))
+                if matches!(
+                    **unowned,
+                    fdo::Error::ServiceUnknown(_) | fdo::Error::NameHasNoOwner(_)
+                ) =>
+            {
+                NO_PORTAL.to_owned()
+            }
+            (_, Some(Bus::MethodError(name, _, _))) if UNOWNED.contains(&name.as_str()) => {
+                NO_PORTAL.to_owned()
+            }
+            (
+                _,
+                Some(
+                    lost @ (Bus::Connection(..)
+                    | Bus::Address(_)
+                    | Bus::InputOutput(_)
+                    | Bus::Handshake(_)),
+                ),
+            ) => format!("{NO_BUS} ({lost})"),
+            (other, _) => format!("the desktop's screen-cast portal refused: {other}"),
+        }
+    }
+}
+
+/// What `work` comes to, or `None` when `ended` brings something before it
+/// is through.
+///
+/// The desktop answers the request to start a cast, and it may instead close
+/// the session and never answer: niri 26.04 does when it cannot start the
+/// cast (its screen cast needs a GPU device and PipeWire), with GNOME's
+/// portal backend passing the closing on. Only the answer was waited for, so
+/// the page went on asking for a screen to be chosen in a dialog that had
+/// long gone, until the output was stopped.
+///
+/// A dialog that is cancelled is answered first and its session closed
+/// after that: an answer that is there when the closing is seen counts.
+async fn unless_ended<T>(
+    work: impl std::future::Future<Output = T>,
+    ended: impl ashpd::zbus::export::futures_core::Stream,
+) -> Option<T> {
+    use std::task::Poll;
+    let mut work = std::pin::pin!(work);
+    let mut ended = std::pin::pin!(ended);
+    // A source of endings that is itself over is not asked again.
+    let mut listening = true;
+    std::future::poll_fn(|context| {
+        if let Poll::Ready(done) = work.as_mut().poll(context) {
+            return Poll::Ready(Some(done));
+        }
+        if !listening {
+            return Poll::Pending;
+        }
+        match ended.as_mut().poll_next(context) {
+            Poll::Ready(Some(_)) => Poll::Ready(match work.as_mut().poll(context) {
+                Poll::Ready(done) => Some(done),
+                Poll::Pending => None,
+            }),
+            Poll::Ready(None) => {
+                listening = false;
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// How long the portal's answer to the closing of a session is waited for.
@@ -553,6 +776,25 @@ fn picture_in(bytes: &[u8], told: Told, width: u32, height: u32) -> Option<(&[u8
     Some((valid.get(..needed)?, stride))
 }
 
+/// Why [`picture_in`] found no picture in a buffer that says `told` about
+/// itself, for the page.
+fn no_picture_in(told: Told) -> &'static str {
+    if told.spoiled {
+        NOT_A_PICTURE
+    } else if told.size == 0 {
+        "empty"
+    } else {
+        TOO_SMALL
+    }
+}
+
+/// What can be wrong with a buffer, said after "the last one was".
+const NOT_A_PICTURE: &str = "marked by the desktop as holding no picture";
+const TOO_SMALL: &str = "smaller than a picture of the size the desktop named";
+const NOT_READABLE: &str =
+    "in memory this program cannot read, as a buffer of the graphics card is";
+const NOT_ASKED_FOR: &str = "in a pixel format that was not asked for";
+
 /// The longest side of a screen that is shown, in pixels: the same as for
 /// a picture that is opened.
 const LONGEST_SIDE: u32 = 16384;
@@ -602,7 +844,7 @@ pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
 /// (mutter 51.1) sent 48 a second when asked for 60, and 60 when asked for
 /// 61, 65, 72 or 90; KDE Plasma (KWin 6.8.2) sent what it was asked for,
 /// 60, 61, 65, 72 or 90.
-const MOST_A_SECOND: u32 = 62;
+pub(crate) const MOST_A_SECOND: u32 = 62;
 
 /// The stream that is asked for: raw video in one of the pixel formats that
 /// are read here, at whatever rate it states for itself and with
@@ -807,6 +1049,7 @@ fn stream(
                 return;
             };
             let Some(packing) = packing(data.format.format()) else {
+                data.shared.no_picture(NOT_ASKED_FOR);
                 return;
             };
             let (width, height) = (data.format.size().width, data.format.size().height);
@@ -827,6 +1070,7 @@ fn stream(
                 });
             let datas = buffer.datas_mut();
             let Some(plane) = datas.first_mut() else {
+                data.shared.no_picture(NOT_READABLE);
                 return;
             };
             let chunk = plane.chunk();
@@ -837,8 +1081,12 @@ fn stream(
                 spoiled: header_spoiled
                     || chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED),
             };
-            let Some(bytes) = plane.data() else { return };
+            let Some(bytes) = plane.data() else {
+                data.shared.no_picture(NOT_READABLE);
+                return;
+            };
             let Some((frame, stride)) = picture_in(bytes, told, width, height) else {
+                data.shared.no_picture(no_picture_in(told));
                 return;
             };
             let row = width as usize * 4;
@@ -873,6 +1121,7 @@ fn stream(
                 (Packing::Bytes { bgr }, _) => {
                     let upright = live::turn_upright(lying(frame, stride), turned, &mut data.spare);
                     let Some((width, height)) = upright else {
+                        data.shared.no_picture(TOO_SMALL);
                         return;
                     };
                     (width, height, width as usize * 4, bgr)
@@ -882,6 +1131,7 @@ fn stream(
                     narrow_tens(frame, tens_wide, tens_high, stride, red_high, narrowed);
                     let upright = live::turn_upright(lying(narrowed, row), turned, &mut data.spare);
                     let Some((width, height)) = upright else {
+                        data.shared.no_picture(TOO_SMALL);
                         return;
                     };
                     (width, height, width as usize * 4, true)
@@ -890,24 +1140,8 @@ fn stream(
             if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
                 data.narrowed = Vec::new();
             }
-            let first = {
-                let mut slot = lock(&data.shared.slot);
-                std::mem::swap(&mut slot.bytes, &mut data.spare);
-                // What was the slot's has held the frame before this one.
-                fitted(&mut data.spare, slot.bytes.len());
-                slot.width = width;
-                slot.height = height;
-                slot.stride = stride;
-                slot.bgr = bgr;
-                slot.serial += 1;
-                slot.serial == 1
-            };
-            data.shared.arrived.notify_all();
-            let mut state = lock(&data.shared.state);
-            let running = CaptureState::Running { width, height };
-            if first || *state != running {
-                *state = running;
-            }
+            data.shared
+                .frame_arrived(&mut data.spare, width, height, stride, bgr);
         })
         .register()
         .map_err(failed("no stream listener"))?;
@@ -934,16 +1168,24 @@ fn stream(
         .map_err(failed("could not connect the stream"))?;
 
     // The loop runs until the capture is stopped; it looks ten times a
-    // second, and tells the page when the first frame has come.
+    // second, and tells the page when the first frame has come, or the
+    // first buffer that is none.
     let (timer_loop, timer_shared) = (mainloop.clone(), shared.clone());
     let announced = AtomicBool::new(false);
+    let no_picture_told = AtomicBool::new(false);
     let wake_once = {
         let shared = shared.clone();
         move || {
-            if !announced.load(Ordering::Relaxed)
-                && matches!(*lock(&shared.state), CaptureState::Running { .. })
-            {
+            if announced.load(Ordering::Relaxed) {
+                return false;
+            }
+            if matches!(*lock(&shared.state), CaptureState::Running { .. }) {
                 announced.store(true, Ordering::Relaxed);
+                return true;
+            }
+            // Buffers come and none of them holds a picture: the page is
+            // told that as well, once; it then looks again by itself.
+            if lock(&shared.unread).0 > 0 && !no_picture_told.swap(true, Ordering::Relaxed) {
                 return true;
             }
             false
@@ -1008,6 +1250,11 @@ impl Fed {
         *lock(&self.0.paused) = since;
     }
 
+    /// A buffer that the desktop marks as holding no picture.
+    pub fn feed_no_picture(&self) {
+        self.0.no_picture(NOT_A_PICTURE);
+    }
+
     pub fn frames(&self) -> Frames {
         Frames(self.0.clone())
     }
@@ -1030,6 +1277,7 @@ impl Fed {
         slot.bgr = true;
         slot.serial += 1;
         drop(slot);
+        *lock(&self.0.unread) = (0, "");
         *lock(&self.0.state) = CaptureState::Running { width, height };
         self.0.arrived.notify_all();
     }
@@ -1120,6 +1368,98 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_is_the_picture_already_there_is_not_a_new_one() {
+        let shared = Shared::new();
+        let serial = || lock(&shared.slot).serial;
+        let picture: Vec<u8> = (0..2 * 3 * 4).collect();
+        let arrive = |bytes: &[u8], width, height, stride, bgr| {
+            let mut frame = bytes.to_vec();
+            shared.frame_arrived(&mut frame, width, height, stride, bgr);
+        };
+        arrive(&picture, 2, 3, 8, true);
+        assert_eq!(serial(), 1);
+        assert_eq!(
+            *lock(&shared.state),
+            CaptureState::Running {
+                width: 2,
+                height: 3
+            }
+        );
+        // The same picture again, as often as the desktop likes: the reader
+        // is not told, and what it reads is what it had.
+        for _ in 0..3 {
+            arrive(&picture, 2, 3, 8, true);
+        }
+        assert_eq!(serial(), 1);
+        assert_eq!(lock(&shared.slot).source().bytes, &picture[..]);
+        // One byte of it differs, the last one: a new picture.
+        let mut changed = picture.clone();
+        *changed.last_mut().unwrap() ^= 1;
+        arrive(&changed, 2, 3, 8, true);
+        assert_eq!(serial(), 2);
+        assert_eq!(lock(&shared.slot).source().bytes, &changed[..]);
+        // And back: new again.
+        arrive(&picture, 2, 3, 8, true);
+        assert_eq!(serial(), 3);
+        // The same bytes as another picture: other sides, the colours the
+        // other way round.
+        arrive(&picture, 3, 2, 12, true);
+        assert_eq!(serial(), 4);
+        assert_eq!(
+            *lock(&shared.state),
+            CaptureState::Running {
+                width: 3,
+                height: 2
+            }
+        );
+        arrive(&picture, 3, 2, 12, false);
+        assert_eq!(serial(), 5);
+        // A buffer without a picture between two frames that are the same
+        // does not make the second one new, and is forgotten with it.
+        shared.no_picture(NOT_A_PICTURE);
+        arrive(&picture, 3, 2, 12, false);
+        assert_eq!(serial(), 5);
+        assert_eq!(*lock(&shared.unread), (0, ""));
+    }
+
+    #[test]
+    fn buffers_that_hold_no_picture_are_counted_with_the_reason_until_one_does() {
+        let fed = Fed::start();
+        let capture = fed.capture();
+        assert_eq!(capture.unread(), None);
+        fed.feed_no_picture();
+        fed.feed_no_picture();
+        assert_eq!(capture.unread(), Some((2, NOT_A_PICTURE)));
+        fed.0.no_picture(NOT_READABLE);
+        assert_eq!(capture.unread(), Some((3, NOT_READABLE)));
+        fed.feed(1, 1, &[0; 4]);
+        assert_eq!(capture.unread(), None);
+        // What is said of each buffer that `picture_in` finds no picture in.
+        let whole = Told {
+            offset: 0,
+            size: 2 * 2 * 4,
+            stride: 8,
+            spoiled: false,
+        };
+        let memory = [0u8; 2 * 2 * 4];
+        assert!(picture_in(&memory, whole, 2, 2).is_some());
+        for (told, why) in [
+            (
+                Told {
+                    spoiled: true,
+                    ..whole
+                },
+                NOT_A_PICTURE,
+            ),
+            (Told { size: 0, ..whole }, "empty"),
+            (Told { size: 12, ..whole }, TOO_SMALL),
+        ] {
+            assert!(picture_in(&memory, told, 2, 2).is_none(), "{told:?}");
+            assert_eq!(no_picture_in(told), why, "{told:?}");
+        }
+    }
+
+    #[test]
     fn the_pointer_is_asked_for_by_name_only_where_it_is_drawn() {
         use ashpd::enumflags2::BitFlags;
         let all = CursorMode::Hidden | CursorMode::Embedded | CursorMode::Metadata;
@@ -1134,6 +1474,139 @@ mod tests {
         assert_eq!(wished_cursor(true, Some(cannot)), None);
         assert_eq!(wished_cursor(true, Some(BitFlags::empty())), None);
         assert_eq!(wished_cursor(true, None), None);
+    }
+
+    /// What a session's "closed" signals are in a test: each poll takes the
+    /// next of these, and after the last nothing more comes.
+    struct Signals(std::collections::VecDeque<std::task::Poll<Option<()>>>);
+
+    impl ashpd::zbus::export::futures_core::Stream for Signals {
+        type Item = ();
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<()>> {
+            self.0.pop_front().unwrap_or(std::task::Poll::Pending)
+        }
+    }
+
+    /// An answer that is there at the `after`th time it is looked for.
+    struct Answer {
+        after: u32,
+        polled: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl std::future::Future for Answer {
+        type Output = &'static str;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<&'static str> {
+            self.polled.set(self.polled.get() + 1);
+            if self.polled.get() >= self.after {
+                return std::task::Poll::Ready("answered");
+            }
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    #[test]
+    fn a_session_closed_while_its_start_is_asked_for_ends_the_wait() {
+        use std::task::Poll::{Pending, Ready};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let outcome = |after: u32, signals: &[std::task::Poll<Option<()>>]| {
+            let polled = std::rc::Rc::new(std::cell::Cell::new(0));
+            let answer = Answer {
+                after,
+                polled: polled.clone(),
+            };
+            let signals = Signals(signals.iter().copied().collect());
+            (
+                runtime.block_on(unless_ended(answer, signals)),
+                polled.get(),
+            )
+        };
+        // niri 26.04 where it cannot start the cast: the session is closed
+        // and the request to start is never answered. The wait used to go
+        // on until the output was stopped.
+        assert_eq!(outcome(u32::MAX, &[Ready(Some(()))]).0, None);
+        assert_eq!(
+            outcome(u32::MAX, &[Pending, Pending, Ready(Some(()))]).0,
+            None
+        );
+        // The ordinary case: an answer, and no closing.
+        assert_eq!(outcome(1, &[]), (Some("answered"), 1));
+        assert_eq!(outcome(4, &[]), (Some("answered"), 4));
+        // A cancelled dialog: the answer is sent first and the session
+        // closed after it. An answer that is there when the closing is seen
+        // counts, so the page says that no screen was chosen.
+        assert_eq!(outcome(2, &[Ready(Some(()))]), (Some("answered"), 2));
+        // The closings are over (the bus went away): the answer is still
+        // waited for, and they are not asked for again.
+        assert_eq!(outcome(5, &[Pending, Ready(None)]), (Some("answered"), 5));
+    }
+
+    #[test]
+    fn the_page_says_what_is_missing_where_no_screen_cast_can_be_had() {
+        use ashpd::desktop::ResponseError;
+        use ashpd::zbus;
+        let said = |error: ashpd::Error| Refused::Portal(error).said();
+        // An X11 session of Xfce or i3 with the GTK portal backend alone.
+        let interface = "org.freedesktop.portal.ScreenCast";
+        let no_cast = said(ashpd::Error::PortalNotFound(
+            zbus::names::OwnedInterfaceName::try_from(interface).unwrap(),
+        ));
+        assert_eq!(no_cast, NO_SCREEN_CAST);
+        assert!(no_cast.contains("xdg-desktop-portal") && no_cast.contains("X11"));
+        // No portal installed: the bus knows nobody of that name, said in
+        // either of the two ways the bus library has for it.
+        let unknown = || zbus::fdo::Error::ServiceUnknown("no .service file".to_owned());
+        let wrapped = zbus::Error::FDO(Box::new(unknown()));
+        assert_eq!(said(ashpd::Error::Zbus(wrapped)), NO_PORTAL);
+        let wrapped = zbus::Error::FDO(Box::new(unknown()));
+        let through_portal = ashpd::PortalError::ZBus(wrapped);
+        assert_eq!(said(ashpd::Error::Portal(through_portal)), NO_PORTAL);
+        // No session bus: the address is named, so that it can be looked at.
+        let no_bus = said(ashpd::Error::Zbus(zbus::Error::Address(
+            "unix:path=/nowhere".to_owned(),
+        )));
+        assert!(
+            no_bus.starts_with(NO_BUS) && no_bus.contains("/nowhere"),
+            "{no_bus}"
+        );
+        // GNOME's or KDE's backend in an X11 session answers "other".
+        assert_eq!(
+            said(ashpd::Error::Response(ResponseError::Other)),
+            NO_REASON
+        );
+        // As before: the dialog was cancelled.
+        assert_eq!(
+            said(ashpd::Error::Response(ResponseError::Cancelled)),
+            "no screen was chosen"
+        );
+        assert_eq!(Refused::Closed.said(), CLOSED_UNSTARTED);
+        // Anything else is passed on in the portal client's words.
+        assert_eq!(
+            said(ashpd::Error::NoResponse),
+            "the desktop's screen-cast portal refused: Portal request didn't receive a response"
+        );
+        // Each is the end of a sentence that begins "Live capture ended: "
+        // and is closed with a full stop by the page.
+        for text in [
+            NO_SCREEN_CAST,
+            NO_PORTAL,
+            NO_BUS,
+            NO_REASON,
+            CLOSED_UNSTARTED,
+        ] {
+            assert!(!text.ends_with('.') && !text.contains("  "), "{text}");
+            assert!(text.starts_with(char::is_lowercase), "{text}");
+        }
     }
 
     #[test]

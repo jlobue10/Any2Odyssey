@@ -17,7 +17,18 @@ pub const SMALL_FILE_LIMIT: u64 = 1024 * 1024;
 /// runs. `fs::read` would load whatever size it finds, some of them four
 /// times a second. An oversized file is an `InvalidData` error naming the
 /// file; a missing one keeps its `NotFound`.
+///
+/// On Unix only a regular file is opened. A named pipe where the file
+/// belongs has no writer, and opening it waits for one: a program that
+/// reads its settings before it has a window never got one.
 pub fn read_limited(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file and was not read", path.display()),
+        ));
+    }
     let file = fs::File::open(path)?;
     let mut bytes = Vec::new();
     file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
@@ -91,11 +102,18 @@ pub fn write_atomic_document(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// previous destination intact and remove the temporary. New files have the
 /// permissions of [`write_atomic_document`]; existing regular files keep
 /// their Unix permissions. The writer supports seeking as well as writing.
+///
+/// Where no file can be made beside the destination (a folder that may not
+/// be written to, a file system mounted read-only around a writable file)
+/// and the destination is an ordinary file that is there already, the
+/// document is written over it instead: see [`write_over`].
 pub fn write_atomic_document_with(
     path: &Path,
     write: impl FnOnce(&mut io::BufWriter<&mut fs::File>) -> io::Result<()>,
 ) -> io::Result<()> {
-    write_atomic_with(path, false, Audience::Anyone, |file| {
+    // Taken by whichever of the two ways gets as far as writing.
+    let write = std::cell::Cell::new(Some(write));
+    let published = write_atomic_with(path, false, Audience::Anyone, |file| {
         // A private export must stay private. Do not follow a symlink to
         // copy its target's permissions; the link itself will be replaced.
         #[cfg(unix)]
@@ -104,10 +122,70 @@ pub fn write_atomic_document_with(
                 file.set_permissions(metadata.permissions())?;
             }
         }
+        let Some(write) = write.take() else {
+            return Ok(());
+        };
         let mut buffered = io::BufWriter::new(file);
         write(&mut buffered)?;
         buffered.flush()
-    })
+    });
+    let Err(error) = published else {
+        return Ok(());
+    };
+    // Nothing was written yet, so it was the temporary file that could not
+    // be made; and only a refusal counts, not a full disk.
+    let refused = matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+    );
+    let Some(write) = write.take().filter(|_| refused) else {
+        return Err(error);
+    };
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(error);
+    }
+    write_over(path, write, error)
+}
+
+/// Write a document over the ordinary file `path`, which exists, where the
+/// folder it is in takes no new file; `refused` is what making one there
+/// gave.
+///
+/// Up to 0.9.5 an export was written in place, and an existing picture in a
+/// folder the user may not write to (a file that was handed to them in a
+/// folder that was not) could be saved over. Since exports go through a
+/// temporary file beside the destination, that was refused with the
+/// folder's "Permission denied". Written in place it is again, but not as
+/// it was then, straight from the encoder, which left an emptied or half
+/// written file when the encoder failed: the document is written whole to
+/// an unnamed file in the system's temporary folder first, and only a
+/// finished one is copied over the destination. A disk that fills up
+/// during that copy still leaves the file cut short; nothing but another
+/// file beside it could prevent that, and that is what cannot be had here.
+/// The file keeps its permissions and its links.
+fn write_over(
+    path: &Path,
+    write: impl FnOnce(&mut io::BufWriter<&mut fs::File>) -> io::Result<()>,
+    refused: io::Error,
+) -> io::Result<()> {
+    use std::io::Seek;
+    // Without somewhere to write it whole, or without the right to write
+    // to the file itself, the answer is the folder's.
+    let Ok(mut whole) = tempfile::tempfile() else {
+        return Err(refused);
+    };
+    let Ok(mut file) = fs::OpenOptions::new().write(true).open(path) else {
+        return Err(refused);
+    };
+    {
+        let mut buffered = io::BufWriter::new(&mut whole);
+        write(&mut buffered)?;
+        buffered.flush()?;
+    }
+    let length = whole.metadata()?.len();
+    whole.rewind()?;
+    io::copy(&mut whole, &mut file)?;
+    file.set_len(length)
 }
 
 /// Who may read the published file, where the platform lets us choose.
@@ -446,6 +524,41 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_limited_read_does_not_wait_on_a_pipe_where_the_file_belongs() {
+        let dir = tempfile::tempdir().unwrap();
+        // A folder is no file either, and is said to be none.
+        let folder = dir.path().join("settings.json");
+        fs::create_dir(&folder).unwrap();
+        let error = read_limited(&folder, 8).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+        // A link to a file is read as the file.
+        fs::write(dir.path().join("real.json"), b"12").unwrap();
+        let link = dir.path().join("link.json");
+        std::os::unix::fs::symlink("real.json", &link).unwrap();
+        assert_eq!(read_limited(&link, 8).unwrap(), b"12");
+
+        let pipe = dir.path().join("status.json");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (a system without mkfifo: nothing to try it with)
+            return;
+        }
+        let (done, read_it) = std::sync::mpsc::channel();
+        let path = pipe.clone();
+        std::thread::spawn(move || done.send(read_limited(&path, 8).map_err(|e| e.kind())));
+        let read = read_it.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a reader that does wait go, so that the test ends either way.
+        let _ = fs::OpenOptions::new().read(true).write(true).open(&pipe);
+        assert_eq!(
+            read,
+            Ok(Err(io::ErrorKind::InvalidInput)),
+            "the read waited on the pipe"
+        );
+    }
+
     #[test]
     fn streamed_document_failure_preserves_the_destination_and_cleans_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -519,6 +632,144 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn a_document_is_written_over_a_file_in_a_folder_that_takes_no_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("picture.png");
+        let refused = || io::Error::from(io::ErrorKind::PermissionDenied);
+        // Longer than what was there, shorter, and nothing at all.
+        for (earlier, new) in [
+            (&b"old"[..], &b"a longer document"[..]),
+            (b"a longer document", b"new"),
+            (b"old", b""),
+        ] {
+            fs::write(&path, earlier).unwrap();
+            write_over(&path, |writer| writer.write_all(new), refused()).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), new);
+        }
+        // A writer that seeks, as an encoder may.
+        write_over(
+            &path,
+            |writer| {
+                use std::io::Seek;
+                writer.write_all(b"....tail")?;
+                writer.rewind()?;
+                writer.write_all(b"head")
+            },
+            refused(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"headtail");
+        // A document that cannot be finished leaves the file as it was: the
+        // encoder's refusal comes before the file is touched.
+        let failed = write_over(
+            &path,
+            |writer| {
+                writer.write_all(b"half of a pict")?;
+                writer.flush()?;
+                Err(io::ErrorKind::InvalidInput.into())
+            },
+            refused(),
+        );
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&path).unwrap(), b"headtail");
+        // A file that is not there is not made, and the answer is the
+        // folder's.
+        let missing = dir.path().join("missing.png");
+        let failed = write_over(&missing, |writer| writer.write_all(b"new"), refused());
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(entries(dir.path()), ["picture.png"]);
+    }
+
+    /// Undoes [`no_new_files`], so that the test's folder can be removed.
+    struct NewFilesAgain(std::path::PathBuf);
+
+    impl Drop for NewFilesAgain {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+            }
+            #[cfg(windows)]
+            let _ = std::process::Command::new("icacls.exe")
+                .arg(&self.0)
+                .args(["/remove:d", "*S-1-1-0"])
+                .output();
+        }
+    }
+
+    /// Keep `folder` from taking new files for as long as the returned
+    /// guard lives. `None` where that cannot be done for this user (root,
+    /// who may write anywhere).
+    fn no_new_files(folder: &Path) -> Option<NewFilesAgain> {
+        let again = NewFilesAgain(folder.to_owned());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(folder, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        // Everyone is denied adding a file to this one folder; what is in
+        // it keeps its own permissions.
+        #[cfg(windows)]
+        std::process::Command::new("icacls.exe")
+            .arg(folder)
+            .args(["/deny", "*S-1-1-0:(WD)"])
+            .output()
+            .unwrap();
+        let probe = folder.join("probe");
+        if fs::write(&probe, b"").is_ok() {
+            fs::remove_file(&probe).unwrap();
+            return None;
+        }
+        Some(again)
+    }
+
+    #[test]
+    fn an_existing_document_is_replaced_in_a_folder_that_may_not_be_written_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("handed over");
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("picture.png");
+        fs::write(&path, b"the picture that was there").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let Some(_again) = no_new_files(&folder) else {
+            return;
+        };
+        // An encoder that refuses leaves the picture as it was.
+        let failed = write_atomic_document_with(&path, |writer| {
+            writer.write_all(b"half")?;
+            Err(io::ErrorKind::InvalidInput.into())
+        });
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&path).unwrap(), b"the picture that was there");
+        // Up to 0.9.8: "Permission denied", the folder's answer to the
+        // temporary file.
+        write_atomic_document_with(&path, |writer| writer.write_all(b"new")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+        // A new file cannot be made there, as before, and the files that
+        // are never written in place are not.
+        let new = folder.join("new.png");
+        let failed = write_atomic_document_with(&new, |writer| writer.write_all(b"new"));
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        let failed = write_atomic(&path, b"settings");
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(entries(&folder), ["picture.png"]);
     }
 
     #[test]

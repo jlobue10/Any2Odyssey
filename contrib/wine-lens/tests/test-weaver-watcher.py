@@ -101,6 +101,8 @@ class TrackingAnswerTests(unittest.TestCase):
         # The weaver host: the picture shows at once, and it leaves.
         self.program("bin/wine", "echo on\n")
         self.environment = dict(os.environ, ROOT=str(self.root), PATH=f"{self.root}/bin:{os.environ['PATH']}")
+        # What the script is given after the frame file ("overlay" for a live screen).
+        self.arguments = []
 
     def program(self, name, body):
         path = self.root / name
@@ -112,7 +114,7 @@ class TrackingAnswerTests(unittest.TestCase):
         (self.root / "stopped").unlink(missing_ok=True)
         self.program("tools/tracking.sh",
                      f'case $1 in\nstart) {start} ;;\nstop) echo stopped >"$ROOT/stopped" ;;\nesac\n')
-        done = subprocess.run([str(self.root / "any2odyssey-weaver"), str(self.root / "frame")],
+        done = subprocess.run([str(self.root / "any2odyssey-weaver"), str(self.root / "frame"), *self.arguments],
                               env=dict(self.environment, **environment), stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
         # The process that stays does the leaving; it is waited for before the folder goes.
@@ -148,6 +150,37 @@ class TrackingAnswerTests(unittest.TestCase):
     def test_a_locale_the_system_does_not_have_does_not_turn_on_into_a_reason(self):
         # bash, which is sh on Arch and Fedora, warns about such a locale whenever it starts; dash says nothing.
         self.assertEqual(self.said("echo on", LC_ALL="xx_XX.UTF-8"), ["on"])
+
+
+class CaptureAnswerTests(unittest.TestCase):
+    """What the script says about screen captures of a live screen's picture (the "overlay" argument)."""
+
+    setUp = TrackingAnswerTests.setUp
+    program = TrackingAnswerTests.program
+    said = TrackingAnswerTests.said
+
+    def test_a_desktop_without_kwin_is_said_not_to_keep_the_picture_out(self):
+        # busctl finds no KWin to call: sway, labwc, GNOME, COSMIC, niri. Up to 0.9.8 the script said
+        # nothing there, and Any2Odyssey's warning not to show the Odyssey's own screen never came.
+        self.arguments = ["overlay"]
+        self.assertEqual(self.said("echo on"), ["capture: not excluded", "on"])
+
+    def test_kwin_that_takes_the_script_keeps_the_picture_out(self):
+        self.program("bin/busctl", 'echo "$*" >>"$ROOT/asked"\n')
+        self.arguments = ["overlay"]
+        self.assertEqual(self.said("echo on"), ["capture: excluded", "on"])
+        asked = (self.root / "asked").read_text().splitlines()
+        self.assertIn("unloadScript s any2odyssey-overlay", asked[0])
+        self.assertIn(f"loadScript ss {self.root}/tools/kwin-overlay.js any2odyssey-overlay", asked[1])
+        self.assertTrue(asked[2].endswith("org.kde.kwin.Scripting start"), asked[2])
+
+    def test_kwin_that_does_not_take_the_script_is_said_not_to(self):
+        self.program("bin/busctl", 'case " $* " in *" loadScript "*) exit 1 ;; esac\n')
+        self.arguments = ["overlay"]
+        self.assertEqual(self.said("echo on"), ["capture: not excluded", "on"])
+
+    def test_a_still_picture_is_told_nothing_about_captures(self):
+        self.assertEqual(self.said("echo on"), ["on"])
 
 
 if __name__ == "__main__":

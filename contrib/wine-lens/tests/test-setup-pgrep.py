@@ -13,6 +13,8 @@ import unittest
 
 SETUP = Path(__file__).resolve().parents[1] / "setup.sh"
 NEEDED = "wine wineserver x86_64-w64-mingw32-gcc x86_64-w64-mingw32-objdump python3 xrandr rsync stty flock setsid"
+# The first Wine 11.x the set-up's cfgmgr32 stand-in can work with (setup.sh names it in its refusal).
+WINE_MINOR = 6
 
 
 class SetupPgrepTests(unittest.TestCase):
@@ -46,6 +48,39 @@ class SetupPgrepTests(unittest.TestCase):
         self.assertIn("pgrep that takes -u", done.stderr)
         self.assertFalse((self.root / "data").exists())
 
+    def test_a_wine_that_is_too_old_is_refused_before_anything_is_made(self):
+        # Seen with Wine 11.0 and 11.5 (and so with the 8.0 to 10.0 that Debian and Ubuntu ship): the set-up
+        # ended with "done", and every request then failed after 80 seconds.
+        self.stand_in("wine", 'echo "wine-10.0 (Ubuntu 10.0~repack-6ubuntu1)"')
+        done = self.setup()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("too old", done.stderr)
+        self.assertIn("wine-10.0 (Ubuntu 10.0~repack-6ubuntu1)", done.stderr)
+        self.assertIn(f"Wine 11.{WINE_MINOR} or newer", done.stderr)
+        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
+        self.assertFalse((self.root / "data").exists())
+
+    def test_which_wines_count_as_too_old(self):
+        function = re.search(r"^wine_too_old\(\) \{.*?^\}$", SETUP.read_text(), re.S | re.M).group(0)
+        script = self.root / "version.sh"
+        script.write_text(f'set -eu\n{function}\nif wine_too_old "$1"; then echo old; else echo fine; fi\n')
+        cases = {
+            "wine-6.0.3 (Ubuntu 6.0.3~repack-1)": "old", "wine-8.0 (Debian 8.0~repack-4)": "old",
+            "wine-9.0 (Ubuntu 9.0~repack-4build3)": "old", "wine-10.0": "old", "wine-10.20": "old",
+            "wine-11.0": "old", "wine-11.0-rc3": "old", "wine-11.0.1": "old", "wine-11.5 (Staging)": "old",
+            f"wine-11.{WINE_MINOR - 1}": "old", f"wine-11.{WINE_MINOR}": "fine", "wine-11.21": "fine",
+            "wine-11.22 (Staging)": "fine", "wine-12.0": "fine", "wine-12.0-rc1": "fine", "wine-12.3": "fine",
+            "wine-100.1": "fine",
+            # What cannot be read is let through: a build with a name of its own, or no answer at all.
+            "": "fine", "wine-staging-11.0": "fine", "Wine 10.0": "fine", "wine-cachyos-11.2": "fine",
+            "wine-11": "fine", "wine-x.y": "fine",
+        }
+        for says, expected in cases.items():
+            with self.subTest(says=says):
+                done = subprocess.run(["sh", str(script), says], stdin=subprocess.DEVNULL, capture_output=True,
+                                      text=True, timeout=30)
+                self.assertEqual((done.returncode, done.stdout.strip(), done.stderr), (0, expected, ""))
+
     @unittest.skipIf(os.path.exists("/dev/odyssey-lens"), "with the lens board present setup.sh would go on")
     def test_the_pgrep_of_procps_is_accepted(self):
         if subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", "."], capture_output=True).returncode:
@@ -77,6 +112,39 @@ class SetupPgrepTests(unittest.TestCase):
                 self.assertEqual(done.returncode, 1)
                 self.assertIn(f"+ T={base}/any2odyssey/wine-lens\n", done.stderr.replace("'", ""))
         self.assertEqual(sorted(path.name for path in self.root.iterdir()), ["bin", "home", "win"])
+
+
+class SetupHelpTests(unittest.TestCase):
+    """--help was taken for the Windows drive: "no Leia SR runtime in --help/Program Files/LeiaSR/Platform"."""
+
+    def test_help_prints_the_usage_and_looks_for_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Through a link too, which is how a package's command reaches the script.
+            (root / "any2odyssey-lens-setup").symlink_to(SETUP)
+            environment = dict(os.environ, ANY2ODYSSEY_DATA_DIR=str(root / "data"))
+            for script in (SETUP, root / "any2odyssey-lens-setup"):
+                for option in ("--help", "-h"):
+                    with self.subTest(script=script.name, option=option):
+                        done = subprocess.run(["sh", str(script), option], cwd=root, env=environment,
+                                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+                        self.assertEqual(done.returncode, 0, done.stderr)
+                        self.assertEqual(done.stderr, "")
+                        lines = done.stdout.splitlines()
+                        self.assertIn("usage: setup.sh <windows-root>", lines)
+                        self.assertTrue(lines[0].startswith("Prepare the Wine route"), lines[0])
+                        self.assertTrue(lines[-1].startswith("Run it again after a Wine upgrade"), lines[-1])
+                        self.assertFalse(any(line.startswith("#") or "SPDX" in line for line in lines), lines)
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["any2odyssey-lens-setup"])
+
+    def test_no_argument_and_two_arguments_still_name_the_usage_and_fail(self):
+        for arguments in ([], ["a", "b"], ["a", "--help"]):
+            with self.subTest(arguments=arguments):
+                done = subprocess.run(["sh", str(SETUP), *arguments], stdin=subprocess.DEVNULL, capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(done.returncode, 1)
+                self.assertIn("usage: setup.sh <windows-root>", done.stderr)
+                self.assertEqual(done.stdout, "")
 
 
 class SetupExportListTests(unittest.TestCase):

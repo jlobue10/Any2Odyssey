@@ -2,6 +2,94 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 0.9.9 (2026-11-19)
+
+An eighth audit release: seven pull requests (#163 to #169) from a round that began with 0.9.8, the first release in a long while that no round had looked at. It found a defect of 0.9.8 that every user of the live screen has, three times over and independently; ran the depth model on a real graphics card for the first time; took the Odyssey 3D set-up across upgrades of Wine with fourteen real Wine versions; ran the Windows controls in a window of their own for the first time since 0.9.1; and ran the Linux edition on the desktops that were left. At the end all seven were merged and run together, on Windows and on Linux.
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive): three scripts of the Odyssey 3D set-up changed, and an update of the program does not replace them in the data folder. From this release on the installer says so when they are another version's.
+
+**Linux, live screen: 0.9.8 computed the depth at twice the depth detail that was chosen.** 0.9.8 hands a large screen to the depth thread at twice the model's size, to be halved there, and the thread still named the frame's own long side as the detail: nothing was halved. On every screen 1036 pixels wide or more *Standard* was a model picture of 1036 × 588 where 518 × 294 was meant, and on a 3840 × 2160 screen *Fine*, *Finer* and *Finest* were one and the same. On the processor a depth map took 1.1 s where it now takes 0.18 s (1920 × 1080), and 0.9.8 made 0.6 maps a second where 0.9.7 made 5; on an RTX 5090, 26 ms against 14. The picture never waits for the depth, so each picture was shifted by the shape of a much earlier one: around anything that moved, the depth trailed. The steadiness 0.9.8 was made for is kept, and is in fact better than what 0.9.8 shipped: its notes' "0.8 %" is what this release measures (0.87 % on a 5120 × 1440 desktop; 0.9.8 as released: 1.12 %). (#164, found independently by #167 and #169)
+
+**Linux, an NVIDIA graphics card: the page says where the depth is computed, and a card that cannot be used no longer ends 2D to 3D.** Where the card's provider did not start, 0.9.8 either went to the processor without a word (no cuDNN, CUDA's libraries missing or of another version), or 2D to 3D did not work at all (cuDNN of another major version, no card visible, the card's memory refused). In every one of these the depth is now computed on the processor, and one line under *Depth detail* reads "Depth is computed on the NVIDIA GPU." or says that the processor is used and why. (#164)
+
+**Linux, the Odyssey 3D: an upgrade of Wine no longer leaves the output dead.** Three cases, each seen with real Wine and stand-ins for Leia's programs: Wine upgraded while the output had been used in the session (dead until the next login); a set-up made under Wine 11.10 to 11.17 and Wine then 11.22 (nothing answered, and running the set-up again did not help); and a first set-up that was interrupted (never repaired by a later run). The fix of 0.9.8 itself holds across 11.21 to 11.22, to wine-staging, and back. (#168)
+
+**Linux, KDE Plasma, live screen: frames are taken as they arrive.** Since 0.9.7 Plasma sends 62 to 64 frames a second, a little faster than the program's loop turned: each frame was taken later than the one before until one was left out, and it began again. (#169)
+
+### Fixed
+
+Linux, the live screen:
+
+- **The depth model is shown a large screen at the chosen depth detail**, as above. If the depth looked better in 0.9.8 than it does now at *Standard*, that was a finer detail under the name of *Standard*: choose *Fine* or *Finer*. (#164, #167, #169)
+- **Frames are taken as they arrive when the desktop sends 62 to 64 a second.** At 62.5 and 64 frames a second a frame was 13 to 17 ms old when its picture was in the frame file and 24 to 164 frames were left out in 40 seconds; it is 4 to 6 ms now with 1 to 10 left out, as at 60. The loop's time is 15 ms, and it is counted from when a turn was due, so one late turn is worked off within three or four pictures and not over a dozen. (#169)
+- **A frame that is the picture already shown is not a new picture.** A desktop sends a frame for every time it has drawn the screen, changed or not: GNOME while only the pointer moves and the pointer is not drawn in. Each was shrunk, given to the depth model and woven again, and the page read "5 pictures a second" over a still screen. It reads "not changing" now; a frame that differs in one pixel is still a new picture. (A "Known, not fixed" item of 0.9.7.) (#163)
+- **niri, and any desktop that gives up a cast the same way: Start no longer waits for ever at "Choose the screen".** The desktop closed the session without an answer; the page now ends within about three seconds with a line that says so. (#166)
+- **Where a desktop has no screen cast, the page says what is missing**: an X11 session, a portal without a backend for the desktop, no portal, no session bus. Each was the portal library's own sentence before. A picker that is closed on Hyprland's portal backend reads "no screen was chosen", not "Invalid session". (#166)
+- **The page says why no picture has come when the desktop sends only buffers that hold none**, with their number and the reason. (A "Known, not fixed" item of 0.9.7.) (#163)
+- **Every desktop but KDE: the page warns that the Odyssey's own screen must not be the one shown**, because only KWin can keep the 3D picture out of a capture. The warning was never given outside KDE. (#166)
+
+Linux, 2D to 3D on an NVIDIA graphics card:
+
+- **A card that cannot be used is left for the processor, and the page says which of the two computes the depth**, as above; a run that fails on the card in the middle of a live screen goes on with the processor. (#164)
+- **The card's memory is given back.** The program kept what the largest picture it had ever worked on had needed: 6.9 GB after one square picture at *Finest*, 2.9 GB after a stopped live screen. It is about 0.8 GB after a still image now, and the model is let go when the last live screen ends (it is loaded again at the next, in about a second on the card). On the processor the program's own memory went from 1352 MB to 393 MB after one still at *Finest*. (#164)
+
+Linux, the Odyssey 3D set-up and its Wine side:
+
+- **An upgrade of Wine while the output had been used in the session**: the old Wine's server turned every new program away, the stack still counted as running, and every request failed until the next login. The first request after the upgrade is now one cold start. (#168)
+- **A set-up made under Wine 11.10, 11.14 or 11.17, and Wine then upgraded to 11.22**: Wine's own update of the prefix never ended, with one of the set-up's stand-ins in its way, and `setup.sh` run again stopped after two minutes without a word. Wine is now let update the prefix by itself first, at the first start after an upgrade and in `setup.sh` over an existing prefix. The first start after an upgrade of Wine takes about 36 seconds for it, where it took 22 to 24. (#168)
+- **`setup.sh` refuses a Wine older than 11.6**, on which the set-up was made without a complaint and every request then failed after 80 seconds. Debian 12 and 13 and Ubuntu 24.04 to 26.04 ship Wine 8.0 to 10.0. (#168)
+- **A first set-up that did not get through** (Ctrl+C, a full disk) is made anew by the next run; a set-up whose stand-ins no longer fit the installed Wine says "Wine has been upgraded since the Odyssey 3D set-up was made … Run the set-up again" within three seconds. (#168)
+- **An update of the program says when the Wine side still runs another version's scripts**: `install.sh` and `any2odyssey-setup` print a note. (A "Known, not fixed" item of 0.9.8.) (#168)
+- **The set-up compiles with the mingw-w64 headers of Ubuntu 22.04.** (#168)
+- `setup.sh --help` prints how to use it; it took `--help` for the Windows drive. (#163)
+- **Another program can no longer shorten the frame file by accident**, which ended the viewer with signal 7: the file is read-only once the viewer has its own handle. Wine 11.22 and wine-staging 11.22 read it as before. (A "Known, not fixed" item of 0.9.7.) (#163)
+
+The viewer and the controls:
+
+- **A right click opens the menu again on the Controls page** (Windows, lost in 0.9.7) and on the viewer (Linux). The page's drag area lay over the area the menu hangs on. (#165)
+- **Windows: after a change of the display's scale the window's smallest size is that of the new scale.** A window made at 100 % and then at 200 % could be made 700 × 360 pixels small, half of what it needs. (#165)
+- **A choice of the viewer made just before the controls are minimized, hidden or turned to another page is written.** It stayed unwritten for as long as the viewer's page was not drawn. (#167)
+- **One value of the wrong kind in `viewer-settings.json` no longer makes every choice the default**; the values are read one by one. (#167)
+- **Linux: a named pipe where `viewer-settings.json` or `lens.json` belongs no longer leaves the program without a window.** (#167)
+- **zenity: Save preview PNG… opens in the current folder**, not at the root of the file system, where nobody but root can save. (#166)
+- **An existing picture in a folder that takes no new file can be saved over again** with `--screenshot` and Save preview PNG…, as up to 0.9.5. (A "Known, not fixed" item of 0.9.7.) (#163)
+
+Windows, uninstalling:
+
+- **A shortcut the uninstaller leaves because it cannot read it is named**, and the window waits for a key. (A "Known, not fixed" item of 0.9.7.) (#163)
+
+### Corrections to the notes of 0.9.8
+
+- "The viewer keeps its choices … Both editions": the Windows edition has no viewer page and writes no `viewer-settings.json`. What Windows keeps, as before, is `settings.json` and `ui-settings.json`.
+- "At a cost of two to four milliseconds a depth map" was the shrink alone, on six threads. On one thread it is 17 to 27 ms for a 3840 × 2160 screen, and the halving for the model adds 3 ms at *Standard* and up to 25 ms at *Finest*.
+- "It is 0.8 % now": that is what this release measures. 0.9.8 as released gave 1.12 % on the same kind of desktop.
+
+### Tests and releases
+
+- **The published programs no longer hold the build machine's folders** (what `makepkg` warned of), and a check in CI and at a release looks for them in the Windows program, the archive's and the Arch package's. (#163)
+- **Ten of 39 changes of 0.9.8, taken out again by hand, were noticed by no test**; each has one now. One of them matters on the monitor: the start script's test was fed a file with other line ends than the set-up writes, so the lines 0.9.8 added were never run as they run there. (#167)
+- **The Windows controls were run in their own window**, on a desktop that is never shown, with a build that has no conversion engine: Chinese, Japanese and Korean window titles in *Source window*, the 360-point window, a click made while the pointer moves, every way of ending the program, 22 damaged settings files, and an hour in the tray (under 0.1 % of a core, no file written, nothing growing). `docs/TESTING.md` marks what was seen there. (#165)
+- **The live screen has a rig that times it**: from the desktop's frame to the frame file a picture is 4 to 6 ms old at 1920 × 1080 and 8 ms at 3840 × 2160; a reader on the Wine side that stalls or stops never holds the program up. (#169)
+- **The Linux edition was run on labwc, COSMIC and niri, and in X11 sessions.** Hyprland and gamescope could not be started without a graphics card. `docs/PLATFORMS.md` no longer says that a live screen works on X11: no X11 session that could be put together has a screen cast. (#166)
+- **All seven pull requests were merged and run together before the release**: every gate on Windows and on Linux, the Wine rig, and the timing rig, which showed that the comparison of each frame with the one before costs nothing that can be measured.
+
+### Known, not fixed
+
+- Linux, live screen: the depth map a picture is made with is about one and a half times as old as the model takes for a map (0.2 s at *Standard* on the processor, a few hundredths on a graphics card), because the picture never waits for it; at *Depth steadiness* 95 the depth had not reached a new scene after five seconds. A still screen's depth is eased in at six steps a second, which on a graphics card is slower than a moving screen's.
+- Linux, an NVIDIA card: one processor core is busy for as long as a map is computed on the card; the first map ever made with a set of NVIDIA's libraries can take from 9 seconds to two minutes (later starts 1 to 4 s); a card that was left for the processor is tried again only at the next start of a live screen or of the program.
+- Linux, the Odyssey 3D: why the stand-in stops Wine's update of an older prefix is not known, the fix goes around it; the Arch package says nothing after `pacman -U` (`any2odyssey-setup` does); the eye tracker's pause stands as it was, with its cause now found in Wine's server (a socket is given up for good after one refused datagram).
+- Linux, live screen: the window is drawn once a second while the live screen is on, also hidden; the page cannot tell that the Wine side has stopped reading; 2160 lines with the depth model on the processor are short of 60 pictures a second.
+- Linux: COSMIC's portal backend ended most casts by itself in the rig's nested session (not known on real hardware); nothing has been seen on Hyprland or on gamescope.
+- A change of the viewer's choices in its last second is lost when the program is ended by a signal or by its session ending; the same has always held for the lens numbers.
+- Two title-bar buttons are both named "Minimize" to a screen reader on Linux: the one that hides the controls in the tray minimizes where there is no tray. Both stay.
+- Hebrew and Arabic are drawn in the wrong order (it needs a library for the Unicode bidirectional algorithm, which the program does not have).
+- Windows: the controls do nothing of their own at a logoff with 3D on; a `settings.json` saved as UTF-16 is taken for damaged until *Apply*.
+- The items of 0.9.8 and 0.9.7 that are not named above stand as they were.
+
+### Hardware verification
+
+Pending: nothing of this release was run with the monitor, the camera, the lens or Leia's and Samsung's software. The graphics card was a real one, reached through WSL and the Windows driver; Wine was real, with stand-ins for Leia's programs; the desktops ran without a screen. `docs/TESTING.md` lists the checks under "New in 0.9.9". Most in need of a real run: the Odyssey 3D set-up's start after `any2odyssey-setup` on the G90XF under Linux, because `setup.sh`, `start-stack.sh` and `ensure-stack.sh` changed and they are the ones seen working there; the live screen at *Standard* with something moving (the depth should follow sooner than in 0.9.8, and the page names the NVIDIA GPU); and a right click on the Windows Controls page.
+
 ## 0.9.8 (2026-11-18)
 
 Two fixes and one addition, from an evening with 0.9.7 on the monitor's own machine.

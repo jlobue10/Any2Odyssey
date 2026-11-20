@@ -73,6 +73,10 @@ if [ "${2:-}" = overlay ] && command -v busctl >/dev/null &&
     busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting loadScript ss "$T/tools/kwin-overlay.js" any2odyssey-overlay >/dev/null 2>&1 &&
         busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting start >/dev/null 2>&1 && KWIN_SCRIPT=1
     [ -n "$KWIN_SCRIPT" ] && echo "capture: excluded" || echo "capture: not excluded"
+elif [ "${2:-}" = overlay ]; then
+    # No KWin to ask: nothing keeps the picture out of a capture here, and Any2Odyssey is told, as it is
+    # when KWin would not take the script. Left unsaid, its page had no word about it on any other desktop.
+    echo "capture: not excluded"
 fi
 # The host is not exec'ed: there is leaving to do after it. It gets this script's input, so it still
 # leaves when Any2Odyssey closes it.

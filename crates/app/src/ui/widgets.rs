@@ -387,7 +387,17 @@ pub const PAGE_SCROLL: egui::scroll_area::ScrollSource = egui::scroll_area::Scro
 /// has the wheel and the scroll bar; a screen that is touched has neither,
 /// so a finger goes on dragging. (Sensed without taking the keyboard focus:
 /// egui's own area was a Tab stop without a name, as large as the page.)
-pub fn drag_with_a_finger(ui: &Ui) {
+///
+/// What comes back is where a click on the page itself is sensed, for the
+/// page's right-click menu. A click reaches nothing that lies under an area
+/// sensing only drags (egui takes what is below for hidden), and the window
+/// senses its right click below the page: with this area on every page all
+/// the time, the menu opened nowhere on the Controls page and the viewer.
+/// (Before, egui's own area was in the way only while a page did not fit
+/// its window: the menu opened in the default window of the controls and
+/// not in a shorter one.) So the click is sensed again above the drag, by
+/// an area that is no Tab stop either.
+pub fn drag_with_a_finger(ui: &Ui) -> egui::Response {
     // The part of the page that is in view: as wide as the contents, as
     // high as the clip.
     let in_view = Rect::from_x_y_ranges(ui.max_rect().x_range(), ui.clip_rect().y_range());
@@ -396,6 +406,7 @@ pub fn drag_with_a_finger(ui: &Ui) {
         let moved = ui.input(|i| i.pointer.delta().y);
         ui.scroll_with_delta_animation(vec2(0.0, moved), egui::style::ScrollAnimation::none());
     }
+    ui.interact(in_view, ui.id().with("clicked-on-the-page"), Sense::CLICK)
 }
 
 /// Scroll the widget that has just been given the keyboard focus into view.

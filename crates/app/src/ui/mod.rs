@@ -69,6 +69,38 @@ fn limit_zoom(ctx: &egui::Context) {
     }
 }
 
+/// Name the smallest window again when the display's scale has changed.
+///
+/// The window system is told the smallest size in pixels, worked out once
+/// for the display the window was made on, and a window that comes onto a
+/// display of another scale keeps those pixels (dragged to a second
+/// monitor, or the scale changed in Settings while the program is in the
+/// tray). Seen in the window on Windows, which was sent what Windows sends
+/// at such a change: made at 100 %, it still named 700 x 360 pixels as its
+/// smallest size at 150 % and at 200 %, where that is 350 x 180 points and
+/// the title bar's buttons lie outside the window. The other way round the
+/// same pixels are too many: a window made at 200 % keeps 1400 x 720 of
+/// them, which at 100 % is as many points. The size in the command is in
+/// points of the page as it is zoomed, and the limit is in the display's
+/// own.
+fn keep_smallest_window(ctx: &egui::Context) {
+    let Some(scale) = ctx.native_pixels_per_point() else {
+        return;
+    };
+    let id = egui::Id::new("smallest-window-scale");
+    let before = ctx.data_mut(|data| {
+        let before = data.get_temp::<f32>(id);
+        data.insert_temp(id, scale);
+        before
+    });
+    // The window was made with the size that fits the display it was made
+    // on: only a change is told.
+    if before.is_some_and(|before| before != scale) {
+        let smallest = egui::Vec2::from(SMALLEST_WINDOW) / ctx.zoom_factor();
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(smallest));
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Controls,
@@ -835,6 +867,7 @@ impl eframe::App for App {
             return;
         }
         limit_zoom(ctx);
+        keep_smallest_window(ctx);
         // The window's name for assistive software. The tree's root has none
         // of its own, and on Linux the title is not taken for it: a screen
         // reader was given a frame without a name.
@@ -874,6 +907,10 @@ impl eframe::App for App {
         // The output window is a window of its own: it stays up while the
         // controls are minimized.
         self.viewer.show_output(ctx);
+        // The viewer's choices are written from here, a moment after the
+        // last change: its page is not drawn while the controls are hidden,
+        // minimized or on another page.
+        self.viewer.keep_choices(ctx, Instant::now());
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
         if self.hidden || minimized {
@@ -900,7 +937,8 @@ impl eframe::App for App {
                 );
                 self.titlebar(&mut body, ctx);
                 body.add_space(8.0);
-                // For the right click only: not a Tab stop.
+                // For the right click only: not a Tab stop. A page that
+                // scrolls senses its own (`widgets::drag_with_a_finger`).
                 let background = body.interact(
                     body.available_rect_before_wrap(),
                     body.id().with("body-bg"),
@@ -914,7 +952,10 @@ impl eframe::App for App {
                             .auto_shrink([false, false])
                             .scroll_source(widgets::PAGE_SCROLL)
                             .show(&mut body, |ui| {
-                                widgets::drag_with_a_finger(ui);
+                                // The right click on the page itself (the
+                                // one above is for what lies around it).
+                                widgets::drag_with_a_finger(ui)
+                                    .context_menu(|ui| self.context_menu(ui));
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 let tray_available = self.tray_available();
@@ -936,7 +977,8 @@ impl eframe::App for App {
                             .auto_shrink([false, false])
                             .scroll_source(widgets::PAGE_SCROLL)
                             .show(&mut body, |ui| {
-                                widgets::drag_with_a_finger(ui);
+                                widgets::drag_with_a_finger(ui)
+                                    .context_menu(|ui| self.context_menu(ui));
                                 ui.set_width((ui.available_width() - 4.0).max(0.0));
                                 let mut c = self.core.lock().expect("core");
                                 self.viewer.show(ui, &mut c, &p, self.wordmark.as_ref());

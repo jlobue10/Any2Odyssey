@@ -54,6 +54,8 @@ struct Harness {
     focus: Option<egui::accesskit::NodeId>,
     /// The name of the tree's root: the window, as a screen reader says it.
     window_name: Option<String>,
+    /// What the last frame told its window to do.
+    commands: Vec<ViewportCommand>,
     /// Display scale: physical pixels per point.
     scale: f32,
     app: App,
@@ -99,6 +101,7 @@ impl Harness {
             widgets: Vec::new(),
             focus: None,
             window_name: None,
+            commands: Vec::new(),
             scale: 1.0,
             app,
             core,
@@ -159,6 +162,11 @@ impl Harness {
             }
         }
         self.events = output.platform_output.events;
+        self.commands = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| viewport.commands.clone())
+            .unwrap_or_default();
         painted
     }
 
@@ -734,6 +742,46 @@ fn no_page_panics_in_a_window_smaller_than_its_margins() {
     }
 }
 
+/// The smallest size is handed to the window system in pixels of the
+/// display the window was made on. On a display of another scale those
+/// pixels are another number of points: the window then has to be told
+/// again, once, with the size in points of the page as it is zoomed.
+#[test]
+fn the_smallest_window_is_named_again_when_the_displays_scale_changes() {
+    fn smallest(h: &mut Harness) -> Vec<egui::Vec2> {
+        h.run(Vec::new());
+        h.commands
+            .iter()
+            .filter_map(|command| match command {
+                ViewportCommand::MinInnerSize(size) => Some(*size),
+                _ => None,
+            })
+            .collect()
+    }
+    let whole = egui::Vec2::from(SMALLEST_WINDOW);
+    let mut h = Harness::new(SIZES[0], Page::Controls);
+    // Made on a display at 100 %: the window was made with the right size.
+    assert!(smallest(&mut h).is_empty());
+    assert!(smallest(&mut h).is_empty());
+    // Onto a display at 200 %: told once, and not at every frame after.
+    h.scale = 2.0;
+    assert_eq!(smallest(&mut h), [whole]);
+    assert!(smallest(&mut h).is_empty());
+    // A zoom changes the page, not the window: nothing is told. At the next
+    // change of scale the size is in the zoomed page's points, so that the
+    // window comes out at 700 x 360 of the display's.
+    h.ctx.set_zoom_factor(1.25);
+    assert!(smallest(&mut h).is_empty());
+    assert!(smallest(&mut h).is_empty());
+    assert_eq!(h.ctx.zoom_factor(), 1.25);
+    h.scale = 1.5;
+    assert_eq!(smallest(&mut h), [whole / 1.25]);
+    // And back where it was made.
+    h.scale = 1.0;
+    assert_eq!(smallest(&mut h), [whole / 1.25]);
+    assert!(smallest(&mut h).is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // The sweep: every page in every state at every size, display scale and zoom
 // a user can reach, checked through what the frame painted and through the
@@ -835,7 +883,10 @@ mod sweep {
             Some(&format!(
                 "Could not save {path}: Permission denied (os error 13)"
             )),
-        );
+        )
+        // The longest the line under Depth detail gets: a GPU that could
+        // not be used, with the end of what the runtime said.
+        .with_depth_line("Depth is computed on the processor, which is several times slower: the NVIDIA GPU could not be used (…Failed to load library libonnxruntime_providers_cuda.so with error: libcublasLt.so.13: cannot open shared object file: No such file or directory). View logs has the whole message; the GPU is tried again when the program is started again.");
     }
 
     fn installed_somewhere_deep(h: &mut Harness) {
@@ -1745,6 +1796,53 @@ mod sweep {
                     }
                 }
             }
+        }
+    }
+
+    /// The right-click menu opens on the page itself, whether the page fits
+    /// its window or scrolls. From 0.9.7 on it opened nowhere on the two
+    /// home pages: the area a finger drags the page by lies over all of the
+    /// page, and a click does not reach what is under an area that senses
+    /// only drags, which is where the window senses its right click. (Up to
+    /// 0.9.6 egui's own drag area did the same, while a page scrolled.)
+    #[test]
+    fn a_right_click_on_the_page_opens_the_menu() {
+        let secondary = |at: egui::Pos2, pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // Only the menu says this: the title bar's button says Dark.
+        let entry = "Toggle light / dark mode";
+        let fits = [(
+            "the controls in their default window",
+            Page::Controls,
+            SIZES[0],
+        )];
+        let scrolls = pages_that_scroll().map(|(what, page, size, _)| (what, page, size));
+        for (what, page, size) in fits.into_iter().chain(scrolls) {
+            let mut h = Harness::new(size, page);
+            let painted = h.settle();
+            assert!(try_find(&painted, entry).is_none(), "{what}: open at once");
+            // On the banner, between the wordmark and the tag line.
+            let banner = banner_at(&painted).expect("the banner");
+            let at = pos2(size.0 * 0.6, banner + 10.0);
+            assert!(
+                !h.widgets.iter().any(|w| w.rect.contains(at)),
+                "{what}: a control lies at {at:?}"
+            );
+            h.run(vec![egui::Event::PointerMoved(at)]);
+            h.run(vec![secondary(at, true)]);
+            h.run(vec![secondary(at, false)]);
+            let painted = h.settle();
+            assert!(
+                try_find(&painted, entry).is_some(),
+                "{what}: a right click on the page opened no menu"
+            );
+            // And a click beside it closes it again.
+            let painted = h.click(pos2(at.x - 300.0, at.y));
+            assert!(try_find(&painted, entry).is_none(), "{what}: still open");
         }
     }
 

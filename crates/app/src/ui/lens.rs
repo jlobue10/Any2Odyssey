@@ -91,7 +91,9 @@ pub struct LensState {
 
 /// Read the lens numbers from `path`. A missing file is the default lens.
 pub fn read_lens(path: &Path) -> Result<Lens, String> {
-    let bytes = match std::fs::read(path) {
+    // (a file, and no more than such a file can be: a named pipe in its
+    // place was waited on for ever, before the program had a window)
+    let bytes = match fsutil::read_limited(path, fsutil::SMALL_FILE_LIMIT) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Lens::default()),
         Err(e) => return Err(format!("Could not read {}: {e}", path.display())),
@@ -513,6 +515,33 @@ mod tests {
         std::fs::write(&file, br#"{"pitch": 0, "offset": 7.25}"#).unwrap();
         let lens = read_lens(&file).unwrap();
         assert_eq!((lens.pitch, lens.offset), (PITCH_RANGE.0, 0.25));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_lens_file_belongs_is_reported_and_not_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lens.json");
+        let made = std::process::Command::new("mkfifo").arg(&file).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (no mkfifo on this system: `fsutil` has the same check)
+            return;
+        }
+        let (done, loaded) = std::sync::mpsc::channel();
+        let pipe = file.clone();
+        std::thread::spawn(move || {
+            let state = LensState::load(pipe);
+            done.send((state.lens, state.problem))
+        });
+        let loaded = loaded.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a reader that does wait go, so that the test ends either way.
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file);
+        let (lens, problem) = loaded.expect("the read waited on the pipe");
+        assert_eq!(lens, Lens::default());
+        assert!(problem.unwrap().contains("not a regular file"));
     }
 
     /// The lens files of every release that has had them (the corpus of

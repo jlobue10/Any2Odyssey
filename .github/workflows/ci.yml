@@ -45,6 +45,20 @@ jobs:
           toolchain: 1.99.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # A program names the source files of its dependencies in its panic messages, by the paths they had
+      # where it was built (C:\Users\runneradmin\.cargo\registry\src\...). The runner's folders are given
+      # other names. As configuration of this account and not as RUSTFLAGS: that variable takes the place
+      # of the flags in .cargo/config.toml (the static C runtime), where configuration joins them; and for
+      # every cargo call of this job alike, since a step with other flags would build the program again.
+      - name: Name source files without this machine's folders
+        shell: pwsh
+        run: |
+          $cargo=if($env:CARGO_HOME){$env:CARGO_HOME}else{Join-Path $env:USERPROFILE '.cargo'}
+          $flags="'--remap-path-prefix=$cargo=cargo', '--remap-path-prefix=$env:GITHUB_WORKSPACE=any2odyssey'"
+          $config=Join-Path $cargo 'config.toml'
+          # Once: a second table of the same name (a configuration that a cache brought back) is an error to cargo.
+          if ((Test-Path -LiteralPath $config) -and (Select-String -LiteralPath $config -SimpleMatch -Pattern 'remap-path-prefix' -Quiet)) { exit 0 }
+          Add-Content -LiteralPath $config -Value '[target.x86_64-pc-windows-msvc]',"rustflags = [$flags]"
       - name: Format check
         run: cargo fmt --all --check
       - name: Build (release)
@@ -52,6 +66,9 @@ jobs:
       - name: Verify the built executable (static C runtime, DPI manifest)
         shell: pwsh
         run: ./installer/tests/test-dpi-manifest.ps1
+      - name: The built executable names no folder of this machine
+        shell: bash
+        run: sh scripts/check-build-paths.sh target/release/Any2Odyssey.exe "$USERPROFILE" "$GITHUB_WORKSPACE"
       - name: Test
         run: cargo test --locked --workspace
       - name: Clippy
@@ -202,6 +219,9 @@ jobs:
         run: |
           pacman -U --noconfirm packaging/arch/any2odyssey-*.pkg.tar.zst
           desktop-file-validate /usr/share/applications/any2odyssey.desktop
+          # The PKGBUILD gives the folders of its build other names (makepkg: "Package contains reference
+          # to $srcdir").
+          scripts/check-build-paths.sh /usr/bin/any2odyssey /home/build "$PWD"
           test -f /usr/share/icons/hicolor/256x256/apps/any2odyssey.png
           test -x /usr/share/any2odyssey/wine-lens/setup.sh
           test -s /usr/share/licenses/any2odyssey/THIRD-PARTY-LICENSES-LINUX.md
@@ -247,6 +267,12 @@ jobs:
           toolchain: 1.99.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # A program names the source files of its dependencies in its panic messages, by the paths they had
+      # where it was built (/home/runner/.cargo/registry/src/...). The runner's folders are given other
+      # names, for every cargo call of this job alike: a step with other flags would build the program
+      # again. scripts/check-build-paths.sh looks at the packaged program below.
+      - name: Name source files without this machine's folders
+        run: echo "RUSTFLAGS=--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$GITHUB_WORKSPACE=/any2odyssey" >> "$GITHUB_ENV"
       - name: Desktop build dependencies (eframe, tray-icon, global-hotkey; PipeWire for live capture)
         run: |
           sudo apt-get update
@@ -357,6 +383,7 @@ jobs:
           cd dist && sha256sum -c ./*.sha256
           mkdir check && tar -xzf ./*.tar.gz -C check --strip-components=1
           check/any2odyssey --help
+          ../scripts/check-build-paths.sh check/any2odyssey "$HOME" "$GITHUB_WORKSPACE"
           sh -n check/wine-lens/setup.sh
           test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh
           test -s check/THIRD-PARTY-LICENSES-LINUX.md -a -s check/wine-lens/LICENSE-MIT
@@ -436,6 +463,8 @@ jobs:
       # license or number, a crate named twice.
       - name: The check of the third-party list refuses what it should (stand-in for cargo)
         run: python3 scripts/tests/test-third-party-linux.py
+      - name: The check for the build machine's folders in a program refuses what it should
+        run: python3 scripts/tests/test-check-build-paths.py
       - name: Every action's commit is under a tag or on a branch of its repository
         env:
           GH_TOKEN: ${{ github.token }}
