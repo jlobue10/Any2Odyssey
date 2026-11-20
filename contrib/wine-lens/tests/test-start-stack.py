@@ -329,7 +329,16 @@ echo "The Function Table (interpreted .pdata section contents)"
         exec(compile(source.replace(run_it, ""), "mkboard.py", "exec"), tool)
         tool["usb_device"] = lambda tty: str(board)
         tool["main"]("/dev/odyssey-lens", str(self.root / "build/board.h"), str(self.root / "build/device.reg"))
-        written = (self.root / "build/device.reg").read_bytes().decode()
+        header, registry = self.root / "build/board.h", self.root / "build/device.reg"
+        before = (header.read_bytes(), registry.read_bytes())
+        descriptors = board / "descriptors"
+        valid = descriptors.read_bytes()
+        for incomplete in [valid[:17], valid[:23], valid[:-1]]:
+            descriptors.write_bytes(incomplete)
+            with self.assertRaisesRegex(SystemExit, "USB descriptors"):
+                tool["main"]("/dev/odyssey-lens", str(header), str(registry))
+            self.assertEqual((header.read_bytes(), registry.read_bytes()), before)
+        written = registry.read_bytes().decode()
         self.assertNotIn("\n", written.replace("\r\n", ""), "the set-up's file has Windows line ends")
         wanted = [entry for entry in written.split("\r\n\r\n") if "\\WindowsRuntime\\ActivatableClassId\\" in entry]
         self.assertEqual(len(wanted), 3, written)
