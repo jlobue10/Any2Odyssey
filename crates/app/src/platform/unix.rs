@@ -924,14 +924,19 @@ pub fn pick_image() -> Result<Option<PathBuf>, String> {
     ])
 }
 
-/// What kdialog's save dialog is started with: `name` in `folder` (the current
-/// one), as a whole path.
+/// What a save dialog is started with: `name` in `folder` (the current one),
+/// as a whole path.
 ///
+/// Neither dialog takes a bare name for "this name, in the current folder".
 /// kdialog reads a bare name of a file that does not exist yet as an address
 /// on the internet: started with `Any2Odyssey-preview.png`, the dialog of
 /// kdialog 26.08 opened at "http: any2odyssey-preview.png" with no name in its
-/// Name box. A whole path is read as a file in a folder.
-fn kdialog_start(name: &str, folder: Option<PathBuf>) -> String {
+/// Name box. zenity 4.2 (GTK 4.24) takes the folder to open in from a whole
+/// path only: started with the bare name, its dialog opened at the root of
+/// the file system, and Return answered `/Any2Odyssey-preview.png`, which
+/// nobody but root can write. A whole path is read as a file in a folder by
+/// both.
+fn save_start(name: &str, folder: Option<PathBuf>) -> String {
     folder
         .filter(|folder| folder.is_absolute())
         .map(|folder| folder.join(name))
@@ -939,9 +944,11 @@ fn kdialog_start(name: &str, folder: Option<PathBuf>) -> String {
         .unwrap_or_else(|| name.to_owned())
 }
 
-/// Ask where to save a PNG, suggesting `name`. Blocks like [`pick_image`].
-pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
-    DIALOGS.run(&[
+/// The save dialogs that are tried, in this order, and what each is started
+/// with to suggest `name` in `folder`.
+fn save_dialogs(name: &str, folder: Option<PathBuf>) -> [(&'static str, Vec<String>); 2] {
+    let start = save_start(name, folder);
+    [
         (
             "zenity",
             vec![
@@ -949,7 +956,7 @@ pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
                 "--save".into(),
                 "--confirm-overwrite".into(),
                 "--title=Save preview".into(),
-                format!("--filename={name}"),
+                format!("--filename={start}"),
                 "--file-filter=PNG | *.png".into(),
             ],
         ),
@@ -959,11 +966,16 @@ pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
                 "--title".into(),
                 "Save preview".into(),
                 "--getsavefilename".into(),
-                kdialog_start(name, std::env::current_dir().ok()),
+                start,
                 "PNG (*.png)".into(),
             ],
         ),
-    ])
+    ]
+}
+
+/// Ask where to save a PNG, suggesting `name`. Blocks like [`pick_image`].
+pub fn pick_save_png(name: &str) -> Result<Option<PathBuf>, String> {
+    DIALOGS.run(&save_dialogs(name, std::env::current_dir().ok()))
 }
 
 /// Estimate depth for the viewer's 2D → 3D mode. The model and the runtime
@@ -1523,20 +1535,32 @@ mod tests {
     }
 
     #[test]
-    fn kdialog_is_given_the_name_to_save_as_a_whole_path() {
+    fn a_save_dialog_is_given_the_name_to_save_as_a_whole_path() {
         use std::os::unix::ffi::OsStringExt;
         // A bare name of a file that is not there is an internet address to
-        // kdialog ("http: any2odyssey-preview.png").
+        // kdialog ("http: any2odyssey-preview.png"), and zenity opens at the
+        // root of the file system for it.
         assert_eq!(
-            kdialog_start("Any2Odyssey-preview.png", Some("/home/somebody".into())),
+            save_start("Any2Odyssey-preview.png", Some("/home/somebody".into())),
             "/home/somebody/Any2Odyssey-preview.png"
         );
-        assert_eq!(kdialog_start("a b.png", Some("/".into())), "/a b.png");
+        assert_eq!(save_start("a b.png", Some("/".into())), "/a b.png");
         // Without a folder that can be named, the name alone, as before.
-        assert_eq!(kdialog_start("p.png", None), "p.png");
-        assert_eq!(kdialog_start("p.png", Some("relative".into())), "p.png");
+        assert_eq!(save_start("p.png", None), "p.png");
+        assert_eq!(save_start("p.png", Some("relative".into())), "p.png");
         let not_text = PathBuf::from(OsString::from_vec(b"/home/\xff".to_vec()));
-        assert_eq!(kdialog_start("p.png", Some(not_text)), "p.png");
+        assert_eq!(save_start("p.png", Some(not_text)), "p.png");
+        // Both dialogs get it: zenity first, as one argument with its switch.
+        let [(first, zenity), (second, kdialog)] =
+            save_dialogs("Any2Odyssey-preview.png", Some("/home/somebody".into()));
+        assert_eq!((first, second), ("zenity", "kdialog"));
+        let whole = "/home/somebody/Any2Odyssey-preview.png";
+        assert!(
+            zenity.contains(&format!("--filename={whole}")),
+            "{zenity:?}"
+        );
+        assert!(zenity.contains(&"--save".to_owned()));
+        assert_eq!(kdialog[2..4], ["--getsavefilename", whole]);
     }
 
     #[test]
