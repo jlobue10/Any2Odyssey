@@ -1861,6 +1861,79 @@ mod tests {
     }
 
     #[test]
+    fn the_model_is_shown_a_large_screen_at_the_detail_chosen_not_at_twice_it() {
+        // Both loops as the program runs them, the capture fed by hand and
+        // the model played by the test. 0.9.8 handed a large screen over at
+        // twice the model's size for the estimator to halve, and told the
+        // estimator that frame's long side for the detail: the model was
+        // shown 1036 x 588 at "Standard" and 1274 x 714 at "Fine".
+        for ((sw, sh), detail, twice) in [
+            ((1920u32, 1080u32), 518u32, true),
+            ((1920, 1080), 770, true),
+            ((1920, 1080), 1022, false),
+            ((2560, 1440), 1274, true),
+            ((5120, 1440), 518, true),
+            ((1000, 600), 518, false),
+        ] {
+            let what = format!("{sw} x {sh} at {detail}");
+            let capture = crate::capture::Fed::start();
+            let shared = Arc::new(Shared::new());
+            shared.detail.store(detail as i32, Ordering::Relaxed);
+            // (the frame's size, the detail, and its darkest and lightest red)
+            type Asked = ((u32, u32), u32, (u8, u8));
+            let asked: Arc<Mutex<Vec<Asked>>> = Arc::default();
+            let (frames, state) = (capture.frames(), shared.clone());
+            let render = std::thread::spawn(move || render_loop(&frames, &state));
+            let (state, seen) = (shared.clone(), asked.clone());
+            let depth = std::thread::spawn(move || {
+                depth_loop_with(&state, |frame, detail| {
+                    let reds = frame.pixels().map(|pixel| pixel.0[0]);
+                    let range = (reds.clone().min().unwrap(), reds.max().unwrap());
+                    lock(&seen).push((frame.dimensions(), detail, range));
+                    // The map comes back at the size the estimator shows the
+                    // model the frame at (`Estimator::estimate`).
+                    let (w, h) = crate::depth::model_size(frame.width(), frame.height(), detail);
+                    Ok(DepthMap::normalized(w, h, vec![0.0; (w * h) as usize]).ok())
+                })
+            });
+            // Columns of black and white one pixel wide, as small text is.
+            let screen: Vec<u8> = (0..sw * sh)
+                .flat_map(|i| [if i % sw % 2 == 0 { 255u8 } else { 0 }; 4])
+                .collect();
+            capture.feed(sw, sh, &screen);
+            eventually(&what, || lock(&shared.depth).latest.is_some());
+            shared.stop.store(true, Ordering::Relaxed);
+            shared.model_wanted.notify_all();
+            render.join().unwrap();
+            depth.join().unwrap();
+
+            let model = crate::depth::model_size(sw, sh, detail);
+            let (frame, told, (darkest, lightest)) = lock(&asked)[0];
+            if sw > frame.0 * 2 {
+                // Shrunk by more than half: every pixel is counted, four
+                // or five columns to one, so nothing is left black or
+                // white. Four samples of it leave both.
+                assert!(
+                    darkest >= 80 && lightest <= 175,
+                    "{what}: {darkest} to {lightest}"
+                );
+            }
+            let expected = if twice {
+                (model.0 * 2, model.1 * 2)
+            } else {
+                model
+            };
+            assert_eq!(frame, expected, "{what}: the frame handed over");
+            assert_eq!(told, detail, "{what}: the detail the estimator is told");
+            let answer = lock(&shared.depth)
+                .latest
+                .as_ref()
+                .map(|(_, _, map)| (map.width(), map.height()));
+            assert_eq!(answer, Some(model), "{what}: the size the model saw");
+        }
+    }
+
+    #[test]
     fn the_defaults_match_the_still_viewer() {
         let controls = Controls::default();
         assert_eq!(DEPTH.value(controls.depth_pos), Params::default().strength);

@@ -348,7 +348,8 @@ pub fn model_size(width: u32, height: u32, long_side: u32) -> (u32, u32) {
 
 /// `image` as the model's input: planar RGB, normalized, at `width` x `height`.
 fn planar_input(image: &RgbaImage, width: u32, height: u32) -> Vec<f32> {
-    // A live screen's frames come at the model's size already.
+    // A live screen's frames come at the model's size already, or at twice
+    // it (`live::model_input_size`): those are halved here.
     let resized = if image.dimensions() == (width, height) {
         std::borrow::Cow::Borrowed(image)
     } else {
@@ -1461,6 +1462,35 @@ mod tests {
                 assert!(mw.max(mh) <= long_side + PATCH, "{w}x{h} -> {mw}x{mh}");
             }
         }
+    }
+
+    #[test]
+    fn a_frame_made_at_the_models_size_or_at_twice_it_is_shown_at_the_models_size() {
+        // A live screen's frame comes at the size the model is to see it
+        // at, or at twice that size (`live::model_input_size`). Told the
+        // detail the frame was made for, the estimator comes to the same
+        // size again; told the frame's long side, it took a frame of twice
+        // the size for a request for twice the detail.
+        let widths = (1..=16384)
+            .step_by(89)
+            .chain([1036, 1920, 2560, 3840, 5120, 7680, 16384]);
+        for width in widths {
+            for height in [1, 14, 200, 588, 1080, 1440, 1600, 2160, 4320, 16384] {
+                for detail in DETAIL.map(|(side, _)| side) {
+                    let model = model_size(width, height, detail);
+                    let what = format!("{width} x {height} at {detail}");
+                    assert_eq!(model_size(model.0, model.1, detail), model, "{what}");
+                    assert_eq!(
+                        model_size(model.0 * 2, model.1 * 2, detail),
+                        model,
+                        "{what}, at twice the size"
+                    );
+                }
+            }
+        }
+        // (what 0.9.8 asked for: the frame's long side)
+        assert_eq!(model_size(1036, 588, 1036), (1036, 588));
+        assert_eq!(model_size(1540, 868, 1540), (1274, 714));
     }
 
     #[test]

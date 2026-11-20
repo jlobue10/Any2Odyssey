@@ -793,6 +793,19 @@ impl ViewerState {
         self.options_file.store(self.options);
     }
 
+    /// Write the choices to their file once they have stood still for a
+    /// moment (`options_file`), and ask for the frame at which that is.
+    /// Call at every frame, whether or not the page is drawn: called from
+    /// the page alone, a choice made just before the controls were
+    /// minimized, hidden in the tray or turned to another page waited in
+    /// memory for as long as that lasted, and was lost with a program that
+    /// ended without leaving (a session that ends, a signal).
+    pub fn keep_choices(&mut self, ctx: &egui::Context, now: std::time::Instant) {
+        if let Some(wait) = self.options_file.save_when_settled(self.options, now) {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
     /// The calibration pattern is a picture of its own: it needs no image.
     fn shows_pattern(&self) -> bool {
         self.options.output == Output::Lens && self.lens.pattern
@@ -1805,12 +1818,7 @@ impl ViewerState {
         }
         self.options_edited(before);
         self.lens.save_when_settled(&ctx, std::time::Instant::now());
-        if let Some(wait) = self
-            .options_file
-            .save_when_settled(self.options, std::time::Instant::now())
-        {
-            ctx.request_repaint_after(wait);
-        }
+        self.keep_choices(&ctx, std::time::Instant::now());
         self.ensure_depth(&ctx);
         self.sync_texture(&ctx);
         ui.add_space(5.0);
@@ -2520,6 +2528,72 @@ mod tests {
         state.lens.nudge(lens::Knob::Pitch, 2.0);
         state.save_lens();
         assert_eq!(lens::read_lens(&file).unwrap(), state.lens.lens);
+    }
+
+    /// A viewer whose choices are kept in `file`, as `with_saved_lens` makes
+    /// one for the user's own file.
+    fn with_choices_in(file: &Path) -> ViewerState {
+        let (options_file, options) = crate::ui::options_file::OptionsFile::load(file.to_owned());
+        ViewerState {
+            options,
+            options_file,
+            ..ViewerState::default()
+        }
+    }
+
+    #[test]
+    fn shutdown_writes_the_choices_before_their_settling_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("viewer-settings.json");
+        let mut state = with_choices_in(&file);
+        assert_eq!(state.options, Options::default());
+        state.options.input = Input::Ai;
+        state.options.detail = 1022;
+        state.save_lens();
+        assert_eq!(crate::ui::options_file::read(&file), state.options);
+        // The next start has them, and its output is off.
+        let next = with_choices_in(&file);
+        assert_eq!(next.options, state.options);
+        assert!(!next.output_open);
+    }
+
+    #[test]
+    fn the_choices_are_written_while_the_page_is_not_drawn() {
+        // The page was the only thing that wrote them: a choice made just
+        // before the controls were minimized, hidden or turned to another
+        // page stayed in memory until the page was drawn again.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("viewer-settings.json");
+        let mut state = with_choices_in(&file);
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        state.options.lines = 2160;
+        state.keep_choices(&ctx, start);
+        assert!(!file.exists(), "written before the choice stood still");
+        state.keep_choices(&ctx, start + std::time::Duration::from_millis(999));
+        assert!(!file.exists(), "written before the choice stood still");
+        state.keep_choices(&ctx, start + std::time::Duration::from_secs(1));
+        assert_eq!(crate::ui::options_file::read(&file).lines, 2160);
+    }
+
+    #[test]
+    fn a_preview_has_the_default_choices_and_leaves_the_file_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("viewer-settings.json");
+        let text = r#"{"Input":"Ai","Output":"Sbs","Lines":1440}"#;
+        std::fs::write(&file, text).unwrap();
+        let saved = with_choices_in(&file);
+        assert_eq!(saved.options.input, Input::Ai);
+        let mut preview = saved.without_saved_options();
+        assert_eq!(preview.options, Options::default());
+        // Whatever happens to its choices, nothing of it reaches the file.
+        preview.options.swap = true;
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        preview.keep_choices(&ctx, start);
+        preview.keep_choices(&ctx, start + std::time::Duration::from_secs(5));
+        preview.save_lens();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
     }
 
     #[test]

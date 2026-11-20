@@ -874,6 +874,10 @@ impl eframe::App for App {
         // The output window is a window of its own: it stays up while the
         // controls are minimized.
         self.viewer.show_output(ctx);
+        // The viewer's choices are written from here, a moment after the
+        // last change: its page is not drawn while the controls are hidden,
+        // minimized or on another page.
+        self.viewer.keep_choices(ctx, Instant::now());
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
         if self.hidden || minimized {
