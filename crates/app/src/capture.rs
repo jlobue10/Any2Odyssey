@@ -692,7 +692,7 @@ pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
 /// (mutter 51.1) sent 48 a second when asked for 60, and 60 when asked for
 /// 61, 65, 72 or 90; KDE Plasma (KWin 6.8.2) sent what it was asked for,
 /// 60, 61, 65, 72 or 90.
-const MOST_A_SECOND: u32 = 62;
+pub(crate) const MOST_A_SECOND: u32 = 62;
 
 /// The stream that is asked for: raw video in one of the pixel formats that
 /// are read here, at whatever rate it states for itself and with

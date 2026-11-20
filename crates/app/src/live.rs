@@ -28,8 +28,40 @@ use image::RgbaImage;
 use crate::capture::{fitted, Capture, CaptureState, Frames};
 use crate::weaver::{self, FrameSink};
 
-/// The least time from one picture to the next.
-const FRAME_TIME: Duration = Duration::from_micros(16_000);
+/// The time from one picture to the next that is kept to over any stretch
+/// of pictures ([`next_turn`]): 66 a second at the most.
+///
+/// It has to be shorter than the time a desktop leaves between the frames
+/// it sends, or the frames come faster than they are taken: each then waits
+/// longer than the one before, until one is left out and the wait begins
+/// again from nothing. A desktop is asked for `capture::MOST_A_SECOND` (62)
+/// frames at the most, and KDE Plasma spaces its frames by whole
+/// milliseconds, 16 for 62 a second, which is 62.5; 62 to 64 a second were
+/// counted arriving there. With 16 ms here the frames of a screen that
+/// sent 62.5 or 64 a second were 13 ms old in the middle when their
+/// pictures reached the output, where those of a screen of 60 were 5, and
+/// 24 to 69 of them were left out in 40 seconds.
+const FRAME_TIME: Duration = Duration::from_micros(15_000);
+
+/// When the turn of the render loop may begin that follows one which was
+/// due at `due` and began at `began`: [`FRAME_TIME`] after that one was
+/// due, so that no more pictures are made than that allows, however fast
+/// the frames come. A turn that began late is forgiven up to one
+/// `FRAME_TIME`: the turn after it may begin that much sooner after it.
+///
+/// The time used to be counted from each turn's own beginning. A turn that
+/// began late (the machine was busy for a moment, and the frame was there
+/// before the loop was) then kept the next one 16 ms away from itself, and
+/// with it from the frame that came 16.7 ms after the late one: that frame
+/// waited almost as long, and the lateness of one turn was worked off at
+/// 0.7 ms a frame. Measured with a screen of 60 frames a second and the
+/// program held for 60 ms once a second: the frames were back to their
+/// usual age from the eleventh and the seventeenth picture after a hold in
+/// two runs, and from the third and the fourth with this.
+fn next_turn(due: Instant, began: Instant) -> Instant {
+    let forgiven = began.checked_sub(FRAME_TIME).unwrap_or(began);
+    due.max(forgiven) + FRAME_TIME
+}
 
 /// What the user can change while the picture runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,15 +500,18 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     // Since when there has been no picture to make, and whether the page
     // has been told that the screen is still.
     let (mut resting, mut still) = (None::<Instant>, false);
-    let mut started = Instant::now();
+    // When the next turn may begin.
+    let mut due = Instant::now();
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
-        // Sixty pictures a second at most: a faster screen (the Odyssey
-        // runs at 120) would double the work for depth the eye cannot tell
-        // apart, on the processor and the GPU.
-        if let Some(early) = FRAME_TIME.checked_sub(started.elapsed()) {
+        // A little more than sixty pictures a second at most: a faster
+        // screen (the Odyssey runs at 165) would double the work for depth
+        // the eye cannot tell apart, on the processor and the GPU. A
+        // desktop is asked to send no more than that, and keeps to it; this
+        // is for a stream that does not (`next_turn`).
+        if let Some(early) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(early);
         }
-        started = Instant::now();
+        due = next_turn(due, Instant::now());
         // A still screen sends no frames. Its last one is looked at again a
         // few times a second all the same: the depth map of a picture that
         // has just appeared arrives after it, and the controls must take
@@ -1545,6 +1580,116 @@ mod tests {
             output: found.output,
         };
         assert!(!plan(Some(&shown), &found).submit);
+    }
+
+    /// The render loop's turns as far as their times go, on a clock of the
+    /// test's own: a frame arrives every `every` microseconds, a turn works
+    /// for `work`, and the turns named in `held` are kept from finishing
+    /// for that much longer. For each turn: when it took its frame, which
+    /// frame that was, and how long the frame had been waiting.
+    fn paced(
+        every: u64,
+        work: u64,
+        turns: usize,
+        held: &[(usize, u64)],
+    ) -> Vec<(Duration, u64, Duration)> {
+        let micros = Duration::from_micros;
+        let start = Instant::now();
+        let (mut now, mut due) = (start, start);
+        let mut seen = None;
+        let mut taken = Vec::new();
+        for turn in 0..turns {
+            // The loop sleeps until the turn is due...
+            now = now.max(due);
+            due = next_turn(due, now);
+            // ...and waits for a frame it has not seen.
+            let newest = (now - start).as_micros() as u64 / every;
+            let frame = if seen == Some(newest) {
+                newest + 1
+            } else {
+                newest
+            };
+            let arrived = start + micros(frame * every);
+            now = now.max(arrived);
+            seen = Some(frame);
+            taken.push((now - start, frame, now - arrived));
+            let more = held.iter().find(|(at, _)| *at == turn).map_or(0, |h| h.1);
+            now += micros(work + more);
+        }
+        taken
+    }
+
+    #[test]
+    fn a_frame_is_taken_as_it_arrives_and_a_late_turn_is_made_up_for_at_once() {
+        // A screen of 60 frames a second, a turn of 5 ms, and one turn that
+        // takes 20 ms longer (the machine was busy).
+        let taken = paced(16_667, 5_000, 40, &[(10, 20_000)]);
+        for (turn, (_, frame, waited)) in taken.iter().enumerate() {
+            match turn {
+                // The frame that came while the long turn was at work has
+                // waited (8.3 ms); the one after it is taken as it arrives
+                // again. Counted from each turn's own beginning, with
+                // 16 ms, the frames after it waited 7.7, 7.0, 6.3 ms and so
+                // on, twelve of them.
+                11 => assert!(*waited > Duration::from_millis(8), "{waited:?}"),
+                _ => assert_eq!(*waited, Duration::ZERO, "turn {turn}"),
+            }
+            // No frame is left out.
+            assert_eq!(*frame, turn as u64);
+        }
+        // A turn held for longer than a frame's time costs the frames that
+        // came meanwhile and nothing after them.
+        let taken = paced(16_667, 5_000, 40, &[(10, 50_000)]);
+        assert_eq!((taken[11].1, taken[12].1), (13, 14));
+        assert!(taken[12..].iter().all(|t| t.2 == Duration::ZERO));
+        // The fastest a desktop sends when it is asked for 62 at the most
+        // (KDE Plasma: 62 to 64 a second): every frame, none waiting.
+        for every in [16_129, 16_000, 15_625] {
+            let taken = paced(every, 5_000, 200, &[]);
+            for (turn, (_, frame, waited)) in taken.iter().enumerate() {
+                assert_eq!((*frame, *waited), (turn as u64, Duration::ZERO), "{every}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_that_keeps_to_no_limit_is_taken_at_the_loops_own_pace() {
+        // 165 frames a second, as a screen cast of the Odyssey would be
+        // from a source that is not a desktop.
+        let taken = paced(6_061, 5_000, 400, &[(100, 40_000), (200, 200_000)]);
+        let turns_in = |from: Duration, to: Duration| {
+            taken.iter().filter(|t| t.0 >= from && t.0 < to).count() as u32
+        };
+        // Over any second no more pictures than `FRAME_TIME` allows, and
+        // one more after each turn that was late.
+        let a_second = Duration::from_secs(1);
+        let most = (a_second.as_micros() / FRAME_TIME.as_micros()) as u32 + 1;
+        let end = taken.last().unwrap().0;
+        let mut from = Duration::ZERO;
+        while from + a_second <= end {
+            let count = turns_in(from, from + a_second);
+            assert!(count <= most + 2, "{count} pictures from {from:?}");
+            from += Duration::from_millis(100);
+        }
+        // Never two turns closer than a turn's own work, and after the one
+        // that makes up for a late turn the pace is `FRAME_TIME` again.
+        let gaps: Vec<Duration> = taken.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        let short = gaps.iter().filter(|gap| **gap < FRAME_TIME).count();
+        // (The turn that is forgiven comes after 5 ms, and the one after it
+        // 10 ms later: back on the pace of the turns before the late one.)
+        assert_eq!(short, 4, "{gaps:?}");
+        // Frames are left out, never taken twice or out of order.
+        assert!(taken.windows(2).all(|w| w[1].1 > w[0].1));
+    }
+
+    #[test]
+    fn the_loop_is_faster_than_the_frames_a_desktop_is_asked_for() {
+        // KDE Plasma spaces the frames it sends by whole milliseconds.
+        let desktop = Duration::from_millis(1000 / u64::from(crate::capture::MOST_A_SECOND));
+        assert!(
+            FRAME_TIME + Duration::from_micros(500) <= desktop,
+            "{FRAME_TIME:?} against {desktop:?}"
+        );
     }
 
     #[test]
