@@ -425,7 +425,7 @@ jobs:
           # usr/share/doc, so the installed system has none of them.
           mkdir pkgdocs
           bsdtar -xf packaging/arch/any2odyssey-*.pkg.tar.zst -C pkgdocs usr/share/doc/any2odyssey usr/share/licenses/any2odyssey
-          sh scripts/check-doc-links.sh pkgdocs/usr/share/doc/any2odyssey
+          sh scripts/check-doc-links.sh pkgdocs/usr/share/doc/any2odyssey pkgdocs
           any2odyssey-setup --help
           any2odyssey-setup --dry-run --no-deps --no-odyssey < /dev/null
           any2odyssey --help

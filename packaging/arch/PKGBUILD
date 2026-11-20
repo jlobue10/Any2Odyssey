@@ -103,7 +103,7 @@ package() {
     install -Dm644 "$repo/$file" "$pkgdir/usr/share/licenses/any2odyssey/$file"
     ln -s "../../licenses/any2odyssey/$file" "$pkgdir/usr/share/doc/any2odyssey/$file"
   done
-  sh "$repo/scripts/check-doc-links.sh" "$pkgdir/usr/share/doc/any2odyssey"
+  sh "$repo/scripts/check-doc-links.sh" "$pkgdir/usr/share/doc/any2odyssey" "$pkgdir"
   # The setup for the Odyssey 3D's lens, eye tracker and weaver under Wine (MIT). It is run by the user,
   # from here, and builds into their own data folder.
   install -d "$pkgdir/usr/share/any2odyssey"

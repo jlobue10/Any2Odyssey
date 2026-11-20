@@ -241,7 +241,9 @@ drop_the_old_setup() {
 # setup's files gone, or with a second copy of it inside the first, while a run said Done. A run racing
 # --uninstall left half an installation. The lock is on the prefix folder itself (no file of its own to
 # leave behind) and goes with this process however it ends. Without flock (util-linux), or in a folder
-# that has no locks, the run goes on unlocked, as before.
+# that has no locks, the run goes on unlocked, as before. A run that has waited five minutes for another
+# one, or whose wait fails, stops and changes nothing: up to 0.9.9 it went on beside the other run, which
+# is what the lock is there to prevent.
 lock_prefix() {
     [ -z "$DRY" ] && have flock && [ -d "$PREFIX" ] || return 0
     # (asked first: a redirection that fails on exec ends the whole script)

@@ -499,10 +499,23 @@ class InstallerTests(unittest.TestCase):
         (documents / "linked").symlink_to(self.root / "outside")
         doc = nested / "README.md"
         check = [*SHELL, str(LINUX.parents[1] / "scripts/check-doc-links.sh"), str(documents)]
-        for target, code in [("../asset", 0), ("../../outside", 1), ("../linked", 1)]:
+        for target, code in [("../asset", 0), ("../../outside", 1), ("../linked", 1), ("../absent", 1)]:
             doc.write_text(f"[asset]({target})")
             result = subprocess.run(check, capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, code, result.stderr)
+            self.assertEqual(result.returncode, code, f"{target}: {result.stderr}")
+        # The Arch package's license files are links out of the documents' folder into another folder of
+        # the package: the package's folder is named then, and what leaves that one is still refused.
+        for target, package, code in [("../linked", self.root, 0), ("../../outside", self.root, 0),
+                                      ("../absent", self.root, 1), ("../linked", documents, 1)]:
+            doc.write_text(f"[asset]({target})")
+            result = subprocess.run([*check, str(package)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, code, f"{target} in {package}: {result.stderr}")
+        # A link to a link that leads nowhere is a link that leads nowhere.
+        (documents / "linked").unlink()
+        (documents / "linked").symlink_to(self.root / "absent")
+        doc.write_text("[asset](../linked)")
+        result = subprocess.run([*check, str(self.root)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
 
     def test_uninstall_refreshes_the_caches_the_installation_wrote(self):
         # The released 0.9.1 archive left share/applications/mimeinfo.cache naming any2odyssey.desktop
@@ -783,15 +796,42 @@ class InstallerTests(unittest.TestCase):
         (self.archive / "any2odyssey").write_bytes(b"updated program")
         tools = self.root / "tools"
         tools.mkdir()
+        called = self.root / "called"
         for name, result in [("flock", 1), ("timeout", 124)]:
             tool = tools / name
-            tool.write_text(f"#!/bin/sh\nexit {result}\n")
+            tool.write_text(f'#!/bin/sh\n: >"{called}"\nexit {result}\n')
             tool.chmod(0o755)
-        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
-        for result in [self.install(prefix), self.run_installer("--prefix", str(prefix), "--uninstall")]:
+        path = self.env["PATH"]
+        self.env["PATH"] = f"{tools}{os.pathsep}{path}"
+        result = self.install(prefix)
+        if not called.exists():
+            # BusyBox's shell can run its own flock and timeout without looking on the PATH (Arch's does):
+            # nothing was busy for those, and the installation simply succeeded.
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in flock, which the test cannot stand in for")
+        for result in [result, self.run_installer("--prefix", str(prefix), "--uninstall")]:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("busy lock", result.stderr)
             self.assertEqual(program.read_bytes(), original)
+        # The same with the real flock and a lock that is held, as another run holds it: only the five
+        # minutes are stood in for.
+        (tools / "flock").unlink()
+        if shutil.which("flock", path=path) is None:
+            return
+        held = os.open(prefix, os.O_RDONLY)
+        try:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            for result in [self.install(prefix), self.run_installer("--prefix", str(prefix), "--uninstall")]:
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("waiting for it to finish", result.stdout)
+                self.assertIn("busy lock", result.stderr)
+                self.assertEqual(program.read_bytes(), original)
+        finally:
+            os.close(held)
+        # And with nothing in its way again, the run that was refused does its work.
+        result = self.install(prefix)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(program.read_bytes(), b"updated program")
 
     def second_run_while_the_first_copies(self, prefix, *second):
         """Update the installation in `prefix` and start `install.sh <second>` while that run copies the Wine setup.
