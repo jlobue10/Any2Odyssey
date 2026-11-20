@@ -10,6 +10,7 @@ Reads the board's USB descriptors from sysfs (nothing is sent to the board) and 
 usage: mkboard.py <tty device, e.g. /dev/odyssey-lens> <board.h> <device.reg>
 """
 import os, sys
+from pathlib import Path
 
 VID, PID = "354b", "0116"
 PREFIX = "6&a2f0e15&0"            # ParentIdPrefix: any value; children are named "<prefix>&0000"
@@ -25,7 +26,7 @@ def usb_device(tty):
         path = os.path.dirname(path)
     sys.exit(f"{tty} is not a USB serial device")
 
-def read(dev, name): return open(os.path.join(dev, name)).read().strip()
+def read(dev, name): return (Path(dev) / name).read_text().strip()
 def multi_sz(*items): return ",".join("%02x" % b for b in "".join(i + "\0" for i in items).encode() + b"\0")
 def esc(s): return s.replace("\\", "\\\\")
 def c_bytes(b): return "{" + ",".join(str(x) for x in b) + "}"
@@ -34,8 +35,14 @@ def main(tty, header, reg):
     dev = usb_device(tty)
     if (read(dev, "idVendor"), read(dev, "idProduct")) != (VID, PID):
         sys.exit(f"{tty} is not the Odyssey 3D lens board ({VID}:{PID})")
-    raw = open(os.path.join(dev, "descriptors"), "rb").read()
-    device, config = raw[:18], raw[18:18 + int.from_bytes(raw[20:22], "little")]
+    raw = (Path(dev) / "descriptors").read_bytes()
+    # The USB shim consumes an 18-byte device descriptor and reads fields
+    # from the configuration header. Validate both before writing either file.
+    total = int.from_bytes(raw[20:22], "little")
+    if (raw[:2] != bytes([18, 1]) or raw[18:20] != bytes([9, 2])
+            or total < 9 or len(raw) < 18 + total):
+        sys.exit("incomplete or invalid lens board USB descriptors")
+    device, config = raw[:18], raw[18:18 + total]
     serial = read(dev, "serial")
     strings = [read(dev, "manufacturer"), read(dev, "product"), serial]
     # They go into C string literals and into the registry file, the serial number into a key's name: nothing
@@ -104,6 +111,6 @@ def main(tty, header, reg):
         f"[{classes}\\{COMPORT}\\{link}]", f'"DeviceInstance"="{esc(child)}"', "",
         f"[{classes}\\{COMPORT}\\{link}\\#]", f'"SymbolicLink"="\\\\\\\\?\\\\{child.replace(chr(92), "#")}#{COMPORT}"', "",
         f"[{classes}\\{COMPORT}\\{link}\\#\\Control]", '"Linked"=dword:00000001', ""]
-    open(reg, "w").write("\r\n".join(lines))
+    Path(reg).write_text("\r\n".join(lines))
 
 main(*sys.argv[1:4])
