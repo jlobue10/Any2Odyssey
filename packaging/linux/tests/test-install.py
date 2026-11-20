@@ -490,6 +490,20 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_removed(prefix)
 
+    def test_document_links_must_resolve_inside_the_package(self):
+        documents = self.root / "docs"
+        nested = documents / "nested"
+        nested.mkdir(parents=True)
+        (documents / "asset").touch()
+        (self.root / "outside").touch()
+        (documents / "linked").symlink_to(self.root / "outside")
+        doc = nested / "README.md"
+        check = [*SHELL, str(LINUX.parents[1] / "scripts/check-doc-links.sh"), str(documents)]
+        for target, code in [("../asset", 0), ("../../outside", 1), ("../linked", 1)]:
+            doc.write_text(f"[asset]({target})")
+            result = subprocess.run(check, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, code, result.stderr)
+
     def test_uninstall_refreshes_the_caches_the_installation_wrote(self):
         # The released 0.9.1 archive left share/applications/mimeinfo.cache naming any2odyssey.desktop
         # as the program for PNG, JPEG and BMP files after the entry itself was removed.
@@ -760,6 +774,24 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer("--prefix", str(prefix), "--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(list((prefix / "bin").iterdir()), [])
+
+    def test_failed_wait_on_busy_prefix_stops_install_and_uninstall(self):
+        prefix = self.root / "prefix"
+        self.assertEqual(self.install(prefix).returncode, 0)
+        program = prefix / "bin/any2odyssey"
+        original = program.read_bytes()
+        (self.archive / "any2odyssey").write_bytes(b"updated program")
+        tools = self.root / "tools"
+        tools.mkdir()
+        for name, result in [("flock", 1), ("timeout", 124)]:
+            tool = tools / name
+            tool.write_text(f"#!/bin/sh\nexit {result}\n")
+            tool.chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        for result in [self.install(prefix), self.run_installer("--prefix", str(prefix), "--uninstall")]:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("busy lock", result.stderr)
+            self.assertEqual(program.read_bytes(), original)
 
     def second_run_while_the_first_copies(self, prefix, *second):
         """Update the installation in `prefix` and start `install.sh <second>` while that run copies the Wine setup.
