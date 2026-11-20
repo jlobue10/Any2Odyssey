@@ -882,6 +882,24 @@ elif [ ! -e "$TEST_ROOT/dev/odyssey-lens" ] && [ -z "$DRY" ]; then
 elif ask "Prepare it now from $WIN (copies about 1 GB of your own installation into $DATA/wine-lens)?"; then
     run "$WINE_LENS/setup.sh" "$WIN" || warn "the setup did not finish; see its message above and docs/LENS-SWITCH.md"
 fi
+# A Wine side that is there runs its own copies of the setup's scripts (setup.sh puts them into the data
+# folder), and an update of the program replaces the setup's files only. Where this run did not make the
+# Wine side again (no Windows drive mounted, the monitor asleep, the question declined, --no-odyssey), it went
+# on with the scripts of the version that had made it, and nothing said so: what 0.9.8 changed in the start
+# of Leia's programs reached nobody who did not run the setup once more. It is said now, here and in what
+# any2odyssey-setup prints.
+older_wine_side() {
+    [ -f "$DATA/wine-lens/tools/start-stack.sh" ] || return 1
+    for script in any2odyssey-lens-helper any2odyssey-weaver tools/start-stack.sh tools/ensure-stack.sh \
+        tools/tracking.sh tools/noxon.sh tools/mkedid.py tools/kwin-overlay.js; do
+        [ -f "$WINE_LENS/$script" ] || continue
+        cmp -s "$WINE_LENS/$script" "$DATA/wine-lens/$script" || return 0
+    done
+    return 1
+}
+if [ -z "$DRY" ] && older_wine_side; then
+    warn "the Odyssey 3D's Wine side in $DATA/wine-lens was made by another version of Any2Odyssey and still runs that version's scripts; what this version changed in them does not apply until it is made again. With the Windows drive mounted and the monitor awake, run this script again, or: $(quoted "$WINE_LENS/setup.sh") /path/to/that/drive"
+fi
 
 say ""
 # The last line does not say Done over a program that cannot start: the two libraries it is linked with or

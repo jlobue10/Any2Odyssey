@@ -74,7 +74,9 @@ What the installer sets up, if you would rather do it by hand
   partition must be unlocked or have BitLocker suspended first. The drive is needed only during set-up:
   about 1 GB is copied to your data folder. Without a Windows installation this part is not available;
   everything else works.
-  Also needed: Wine, mingw-w64-gcc, clang, a C compiler, Python 3, xrandr, rsync and pgrep (Debian and
+  Also needed: Wine 11.6 or newer (the set-up refuses an older one; Debian's and Ubuntu's own Wine is
+  older, and WineHQ's wine-devel or wine-staging packages are new enough), mingw-w64-gcc, clang, a C
+  compiler, Python 3, xrandr, rsync and pgrep (Debian and
   Ubuntu: wine gcc-mingw-w64-x86-64 clang gcc python3 x11-xserver-utils rsync procps; Fedora: wine
   mingw64-gcc clang gcc python3 xrandr rsync procps-ng; openSUSE: wine mingw64-cross-gcc clang gcc python3
   xrandr rsync procps). Then, as docs/LENS-SWITCH.md explains:

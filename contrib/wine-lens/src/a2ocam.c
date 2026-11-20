@@ -23,6 +23,11 @@
 #endif
 
 #ifndef A2O_CAMERA_TEST
+/* The headers of mingw-w64 before version 9 take Windows XP as the target unless told otherwise (Ubuntu
+ * 22.04 has 8.0), and then leave out two of the media type names used below. Later versions take Windows 10, which this says for all of them. */
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #define COBJMACROS
 #include <winsock2.h>
 #include <windows.h>
@@ -36,6 +41,16 @@
 #include <strmif.h>
 
 #include "sha256.h"
+
+/* (and these two the headers of mingw-w64 8.0 do not have at all; the camera stand-in did not compile there) */
+#if defined(__MINGW64_VERSION_MAJOR) && __MINGW64_VERSION_MAJOR < 10
+#ifndef MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED
+#define MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED ((HRESULT)0xc00d3ea2)
+#endif
+#ifndef MF_SOURCE_READER_CURRENT_TYPE_INDEX
+#define MF_SOURCE_READER_CURRENT_TYPE_INDEX 0xffffffff
+#endif
+#endif
 
 #ifndef E_PROP_ID_UNSUPPORTED
 #define E_PROP_ID_UNSUPPORTED ((HRESULT)0x80070490)

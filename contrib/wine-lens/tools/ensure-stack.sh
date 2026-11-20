@@ -16,9 +16,17 @@ STAMP=$T/stack.started
 # (or crashed) leaves the prefix's programs behind: they stay in the list of processes, Leia's service and
 # session among them, and can do nothing any more. Found by name alone they passed for a running stack, at
 # every request, until the next login. (Some distributions call the server wineserver64.)
+# Nor does a server count whose own program file has been replaced or removed since it started: that is what
+# an upgrade of Wine leaves of a stack that was up at the time (a package manager puts the new file in place
+# of the old one, and the kernel then names the running one "... (deleted)"). The stack went on running, but
+# every program started after the upgrade is the new Wine's and is turned away by the old server ("version
+# mismatch"): the lens helper ended without a word and eye tracking did not start, at every request, until
+# the next login. Such a stack is started again, under the Wine that is installed now.
 server_runs() {
     for pid in $(pgrep -u "$(id -u)" wineserver 2>/dev/null); do
-        tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q -x -F "WINEPREFIX=$WINEPREFIX" && return 0
+        tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q -x -F "WINEPREFIX=$WINEPREFIX" || continue
+        case $(readlink "/proc/$pid/exe" 2>/dev/null) in *' (deleted)') continue ;; esac
+        return 0
     done
     return 1
 }
@@ -41,8 +49,15 @@ if ! stack_ok; then
     case $old in '' | *[!0-9]*) ;; *) grep -q -a -e 'noxon\.sh' -e 'any2odyssey-noxon' "/proc/$old/cmdline" 2>/dev/null && kill "$old" 2>/dev/null ;; esac
     setsid "$T/tools/noxon.sh" </dev/null >/dev/null 2>&1 9>&- &
     echo $! >"$NOXON"
-    "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- ||
-        { echo "error: could not start Leia's service (see $T/edid.pairs)"; exit 1; }
+    "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- || {
+        # (start-stack.sh leaves its reason there when it has one of its own)
+        if [ -s "$T/stack.error" ]; then
+            echo "error: $(cat "$T/stack.error")"
+        else
+            echo "error: could not start Leia's service (see $T/edid.pairs)"
+        fi
+        exit 1
+    }
     i=0
     until grep -a -q 'responded to initial disable' "$(ls -t "$LOGDIR"/*.txt 2>/dev/null | head -1)" 2>/dev/null; do
         i=$((i + 1))

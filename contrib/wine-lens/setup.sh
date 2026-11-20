@@ -63,6 +63,25 @@ fi
 for tool in wine wineserver $CC x86_64-w64-mingw32-objdump python3 xrandr rsync stty flock setsid; do
     command -v "$tool" >/dev/null || die "'$tool' is needed (Arch: wine mingw-w64-gcc python xorg-xrandr rsync; Debian and Ubuntu: wine gcc-mingw-w64-x86-64 python3 x11-xserver-utils rsync; Fedora: wine mingw64-gcc python3 xrandr rsync; openSUSE: wine mingw64-cross-gcc python3 xrandr rsync)"
 done
+# The cfgmgr32 stand-in (src/cfgshim.c) leaves it to Wine's own cfgmgr32 to find a device by its name and to
+# name the device it is given, and links parent and child itself. Wine does both since 11.6; before that
+# its functions answer without doing the work (or are not there at all), Leia's service cannot walk from the
+# lens board to its serial port, and the set-up was made without a complaint: every request then ended after
+# 80 seconds with "Leia's service did not get the lens board ready". Debian 12 and 13 and Ubuntu up to 26.04
+# have Wine 8.0 to 10.0. A version that cannot be read (a build with a name of its own) is let through.
+wine_too_old() { # <what "wine --version" says>
+    case $1 in wine-[0-9]*.[0-9]*) ;; *) return 1 ;; esac
+    number=${1#wine-}
+    major=${number%%.*}
+    minor=${number#*.}
+    minor=${minor%%[!0-9]*}
+    case $major in *[!0-9]*) return 1 ;; esac
+    [ "$major" -lt 11 ] || { [ "$major" -eq 11 ] && [ "${minor:-0}" -lt 6 ]; }
+}
+WINE_IS=$(wine --version 2>/dev/null | head -n 1) || WINE_IS=
+if wine_too_old "$WINE_IS"; then
+    die "this Wine is too old for the Odyssey 3D set-up: $WINE_IS, and Wine 11.6 or newer is needed (older ones cannot tell Leia's service where the lens board is). Where the distribution's own Wine is older, WineHQ's packages (wine-devel or wine-staging) are new enough."
+fi
 # The tools tell whether Leia's service runs by looking among this user's own processes. BusyBox's pgrep
 # cannot (it has no -u) and fails instead: every start of the lens helper would restart the service.
 pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
@@ -96,9 +115,26 @@ case $BRIDGE_PID in '' | *[!0-9]*) ;; *)
 esac
 
 echo "setup: Wine prefix in $WINEPREFIX"
+# A prefix with no finished set-up behind it (this script puts its tools into place last) is what a first run
+# left that did not get through: Ctrl+C while Wine made the prefix, or a disk that filled up. Wine does not
+# complete such a prefix, and with it every later run ended as the first had, some of them without a word
+# (after a full disk: exit 53 in a fifth of a second, at every run). It is made anew.
+if [ -d "$WINEPREFIX" ] && [ ! -f "$T/tools/start-stack.sh" ]; then rm -rf "$WINEPREFIX"; fi
 if [ ! -f "$WINEPREFIX/system.reg" ]; then
-    setsid wineboot -i >/dev/null 2>&1 </dev/null
+    setsid wineboot -i >/dev/null 2>&1 </dev/null ||
+        die "Wine could not make the prefix $WINEPREFIX (wineboot ended with $?). It needs about 2 GB there: is the disk full?"
     wineserver -w
+else
+    # A prefix from an earlier set-up, and maybe from an earlier Wine: Wine updates it at the first program
+    # run in it, and has to get past the stand-ins that are in it. With a prefix set up under Wine 11.17 and
+    # Wine then 11.22 that update never ended while the cfgmgr32 stand-in was in its way: this script stopped
+    # two minutes later at its first program below, without a word, and left a prefix in which nothing
+    # started. So Wine updates the prefix here, by a program that does nothing, with its own five libraries
+    # in place of the stand-ins for that one run (tools/start-stack.sh does the same after an upgrade).
+    WINEDLLOVERRIDES="cfgmgr32,dxva2,wtsapi32,mf,mfreadwrite=b;$WINEDLLOVERRIDES" \
+        setsid timeout 300 wine cmd /c exit >/dev/null 2>&1 </dev/null ||
+        die "Wine did not get the prefix $WINEPREFIX ready (it updates a prefix that an earlier Wine made). Moved out of the way, a new one is made by this script: mv '$WINEPREFIX' '$WINEPREFIX.old'"
+    wineserver -k 2>/dev/null || true
 fi
 
 echo "setup: copying Leia's runtime from $WIN"
