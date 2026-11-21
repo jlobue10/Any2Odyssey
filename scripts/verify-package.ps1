@@ -1,5 +1,5 @@
 # Open the ZIP that package.ps1 wrote and check it the way a user's first step would:
-# the entry points exist and the installer's read-only preflight accepts the extracted folder.
+# the entry points exist and the installer's own check of its package accepts the extracted folder.
 # Changes nothing outside a temporary folder. Run after package.ps1.
 [CmdletBinding()]
 param([string]$Zip)
@@ -17,9 +17,11 @@ try{
  foreach($name in @('Install.cmd','Install-GUI.cmd','Install-Launcher.ps1','InstallSupport.ps1','install.ps1','README.md','CHANGELOG.md','installer\README.md')){
   if(-not (Test-Path -LiteralPath (Join-Path $out $name) -PathType Leaf)){throw "The package has no $name."}
  }
- # -CheckOnly verifies every file the installer copies, VERSION and the executable's version, and
- # returns before any change; -ControlsOnly keeps Samsung's engine out of the check.
- & (Join-Path $out 'install.ps1') -CheckOnly -ControlsOnly
+ # -PackageOnly verifies every file the installer copies, VERSION and the executable's version, and
+ # returns before the installer looks at this PC. The preflight (-CheckOnly -ControlsOnly) was used
+ # here before: it refuses on a PC with the full converter or a newer Any2Odyssey installed, and a
+ # correct package was then reported as failing.
+ & (Join-Path $out 'install.ps1') -PackageOnly
  Write-Host "Package verified: $Zip"
 }finally{
  if(Test-Path -LiteralPath $out){Remove-Item -LiteralPath $out -Recurse -Force}

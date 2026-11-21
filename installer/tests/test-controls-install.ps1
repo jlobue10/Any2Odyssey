@@ -75,6 +75,10 @@ try{
  Assert ((Get-ItemProperty -LiteralPath $registration).DisplayName -eq 'Any2Odyssey') 'Full setup clears the controls-only registration label'
  Assert ((Get-FileHash -LiteralPath (Join-Path $data 'settings.json')).Hash -eq $settingsHash) 'Promotion preserves user preferences'
  $failed=$false;try{& $installer -ControlsOnly}catch{$failed=$_.Exception.Message.Contains('full installation')};Assert $failed 'Controls-only setup refuses to split an existing full installation'
+ # The package check (scripts/verify-package.ps1) is about the package alone: what is installed on
+ # the PC, here a full installation that the controls-only preflight refuses, plays no part in it.
+ & $installer -PackageOnly
+ Assert $true 'The package check passes whatever is installed on the PC'
  $passed=$true
 }finally{
  if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}
