@@ -430,6 +430,57 @@ class EnsureStackTests(StackTests):
         self.assertEqual(self.starts(), 0)
         self.assertEqual(self.starts(), 0)
 
+    def request(self):
+        return subprocess.run([*SHELL, str(self.root / "tools/ensure-stack.sh")], env=self.environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+
+    def no_waiting(self):
+        """The script's pauses take no time (not under BusyBox's shell, which has a sleep of its own)."""
+        (self.root / "bin/sleep").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "bin/sleep").chmod(0o755)
+        self.environment["PATH"] = f"{self.root}/bin{os.pathsep}{os.environ['PATH']}"
+
+    def test_a_start_that_did_not_end_well_is_not_taken_for_the_one_before_it(self):
+        # The stack had been started once, and the note of that start stayed while it was started again. A
+        # restart that failed left Leia's programs and Wine's server up, with a board the service never got,
+        # and that note: the next request found a running stack at once and started nothing.
+        start = self.root / "tools/start-stack.sh"
+        works = start.read_text()
+        self.assertEqual(self.starts(), 1)  # (no server of Wine: what is there was left behind)
+        self.assertTrue((self.root / "stack.started").exists())
+        start.write_text('#!/bin/sh\necho started >>"$ROOT/starts"\nexit 1\n')
+        result = self.request()
+        self.assertEqual((result.returncode, result.stdout),
+                         (1, f"error: could not start Leia's service (see {self.root}/edid.pairs)\n"))
+        # As far as that start got, Wine's server and Leia's programs are up.
+        self.stays("wineserver")
+        start.write_text(works)
+        (self.root / "starts").unlink()
+        self.assertEqual(self.starts(), 1, "a start that failed passed for the one before it")
+        self.assertEqual(self.starts(), 0)
+
+    def test_a_board_that_did_not_get_ready_is_not_taken_for_the_one_before_it(self):
+        self.no_waiting()
+        self.stays("wineserver")
+        self.assertEqual(self.starts(), 0)
+        # The board has been away and is back (a monitor standby): the start goes through, and Leia's
+        # service never says that it has the board.
+        log = self.root / "prefix/drive_c/ProgramData/Simulated Reality/Server/Log/service.txt"
+        said = log.read_text()
+        log.unlink()
+        later = time.time() + 5
+        os.utime(self.root / "board", (later, later))
+        result = self.request()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("error: Leia's service did not get the lens board ready", result.stdout)
+        # The board is as old as it was when the stack was last started well, or older (udev made the
+        # link anew at the same second; a clock that was set back).
+        os.utime(self.root / "board", (0, 0))
+        (self.root / "starts").unlink()
+        log.write_text(said)
+        self.assertEqual(self.starts(), 1, "a start without the board passed for the one before it")
+        self.assertEqual(self.starts(), 0)
+
     def test_a_start_that_ends_with_a_reason_of_its_own_is_reported_with_it(self):
         def asked(body):
             (self.root / "tools/start-stack.sh").write_text(f"#!/bin/sh\n{body}\n")

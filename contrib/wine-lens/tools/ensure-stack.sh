@@ -49,6 +49,10 @@ if ! stack_ok; then
     case $old in '' | *[!0-9]*) ;; *) grep -q -a -e 'noxon\.sh' -e 'any2odyssey-noxon' "/proc/$old/cmdline" 2>/dev/null && kill "$old" 2>/dev/null ;; esac
     setsid "$T/tools/noxon.sh" </dev/null >/dev/null 2>&1 9>&- &
     echo $! >"$NOXON"
+    # The note of an earlier start goes before this one begins. It used to stay until this start had ended
+    # well: a start that failed, or a caller ended while it waited for the board below, left Leia's programs
+    # and Wine's server up with the old note, and the next request took that for a stack that had the board.
+    rm -f "$STAMP"
     "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- || {
         # (start-stack.sh leaves its reason there when it has one of its own)
         if [ -s "$T/stack.error" ]; then
