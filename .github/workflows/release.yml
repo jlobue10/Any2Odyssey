@@ -285,6 +285,8 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-noxon.py
       - name: Monitor registry file tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-mkedid.py
+      - name: Lens board file tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-mkboard.py
       - name: Weaver helper leaving tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
       - name: Eye tracking stop tests (no hardware)
