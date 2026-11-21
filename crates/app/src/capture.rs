@@ -366,7 +366,9 @@ fn run(
     wake: &(impl Fn() + Send + 'static),
 ) -> Result<(), String> {
     let runtime = portal_runtime()?;
-    let portal = async {
+    // The desktop is asked, with the token of the screen chosen last time
+    // or without one.
+    let ask = |restore_token: Option<String>| async move {
         let proxy = Screencast::new().await?;
         let session = proxy.create_session(Default::default()).await?;
         // Listened for from before the desktop is asked to start (see
@@ -426,6 +428,7 @@ fn run(
             }
         }
     };
+    let portal = asked_again_without(restore_token, ask);
     let (session, node, token, fd) = runtime.block_on(portal).map_err(|refused| refused.said())?;
     *lock(&shared.token) = token;
     // The dialog is over: the page stops asking for a screen to be chosen.
@@ -461,6 +464,55 @@ fn wished_cursor(
             Some(CursorMode::Embedded)
         }
         _ => None,
+    }
+}
+
+/// The remembered token as it may be handed to the portal: `None` for one
+/// that holds what no token holds (a zero byte, a line end or another
+/// control character), and for none at all.
+///
+/// The token comes from a file, and after a power cut a file can hold zero
+/// bytes where its text was. A string with a zero byte in it is not allowed
+/// on the session bus, and the bus ends the connection of whoever sends
+/// one. The portal client keeps one connection for the life of the program:
+/// with 22 zero bytes in the file (KDE Plasma, xdg-desktop-portal 1.22) the
+/// first Start read "Portal request didn't receive a response" and every
+/// Start after it "the session's D-Bus cannot be reached", and a program
+/// started anew did the same, the file being as it was. Asked without a
+/// token the desktop shows its dialog, and the token it then gives takes
+/// the file's place.
+fn sendable(token: Option<String>) -> Option<String> {
+    token.filter(|token| !token.is_empty() && !token.chars().any(char::is_control))
+}
+
+/// What `ask` comes to with the remembered `token`, where that is one that
+/// can be sent ([`sendable`]); and where the desktop answers that what it
+/// was asked with is not valid, what it comes to when asked once more
+/// without the token.
+///
+/// The portal looks at the form of a restore token before anything else and
+/// refuses the request for one it does not take for a token:
+/// "org.freedesktop.portal.Error.InvalidArgument: Restore token is not
+/// valid". xdg-desktop-portal 1.22 says so of two words, of a word with a
+/// letter that is not ASCII, and of 22 letters with a hyphen among them;
+/// which form it wants is the portal's own matter, and the file may hold
+/// what another version wrote, or anything else. The page then read "Live
+/// capture ended: the desktop's screen-cast portal refused: ..." at every
+/// Start, the file stayed as it was, and nothing said that "Choose another
+/// screen" was the way out. Asked without a token the desktop shows its
+/// dialog, as it does for a token of the right form that it does not know.
+async fn asked_again_without<T, Asked>(
+    token: Option<String>,
+    ask: impl Fn(Option<String>) -> Asked,
+) -> Result<T, Refused>
+where
+    Asked: std::future::Future<Output = Result<T, Refused>>,
+{
+    let token = sendable(token);
+    let remembered = token.is_some();
+    match ask(token).await {
+        Err(refused) if remembered && refused.of_what_was_asked() => ask(None).await,
+        answered => answered,
     }
 }
 
@@ -506,6 +558,16 @@ const CLOSED_UNSTARTED: &str = "the desktop gave up the screen cast before it ha
     without an answer; its own log may say why";
 
 impl Refused {
+    /// The portal turned the request down for what it was asked with (it
+    /// calls one of the request's values invalid), not for anything the
+    /// desktop cannot do or the user did not want.
+    fn of_what_was_asked(&self) -> bool {
+        matches!(
+            self,
+            Refused::Portal(ashpd::Error::Portal(ashpd::PortalError::InvalidArgument(_)))
+        )
+    }
+
     /// The reason as the page says it, after "Live capture ended: ".
     ///
     /// All but a cancelled dialog used to be the portal client's own words
@@ -1655,6 +1717,123 @@ mod tests {
         assert_eq!(wished_cursor(true, Some(cannot)), None);
         assert_eq!(wished_cursor(true, Some(BitFlags::empty())), None);
         assert_eq!(wished_cursor(true, None), None);
+    }
+
+    #[test]
+    fn a_token_that_cannot_be_one_is_not_handed_to_the_portal() {
+        let handed = |token: &str| sendable(Some(token.to_owned()));
+        // What portals give: a word (xdg-desktop-portal 1.22), a UUID.
+        for token in [
+            "OQktWWv1O2aZUaxNzjVHdg",
+            "TU4MM6_f32JA__rkXhqrgw",
+            "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        ] {
+            assert_eq!(handed(token).as_deref(), Some(token));
+        }
+        // A file of zero bytes, as a power cut can leave one, and text with
+        // a zero byte in it: sent to the portal, each cost the program its
+        // connection to the session bus, for good.
+        let zeros = "\0".repeat(22);
+        for token in [zeros.as_str(), "\0", "abc\0def", "OQktWWv1O2aZUaxNzjVHd\0"] {
+            assert_eq!(handed(token), None, "{token:?}");
+        }
+        // Nothing else that no token holds either, and no empty one.
+        for token in ["abc\ndef", "abc\u{1}def", "abc\u{7f}", "a\tb", "\u{85}", ""] {
+            assert_eq!(handed(token), None, "{token:?}");
+        }
+        assert_eq!(sendable(None), None);
+        // What is text is the portal's to judge (and is asked for again
+        // without it where the portal calls it invalid).
+        for token in ["not-a-token-at-all", "two words", "grün-日本"] {
+            assert_eq!(handed(token).as_deref(), Some(token));
+        }
+    }
+
+    #[test]
+    fn a_token_the_portal_calls_invalid_is_asked_for_again_without_it() {
+        type Answer = Result<&'static str, Refused>;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        // What xdg-desktop-portal 1.22 answers to a restore token that is
+        // not one by its form.
+        let invalid = |what: &str| {
+            Refused::Portal(ashpd::Error::Portal(ashpd::PortalError::InvalidArgument(
+                what.to_owned(),
+            )))
+        };
+        let not_valid = || invalid("Restore token is not valid");
+        // The desktop's answers in turn, and the tokens it was asked with.
+        let outcome = |token: Option<&str>, answers: Vec<Answer>| {
+            let answers = std::cell::RefCell::new(std::collections::VecDeque::from(answers));
+            let asked = std::cell::RefCell::new(Vec::new());
+            let came = runtime.block_on(asked_again_without(token.map(str::to_owned), |token| {
+                asked.borrow_mut().push(token);
+                let answer = answers.borrow_mut().pop_front().expect("asked once more");
+                async move { answer }
+            }));
+            assert!(answers.borrow().is_empty(), "an answer was not asked for");
+            (came.map_err(|refused| refused.said()), asked.into_inner())
+        };
+        let token = || Some("not-a-token".to_owned());
+        // The token in the file is none to the portal: the page read "Live
+        // capture ended: the desktop's screen-cast portal refused: ..." at
+        // every Start. The desktop is asked again and shows its dialog.
+        assert_eq!(
+            outcome(Some("not-a-token"), vec![Err(not_valid()), Ok("a screen")]),
+            (Ok("a screen"), vec![token(), None])
+        );
+        // Once: what the second asking comes to is what the page says.
+        let (came, asked) = outcome(
+            Some("not-a-token"),
+            vec![
+                Err(not_valid()),
+                Err(Refused::Portal(ashpd::Error::Response(
+                    ashpd::desktop::ResponseError::Cancelled,
+                ))),
+            ],
+        );
+        assert_eq!(came, Err("no screen was chosen".to_owned()));
+        assert_eq!(asked, vec![token(), None]);
+        let (came, asked) = outcome(
+            Some("not-a-token"),
+            vec![Err(not_valid()), Err(invalid("Unavailable cursor mode 2"))],
+        );
+        assert!(came.is_err_and(|said| said.ends_with("Unavailable cursor mode 2")));
+        assert_eq!(asked.len(), 2);
+        // A token that is taken, and every other refusal: asked once.
+        assert_eq!(
+            outcome(Some("a-token"), vec![Ok("a screen")]),
+            (Ok("a screen"), vec![Some("a-token".to_owned())])
+        );
+        for refused in [
+            Refused::Closed,
+            Refused::Portal(ashpd::Error::Response(
+                ashpd::desktop::ResponseError::Cancelled,
+            )),
+            Refused::Portal(ashpd::Error::Response(ashpd::desktop::ResponseError::Other)),
+            Refused::Portal(ashpd::Error::Portal(ashpd::PortalError::NotAllowed(
+                "no".to_owned(),
+            ))),
+            Refused::Portal(ashpd::Error::NoResponse),
+        ] {
+            assert!(!refused.of_what_was_asked(), "{refused:?}");
+            let (came, asked) = outcome(Some("a-token"), vec![Err(refused)]);
+            assert!(came.is_err());
+            assert_eq!(asked.len(), 1);
+        }
+        // A token that cannot be sent is not: the desktop is asked without
+        // one, and once.
+        for unsendable in ["abc\0def", "\0\0\0\0", ""] {
+            assert_eq!(
+                outcome(Some(unsendable), vec![Ok("a screen")]),
+                (Ok("a screen"), vec![None])
+            );
+        }
+        // Without a token there is nothing to leave out.
+        let (came, asked) = outcome(None, vec![Err(not_valid())]);
+        assert!(came.is_err());
+        assert_eq!(asked, vec![None]);
     }
 
     /// What a session's "closed" signals are in a test: each poll takes the
