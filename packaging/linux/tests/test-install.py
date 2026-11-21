@@ -6,6 +6,7 @@ The installed fixture only records its argv; it never opens an image or a UI.
 """
 
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import pty
@@ -314,25 +315,77 @@ class InstallerTests(unittest.TestCase):
         self.assertIsNone(self.setup_ran_with())
 
     def test_stand_in_root_never_reaches_a_command_run_as_root(self):
-        # The variable comes from the environment: what it names must not be handed to sudo.
+        # The variable comes from the environment: what it names must not be handed to sudo, and udevadm
+        # acts on the real system whatever stands in for /. The udev step and its removal run all the
+        # same, on the stand-in's rules folder. (Up to 1.0.0 that folder was the real /etc/udev/rules.d in
+        # a test run too and the step was switched off: this test looked at a file the script never came
+        # near, and its removal half ran only on a machine that has the real rules installed.)
         tools = self.root / "tools"
         tools.mkdir()
-        called = self.root / "sudo-argv"
-        (tools / "sudo").write_text(f'#!/bin/sh\necho "$*" >> "{called}"\n')
-        (tools / "sudo").chmod(0o755)
+        called = self.root / "root-argv"
+        for name in ("sudo", "udevadm"):
+            (tools / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{called}"\n')
+            (tools / name).chmod(0o755)
         self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        real = Path("/etc/udev/rules.d/70-any2odyssey-lens.rules")
+        before = (real.read_bytes(), real.stat().st_mtime_ns) if real.exists() else None
         rules = self.system / "etc/udev/rules.d/70-any2odyssey-lens.rules"
         rules.parent.mkdir(parents=True)
-        rules.write_text("# somebody else's file\n")
+        rules.write_text("# the rules of an earlier version\n")
         (self.archive / "wine-lens" / "70-any2odyssey-lens.rules").write_text("# the rules\n")
         prefix = self.root / "prefix"
-        result = self.run_installer("--prefix", str(prefix), "--yes", "--no-model", "--no-odyssey")
+        flags = ["--prefix", str(prefix), "--no-model", "--no-odyssey"]
+        # Nobody answers the question: the file stays as it is.
+        result = self.run_installer(*flags)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("A2O_INSTALL_TEST_ROOT is set", result.stdout)
+        self.assertEqual(rules.read_text(), "# the rules of an earlier version\n")
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(rules.read_text(), "# the rules\n")
+        self.assertEqual(rules.stat().st_mode & 0o777, 0o644)
+        self.assertIn("would run: udevadm control --reload\n", result.stdout)
+        # The link to the lens board is waited for: step 5 looks for it right after this one.
+        self.assertIn("would run: udevadm trigger --subsystem-match=tty\n   would run: udevadm settle --timeout=5\n",
+                      result.stdout)
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("udev rules for the Odyssey 3D\n   already installed\n", result.stdout)
+        # The removal: asked about, and with nobody to answer the rules stay.
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(rules.is_file(), "the rules were removed although nobody agreed to it")
         result = self.run_installer("--prefix", str(prefix), "--uninstall", "--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(rules.exists(), "the rules are still there")
+        self.assertIn("would run: udevadm control --reload\n", result.stdout)
+        # Where a distribution's package has the rules, none are put beside them.
+        packaged = self.system / "usr/lib/udev/rules.d/70-any2odyssey-lens.rules"
+        packaged.parent.mkdir(parents=True)
+        packaged.write_text("# the package's rules\n")
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("installed by your distribution's package", result.stdout)
+        self.assertFalse(rules.exists())
         self.assertFalse(called.exists(), called.read_text() if called.exists() else "")
-        self.assertEqual(rules.read_text(), "# somebody else's file\n")
+        after = (real.read_bytes(), real.stat().st_mtime_ns) if real.exists() else None
+        self.assertEqual(after, before, "the real rules folder was touched")
+
+    def test_a_webcam_that_is_there_is_taken_out_of_power_saving_with_the_rules(self):
+        # The rule acts when the camera appears; for one that is connected already the step sets it now,
+        # and says what a camera that has been in power saving needs. Looked for under the stand-in too.
+        camera = self.system / "sys/bus/usb/devices/1-2"
+        (camera / "power").mkdir(parents=True)
+        (camera / "idVendor").write_text("04e8\n")
+        (camera / "idProduct").write_text("20d7\n")
+        (camera / "power/control").write_text("auto\n")
+        (camera / "power/runtime_status").write_text("suspended\n")
+        (self.system / "etc/udev/rules.d").mkdir(parents=True)
+        (self.archive / "wine-lens" / "70-any2odyssey-lens.rules").write_text("# the rules\n")
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-model", "--no-odyssey", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((camera / "power/control").read_text(), "on\n")
+        self.assertIn("the Odyssey's webcam has been in USB power saving", result.stdout)
 
     def test_empty_windows_root_is_rejected(self):
         for root in ["", "/"]:
@@ -535,6 +588,44 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assert_removed(prefix)
         self.assertNotIn("any2odyssey", cache.read_text())
+
+    def test_no_icon_cache_is_made_where_there_was_none(self):
+        # Up to 1.0.0 the installer ran gtk-update-icon-cache on <prefix>/share/icons/hicolor whatever
+        # was there: in ~/.local, where there usually is no cache, that made one, --uninstall left it,
+        # and GTK then missed the icons other programs added later. A cache that is there is refreshed.
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "icon-cache-argv"
+        (tools / "gtk-update-icon-cache").write_text(
+            f'#!/bin/sh\necho "$*" >> "{called}"\nfor last; do :; done\necho made > "$last/icon-theme.cache"\n')
+        (tools / "gtk-update-icon-cache").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        prefix = self.root / "prefix"
+        icons = prefix / "share/icons/hicolor"
+        cache = icons / "icon-theme.cache"
+        long_ago = 1_000_000_000
+
+        def run_and_see(*arguments):
+            """Run with the icons folder's time set back; returns whether the run set it anew."""
+            if icons.is_dir():
+                os.utime(icons, (long_ago, long_ago))
+            result = self.run_installer("--prefix", str(prefix), *arguments)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return icons.stat().st_mtime > long_ago + 1
+
+        installing = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        run_and_see(*installing)
+        self.assertTrue(run_and_see(*installing), "GTK is not told to look at the icons again")
+        self.assertFalse(run_and_see("--uninstall", "--dry-run"), "a dry run changed something")
+        self.assertTrue(run_and_see("--uninstall"), "GTK is not told to look at the icons again")
+        self.assertFalse(cache.exists(), "an icon cache was made where there was none")
+        self.assertFalse(called.exists(), called.read_text() if called.exists() else "")
+        # With a cache there, as a system-wide prefix has it: made again by both.
+        for arguments in (installing, ["--uninstall"]):
+            cache.write_text("as it was\n")
+            run_and_see(*arguments)
+            self.assertEqual(cache.read_text(), "made\n")
+        self.assertEqual(called.read_text(), f"-q -t {icons}\n" * 2)
 
     def usual_place(self):
         """A stand-in home with nothing naming another data folder: ~/.local/share/any2odyssey is then
@@ -986,6 +1077,9 @@ class InstallerTests(unittest.TestCase):
         self.windows_drive(f"run/media/{login}/Windows", self.block_device("a2ofix", "pci0000:00/ata1"))
         (self.system / "dev/odyssey-lens").touch()
         prefix = self.root / "prefix"
+        # (an icon cache that is there: without one its tool is not run)
+        (prefix / "share/icons/hicolor").mkdir(parents=True)
+        (prefix / "share/icons/hicolor/icon-theme.cache").touch()
         result = self.run_installer("--prefix", str(prefix), "--no-deps", "--no-udev", "--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         seen = (self.root / "lock seen").read_text().splitlines()
@@ -1000,6 +1094,88 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(seen, ["update-desktop-database 0", "gtk-update-icon-cache 0", "wineserver 0"],
                          result.stdout + result.stderr)
 
+    def a_setup_that_copies_its_scripts(self):
+        """The archive's setup, as far as the installer's look at a Wine side goes: it puts its scripts
+        into the data folder and notes what the Wine side was made from, with the lines the real
+        setup.sh ends with (so that the installer is tried against the note as that script writes it)."""
+        real = (LINUX.parents[1] / "contrib/wine-lens/setup.sh").read_text()
+        noting = real[real.index("# What this Wine side was made from"):]
+        self.assertIn("made-from", noting)
+        (self.archive / "wine-lens/setup.sh").write_text(
+            '#!/bin/sh\nset -eu\nprintf "%s\\000" "$@" > "$A2O_INSTALL_TEST_SETUP_LOG"\n'
+            'HERE=$(cd "$(dirname "$0")" && pwd)\nT=$ANY2ODYSSEY_DATA_DIR/wine-lens\n'
+            'mkdir -p "$T/tools"\ncp "$HERE"/tools/*.sh "$T/tools/"\n'
+            'for script in any2odyssey-lens-helper any2odyssey-weaver; do\n'
+            '    [ ! -f "$HERE/$script" ] || cp "$HERE/$script" "$T/"\ndone\n'
+            + noting)
+
+    def digest_of(self, folder, names):
+        """The digest setup.sh and the installer make of files of the set-up (sha256sum's lines, sorted)."""
+        lines = sorted(f"{hashlib.sha256((folder / name).read_bytes()).hexdigest()}  {name}\n" for name in names)
+        return hashlib.sha256("".join(lines).encode()).hexdigest()
+
+    def test_an_update_that_changes_only_what_the_setup_compiles_says_so(self):
+        # The look at a Wine side compared the eight scripts setup.sh copies. A release that changed only a
+        # stand-in's C source, tools/mkboard.py or setup.sh itself left the libraries of the version
+        # before in the prefix, and neither the installer nor any2odyssey-setup said so.
+        if not shutil.which("sha256sum"):
+            self.skipTest("needs sha256sum (coreutils), which the Wine side's note is made with")
+        data = Path(self.env["ANY2ODYSSEY_DATA_DIR"])
+        files = {"tools/start-stack.sh": "#!/bin/sh\n", "tools/mkboard.py": "# the board\n",
+                 "any2odyssey-lens-helper": "#!/bin/sh\n", "any2odyssey-weaver": "#!/bin/sh\n",
+                 "src/cfgshim.c": "/* the stand-in */\n", "src/a2ocam.def": "EXPORTS\n"}
+        for name, text in files.items():
+            (self.archive / "wine-lens" / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.archive / "wine-lens" / name).write_text(text)
+        self.a_setup_that_copies_its_scripts()
+        prefix = self.root / "prefix"
+        flags = ["--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model"]
+
+        def said(*extra):
+            result = self.run_installer(*flags, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return [line for line in result.stdout.splitlines() if "another version" in line]
+
+        (self.system / "dev/odyssey-lens").touch()
+        self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        self.assertEqual(said("--yes"), [])
+        self.assertIsNotNone(self.setup_ran_with())
+        # The note is what the real setup.sh's lines write: one digest, of the files as this test reads them.
+        note = data / "wine-lens/made-from"
+        self.assertEqual(note.read_text(), self.digest_of(self.archive / "wine-lens", ["setup.sh", *files]) + "\n")
+        self.assertEqual(said("--no-odyssey"), [])
+        # The next version changes one source that is compiled, and nothing that is copied.
+        for name in ["src/cfgshim.c", "tools/mkboard.py", "setup.sh"]:
+            with self.subTest(changed=name):
+                changed = self.archive / "wine-lens" / name
+                before = changed.read_text()
+                changed.write_text(before + "# changed in the next version\n")
+                lines = said("--no-odyssey")
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn(f"{data}/wine-lens was made by another version", lines[0])
+                changed.write_text(before)
+                self.assertEqual(said("--no-odyssey"), [])
+        # Made again by the version that changed it: nothing to say.
+        (self.archive / "wine-lens/src/cfgshim.c").write_text("/* the stand-in of the next version */\n")
+        self.assertEqual(len(said("--no-odyssey")), 1)
+        self.assertEqual(said("--yes"), [])
+        self.assertEqual(said("--no-odyssey"), [])
+        # A Wine side without the note, as 1.0.0 and earlier made it, with the same copied scripts: older
+        # when what this version compiles from is not what 1.0.0 compiled from ...
+        note.unlink()
+        self.assertEqual(len(said("--no-odyssey")), 1)
+        # ... and not for the lack of the note alone, where the sources are the ones 1.0.0 had.
+        installer = self.archive / "install.sh"
+        text = installer.read_text()
+        ours = [line for line in text.splitlines() if line.startswith("BUILT_1_0_0=")]
+        self.assertEqual(len(ours), 1)
+        compiled = self.digest_of(self.archive / "wine-lens", ["src/cfgshim.c", "src/a2ocam.def", "tools/mkboard.py"])
+        installer.write_text(text.replace(ours[0], f"BUILT_1_0_0={compiled}"))
+        self.assertEqual(said("--no-odyssey"), [])
+        # (its copied scripts still count, as before)
+        (data / "wine-lens/tools/start-stack.sh").write_text("#!/bin/sh\n# of the version before\n")
+        self.assertEqual(len(said("--no-odyssey")), 1)
+
     def test_an_update_says_when_the_wine_side_still_runs_another_versions_scripts(self):
         # Seen with the published archives and Arch packages of 0.9.7 and 0.9.8: after the update the data
         # folder's start-stack.sh was still 0.9.7's, in every run that did not make the Wine side again, and
@@ -1009,12 +1185,7 @@ class InstallerTests(unittest.TestCase):
         for name in scripts:
             (self.archive / "wine-lens" / name).parent.mkdir(parents=True, exist_ok=True)
             (self.archive / "wine-lens" / name).write_text(f"#!/bin/sh\n# {name} of this version\n")
-        # The setup, as far as this goes: it puts its scripts into the data folder.
-        (self.archive / "wine-lens/setup.sh").write_text(
-            '#!/bin/sh\nprintf "%s\\000" "$@" > "$A2O_INSTALL_TEST_SETUP_LOG"\nhere=$(dirname "$0")\n'
-            'mkdir -p "$ANY2ODYSSEY_DATA_DIR/wine-lens/tools"\n'
-            'cp "$here"/tools/*.sh "$ANY2ODYSSEY_DATA_DIR/wine-lens/tools/"\n'
-            'cp "$here/any2odyssey-lens-helper" "$ANY2ODYSSEY_DATA_DIR/wine-lens/"\n')
+        self.a_setup_that_copies_its_scripts()
         prefix = self.root / "prefix"
         flags = ["--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model"]
 
@@ -1061,7 +1232,8 @@ class InstallerTests(unittest.TestCase):
         lines = [line for line in result.stdout.splitlines() if "is still in" in line]
         self.assertEqual(len(lines), 1, result.stdout)
         self.assertIn(f"from the release archive is still in {home}/.local:", lines[0])
-        words = shlex.split(lines[0].split("stay): ", 1)[1])
+        self.assertIn("Wine side", lines[0])
+        words = shlex.split(lines[0].split("): ", 1)[1])
         self.assertEqual(words, [str(self.archive / "install.sh"), "--uninstall", "--prefix", f"{home}/.local"])
         result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
                                 capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
@@ -1073,6 +1245,105 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer("--packaged", *flags)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("is still in", result.stdout)
+
+    def at_a_terminal(self, keys, *arguments):
+        """Run the installer at a terminal of its own and type `keys` at its first question.
+
+        Returns its exit code and what it printed (None for the code when it did not end).
+        """
+        command = [*SHELL, str(self.archive / "install.sh"), *arguments]
+        pid, terminal = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(self.root)
+                os.execvpe(command[0], command, self.env)
+            finally:
+                os._exit(127)
+        text, typed, status = b"", False, None
+        deadline = time.monotonic() + 20
+        try:
+            while time.monotonic() < deadline:
+                if select.select([terminal], [], [], 0.05)[0]:
+                    try:
+                        text += os.read(terminal, 4096)
+                    except OSError:  # the run has ended and closed its side
+                        break
+                if not typed and text.endswith((b"[Y/n] ", b"[y/N] ")):
+                    os.write(terminal, keys)
+                    typed = True
+        finally:
+            ended, code = os.waitpid(pid, os.WNOHANG)
+            if ended:
+                status = os.waitstatus_to_exitcode(code)
+            else:
+                ended, code = None, None
+                for _ in range(100):
+                    ended, code = os.waitpid(pid, os.WNOHANG)
+                    if ended:
+                        break
+                    time.sleep(0.05)
+                if ended:
+                    status = os.waitstatus_to_exitcode(code)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+            os.close(terminal)
+        return status, text.decode(errors="replace")
+
+    def test_removing_an_archive_installation_keeps_the_wine_side_a_package_uses_too(self):
+        # The package's set-up tells whoever still has an installation from the archive to remove it,
+        # and says the settings and the depth model stay. That removal then asked "Remove the Wine side
+        # (... about 1 GB)? [Y/n]", and the Wine side is in the data folder the package's program uses:
+        # Enter, or --yes, removed the set-up of the Odyssey 3D that the move was meant to keep.
+        home, data = self.usual_place()
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        wine_side = data / "wine-lens"
+
+        def installed_with_a_wine_side():
+            result = self.run_installer(*flags)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return self.wine_side(data)
+
+        # No package beside it: Enter and --yes remove the Wine side, as they did.
+        installed_with_a_wine_side()
+        code, said = self.at_a_terminal(b"\n", "--uninstall")
+        self.assertEqual(code, 0, said)
+        self.assertIn("[Y/n]", said)
+        self.assertFalse(wine_side.exists(), said)
+        # A distribution's package is installed as well.
+        setup = self.system / "usr/bin/any2odyssey-setup"
+        setup.parent.mkdir(parents=True)
+        setup.write_text("#!/bin/sh\n")
+        setup.chmod(0o755)
+        kept = installed_with_a_wine_side()
+        code, said = self.at_a_terminal(b"\n", "--uninstall")
+        self.assertEqual(code, 0, said)
+        self.assertIn("[y/N]", said)
+        self.assertNotIn("[Y/n]", said)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"Enter removed {file}\n{said}")
+        self.assertIn("any2odyssey-setup --uninstall", said)
+        self.assertFalse((home / ".local/bin/any2odyssey").exists())
+        # --yes does not remove it either, and says how it is removed.
+        installed_with_a_wine_side()
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"--yes removed {file}\n{result.stdout}")
+        self.assertIn("any2odyssey-setup --uninstall", result.stdout)
+        self.assertFalse((home / ".local/bin/any2odyssey").exists())
+        # Somebody who types y means it.
+        installed_with_a_wine_side()
+        code, said = self.at_a_terminal(b"y\n", "--uninstall")
+        self.assertEqual(code, 0, said)
+        self.assertFalse(wine_side.exists(), said)
+        for file in kept[:2]:
+            self.assertTrue(file.is_file(), f"{file} was removed")
+        # The package's own removal (any2odyssey-setup --uninstall) is what removes it with --yes.
+        self.wine_side(data)
+        result = self.run_installer("--packaged", "--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(wine_side.exists(), result.stdout)
 
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
@@ -1471,6 +1742,49 @@ done
         missing, _ = self.missing_packages()
         self.assertNotIn("onnxruntime-devel", missing)
 
+    def test_on_arch_the_cuda_runtime_is_not_asked_for_over_an_installed_runtime_without_it(self):
+        # onnxruntime-cuda and onnxruntime-cpu both provide onnxruntime and conflict with it. On a machine
+        # with an NVIDIA GPU and onnxruntime-cpu, 1.0.0 put onnxruntime-cuda into the one pacman
+        # transaction: with --yes (--noconfirm) pacman answers its "Remove onnxruntime-cpu? [y/N]" with
+        # no and installs nothing at all, so curl, zenity, Wine and the compilers stayed missing at
+        # every run.
+        self.only_package_manager("pacman", "exit 0")
+        (self.root / "tools/nvidia-smi").unlink(missing_ok=True)
+        (self.root / "tools/nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "tools/nvidia-smi").chmod(0o755)
+
+        def swap_notes(output):
+            return [line for line in output.splitlines() if line.startswith("note: ") and "onnxruntime-cuda" in line]
+
+        # No runtime at all: the CUDA build and what it needs.
+        missing, output = self.missing_packages()
+        self.assertIn("onnxruntime-cuda", missing)
+        self.assertIn("cudnn", missing)
+        self.assertNotIn("onnxruntime-cpu", missing)
+        self.assertEqual(swap_notes(output), [])
+        # The runtime for the processor is installed: nothing that conflicts with it is asked for, and
+        # a note says how to change over.
+        (self.system / "usr/lib").mkdir(parents=True)
+        (self.system / "usr/lib/libonnxruntime.so").touch()
+        missing, output = self.missing_packages()
+        self.assertNotIn("onnxruntime-cuda", missing)
+        self.assertNotIn("cudnn", missing)
+        self.assertIn("libpipewire", missing)
+        notes = swap_notes(output)
+        self.assertEqual(len(notes), 1, output)
+        self.assertIn("runs on the processor", notes[0])
+        self.assertIn("pacman -S onnxruntime-cuda cudnn", notes[0])
+        # Not when the depth model is not wanted.
+        missing, output = self.missing_packages("--no-model")
+        self.assertNotIn("onnxruntime-cuda", missing)
+        self.assertEqual(swap_notes(output), [])
+        # The CUDA build is installed: what it still lacks is asked for, and there is nothing to note.
+        (self.system / "usr/lib/libonnxruntime_providers_cuda.so").touch()
+        missing, output = self.missing_packages()
+        self.assertNotIn("onnxruntime-cuda", missing)
+        self.assertIn("cudnn", missing)
+        self.assertEqual(swap_notes(output), [])
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.
@@ -1619,6 +1933,108 @@ done
         lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
         self.assertEqual(len(lines), 1, result.stdout)
         self.assertIn("procps-ng", lines[0].split())
+
+    def distribution_wine(self, candidate):
+        """Say that apt's lists have wine in the version `candidate` (None: no such package there)."""
+        policy = self.root / "tools/apt-cache"
+        policy.unlink(missing_ok=True)
+        answer = "" if candidate is None else (
+            f"wine:\\n  Installed: (none)\\n  Candidate: {candidate}\\n  Version table:\\n     {candidate} 500\\n")
+        policy.write_text(f'#!/bin/sh\n[ "$1 $2" = "policy wine" ] || exit 1\nprintf "{answer}"\n')
+        policy.chmod(0o755)
+
+    def test_a_distribution_wine_that_the_set_up_would_refuse_is_not_installed(self):
+        # Debian 12 and 13 and Ubuntu up to 26.04 have Wine 8.0 to 10.0, and setup.sh refuses anything
+        # below 11.6. 1.0.0 installed the distribution's wine all the same: the Odyssey 3D step then
+        # ended at "this Wine is too old", and the package was in the way of WineHQ's.
+        self.only_package_manager("apt-get", "exit 0")
+        for name in ("wine", "x86_64-w64-mingw32-gcc"):
+            (self.root / "tools" / name).unlink(missing_ok=True)
+        (self.system / "dev/odyssey-lens").touch()
+        self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        flags = ["--prefix", str(self.root / "prefix"), "--no-udev", "--no-model", "--yes"]
+
+        def packages_and_output():
+            self.setup_log.unlink(missing_ok=True)
+            result = self.run_installer(*flags)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+            self.assertEqual(len(lines), 1, result.stdout)
+            return lines[0].removeprefix("   missing packages: ").split(), result.stdout
+
+        for candidate in ["10.0~repack-6", "8.0~repack-4", "9.0~repack-4build3", "1:10.0-1", "11.5~trixie-1", "11"]:
+            with self.subTest(candidate=candidate):
+                self.distribution_wine(candidate)
+                missing, output = packages_and_output()
+                self.assertNotIn("wine", missing)
+                self.assertIn("gcc-mingw-w64-x86-64", missing)
+                notes = [line for line in output.splitlines() if line.startswith("note: ") and "winehq-devel" in line]
+                self.assertEqual(len(notes), 1, output)
+                self.assertIn(f"({candidate}) is older than Wine 11.6", notes[0])
+                self.assertIn("winehq-staging", notes[0])
+                self.assertIn("   skipped: this part needs Wine 11.6 or newer", output)
+                self.assertIsNone(self.setup_ran_with(), "the set-up was started without a Wine it takes")
+        # One that is new enough, one whose version cannot be read, none in the lists, no apt-cache:
+        # asked for as before.
+        for candidate in ["11.6~trixie-1", "11.20~trixie-1", "12.0~repack-1", "2:11.6-1", "(none)", "staging", None]:
+            with self.subTest(candidate=candidate):
+                self.distribution_wine(candidate)
+                missing, output = packages_and_output()
+                self.assertIn("wine", missing)
+                self.assertNotIn("winehq", output)
+                self.assertNotIn("this part needs Wine", output)
+        (self.root / "tools/apt-cache").unlink()
+        missing, output = packages_and_output()
+        self.assertIn("wine", missing)
+        # With --no-deps the packages are the user's business, and apt is asked nothing: the list is
+        # what is missing, and the set-up says itself what it thinks of the Wine it finds.
+        asked = self.root / "apt-cache-asked"
+        self.distribution_wine("10.0~repack-6")
+        policy = self.root / "tools/apt-cache"
+        policy.write_text(policy.read_text().replace("#!/bin/sh\n", f'#!/bin/sh\necho asked > "{asked}"\n'))
+        flags.append("--no-deps")
+        missing, output = packages_and_output()
+        self.assertIn("wine", missing)
+        self.assertNotIn("winehq", output)
+        self.assertFalse(asked.exists(), "apt was asked although --no-deps was given")
+        self.assertIsNotNone(self.setup_ran_with())
+        flags.remove("--no-deps")
+        # A Wine that is installed is the set-up's to judge: nothing is said of the lists.
+        self.distribution_wine("10.0~repack-6")
+        (self.root / "tools/wine").write_text("#!/bin/sh\necho wine-11.20\n")
+        (self.root / "tools/wine").chmod(0o755)
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("winehq", result.stdout)
+        self.assertIsNotNone(self.setup_ran_with())
+
+    def test_the_command_for_apt_leaves_out_a_wine_that_is_too_old(self):
+        # As a dry run names the command, without the stand-in for / (with it no package is installed).
+        self.only_package_manager("apt-get", "exit 0")
+        for name in ("wine", "x86_64-w64-mingw32-gcc"):
+            (self.root / "tools" / name).unlink(missing_ok=True)
+        self.distribution_wine("10.0~repack-6")
+        del self.env["A2O_INSTALL_TEST_ROOT"]
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--dry-run", "--yes", "--no-udev", "--no-model",
+                                    "--windows-root", str(self.root / "no such drive"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(prefix.exists())
+        lines = [line for line in result.stdout.splitlines() if "apt-get install -y " in line]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn("gcc-mingw-w64-x86-64", lines[0].split())
+        self.assertNotIn("wine", lines[0].split())
+        self.assertIn("winehq-devel", result.stdout)
+        self.assertIn("   skipped: this part needs Wine 11.6 or newer", result.stdout)
+
+    def test_the_oldest_wine_is_the_one_the_set_up_names(self):
+        # install.sh keeps the number beside a comment that names setup.sh, which decides it.
+        ours = [line for line in (LINUX / "install.sh").read_text().splitlines() if line.startswith("WINE_MIN=")]
+        self.assertEqual(len(ours), 1)
+        oldest = ours[0].removeprefix("WINE_MIN=")
+        setup = (LINUX.parents[1] / "contrib/wine-lens/setup.sh").read_text()
+        self.assertIn(f"Wine {oldest} or newer is needed", setup)
+        self.assertIn(f"Wine {oldest} or newer", (LINUX / "INSTALL.txt").read_text())
 
     def a_program_as_released(self):
         """The archive's program as an ELF file, as the released one is (the installer reads its first bytes)."""

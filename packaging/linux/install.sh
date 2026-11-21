@@ -40,20 +40,28 @@ umask go-w
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local PREFIX_GIVEN=
 YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
-# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board
-# and for mounted drives (with the mount table and the /sys entries that describe them). It comes from the
-# environment, so nothing it names reaches a command run as root: while it is set no step uses sudo.
+# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board,
+# for mounted drives (with the mount table and the /sys entries that describe them) and for the udev rules.
+# It comes from the environment, so nothing it names reaches a command run as root: while it is set no step
+# uses sudo, and udevadm, which acts on the real system whatever stands in for /, is named and not run.
 TEST_ROOT=${A2O_INSTALL_TEST_ROOT:-}
 RULES_NAME=70-any2odyssey-lens.rules
-RULES_DIR=/etc/udev/rules.d
+# The rules folder follows the stand-in. It was the real /etc/udev/rules.d in a test run too, with the udev
+# step switched off there: no test could see what that step or its removal does, and the one that looked
+# whether a rules file under the stand-in was left alone passed whatever this script did.
+RULES_DIR=$TEST_ROOT/etc/udev/rules.d
+PACKAGED_RULES_DIR=$TEST_ROOT/usr/lib/udev/rules.d
 # The program in the archive is built for the GNU C library on x86_64: the kernel starts it through this
 # loader, and it needs at least this version of the library (the workflows compare the number with the
 # program they have built).
 LOADER=/lib64/ld-linux-x86-64.so.2
 GLIBC_MIN=2.35
+# The oldest Wine the Odyssey 3D set-up takes. The number is wine-lens/setup.sh's (wine_too_old there says
+# why, and refuses an older one); packaging/linux/tests compares the two.
+WINE_MIN=11.6
 # The steps that need root go through sudo; a root shell runs them itself (not every system has sudo).
 SUDO=sudo
-[ "$(id -u)" != 0 ] || SUDO=
+if [ "$(id -u)" = 0 ] || [ -n "$TEST_ROOT" ]; then SUDO=; fi
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -132,9 +140,8 @@ canonical() {
 PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
 WANT_DEPS=$DEPS # as asked for: a test run still looks which of the packages exist
 if [ -n "$TEST_ROOT" ]; then
-    echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives are looked for under $TEST_ROOT, and no packages or udev rules are installed or removed"
+    echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives, the monitor and the udev rules are looked for under $TEST_ROOT, no packages are installed, and nothing is run with sudo or udevadm"
     DEPS=
-    UDEV=
 fi
 
 say() { printf '%s\n' "$*"; }
@@ -145,7 +152,16 @@ run() {
     if [ -n "$DRY" ]; then printf '   would run: %s\n' "$*"; else "$@"; fi
 }
 # Ask a yes/no question; yes with --yes, no when there is nobody to ask.
+# With "no" as a second word the question is about removing something that is most likely meant to stay:
+# Enter means no, and so does --yes, which agrees to the steps of this script and not to that.
 ask() {
+    if [ "${2:-}" = no ]; then
+        [ -z "$YES" ] || { say "   ($1 -- no: --yes does not agree to this)"; return 1; }
+        [ -t 0 ] || { say "   ($1 -- no: not asked without a terminal)"; return 1; }
+        printf '%s [y/N] ' "$1"
+        read -r answer || return 1
+        case $answer in y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
+    fi
     [ -n "$YES" ] && return 0
     [ -t 0 ] || { say "   ($1 -- skipped: not asked without a terminal; use --yes)"; return 1; }
     printf '%s [Y/n] ' "$1"
@@ -153,6 +169,10 @@ ask() {
     case $answer in '' | y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
 }
 have() { command -v "$1" >/dev/null 2>&1; }
+# udevadm as root, or only shown with --dry-run and in a test run (see TEST_ROOT).
+udev() {
+    if [ -n "$TEST_ROOT" ]; then printf '   would run: udevadm %s\n' "$*"; else run $SUDO udevadm "$@"; fi
+}
 # Not root and no sudo to become it (Debian installed with a root password has none): the steps that need
 # root are named for the user to run as root instead of being tried.
 no_sudo() { [ -n "$SUDO" ] && ! have sudo; }
@@ -234,6 +254,20 @@ drop_the_old_setup() {
     done
 }
 
+# Tell GTK that the icons under the prefix have changed. An icon cache that is there is made again. Where
+# there is none (the usual state of ~/.local/share/icons/hicolor) none is made: up to 1.0.0 this script made
+# one, --uninstall left it, and GTK then believed that cache and did not see the icons other programs put
+# there later without refreshing it. The folder's time is set instead, which is what makes GTK look again
+# (and pass over a cache that could not be refreshed).
+refresh_icons() {
+    [ -d "$SHARE/icons/hicolor" ] || return 0
+    if [ -f "$SHARE/icons/hicolor/icon-theme.cache" ] && have gtk-update-icon-cache &&
+        run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1; then
+        return 0
+    fi
+    run touch "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
+}
+
 # One run at a time puts files into a prefix or takes them out, the others wait their turn. The program and
 # the desktop entry are each moved into place whole, but the rest is copied file by file and the Wine setup
 # is removed and copied again: of two runs started together (0.9.4) one stopped at "File exists" in most
@@ -299,20 +333,30 @@ if [ -n "$UNINSTALL" ]; then
         unlock_prefix
         # The caches the installation refreshed still name the entry and the icon that are gone now.
         [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
-        [ -d "$SHARE/icons/hicolor" ] && have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
+        refresh_icons
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
-    if [ -z "$TEST_ROOT" ] && [ -f "$RULES_DIR/$RULES_NAME" ]; then
+    if [ -f "$RULES_DIR/$RULES_NAME" ]; then
         if no_sudo; then
             say "   the udev rules stay (this system has no sudo); as root: rm -f $RULES_DIR/$RULES_NAME && udevadm control --reload"
         elif ask "Remove the udev rules ($RULES_DIR/$RULES_NAME${SUDO:+, needs sudo})?"; then
             # (a refusal by sudo must not end the removal half-way: the Wine side and the last lines follow)
-            { run $SUDO rm -f "$RULES_DIR/$RULES_NAME" && run $SUDO udevadm control --reload; } ||
+            { run $SUDO rm -f "$RULES_DIR/$RULES_NAME" && udev control --reload; } ||
                 warn "the udev rules could not be removed or reloaded (see the message above)"
         fi
     fi
-    if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?"; then
+    # The Wine side is in the data folder, which a distribution's package of the program uses as well. The
+    # package's set-up sends whoever still has an installation from the archive here to remove it, and up
+    # to 1.0.0 this question then had yes for Enter and for --yes: the set-up of the Odyssey 3D that was to
+    # be kept went with the old program. Beside a package it stays unless somebody types y; the package's
+    # own removal (any2odyssey-setup --uninstall) asks as before.
+    KEEP=
+    if [ -z "$PACKAGED" ] && { [ -e "$TEST_ROOT/usr/bin/any2odyssey-setup" ] || { [ -z "$TEST_ROOT" ] && have any2odyssey-setup; }; }; then
+        KEEP=no
+        [ ! -d "$DATA/wine-lens" ] || say "   Any2Odyssey is also installed from your distribution's package, which uses the same Wine side."
+    fi
+    if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?" $KEEP; then
         if [ -x "$DATA/wine-lens/tools/tracking.sh" ]; then run "$DATA/wine-lens/tools/tracking.sh" stop >/dev/null 2>&1 || true; fi
         # The serial port's keeper (tools/noxon.sh, or the program it becomes when setup.sh could build one)
         # that tools/ensure-stack.sh left running, found the way that script finds it: the noted number
@@ -337,6 +381,8 @@ if [ -n "$UNINSTALL" ]; then
         run env WINEPREFIX="$DATA/wine-lens/prefix" WINEDEBUG=-all wineserver -k 2>/dev/null || true
         run rm -f "$DATA/any2odyssey-lens-helper" "$DATA/any2odyssey-weaver"
         run rm -rf "$DATA/wine-lens"
+    elif [ -n "$KEEP" ] && [ -d "$DATA/wine-lens" ]; then
+        say "   The Wine side stays, for the package's program. To remove it as well: any2odyssey-setup --uninstall"
     fi
     say ""
     say "Your settings and the depth model stay in $DATA; delete that folder yourself if you want them gone."
@@ -504,7 +550,7 @@ if [ -z "$PACKAGED" ]; then
     fi
     unlock_prefix
     have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
-    have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
+    refresh_icons
     case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; start the program from the application menu, or as $BIN/any2odyssey" ;; esac
 else
     step "1. The program is installed by your distribution's package"
@@ -513,7 +559,7 @@ else
     # Removed through this script, whatever version made it: the --uninstall of 0.9.0 and 0.9.1 removes the
     # settings and the depth model with it.
     if [ -e "$HOME/.local/share/applications/any2odyssey.desktop" ] || [ -e "$HOME/.local/bin/any2odyssey" ]; then
-        warn "an installation from the release archive is still in $HOME/.local: its menu entry and its program are used instead of the package's. To remove it (your settings and the depth model stay): $(quoted "$HERE/install.sh") --uninstall --prefix $(quoted "$HOME/.local")"
+        warn "an installation from the release archive is still in $HOME/.local: its menu entry and its program are used instead of the package's. To remove it (your settings and the depth model stay, and so does the Odyssey 3D's Wine side: the removal asks about it, and Enter there keeps it): $(quoted "$HERE/install.sh") --uninstall --prefix $(quoted "$HOME/.local")"
     fi
 fi
 
@@ -661,9 +707,9 @@ find_windows() {
     fi
     WIN=$1
 }
-lens_board() { grep -q -s -i '^354b$' /sys/bus/usb/devices/*/idVendor 2>/dev/null; }
+lens_board() { grep -q -s -i '^354b$' "$TEST_ROOT"/sys/bus/usb/devices/*/idVendor 2>/dev/null; }
 webcam_dir() {
-    for d in /sys/bus/usb/devices/*; do
+    for d in "$TEST_ROOT"/sys/bus/usb/devices/*; do
         [ "$(cat "$d/idVendor" 2>/dev/null):$(cat "$d/idProduct" 2>/dev/null)" = 04e8:20d7 ] && { echo "$d"; return 0; }
     done
     return 1
@@ -749,6 +795,22 @@ present() {
             ;;
     esac
 }
+# Whether the wine that apt would install is older than the set-up takes; WINE_CANDIDATE is its version.
+# Asked of apt's lists, which needs no root. A version that cannot be read (no candidate, no apt-cache) is
+# let through, as setup.sh lets through a Wine whose version it cannot read.
+WINE_CANDIDATE=unasked
+candidate_wine_too_old() {
+    if [ "$WINE_CANDIDATE" = unasked ]; then
+        WINE_CANDIDATE=$(LC_ALL=C apt-cache policy wine 2>/dev/null | sed -n 's/^ *Candidate: *//p' | head -n 1) || WINE_CANDIDATE=
+    fi
+    number=${WINE_CANDIDATE#*:} # (without an epoch)
+    major=${number%%.*}
+    case $major in '' | *[!0-9]*) return 1 ;; esac
+    minor=${number#"$major"}
+    minor=${minor#.}
+    minor=${minor%%[!0-9]*}
+    [ "$major" -lt "${WINE_MIN%%.*}" ] || { [ "$major" -eq "${WINE_MIN%%.*}" ] && [ "${minor:-0}" -lt "${WINE_MIN#*.}" ]; }
+}
 MISSING= UNNAMED= ABSENT=
 check() { # <list> : adds the packages of what is missing to MISSING
     for line in $1; do
@@ -765,15 +827,45 @@ check() { # <list> : adds the packages of what is missing to MISSING
     done
 }
 look() { # sets MISSING and UNNAMED to what is not there now
-    MISSING= UNNAMED=
+    MISSING= UNNAMED= ONNX_ON_CPU=
     check "$NEEDED"
     have zenity || have kdialog || check "$DIALOG"
     if [ -n "$MODEL" ]; then
         # An NVIDIA GPU gets the CUDA build; depth then takes milliseconds instead of a tenth of a second.
-        if have nvidia-smi && [ "$FAMILY" = 2 ]; then check "$ONNX_GPU"; else check "$ONNX_CPU"; fi
+        # Only on Arch, whose packages have one; the other families get the one runtime they have.
+        # Not over a runtime that is installed without it: Arch's onnxruntime-cuda and onnxruntime-cpu
+        # conflict (each provides onnxruntime), and pacman installs neither that nor anything else of its
+        # list while one question is answered with no, which is what --noconfirm does with "Remove
+        # onnxruntime-cpu? [y/N]". With --yes on such a machine 1.0.0 installed no package at all, at every
+        # run. The runtime that is there is kept, and a note below says how to change over.
+        if have nvidia-smi && [ "$FAMILY" = 2 ]; then
+            if present "${ONNX_CPU%%|*}" && ! present "${ONNX_GPU%%|*}"; then ONNX_ON_CPU=1; else check "$ONNX_GPU"; fi
+        else
+            check "$ONNX_CPU"
+        fi
     fi
     [ -z "$WANT_ODYSSEY" ] || check "$WINE_SIDE"
     MISSING=${MISSING# }
+    # Debian 12 and 13 and Ubuntu up to 26.04 have Wine 8.0 to 10.0, and setup.sh refuses anything below
+    # WINE_MIN. Up to 1.0.0 a missing wine was installed from the distribution all the same: a long
+    # download, then "this Wine is too old" from the set-up, and a package that is in the way of WineHQ's.
+    # Such a wine is left out of the list; a note below says where a newer one is, and step 5 is skipped.
+    # (Not with --no-deps, which leaves the packages to the user: apt is not asked anything then.)
+    WINE_OLD=
+    if [ "$FAMILY" = 3 ] && [ -n "$WANT_DEPS" ]; then
+        case " $MISSING " in
+            *" wine "*)
+                if candidate_wine_too_old; then
+                    WINE_OLD=$WINE_CANDIDATE
+                    KNOWN=
+                    for package in $MISSING; do
+                        [ "$package" = wine ] || KNOWN="$KNOWN $package"
+                    done
+                    MISSING=${KNOWN# }
+                fi
+                ;;
+        esac
+    fi
 }
 look
 # One name that the release's package lists do not have makes apt-get refuse the whole list: Ubuntu 24.04
@@ -822,6 +914,12 @@ else
         fi
     fi
 fi
+if [ -n "$WINE_OLD" ]; then
+    warn "Wine is not installed, and the one in this system's package lists ($WINE_OLD) is older than Wine $WINE_MIN, which the Odyssey 3D set-up needs: it is not installed, because the set-up would refuse it and it would be in the way of a newer one. WineHQ's own packages for Debian and Ubuntu are new enough: add WineHQ's repository as the download page of https://www.winehq.org describes, install winehq-devel or winehq-staging from it, then run this script again. Everything else works without Wine."
+fi
+if [ -n "$ONNX_ON_CPU" ]; then
+    warn "the ONNX Runtime installed here has no CUDA part (onnxruntime-cpu, or another package that provides onnxruntime): 2D -> 3D depth works and runs on the processor. To run it on the NVIDIA GPU, put onnxruntime-cuda in its place; the two cannot be installed together, so this script does not do that unasked: ${SUDO:+sudo }pacman -S onnxruntime-cuda cudnn (pacman asks whether to remove the installed one; answer yes)"
+fi
 
 # ---------------------------------------------------------------------------------------------------------
 step "3. udev rules for the Odyssey 3D"
@@ -829,7 +927,7 @@ RULES=$WINE_LENS/$RULES_NAME
 [ -f "$RULES" ] || RULES=$HERE/wine-lens/$RULES_NAME
 if [ -z "$UDEV" ]; then
     say "   skipped (--no-udev)"
-elif [ -f /usr/lib/udev/rules.d/$RULES_NAME ]; then
+elif [ -f "$PACKAGED_RULES_DIR/$RULES_NAME" ]; then
     say "   installed by your distribution's package"
 elif [ ! -f "$RULES" ]; then
     warn "$RULES_NAME was not found; skipped"
@@ -847,8 +945,13 @@ elif ask "Install $RULES_DIR/$RULES_NAME (lens board for you at the seat, no USB
     if ! run $SUDO install -m644 "$RULES" "$RULES_DIR/$RULES_NAME"; then
         warn "the udev rules were not installed (see the message above); the Odyssey 3D's lens board cannot be used until they are. As root: install -m644 $(quoted "$RULES") $RULES_DIR/$RULES_NAME && udevadm control --reload && udevadm trigger --subsystem-match=tty"
     else
-        { run $SUDO udevadm control --reload && run $SUDO udevadm trigger --subsystem-match=tty; } ||
+        { udev control --reload && udev trigger --subsystem-match=tty; } ||
             warn "the udev rules are installed but could not be put into effect now (see the message above); they are read at the next start of the system"
+        # The trigger only asks for the events: udev makes /dev/odyssey-lens a moment later. With nothing
+        # slow between here and step 5 (the depth model is there already, or --no-model) that step looked
+        # for the link before it was made and said the lens board is not available, over rules that had
+        # just been installed. The events are waited for, a few seconds at most.
+        udev settle --timeout=5 || true
         # The webcam rule acts when the camera appears; for one that is here already, set it now.
         if CAM=$(webcam_dir); then
             run $SUDO sh -c "echo on > '$CAM/power/control'" || true
@@ -877,6 +980,8 @@ fi
 step "5. The Odyssey 3D's lens, eye tracker and weaver (Leia's runtime under Wine)"
 if [ -z "$WANT_ODYSSEY" ]; then
     say "   skipped"
+elif [ -n "$WINE_OLD" ]; then
+    say "   skipped: this part needs Wine $WINE_MIN or newer, and this system's package lists have an older one (see the note in step 2)"
 elif ! find_windows; then
     : # it has said why
 elif [ ! -f "$WIN/$SERVICE" ]; then
@@ -892,17 +997,42 @@ fi
 # on with the scripts of the version that had made it, and nothing said so: what 0.9.8 changed in the start
 # of Leia's programs reached nobody who did not run the setup once more. It is said now, here and in what
 # any2odyssey-setup prints.
+#
+# That looked at the scripts setup.sh copies, and at nothing else: the libraries it compiles from
+# wine-lens/src, the board description tools/mkboard.py writes and what setup.sh itself does to the prefix
+# were not compared, and a release that changed only those left the old ones in place without a word.
+# setup.sh now notes in the Wine side what it was made from (made-from: a digest of the set-up's own files,
+# by the command that made_from repeats here), and the note is compared with the set-up installed now.
+# A Wine side without the note was made by 1.0.0 or earlier, or on a system without sha256sum. Its copied
+# scripts are compared as before; where they are the same, it counts as older only when this version's
+# sources of what is compiled (src, tools/mkboard.py) are not the ones 1.0.0 had. Not for the mere lack of
+# the note: that would tell everybody who updates to make the Wine side again, with the Windows drive
+# mounted, also after an update that changed nothing in it.
+STAMP_FILES='setup.sh any2odyssey-lens-helper any2odyssey-weaver src/*.* tools/*.*'
+BUILT_FILES='src/*.* tools/mkboard.py'
+BUILT_1_0_0=e38a9c8eeb3186d9717bf6b1fbf59a33d6c218f012e3285eeacec42533fae0f2
+made_from() { # <files of the set-up, as patterns>: their digest, or nothing where it cannot be made
+    have sha256sum && [ -f "$WINE_LENS/setup.sh" ] || return 0
+    # shellcheck disable=SC2086  # patterns, for the set-up's folder
+    (cd "$WINE_LENS" 2>/dev/null && sha256sum $1 2>/dev/null | LC_ALL=C sort | sha256sum 2>/dev/null | cut -d' ' -f1) || true
+}
 older_wine_side() {
     [ -f "$DATA/wine-lens/tools/start-stack.sh" ] || return 1
+    made=$(cat "$DATA/wine-lens/made-from" 2>/dev/null) || made=
+    now=$(made_from "$STAMP_FILES")
+    if [ -n "$made" ] && [ -n "$now" ]; then
+        [ "$made" != "$now" ] || return 1
+        return 0
+    fi
     for script in any2odyssey-lens-helper any2odyssey-weaver tools/start-stack.sh tools/ensure-stack.sh \
         tools/tracking.sh tools/noxon.sh tools/mkedid.py tools/kwin-overlay.js; do
         [ -f "$WINE_LENS/$script" ] || continue
         cmp -s "$WINE_LENS/$script" "$DATA/wine-lens/$script" || return 0
     done
-    return 1
+    [ -z "$made" ] && [ -n "$now" ] && [ "$(made_from "$BUILT_FILES")" != "$BUILT_1_0_0" ]
 }
 if [ -z "$DRY" ] && older_wine_side; then
-    warn "the Odyssey 3D's Wine side in $DATA/wine-lens was made by another version of Any2Odyssey and still runs that version's scripts; what this version changed in them does not apply until it is made again. With the Windows drive mounted and the monitor awake, run this script again, or: $(quoted "$WINE_LENS/setup.sh") /path/to/that/drive"
+    warn "the Odyssey 3D's Wine side in $DATA/wine-lens was made by another version of Any2Odyssey and still runs that version's scripts and stand-in libraries; what this version changed in them does not apply until it is made again. With the Windows drive mounted and the monitor awake, run this script again, or: $(quoted "$WINE_LENS/setup.sh") /path/to/that/drive"
 fi
 
 say ""
