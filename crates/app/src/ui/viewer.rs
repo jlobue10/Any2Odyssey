@@ -300,6 +300,62 @@ pub struct Loaded {
     result: Option<Arc<RgbaImage>>,
 }
 
+/// The flags that keep `open` from waiting, where their numbers are known
+/// here: O_NONBLOCK and O_NOCTTY as Linux has them on these processors
+/// (`any2odyssey_core::fsutil` opens the settings files the same way).
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "riscv64"
+    )
+))]
+const OPEN_WITHOUT_WAITING: Option<i32> = Some(0o4000 | 0o400);
+#[cfg(not(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "riscv64"
+    )
+)))]
+const OPEN_WITHOUT_WAITING: Option<i32> = None;
+
+/// Open `path` for reading if it is an ordinary file.
+///
+/// Whether it is one was asked of the name, and the name was then opened.
+/// Opening a named pipe waits for somebody to write to it: with a pipe put
+/// where the file was between the two, the thread reading the image waited
+/// for good, the page went on saying it was opening the file, and every
+/// image asked for afterwards was only queued behind it. The file is now
+/// opened once, without waiting, and the question is put to what was
+/// opened. Reading an ordinary file is the same either way.
+fn open_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let not_a_file = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "it is not a file.");
+    let mut options = std::fs::File::options();
+    options.read(true);
+    #[cfg(unix)]
+    if let Some(flags) = OPEN_WITHOUT_WAITING {
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, flags);
+    }
+    // Where opening cannot be kept from waiting (and on Windows, where a
+    // folder is not opened this way at all) the name is asked first, as
+    // it was.
+    if OPEN_WITHOUT_WAITING.is_none() && !std::fs::metadata(path)?.is_file() {
+        return Err(not_a_file());
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_a_file());
+    }
+    Ok(file)
+}
+
 /// Read the image in `path`, refusing one larger than the viewer opens
 /// before any of its pixels are decoded.
 fn decode(path: &Path) -> Result<RgbaImage, String> {
@@ -315,18 +371,27 @@ fn decode(path: &Path) -> Result<RgbaImage, String> {
         image::ImageError::Limits(_) => too_large(&""),
         e => failed(&e),
     };
-    // Only a file is read: a pipe would never end, a device might.
-    let file = std::fs::metadata(path).map_err(|e| failed(&e))?;
-    if !file.is_file() {
-        return Err(failed(&"it is not a file."));
-    }
-    if file.len() > MAX_FILE_BYTES {
+    // Only a file is read: a pipe would never end, a device might. What
+    // was opened is what is asked and what is read: the name was asked
+    // first and then opened, and could be another thing by then.
+    let file = open_file(path).map_err(|e| failed(&e))?;
+    let size = file.metadata().map_err(|e| failed(&e))?.len();
+    if size > MAX_FILE_BYTES {
         return Err(too_large(&format_args!(
             " ({} MB on disk)",
-            file.len() / 1_000_000
+            size / 1_000_000
         )));
     }
-    let mut reader = image::ImageReader::open(path).map_err(|e| failed(&e))?;
+    // What the file is, is read from its first bytes; its name only decides
+    // where they say nothing. By the name alone a picture saved without an
+    // ending, with another format's, or as "pair.png.part" was refused,
+    // while the file manager that offered this program for it had looked at
+    // the content. The formats taken are the same either way.
+    let mut reader = image::ImageReader::new(std::io::BufReader::new(file));
+    if let Ok(named) = image::ImageFormat::from_path(path) {
+        reader.set_format(named);
+    }
+    let mut reader = reader.with_guessed_format().map_err(|e| failed(&e))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_SIDE);
     limits.max_image_height = Some(MAX_IMAGE_SIDE);
@@ -496,7 +561,13 @@ impl Document {
 /// same (the folder decides a rename, not the file). So links are followed
 /// here, and only a file that could have been written to is replaced.
 pub(super) fn export_target(path: &Path) -> Result<PathBuf, String> {
-    let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
+    resolve_export(path).map_err(|e| format!("Could not save {}: {e}", path.display()))
+}
+
+/// [`export_target`] with only the reason for an error, for a caller that
+/// names the file in words of its own (the exported guide).
+pub(crate) fn resolve_export(path: &Path) -> Result<PathBuf, String> {
+    let failed = |e: &dyn std::fmt::Display| e.to_string();
     let mut target = path.to_owned();
     // As many links as the system itself follows before it gives up.
     for _ in 0..40 {
@@ -1880,6 +1951,17 @@ impl ViewerState {
     /// of its own that the user places on the display they want. Call once
     /// per frame, outside the page's layout.
     pub fn show_output(&mut self, ctx: &egui::Context) {
+        if !self.output_open || self.options.output == Output::Odyssey {
+            // The output window is not drawn on this frame, and a window
+            // that is not drawn is closed: the next one is a new window,
+            // and not full screen. Only stopping the output said so. With
+            // the format changed to Odyssey 3D and back, the new window
+            // was still taken to be full screen: the lens was switched on
+            // over a picture in a window, the line about F11 was missing,
+            // the first F11 did nothing to see, and the first Esc "left
+            // full screen" where it should have closed the output.
+            self.output_fullscreen = false;
+        }
         if !self.output_open {
             // Every way the output ends comes through here on the next frame.
             // One that ends by itself (depth that failed, options the image
@@ -1908,6 +1990,7 @@ impl ViewerState {
         let plain = self.texture.clone();
         if plain.is_none() && !self.shows_pattern() && !awaiting {
             self.output_open = false;
+            self.output_fullscreen = false;
             self.lens.release();
             self.lens_switch.set(false, || {});
             return;
@@ -3205,6 +3288,65 @@ mod tests {
         assert!(state.output_open && state.weaver.is_running());
     }
 
+    /// The output window goes when the format becomes Odyssey 3D, and the
+    /// one that comes when the format is changed back is a new window.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_output_window_after_the_odyssey_output_is_not_taken_to_be_full_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 0);
+        let frame = |state: &mut ViewerState, key: Option<Key>| {
+            let events = key
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .into_iter()
+                .collect();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| state.show_output(ctx));
+        };
+        let choose = |state: &mut ViewerState, output: Output| {
+            let before = state.options;
+            state.options.output = output;
+            state.options_edited(before);
+        };
+        // Lens output, made full screen with F11: the lens is asked for.
+        state.options.half_width = false;
+        choose(&mut state, Output::Lens);
+        frame(&mut state, None);
+        assert!(state.output_open && !state.output_fullscreen);
+        assert!(!state.lens_switch.wanted());
+        frame(&mut state, Some(Key::F11));
+        frame(&mut state, None);
+        assert!(state.output_fullscreen && state.lens_switch.wanted());
+
+        // To the Odyssey 3D output and back, without stopping in between.
+        choose(&mut state, Output::Odyssey);
+        frame(&mut state, None);
+        assert!(state.output_open, "{}", state.status);
+        assert!(!state.lens_switch.wanted());
+        assert!(!state.output_fullscreen, "its window has gone");
+        choose(&mut state, Output::Lens);
+        frame(&mut state, None);
+        assert!(state.output_open, "{}", state.status);
+        assert!(!state.output_fullscreen);
+        assert!(
+            !state.lens_switch.wanted(),
+            "the lens is not asked for over a picture in a window"
+        );
+        // Esc closes a window that is not full screen.
+        frame(&mut state, Some(Key::Escape));
+        assert!(!state.output_open);
+        assert_eq!(state.status, OUTPUT_OFF);
+    }
+
     #[test]
     fn the_output_window_waits_for_depth_too_and_closes_when_there_is_none_to_come() {
         let ctx = egui::Context::default();
@@ -3343,6 +3485,76 @@ mod tests {
             let error = decode(&sparse).unwrap_err();
             assert!(error.contains("too large (1073 MB on disk)"), "{error}");
         }
+    }
+
+    #[test]
+    fn a_picture_is_opened_by_what_it_is_not_by_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        pair().write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        // Another format's ending, none, and a download's.
+        for name in ["pair.jpg", "pair", "pair.png.part", "pair.PNG"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, &png).unwrap();
+            assert_eq!(decode(&path), Ok(pair()), "{name}");
+        }
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        pair().write_to(&mut bmp, image::ImageFormat::Bmp).unwrap();
+        let path = dir.path().join("pair.png");
+        std::fs::write(&path, bmp.into_inner()).unwrap();
+        assert_eq!(decode(&path), Ok(pair()), "a BMP named .png");
+        // What is no picture stays none whatever it is called, and so does
+        // one in a format this program does not read (the first bytes of a
+        // GIF and of a WebP file).
+        for (name, content) in [
+            ("notes.png", &b"not a picture at all"[..]),
+            ("notes", b"not a picture at all"),
+            ("moving.png", b"GIF89a\x01\0\x01\0\0\0\0;"),
+            ("moving", b"GIF89a\x01\0\x01\0\0\0\0;"),
+            ("photo.jpg", b"RIFF\x04\0\0\0WEBPVP8 "),
+            ("empty.png", b""),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            let error = decode(&path).unwrap_err();
+            assert!(error.starts_with("Could not open "), "{name}: {error}");
+        }
+    }
+
+    /// A pipe is found out by opening it, not by asking its name first: the
+    /// opening itself must not wait for a writer that never comes.
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_where_the_image_belongs_is_refused_and_not_waited_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("pair.png");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (no mkfifo on this system: `fsutil` has the same check)
+            return;
+        }
+        let (done, answers) = mpsc::channel();
+        let opened = pipe.clone();
+        std::thread::spawn(move || {
+            let file = open_file(&opened).map(|_| ()).map_err(|e| e.to_string());
+            let _ = done.send((file, decode(&opened).map(|_| ())));
+        });
+        let answers = answers.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a reader that does wait go, so that the test ends either way.
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&pipe);
+        let (file, picture) = answers.expect("opening the pipe waited for a writer");
+        assert_eq!(file, Err("it is not a file.".into()));
+        let error = picture.unwrap_err();
+        assert!(error.starts_with("Could not open "), "{error}");
+        assert!(error.ends_with("it is not a file."), "{error}");
+        // The handle that does not wait reads an ordinary file like any.
+        std::fs::remove_file(&pipe).unwrap();
+        pair().save(&pipe).unwrap();
+        assert_eq!(decode(&pipe), Ok(pair()));
     }
 
     /// Wait for the image being read and take it.
