@@ -143,7 +143,16 @@ impl Logger {
             }
             // A log made by 1.0.0 or earlier is still there, readable by
             // everyone, until it is rotated, which may be never.
-            if metadata.permissions().mode() & 0o077 != 0 {
+            //
+            // Not where the log's name is a link. The lines go to the
+            // file the link leads to, as they always have, but that file
+            // is somewhere else and whoever put the link there chose who
+            // may read it: it was closed to them at every line, however
+            // often they opened it again.
+            let through_a_link = || {
+                std::fs::symlink_metadata(&self.path).is_ok_and(|at| at.file_type().is_symlink())
+            };
+            if metadata.permissions().mode() & 0o077 != 0 && !through_a_link() {
                 let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
             }
         }
@@ -483,6 +492,19 @@ mod tests {
         logger.log("third");
         assert_eq!(mode(logger.path()), 0o600);
         assert_eq!(mode(&logger.previous_path()), 0o600);
+        // A file somewhere else that the log's name is a link to takes the
+        // line, as it always has, and stays as open as it was made: it
+        // was closed to its other readers at every line.
+        let elsewhere = dir.path().join("notes.txt");
+        std::fs::write(&elsewhere, b"somebody's notes\n").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let linked = Logger::new(dir.path().join("linked.log"));
+        std::os::unix::fs::symlink(&elsewhere, linked.path()).unwrap();
+        linked.log("through the link");
+        assert_eq!(mode(&elsewhere), 0o664);
+        let text = std::fs::read_to_string(&elsewhere).unwrap();
+        assert!(text.starts_with("somebody's notes\n"), "{text:?}");
+        assert!(text.ends_with(" through the link\n"), "{text:?}");
     }
 
     /// `<RFC 3339 time> <message>`: the whole shape of the time is checked,
