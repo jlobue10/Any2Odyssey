@@ -30,14 +30,23 @@ pub fn run_worker(event: &str, parent: u32, source: isize, preferences: Preferen
 pub fn inspect(pid: u32) -> i32 {
     match diagnostics::write_inspect(pid) {
         Ok(()) => 0,
-        Err(_) => 1,
+        // This failed with exit code 1 and not a word about why.
+        Err(e) => {
+            crate::complain(&format!(
+                "Could not write {}: {e}",
+                paths::window_diagnostics_file().display()
+            ));
+            1
+        }
     }
 }
 pub fn layout_probe(parent: u32, worker: u32) -> i32 {
     match diagnostics::write_layout_probe(parent, worker) {
         Ok(()) => 0,
+        // Not `eprintln!`, which panics (exit code 101 instead of 1) when
+        // stderr is a closed pipe.
         Err(e) => {
-            eprintln!("{e}");
+            crate::complain(&e);
             1
         }
     }
