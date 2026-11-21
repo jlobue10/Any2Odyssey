@@ -409,6 +409,14 @@ impl DepthSmoother {
             low = low.min(v);
             high = high.max(v);
         }
+        // Numbers that are each finite can still lie further apart than a
+        // number can say (-f32::MAX and f32::MAX). Their span was infinite
+        // then and the map made with it was not a number anywhere, which
+        // the next map's blend stopped the program over. Such a map is
+        // refused like one that holds no numbers.
+        if !(high - low).is_finite() {
+            return false;
+        }
         let keep = steadiness.clamp(0.0, 0.95);
         let fresh = self.width != width || self.height != height || self.values.len() != count;
         // The range follows the scene more slowly than the map does, so a
@@ -423,8 +431,12 @@ impl DepthSmoother {
             }
             _ => (low, high),
         };
-        self.range = Some((low, high));
         let span = high - low;
+        // (the range kept and the map's own, each with a span, far apart)
+        if !span.is_finite() {
+            return false;
+        }
+        self.range = Some((low, high));
         let scale = if span > f32::EPSILON { 1.0 / span } else { 0.0 };
         if fresh {
             self.width = width;
@@ -1078,6 +1090,49 @@ mod tests {
         // A new size starts afresh; a flat scene is all far.
         assert!(smoother.update(1, 3, &[4.0, 4.0, 4.0], 0.9));
         assert_eq!(smoother.values(), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_map_whose_numbers_lie_too_far_apart_to_measure_is_refused_not_a_panic() {
+        // Every number is finite and their span is not. The first such map
+        // was taken and became "not a number" throughout; the second one's
+        // blend then panicked (`clamp` between two of those).
+        let wide = [-f32::MAX, f32::MAX];
+        let mut smoother = DepthSmoother::default();
+        assert!(!smoother.update(2, 1, &wide, 0.5));
+        assert!(!smoother.update(2, 1, &wide, 0.5));
+        assert!(smoother.values().is_empty());
+        // After a map that can be used, it is refused and that one stays;
+        // easing towards it ends at once, as for any map that cannot be
+        // used.
+        assert!(smoother.update(2, 1, &[2.0, 6.0], 0.5));
+        assert!(!smoother.update(2, 1, &wide, 0.5));
+        assert!(smoother.settle(2, 1, &wide, 0.5));
+        assert_eq!(smoother.values(), [0.0, 1.0]);
+        // Maps at the two ends of what a number can say, one after the
+        // other: each has a span, and whatever becomes of the second, the
+        // map stays made of numbers from 0 to 1.
+        for steadiness in [0.0, 0.5, 0.95] {
+            let maps = [
+                [-f32::MAX, -f32::MAX / 2.0],
+                [f32::MAX / 2.0, f32::MAX],
+                [-f32::MAX, 0.0],
+                [0.0, f32::MAX],
+                [f32::MAX / 2.0, f32::MAX],
+                [-1.0, 1.0],
+                [f32::MIN_POSITIVE, 0.0],
+            ];
+            let mut smoother = DepthSmoother::default();
+            for map in maps.iter().chain(maps.iter().rev()) {
+                smoother.update(2, 1, map, steadiness);
+                smoother.settle(2, 1, map, steadiness);
+                assert!(
+                    smoother.values().iter().all(|v| (0.0..=1.0).contains(v)),
+                    "{:?} after {map:?} at {steadiness}",
+                    smoother.values()
+                );
+            }
+        }
     }
 
     #[test]
