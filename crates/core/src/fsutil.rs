@@ -600,28 +600,33 @@ mod tests {
     }
 
     /// The settings are replaced in this one place, on every system. A
-    /// write that fails part way (a full disk, a quota, a device error), in
-    /// the writing or in the flush to disk that follows it, must leave the
-    /// file that was there whole and nothing beside it. Shown on Linux with
-    /// the system calls themselves failing; this is the same failure put in
-    /// by hand, so that it is also run where that cannot be done.
+    /// write that fails part way (a full disk, a quota, a device error)
+    /// must leave the file that was there whole and nothing beside it.
+    /// Shown on Linux with the system calls themselves failing; this is the
+    /// same failure put in by hand, so that it is also run where that
+    /// cannot be done.
+    ///
+    /// Only the writing is made to fail here. The flush to disk that
+    /// follows it for the settings cannot be made to fail by hand; it
+    /// leaves by the same way, the temporary file removed as it is
+    /// dropped. This test used to run once with the flush and once
+    /// without, as if that covered it, but the writing fails before the
+    /// flush is reached and the two runs were one and the same.
     #[test]
     fn a_write_that_fails_part_way_leaves_the_earlier_file_and_no_temporary() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let earlier = b"{\n  \"Depth\": 1.5\n}";
         write_atomic_durable(&path, earlier).unwrap();
-        for sync in [false, true] {
-            for audience in [Audience::Owner, Audience::Anyone] {
-                let failed = write_atomic_with(&path, sync, audience, |file| {
-                    // Half of the new content is in the temporary file.
-                    file.write_all(b"{\n  \"Dep")?;
-                    Err(io::ErrorKind::StorageFull.into())
-                });
-                assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::StorageFull);
-                assert_eq!(fs::read(&path).unwrap(), earlier);
-                assert_eq!(entries(dir.path()), ["settings.json"]);
-            }
+        for audience in [Audience::Owner, Audience::Anyone] {
+            let failed = write_atomic_with(&path, true, audience, |file| {
+                // Half of the new content is in the temporary file.
+                file.write_all(b"{\n  \"Dep")?;
+                Err(io::ErrorKind::StorageFull.into())
+            });
+            assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::StorageFull);
+            assert_eq!(fs::read(&path).unwrap(), earlier);
+            assert_eq!(entries(dir.path()), ["settings.json"]);
         }
         // Nothing of the failures stands in the way of the next write.
         write_atomic_durable(&path, b"{}").unwrap();
@@ -799,20 +804,50 @@ mod tests {
     fn temporaries_are_unique_per_writer() {
         // Two writers of the same path must never share a temporary name, so an
         // interrupted writer cannot leave a file the next one appends to or
-        // publishes. The exclusive-create temp file is what provides that; a
-        // fixed `<name>.tmp` sibling would make this test fail.
+        // publishes. The exclusive-create temp file is what provides that.
+        //
+        // This test used to pass against a writer with one fixed temporary
+        // name: it only looked at a temporary it had made itself, under a
+        // name no writer would have used. Now a second writer is run while
+        // the first has its temporary open, and the two names are compared:
+        // with a fixed `<name>.tmp` sibling they are the same one.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let parent = dir.path();
-        let first = tempfile::Builder::new()
-            .prefix(".any2odyssey-")
-            .tempfile_in(parent)
-            .unwrap();
+        let temporaries = || {
+            let mut names = entries(parent);
+            names.retain(|name| name != "settings.json");
+            names
+        };
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        write_atomic_with(&path, false, Audience::Owner, |file| {
+            first = temporaries();
+            file.write_all(b"the first writer's, ")?;
+            write_atomic_with(&path, false, Audience::Owner, |file| {
+                second = temporaries();
+                file.write_all(b"the second writer's")
+            })?;
+            // The second writer has published and gone. The first one's
+            // temporary is where it was, with what it held and no more.
+            assert_eq!(temporaries(), first);
+            assert_eq!(fs::read(&path).unwrap(), b"the second writer's");
+            file.write_all(b"whole")
+        })
+        .unwrap();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(first[0].starts_with(TEMPORARY_PREFIX), "{first:?}");
+        assert_eq!(first[0].len(), TEMPORARY_NAME_LENGTH);
+        assert_eq!(second.len(), 2, "one temporary for each writer: {second:?}");
+        assert!(second.contains(&first[0]));
+        assert_eq!(fs::read(&path).unwrap(), b"the first writer's, whole");
+        assert_eq!(entries(parent), ["settings.json"]);
+        // Nor does a writer take up a file that an interrupted one left
+        // under a name of the same kind.
+        let left = parent.join(format!("{TEMPORARY_PREFIX}left"));
+        fs::write(&left, b"half a file").unwrap();
         write_atomic(&path, b"new settings").unwrap();
-        assert!(
-            first.path().exists(),
-            "another writer's temporary is untouched"
-        );
+        assert_eq!(fs::read(&left).unwrap(), b"half a file");
         assert_eq!(fs::read(&path).unwrap(), b"new settings");
         assert_eq!(entries(parent).len(), 2);
     }
