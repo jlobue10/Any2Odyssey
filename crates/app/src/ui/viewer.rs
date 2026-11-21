@@ -561,7 +561,13 @@ impl Document {
 /// same (the folder decides a rename, not the file). So links are followed
 /// here, and only a file that could have been written to is replaced.
 pub(super) fn export_target(path: &Path) -> Result<PathBuf, String> {
-    let failed = |e: &dyn std::fmt::Display| format!("Could not save {}: {e}", path.display());
+    resolve_export(path).map_err(|e| format!("Could not save {}: {e}", path.display()))
+}
+
+/// [`export_target`] with only the reason for an error, for a caller that
+/// names the file in words of its own (the exported guide).
+pub(crate) fn resolve_export(path: &Path) -> Result<PathBuf, String> {
+    let failed = |e: &dyn std::fmt::Display| e.to_string();
     let mut target = path.to_owned();
     // As many links as the system itself follows before it gives up.
     for _ in 0..40 {
