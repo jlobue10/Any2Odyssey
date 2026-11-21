@@ -813,13 +813,29 @@ pub struct Estimator {
 /// The one model, shared by still images and live sessions.
 static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
 
-/// Let the model go, with everything the runtime holds for it; the next
-/// map loads it again. A live screen that has ended does this: its model
-/// held 0.9 GB of a GPU's memory at standard detail and 2.8 GB at the
-/// finest for as long as the program stayed open, output or none. Waits
-/// for a map that is being made: not for the UI's thread.
-pub fn unload() {
-    *ESTIMATOR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+/// Let the model go, with everything the runtime holds for it, if
+/// `unused` says so once no map is being made; the next map loads it
+/// again. A live screen that has ended does this: its model held 0.9 GB of
+/// a GPU's memory at standard detail and 2.8 GB at the finest for as long
+/// as the program stayed open, output or none. Waits for a map that is
+/// being made: not for the UI's thread.
+///
+/// Whether the model is unused was decided before the wait and not asked
+/// again after it. A live screen that began in between and was given the
+/// model first had it let go of behind its first map, and loaded it once
+/// more for its second: seconds, where a GPU is started for the first
+/// time.
+pub fn unload_if(unused: impl FnOnce() -> bool) {
+    unload_from(&ESTIMATOR, unused);
+}
+
+fn unload_from<T>(model: &Mutex<Option<T>>, unused: impl FnOnce() -> bool) {
+    let mut slot = model.lock().unwrap_or_else(|e| e.into_inner());
+    // Whoever wants the model from here on waits for this, and loads it
+    // after: nobody's model is taken from under them.
+    if unused() {
+        *slot = None;
+    }
 }
 
 /// Share one model between still images and live sessions. A stopped live
@@ -1493,6 +1509,46 @@ mod tests {
         // Numbers further apart than a number can say would make a map of
         // "not a number" whoever brought them to 0..=1.
         assert!(answer(&[1, 1, 2], &[-f32::MAX, f32::MAX]).is_err());
+    }
+
+    #[test]
+    fn a_model_that_is_wanted_again_is_not_let_go_of_by_whoever_wanted_it_before() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // Nobody wants it: it goes.
+        let model = Mutex::new(Some(1u32));
+        unload_from(&model, || true);
+        assert_eq!(*model.lock().unwrap(), None);
+        unload_from(&model, || true);
+        assert_eq!(*model.lock().unwrap(), None);
+
+        // A live screen has ended and counted itself out (0 are left); its
+        // letting go waits for the map being made. Meanwhile another has
+        // begun, counted itself in, and is given the model next.
+        let model = Arc::new(Mutex::new(Some(1u32)));
+        let users = Arc::new(AtomicUsize::new(0));
+        let in_use = model.lock().unwrap();
+        let (ended_model, ended_users) = (model.clone(), users.clone());
+        let ended = std::thread::spawn(move || {
+            unload_from(&ended_model, || ended_users.load(Ordering::SeqCst) == 0)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        users.fetch_add(1, Ordering::SeqCst);
+        drop(in_use);
+        ended.join().unwrap();
+        // It was let go of all the same, having been found unused before
+        // the wait, and loaded again for the next map. Asked at the time,
+        // the count says it is wanted.
+        assert_eq!(
+            with_model(
+                &model,
+                || false,
+                || panic!("the model in use was let go of"),
+                |model| Ok(*model)
+            )
+            .unwrap(),
+            Some(1)
+        );
     }
 
     #[test]

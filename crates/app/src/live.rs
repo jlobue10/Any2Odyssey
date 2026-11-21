@@ -745,10 +745,12 @@ fn depth_loop(shared: &Shared) {
     });
     // The last live screen has ended: the model goes, and with it what it
     // holds of the GPU's memory or the processor's. The next start loads
-    // it again, in about a second, while the output comes up.
-    if RUNNING.fetch_sub(1, Ordering::SeqCst) == 1 {
-        crate::depth::unload();
-    }
+    // it again, in about a second, while the output comes up. Whether this
+    // was the last is asked when the model is free to be let go of, not
+    // here: another live screen may begin before that
+    // (`depth::unload_if`).
+    RUNNING.fetch_sub(1, Ordering::SeqCst);
+    crate::depth::unload_if(|| RUNNING.load(Ordering::SeqCst) == 0);
 }
 
 /// [`depth_loop`] with the model as `estimate`, which is given a frame and
