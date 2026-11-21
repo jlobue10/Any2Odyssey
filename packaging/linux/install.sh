@@ -149,7 +149,16 @@ run() {
     if [ -n "$DRY" ]; then printf '   would run: %s\n' "$*"; else "$@"; fi
 }
 # Ask a yes/no question; yes with --yes, no when there is nobody to ask.
+# With "no" as a second word the question is about removing something that is most likely meant to stay:
+# Enter means no, and so does --yes, which agrees to the steps of this script and not to that.
 ask() {
+    if [ "${2:-}" = no ]; then
+        [ -z "$YES" ] || { say "   ($1 -- no: --yes does not agree to this)"; return 1; }
+        [ -t 0 ] || { say "   ($1 -- no: not asked without a terminal)"; return 1; }
+        printf '%s [y/N] ' "$1"
+        read -r answer || return 1
+        case $answer in y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
+    fi
     [ -n "$YES" ] && return 0
     [ -t 0 ] || { say "   ($1 -- skipped: not asked without a terminal; use --yes)"; return 1; }
     printf '%s [Y/n] ' "$1"
@@ -334,7 +343,17 @@ if [ -n "$UNINSTALL" ]; then
                 warn "the udev rules could not be removed or reloaded (see the message above)"
         fi
     fi
-    if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?"; then
+    # The Wine side is in the data folder, which a distribution's package of the program uses as well. The
+    # package's set-up sends whoever still has an installation from the archive here to remove it, and up
+    # to 1.0.0 this question then had yes for Enter and for --yes: the set-up of the Odyssey 3D that was to
+    # be kept went with the old program. Beside a package it stays unless somebody types y; the package's
+    # own removal (any2odyssey-setup --uninstall) asks as before.
+    KEEP=
+    if [ -z "$PACKAGED" ] && { [ -e "$TEST_ROOT/usr/bin/any2odyssey-setup" ] || { [ -z "$TEST_ROOT" ] && have any2odyssey-setup; }; }; then
+        KEEP=no
+        [ ! -d "$DATA/wine-lens" ] || say "   Any2Odyssey is also installed from your distribution's package, which uses the same Wine side."
+    fi
+    if [ -d "$DATA/wine-lens" ] && ask "Remove the Wine side ($DATA/wine-lens: your copy of Leia's runtime, about 1 GB)?" $KEEP; then
         if [ -x "$DATA/wine-lens/tools/tracking.sh" ]; then run "$DATA/wine-lens/tools/tracking.sh" stop >/dev/null 2>&1 || true; fi
         # The serial port's keeper (tools/noxon.sh, or the program it becomes when setup.sh could build one)
         # that tools/ensure-stack.sh left running, found the way that script finds it: the noted number
@@ -359,6 +378,8 @@ if [ -n "$UNINSTALL" ]; then
         run env WINEPREFIX="$DATA/wine-lens/prefix" WINEDEBUG=-all wineserver -k 2>/dev/null || true
         run rm -f "$DATA/any2odyssey-lens-helper" "$DATA/any2odyssey-weaver"
         run rm -rf "$DATA/wine-lens"
+    elif [ -n "$KEEP" ] && [ -d "$DATA/wine-lens" ]; then
+        say "   The Wine side stays, for the package's program. To remove it as well: any2odyssey-setup --uninstall"
     fi
     say ""
     say "Your settings and the depth model stay in $DATA; delete that folder yourself if you want them gone."
@@ -535,7 +556,7 @@ else
     # Removed through this script, whatever version made it: the --uninstall of 0.9.0 and 0.9.1 removes the
     # settings and the depth model with it.
     if [ -e "$HOME/.local/share/applications/any2odyssey.desktop" ] || [ -e "$HOME/.local/bin/any2odyssey" ]; then
-        warn "an installation from the release archive is still in $HOME/.local: its menu entry and its program are used instead of the package's. To remove it (your settings and the depth model stay): $(quoted "$HERE/install.sh") --uninstall --prefix $(quoted "$HOME/.local")"
+        warn "an installation from the release archive is still in $HOME/.local: its menu entry and its program are used instead of the package's. To remove it (your settings and the depth model stay, and so does the Odyssey 3D's Wine side: the removal asks about it, and Enter there keeps it): $(quoted "$HERE/install.sh") --uninstall --prefix $(quoted "$HOME/.local")"
     fi
 fi
 

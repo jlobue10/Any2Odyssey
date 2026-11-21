@@ -1154,7 +1154,8 @@ class InstallerTests(unittest.TestCase):
         lines = [line for line in result.stdout.splitlines() if "is still in" in line]
         self.assertEqual(len(lines), 1, result.stdout)
         self.assertIn(f"from the release archive is still in {home}/.local:", lines[0])
-        words = shlex.split(lines[0].split("stay): ", 1)[1])
+        self.assertIn("Wine side", lines[0])
+        words = shlex.split(lines[0].split("): ", 1)[1])
         self.assertEqual(words, [str(self.archive / "install.sh"), "--uninstall", "--prefix", f"{home}/.local"])
         result = subprocess.run([*SHELL, *words], cwd=self.root, env=self.env, text=True,
                                 capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
@@ -1166,6 +1167,105 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer("--packaged", *flags)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("is still in", result.stdout)
+
+    def at_a_terminal(self, keys, *arguments):
+        """Run the installer at a terminal of its own and type `keys` at its first question.
+
+        Returns its exit code and what it printed (None for the code when it did not end).
+        """
+        command = [*SHELL, str(self.archive / "install.sh"), *arguments]
+        pid, terminal = pty.fork()
+        if pid == 0:
+            try:
+                os.chdir(self.root)
+                os.execvpe(command[0], command, self.env)
+            finally:
+                os._exit(127)
+        text, typed, status = b"", False, None
+        deadline = time.monotonic() + 20
+        try:
+            while time.monotonic() < deadline:
+                if select.select([terminal], [], [], 0.05)[0]:
+                    try:
+                        text += os.read(terminal, 4096)
+                    except OSError:  # the run has ended and closed its side
+                        break
+                if not typed and text.endswith((b"[Y/n] ", b"[y/N] ")):
+                    os.write(terminal, keys)
+                    typed = True
+        finally:
+            ended, code = os.waitpid(pid, os.WNOHANG)
+            if ended:
+                status = os.waitstatus_to_exitcode(code)
+            else:
+                ended, code = None, None
+                for _ in range(100):
+                    ended, code = os.waitpid(pid, os.WNOHANG)
+                    if ended:
+                        break
+                    time.sleep(0.05)
+                if ended:
+                    status = os.waitstatus_to_exitcode(code)
+                else:
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+            os.close(terminal)
+        return status, text.decode(errors="replace")
+
+    def test_removing_an_archive_installation_keeps_the_wine_side_a_package_uses_too(self):
+        # The package's set-up tells whoever still has an installation from the archive to remove it,
+        # and says the settings and the depth model stay. That removal then asked "Remove the Wine side
+        # (... about 1 GB)? [Y/n]", and the Wine side is in the data folder the package's program uses:
+        # Enter, or --yes, removed the set-up of the Odyssey 3D that the move was meant to keep.
+        home, data = self.usual_place()
+        flags = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        wine_side = data / "wine-lens"
+
+        def installed_with_a_wine_side():
+            result = self.run_installer(*flags)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return self.wine_side(data)
+
+        # No package beside it: Enter and --yes remove the Wine side, as they did.
+        installed_with_a_wine_side()
+        code, said = self.at_a_terminal(b"\n", "--uninstall")
+        self.assertEqual(code, 0, said)
+        self.assertIn("[Y/n]", said)
+        self.assertFalse(wine_side.exists(), said)
+        # A distribution's package is installed as well.
+        setup = self.system / "usr/bin/any2odyssey-setup"
+        setup.parent.mkdir(parents=True)
+        setup.write_text("#!/bin/sh\n")
+        setup.chmod(0o755)
+        kept = installed_with_a_wine_side()
+        code, said = self.at_a_terminal(b"\n", "--uninstall")
+        self.assertEqual(code, 0, said)
+        self.assertIn("[y/N]", said)
+        self.assertNotIn("[Y/n]", said)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"Enter removed {file}\n{said}")
+        self.assertIn("any2odyssey-setup --uninstall", said)
+        self.assertFalse((home / ".local/bin/any2odyssey").exists())
+        # --yes does not remove it either, and says how it is removed.
+        installed_with_a_wine_side()
+        result = self.run_installer("--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for file in kept:
+            self.assertTrue(file.is_file(), f"--yes removed {file}\n{result.stdout}")
+        self.assertIn("any2odyssey-setup --uninstall", result.stdout)
+        self.assertFalse((home / ".local/bin/any2odyssey").exists())
+        # Somebody who types y means it.
+        installed_with_a_wine_side()
+        code, said = self.at_a_terminal(b"y\n", "--uninstall")
+        self.assertEqual(code, 0, said)
+        self.assertFalse(wine_side.exists(), said)
+        for file in kept[:2]:
+            self.assertTrue(file.is_file(), f"{file} was removed")
+        # The package's own removal (any2odyssey-setup --uninstall) is what removes it with --yes.
+        self.wine_side(data)
+        result = self.run_installer("--packaged", "--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(wine_side.exists(), result.stdout)
 
     def test_the_archive_in_a_folder_named_like_an_installation_still_installs_to_the_usual_place(self):
         # Only the installed copy, which has no program beside it, takes the prefix from where it is.
