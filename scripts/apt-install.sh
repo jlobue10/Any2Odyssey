@@ -12,6 +12,7 @@
 #
 # Here the parts that use the network (the package lists with --update, then the packages' files) each get
 # a time limit and three tries. What a try has fetched is kept, so the next one goes on where it stopped.
+# Before the files are tried again the lists are fetched once more (lists_again below says why).
 # When the third try has not finished either, the script fails, and says which part it was. Only then are
 # the packages installed, from the files that are on the disk by now: that part is never stopped half-way.
 # The step's timeout-minutes in the workflow is the bound on all of it.
@@ -51,13 +52,29 @@ attempt() { # <seconds for one try> <what it is, for the messages> <apt-get argu
         [ "$try" -lt "$TRIES" ] || return 1
         try=$((try + 1))
         sleep "$PAUSE"
+        [ -z "$AGAIN" ] || lists_again
     done
 }
+# The package lists once more, before a download is tried again. apt-get update ends well when a mirror
+# could not be reached ("Some index files failed to download. They have been ignored, or old ones used
+# instead." is a warning then, and an error only when the mirror answers with one). The lists that are
+# there, from such an update or from the runner's image, can name a file the mirror has replaced since:
+# the download asked for it three times, got 404 three times and failed, where apt-get's own advice is to
+# run update. Seen with apt 2.7.14 against a mirror that dropped its connections for 15 seconds and came
+# back with a newer package. What this fetch cannot get stays as it is; the try that follows shows
+# whether that matters.
+lists_again() {
+    # shellcheck disable=SC2086  # a list of options
+    $SUDO timeout --kill-after=10 60 apt-get $OPTIONS update ||
+        echo "apt-install: the package lists could not be fetched again; the next try uses the ones that are there" >&2
+}
 
+AGAIN=
 if [ -n "$UPDATE" ]; then
     attempt 60 "fetching the package lists" update ||
         { echo "apt-install: the package lists could not be fetched; nothing was installed" >&2; exit 1; }
 fi
+AGAIN=1
 attempt 300 "downloading the packages" install -y --no-install-recommends --download-only "$@" ||
     { echo "apt-install: the packages could not be downloaded; nothing was installed" >&2; exit 1; }
 # shellcheck disable=SC2086  # a list of options
