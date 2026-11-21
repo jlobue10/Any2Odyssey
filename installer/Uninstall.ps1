@@ -11,14 +11,20 @@ $ErrorActionPreference='Stop'
 # as in Install.cmd: this script is started again with it, in the same console, and its exit code
 # is passed on. PSModulePath is cleared for that start as Install.cmd clears it, and put back for a
 # console that goes on after this script. No cmdlet is called here, so none has to be loaded.
+# Where the 64-bit one is there and Windows does not start it (a policy, security software that
+# keeps one PowerShell from starting another), the script goes on to its refusal below, which with
+# -Pause stays on screen; the start's own error ended the script here, and the window closed with it.
+$nativeFailure=''
 if(-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem){
  $native=$env:SystemRoot+'\Sysnative\WindowsPowerShell\v1.0\powershell.exe'
  if([IO.File]::Exists($native)){
   $relaunch=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
   if($Pause){$relaunch+='-Pause'}
   $modulePath=$env:PSModulePath;$env:PSModulePath=$null
-  try{& $native @relaunch}finally{$env:PSModulePath=$modulePath}
-  exit $LASTEXITCODE
+  try{& $native @relaunch}
+  catch [Management.Automation.ApplicationFailedException]{$nativeFailure=([string]$_.Exception.Message).Trim();if(-not $nativeFailure){$nativeFailure='no reason was given.'}}
+  finally{$env:PSModulePath=$modulePath}
+  if(-not $nativeFailure){exit $LASTEXITCODE}
  }
 }
 $notices=0
@@ -40,7 +46,7 @@ $principal=New-Object Security.Principal.WindowsPrincipal($identity)
 # built-in Administrator account or an elevated console). There is no higher token
 # to request then, so the helper runs as this process instead of through UAC.
 $alreadyElevated=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if(-not [Environment]::Is64BitProcess){throw 'Use 64-bit PowerShell to uninstall Any2Odyssey.'}
+if(-not [Environment]::Is64BitProcess){throw ('Use 64-bit PowerShell to uninstall Any2Odyssey.'+$(if($nativeFailure){" Windows did not start it from this 32-bit one: $nativeFailure"}else{''}))}
 $exe=Join-Path $app 'Any2Odyssey.exe'
 $worker='C:\Program Files\Odyssey 3D Hub\Conversion\Any2OdysseyWorker.exe'
 $helper=Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Any2Odyssey\UninstallWorker.ps1'

@@ -47,10 +47,10 @@ done
 # asked the stand-in for a name it did not have, and nothing in the prefix started): that takes setup.sh,
 # and this start says so instead of trying.
 SYS=$WINEPREFIX/drive_c/windows/system32
-# (The folder beside the wine that runs, and the usual ones only after it: with two Wines on one machine the
-# copies were compared with, and brought up to, the libraries of the Wine that does not run. The function is
-# setup.sh's, word for word.)
-wine_libraries() {
+# (The folder beside the wine that runs, then the one that Wine named when setup.sh asked it, and the usual
+# ones only after both: with two Wines on one machine the copies were compared with, and brought up to, the
+# libraries of the Wine that does not run. The function is setup.sh's, word for word.)
+wine_libraries() { # [beside]: with that word, only the folder beside the wine that runs
     wine_is=$(command -v wine 2>/dev/null) || wine_is=
     case $wine_is in /*) wine_is=$(readlink -f "$wine_is" 2>/dev/null) || wine_is= ;; *) wine_is= ;; esac
     case $wine_is in
@@ -66,6 +66,10 @@ wine_libraries() {
             d=${wine_is%/*}
             if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi ;;
     esac
+    [ "${1:-}" != beside ] || return 1
+    # (not beside it: what the Wine that runs said when setup.sh asked it, while that folder is there)
+    d=$(cat "$T/wine.libs" 2>/dev/null) || d=
+    if [ -n "$d" ] && [ -f "$d/cfgmgr32.dll" ]; then echo "$d"; return 0; fi
     for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
              /usr/lib64/wine-wow64/wine/x86_64-windows \
              /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do

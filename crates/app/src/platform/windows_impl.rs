@@ -433,8 +433,61 @@ mod tests {
             .ends_with(['\\', '/']));
     }
 
+    /// Run `test` on a thread whose windows are on a desktop of their own,
+    /// which is never shown. The test below shows a window and asks for the
+    /// foreground with it (`show_window`); that was done on the desktop of
+    /// whoever ran the tests. Where Windows gives no such desktop the test
+    /// runs on the one it was started on, as before.
+    fn on_a_desktop_of_its_own(test: impl FnOnce() + Send) {
+        use std::ptr::null;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateDesktopW(
+                name: *const u16,
+                device: *const u16,
+                mode: *const std::ffi::c_void,
+                flags: u32,
+                access: u32,
+                security: *const std::ffi::c_void,
+            ) -> isize;
+            fn SetThreadDesktop(desktop: isize) -> i32;
+            fn CloseDesktop(desktop: isize) -> i32;
+        }
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let name = win::wide(&format!(
+            "Any2Odyssey-tray-test-{}",
+            processes::current_pid()
+        ));
+        // SAFETY: a NUL-terminated name that outlives the call; the other
+        // pointers are optional and absent.
+        let desktop =
+            unsafe { CreateDesktopW(name.as_ptr(), null(), null(), 0, GENERIC_ALL, null()) };
+        let outcome = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    if desktop != 0 {
+                        // SAFETY: a new thread, which has no window yet.
+                        let _ = unsafe { SetThreadDesktop(desktop) };
+                    }
+                    test()
+                })
+                .join()
+        });
+        if desktop != 0 {
+            // SAFETY: the handle made above; its one thread has ended.
+            let _ = unsafe { CloseDesktop(desktop) };
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     #[test]
     fn a_window_hidden_for_the_tray_is_minimized_until_something_restores_it() {
+        on_a_desktop_of_its_own(hidden_for_the_tray_and_restored);
+    }
+
+    fn hidden_for_the_tray_and_restored() {
         use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, IsWindowVisible, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,

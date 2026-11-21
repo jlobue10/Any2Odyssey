@@ -31,10 +31,19 @@ server_runs() {
     return 1
 }
 
+# The note of a start that ended well holds the time of the board's link as it was then, and the stack has
+# the board for as long as the link still has that time. (The link itself, not the tty behind it: udev makes
+# it anew when the board returns after a monitor sleep.) The note used to be an empty file whose own time was
+# compared with the link's, and the stack counted while the link was not the newer of the two. That takes a
+# clock that only goes forward. Where the clock is set back after udev made the link (a PC that also runs
+# Windows, which keeps local time in the clock chip: Linux starts hours ahead east of Greenwich and is
+# corrected from the network a little later), the link was newer than every note until the clock had caught
+# up with it, and each request in those hours started the stack again, under whatever was using it.
+board_time() { stat -c %Y "$BOARD" 2>/dev/null; }
+
 stack_ok() {
     pgrep -u "$(id -u)" -f 'bin.SRService\.exe' >/dev/null && pgrep -u "$(id -u)" -f 'SRSession\.exe' >/dev/null &&
-        [ -e "$STAMP" ] && [ "$(stat -c %Y "$BOARD")" -le "$(stat -c %Y "$STAMP")" ] && server_runs
-    # (the link itself, not the tty behind it: udev makes it anew when the board returns after a monitor sleep)
+        [ -s "$STAMP" ] && [ "$(board_time)" = "$(cat "$STAMP" 2>/dev/null)" ] && server_runs
 }
 
 # Whether Leia's service has said, since this start began, that the lens board answered it. The line used to
@@ -94,6 +103,22 @@ if ! stack_ok; then
         [ $i -gt 60 ] && { echo "error: Leia's service did not get the lens board ready (log in $LOGDIR)"; exit 1; }
         sleep 1
     done
-    touch "$STAMP"
+    # Leia's session is the last thing the start launches, and Wine 11.21 and 11.22 start it through a
+    # program of their own: the process that was started as "wine SRSession.exe" becomes "start.exe /exec",
+    # and the session comes a moment later as a process of its own, named by its Windows path. In between,
+    # no process has the session's name. Where the board had answered by then, this request left in that
+    # moment, and a second request that had been waiting at the lock above (the lens helper and the weaver
+    # ask at the same time) looked for the session, did not find it and started the stack again, under the
+    # first request's program: of eight such pairs under real Wine 11.22 six started the stack twice, and
+    # in five the first helper never said "on". So the session itself is waited for here: a process whose
+    # command line begins with the session's name ("SRSession.exe" up to Wine 11.17) or with a Windows path
+    # to it, which "wine SRSession.exe" does not. Three seconds at the most: a session that does not come,
+    # or has ended at once, is what the next request finds, as before.
+    i=0
+    until pgrep -u "$(id -u)" -f '^([A-Za-z]:.*)?SRSession\.exe' >/dev/null || [ $i -ge 30 ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
+    board_time >"$STAMP"
 fi
 exit 0

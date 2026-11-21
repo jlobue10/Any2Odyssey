@@ -102,7 +102,10 @@ pub fn write_layout_probe(parent_pid: u32, worker_pid: u32) -> Result<(), String
     }
     let _ = unsafe { DestroyWindow(destination) };
     let monitors: Vec<_> = win::monitors().into_iter().map(|(bounds, primary, name, _)| serde_json::json!({"name": name, "bounds": bounds, "primary": primary})).collect();
-    write_json_atomic(&paths::projection_diagnostics_file(), &serde_json::json!({"time": any2odyssey_core::log::now_iso(), "monitors": monitors, "windows": rows})).map_err(|e| e.to_string())
+    // With the file's name, as `--inspect` gives it: "Access is denied." alone
+    // says nothing about what could not be written.
+    let report = paths::projection_diagnostics_file();
+    write_json_atomic(&report, &serde_json::json!({"time": any2odyssey_core::log::now_iso(), "monitors": monitors, "windows": rows})).map_err(|e| format!("Could not write {}: {e}", report.display()))
 }
 
 #[derive(Serialize)]

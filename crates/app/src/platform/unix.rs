@@ -1797,11 +1797,18 @@ mod tests {
             assert!(send_to_any(&paths, &Request::Quit), "{context}");
             assert_eq!(server.join().unwrap(), Request::Quit, "{context}");
             // The listener went with the thread: its name is a stale one,
-            // which the next launch clears away and binds again.
-            assert!(
-                matches!(bind_among(&paths), (Bound::Listening(_), Some(at)) if at == bound),
-                "{context}: the stale socket was not taken over"
-            );
+            // which the next launch clears away and binds again. Another
+            // test's child process, between fork and exec, can still hold
+            // a copy of the listener for a moment, and a knock is answered
+            // for as long; that is the test harness, so give it the
+            // moment (as the test below does).
+            let taken_over = (0..200).any(|_| {
+                matches!(bind_among(&paths), (Bound::Listening(_), Some(at)) if at == bound) || {
+                    std::thread::sleep(Duration::from_millis(10));
+                    false
+                }
+            });
+            assert!(taken_over, "{context}: the stale socket was not taken over");
             std::fs::remove_file(data.join(SOCKET_NAME)).unwrap();
         }
         // Nowhere at all: the program runs without the socket, as before.
