@@ -63,6 +63,9 @@ class SetupPgrepTests(unittest.TestCase):
         self.assertIn("too old", done.stderr)
         self.assertIn("wine-10.0 (Ubuntu 10.0~repack-6ubuntu1)", done.stderr)
         self.assertIn(f"Wine 11.{WINE_MINOR} or newer", done.stderr)
+        # WineHQ's packages that put a wine on the PATH; wine-devel and wine-staging install under /opt alone.
+        self.assertIn("winehq-devel or winehq-staging", done.stderr)
+        self.assertNotRegex(done.stderr, r"(?<!/)\bwine-(devel|staging)\b")
         self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
         self.assertFalse((self.root / "data").exists())
 

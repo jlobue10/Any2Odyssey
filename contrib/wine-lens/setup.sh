@@ -79,8 +79,11 @@ wine_too_old() { # <what "wine --version" says>
     [ "$major" -lt 11 ] || { [ "$major" -eq 11 ] && [ "${minor:-0}" -lt 6 ]; }
 }
 WINE_IS=$(wine --version 2>/dev/null | head -n 1) || WINE_IS=
+# (WineHQ's packages by the names that put a wine on the PATH: winehq-devel and winehq-staging. The message
+# named wine-devel and wine-staging, which install under /opt alone, and this check then found the old Wine
+# again.)
 if wine_too_old "$WINE_IS"; then
-    die "this Wine is too old for the Odyssey 3D set-up: $WINE_IS, and Wine 11.6 or newer is needed (older ones cannot tell Leia's service where the lens board is). Where the distribution's own Wine is older, WineHQ's packages (wine-devel or wine-staging) are new enough."
+    die "this Wine is too old for the Odyssey 3D set-up: $WINE_IS, and Wine 11.6 or newer is needed (older ones cannot tell Leia's service where the lens board is). Where the distribution's own Wine is older, WineHQ's packages winehq-devel or winehq-staging are new enough."
 fi
 # The tools tell whether Leia's service runs by looking among this user's own processes. BusyBox's pgrep
 # cannot (it has no -u) and fails instead: every start of the lens helper would restart the service.
