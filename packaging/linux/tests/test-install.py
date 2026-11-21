@@ -913,7 +913,7 @@ class InstallerTests(unittest.TestCase):
             # BusyBox's shell can run its own timeout without looking on the PATH while flock is a program
             # (Debian's and Ubuntu's does: their BusyBox has no flock). The five minutes are then real:
             # the installer waited them, and this test ended in an error when its own patience was over.
-            self.skipTest("this shell runs a built-in timeout: the five minutes cannot be stood in for (the half with a stand-in for flock passed)")
+            self.skipTest("this shell runs a built-in timeout: the five minutes of a real wait cannot be stood in for")
         held = os.open(prefix, os.O_RDONLY)
         try:
             fcntl.flock(held, fcntl.LOCK_EX)
@@ -2001,7 +2001,8 @@ done
         german = (answer.replace("Installed: (none)", "Installiert:           (keine)")
                   .replace("Candidate:", "Installationskandidat:").replace("Version table:", "Versionstabelle:"))
         policy.write_text(f'#!/bin/sh\n[ "$1 $2" = "policy wine" ] || exit 1\n'
-                          f'case ${{LC_ALL:-${{LC_MESSAGES:-${{LANG:-}}}}}} in de*) printf "{german}" ;; *) printf "{answer}" ;; esac\n')
+                          'case ${LC_ALL:-${LC_MESSAGES:-${LANG:-}}} in\n'
+                          f'    de*) printf "{german}" ;;\n    *) printf "{answer}" ;;\nesac\n')
         policy.chmod(0o755)
 
     def test_a_distribution_wine_that_the_set_up_would_refuse_is_not_installed(self):

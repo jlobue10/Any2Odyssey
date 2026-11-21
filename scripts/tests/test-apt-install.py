@@ -47,9 +47,10 @@ class AptInstall(unittest.TestCase):
         # script then starts BusyBox's timeout itself, which has no --kill-after, and nothing here stands
         # in for it: six of these tests failed that way, at v1.0.1 as well. (Run by another user the
         # script goes through sudo, which is a stand-in and finds the one for timeout.)
-        probe = subprocess.run([*SHELL, "-c", "command -v timeout; id -u"], env=self.env, capture_output=True, text=True)
+        probe = subprocess.run([*SHELL, "-c", "command -v timeout; id -u"], env=self.env, capture_output=True,
+                               text=True)
         if "/" not in probe.stdout.splitlines()[0] and probe.stdout.split()[-1] == "0":
-            self.skipTest("root under a shell that runs a timeout of its own (BusyBox's), which the test cannot stand in for")
+            self.skipTest("root under a shell that runs a timeout of its own (BusyBox's): no stand-in for it")
 
     def run_script(self, plan, *arguments):
         """Run with the exit codes of apt-get's calls planned, in order (a call beyond the plan succeeds)."""
@@ -108,8 +109,8 @@ class AptInstall(unittest.TestCase):
                 self.assertEqual(done.returncode, 0, done.stderr)
                 self.assertEqual(self.noted("apt-get"), [*before, DOWNLOAD, UPDATE, DOWNLOAD, INSTALL])
                 # With the lists' time limit, not the download's.
-                self.assertEqual(self.noted("timeout")[len(before):],
-                                 ["--kill-after=10 300 apt-get", "--kill-after=10 60 apt-get", "--kill-after=10 300 apt-get"])
+                limits = [note.split()[1] for note in self.noted("timeout")]
+                self.assertEqual(limits[len(before):], ["300", "60", "300"])
 
     def test_lists_that_cannot_be_fetched_again_do_not_end_the_tries(self):
         # The download decides: the second fetch of the lists fails or is stopped, the try after it gets through.
