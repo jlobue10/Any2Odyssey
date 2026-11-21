@@ -790,7 +790,9 @@ const BAR_BLACK: u8 = 24;
 /// it (an upright video on a wide screen has two thirds): what is dark for
 /// more than that is a dark picture, and a picture that is black all over
 /// has no bars. Rows are looked at first, columns between them: a frame
-/// that is no film between bars is told by its first row and column.
+/// that is no film between bars is told by its first row and column. The
+/// bar above and the bar below are taken to be of one height where one of
+/// them has subtitles, a player's controls or the pointer in it.
 fn black_bars(frame: &RgbaImage) -> (u32, u32, u32, u32) {
     let (w, h) = (frame.width() as usize, frame.height() as usize);
     let pixels = frame.as_raw().as_chunks::<4>().0;
@@ -809,6 +811,29 @@ fn black_bars(frame: &RgbaImage) -> (u32, u32, u32, u32) {
         return (0, 0, 0, 0);
     }
     let bottom = (0..h).rev().take_while(|&y| row(y)).count();
+    // A bar with something in it: subtitles, a player's controls, the
+    // pointer. Its rows are black from end to end only as far as that
+    // reaches, and the rest of the bar would be the picture's: the range
+    // would be the bar's again for as long as a subtitle stands, and the
+    // film's depth would pump with every line of them. A film's two bars
+    // are of one height. Where one reaches further than the other and the
+    // same rows at the other edge are black in four pixels of five (two
+    // long lines of subtitles leave about that), that one is a bar as
+    // high, with what stands in it.
+    let mostly_black = |rows: std::ops::Range<usize>| {
+        let dark = pixels[rows.start * w..rows.end * w]
+            .iter()
+            .filter(|pixel| black(pixel))
+            .count();
+        dark * 5 >= rows.len() * w * 4
+    };
+    let (top, bottom) = match (top, bottom) {
+        (top, bottom) if top > bottom && top <= h / 2 && mostly_black(h - top..h) => (top, top),
+        (top, bottom) if bottom > top && bottom <= h / 2 && mostly_black(0..bottom) => {
+            (bottom, bottom)
+        }
+        as_found => as_found,
+    };
     let (top, bottom) = bars(top, bottom, h);
     let column = |x: usize| (top..h - bottom).all(|y| black(&pixels[y * w + x]));
     let left = (0..w).take_while(|&x| column(x)).count();
@@ -1118,11 +1143,42 @@ mod tests {
             }
         });
         assert_eq!(black_bars(&small), (10, 5, 20, 20));
-        // One pixel in a bar's row that is not black, and the row is the
-        // picture's; so is everything below it.
-        let mut marked = film.clone();
+        // One pixel in a row that is not black, and the row is not black
+        // from end to end: a bar at one edge alone ends there.
+        let one_bar = grey_frame(1036, 588, |x, y| match y {
+            0..76 => 16,
+            _ => 40 + ((x + y) % 200) as u8,
+        });
+        assert_eq!(black_bars(&one_bar), (76, 0, 0, 0));
+        let mut marked = one_bar.clone();
         marked.put_pixel(1000, 70, image::Rgba([25, 0, 0, 255]));
-        assert_eq!(black_bars(&marked), (70, 76, 0, 0));
+        assert_eq!(black_bars(&marked), (70, 0, 0, 0));
+        // The film again with something in a bar: the pointer in the upper
+        // one, two lines of subtitles in the lower one. Each is still a
+        // bar as high as the other; a subtitle that comes and goes does
+        // not move the picture's edge.
+        let mut pointed = film.clone();
+        pointed.put_pixel(1000, 70, image::Rgba([255, 255, 255, 255]));
+        assert_eq!(black_bars(&pointed), (76, 76, 0, 0));
+        let subtitled = grey_frame(1036, 588, |x, y| match y {
+            76..512 => 40 + ((x + y) % 200) as u8,
+            525..540 | 548..563 if (200..840).contains(&x) && x % 3 == 0 => 235,
+            _ => 16,
+        });
+        assert_eq!(black_bars(&subtitled), (76, 76, 0, 0));
+        // With something in both bars at once, both are as high as the
+        // one that is black from end to end for longer.
+        let mut both = subtitled.clone();
+        both.put_pixel(1000, 70, image::Rgba([255, 255, 255, 255]));
+        assert_eq!(black_bars(&both), (70, 70, 0, 0));
+        // A bar above a picture whose lower rows are merely dark is one
+        // bar: three pixels of ten are lit there.
+        let dark_below = grey_frame(1036, 588, |x, y| match y {
+            0..76 => 16,
+            512.. if x % 10 < 7 => 10,
+            _ => 40 + ((x + y) % 200) as u8,
+        });
+        assert_eq!(black_bars(&dark_below), (76, 0, 0, 0));
         // No bars: a picture to its edges, a border of one row (less than
         // a hundredth of the side), a picture that is black all over, and
         // a dark picture with something in one corner: more than three
