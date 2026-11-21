@@ -245,7 +245,10 @@ cp "$WINELIB/dxva2.dll" "$SYS/dxva2w.dll"
 cp "$WINELIB/wtsapi32.dll" "$SYS/wtsapiw.dll"
 cp "$B/a2otoast.dll" "$B/cfgmgr32.dll" "$B/dxva2.dll" "$B/wtsapi32.dll" "$SYS/"
 cp "$B/a2ousb.sys" "$SYS/drivers/"
-(cd "$B" && setsid timeout 120 wine regedit /S device.reg >/dev/null 2>&1 </dev/null)
+# (Each of the three requests to Wine below that can fail now ends the set-up with its reason. Under "set -e"
+# this first one ended the script without a word, after two minutes when it was Wine that did not come back.)
+(cd "$B" && setsid timeout 120 wine regedit /S device.reg >/dev/null 2>&1 </dev/null) ||
+    die "Wine did not import the lens board's entries into the prefix's registry (wine regedit ended with $?; 124 means it had not ended after two minutes). The set-up is not finished; run it again."
 (cd "$WINEPREFIX/drive_c/Program Files/LeiaSR/Platform/bin" && setsid timeout 120 wine SRService.exe -install >/dev/null 2>&1 </dev/null) || true
 timeout 60 wine sc query "SR Service" 2>/dev/null | grep -q "SERVICE_NAME" || die "Leia's service could not be registered in the prefix"
 if [ -n "$TRACKING" ]; then
@@ -265,13 +268,23 @@ if [ -n "$TRACKING" ]; then
        printf '"SymbolicLink"="%s"\n"FriendlyName"="3D Stereo WebCam"\n' \
            '\\\\?\\USB#VID_04E8&PID_20D7&MI_00#8&2939E249&0&0000#{E5323777-F976-4F5B-9B55-B94699C46E44}\\GLOBAL'
      } >"$B/camera.reg")
-    (cd "$B" && setsid timeout 120 wine regedit /S camera.reg >/dev/null 2>&1 </dev/null) || true
+    # A failure of this import was let pass and never looked at: the set-up said "done", the camera stand-in
+    # found neither the port nor the secret, and Leia's eye tracker never got a camera. It ends the set-up
+    # now, and so does a secret that Wine does not have afterwards (asked for by its name only; what Wine
+    # answers is not kept).
+    (cd "$B" && setsid timeout 120 wine regedit /S camera.reg >/dev/null 2>&1 </dev/null) ||
+        die "Wine did not import the camera's entries into the prefix's registry (wine regedit ended with $?; 124 means it had not ended after two minutes). The set-up is not finished; run it again."
     rm -f "$B/camera.reg" # it holds the secret
+    timeout 60 wine reg query 'HKLM\Software\Any2Odyssey\Camera' /v Secret >/dev/null 2>&1 </dev/null ||
+        die "the camera's entries are not there in the prefix's registry after Wine imported them (wine reg query ended with $?): Leia's eye tracker would get no camera. The set-up is not finished; run it again."
+    # (The request to register the tracker was the last of an "||" list: under "set -e" its failure ended the
+    # script before the line after it could say what had failed.)
     timeout 60 wine sc query "SR Eye Tracker" 2>/dev/null | grep -q "SERVICE_NAME" ||
         setsid timeout 60 wine sc create "SR Eye Tracker" \
-            binPath= 'C:\Program Files\LeiaSR\Tracker\bin\SREyeTracker.exe' start= demand >/dev/null 2>&1 </dev/null
+            binPath= 'C:\Program Files\LeiaSR\Tracker\bin\SREyeTracker.exe' start= demand >/dev/null 2>&1 </dev/null ||
+        true
     timeout 60 wine sc query "SR Eye Tracker" 2>/dev/null | grep -q "SERVICE_NAME" ||
-        die "Leia's eye tracker could not be registered in the prefix"
+        die "Leia's eye tracker could not be registered in the prefix (after \"wine sc create\", Wine has no service \"SR Eye Tracker\"). The set-up is not finished; run it again."
 fi
 wineserver -k 2>/dev/null || true
 
