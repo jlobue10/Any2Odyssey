@@ -34,17 +34,26 @@ class AptInstall(unittest.TestCase):
                        'number=$(wc -l < "$A2O_TEST_ROOT/apt-get")\n'
                        'code=$(sed -n "${number}p" "$A2O_TEST_ROOT/plan")\nexit "${code:-0}"\n',
             "timeout": 'echo "$1 $2 $3" >> "$A2O_TEST_ROOT/timeout"\nshift 2\nexec "$@"\n',
-            "sudo": 'exec "$@"\n',
+            "sudo": 'echo "$1" >> "$A2O_TEST_ROOT/sudo"\nexec "$@"\n',
+            # The runner's user, whoever runs the test (A2O_TEST_UID=0: a container's root).
+            "id": 'echo "${A2O_TEST_UID:-1000}"\n',
         }
         for name, body in stand_ins.items():
             (tools / name).write_text("#!/bin/sh\n" + body)
             (tools / name).chmod(0o755)
         self.env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", A2O_TEST_ROOT=str(self.root),
                         A2O_APT_PAUSE="0")
+        # A BusyBox shell can run its own id and timeout without looking on the PATH. Run by root, the
+        # script then starts BusyBox's timeout itself, which has no --kill-after, and nothing here stands
+        # in for it: six of these tests failed that way, at v1.0.1 as well. (Run by another user the
+        # script goes through sudo, which is a stand-in and finds the one for timeout.)
+        probe = subprocess.run([*SHELL, "-c", "command -v timeout; id -u"], env=self.env, capture_output=True, text=True)
+        if "/" not in probe.stdout.splitlines()[0] and probe.stdout.split()[-1] == "0":
+            self.skipTest("root under a shell that runs a timeout of its own (BusyBox's), which the test cannot stand in for")
 
     def run_script(self, plan, *arguments):
         """Run with the exit codes of apt-get's calls planned, in order (a call beyond the plan succeeds)."""
-        for name in ("apt-get", "timeout"):
+        for name in ("apt-get", "timeout", "sudo"):
             (self.root / name).unlink(missing_ok=True)
         (self.root / "plan").write_text("".join(f"{code}\n" for code in plan))
         return subprocess.run([*SHELL, str(SCRIPT), *arguments], env=self.env, stdin=subprocess.DEVNULL,
@@ -61,6 +70,20 @@ class AptInstall(unittest.TestCase):
         # The two parts that use the network have a time limit; the installation itself has none.
         self.assertEqual(self.noted("timeout"), ["--kill-after=10 60 apt-get", "--kill-after=10 300 apt-get"])
         self.assertEqual(done.stderr, "")
+        # sudo starts timeout, and the installation itself, each time.
+        self.assertEqual(self.noted("sudo"), ["timeout", "timeout", "apt-get"])
+
+    def test_root_runs_apt_get_without_sudo(self):
+        # A container's user is root, and need not have sudo.
+        self.env["A2O_TEST_UID"] = "0"
+        found = subprocess.run([*SHELL, "-c", "command -v timeout"], env=self.env, capture_output=True, text=True)
+        if "/" not in found.stdout:
+            self.skipTest("this shell runs a timeout of its own (BusyBox's) in place of the stand-in")
+        done = self.run_script([], "--update", "one", "two")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.noted("apt-get"), [UPDATE, DOWNLOAD, INSTALL])
+        self.assertEqual(self.noted("timeout"), ["--kill-after=10 60 apt-get", "--kill-after=10 300 apt-get"])
+        self.assertEqual(self.noted("sudo"), [])
 
     def test_the_lists_are_fetched_only_when_asked_for(self):
         done = self.run_script([], "one", "two")
