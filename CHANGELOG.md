@@ -2,6 +2,89 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 1.0.2 (2026-11-21)
+
+A tenth audit release: six pull requests (#179 to #183 and #185) from a round that ran what the round before it had reasoned. 1.0.1 was made by reading, on Linux alone, and its notes say so in several places. This round put it on the rigs: the depth model itself on the processor and on a graphics card over real film and recordings of a desktop, the Odyssey 3D set-up under real Wine in three versions, the live screen on KDE Plasma, GNOME, sway, labwc and COSMIC with their own portals, the Linux installer against real apt and real pacman in root trees of eight distributions, and the Windows side on a Windows PC for the first time since 0.9.9. Most of 1.0.1 held, the two corrections it had "reasoned from the code, not seen" among them. One of its claims did not hold and is taken back here. Nothing found was grave; three findings were of the middle kind, one of them new in 1.0.1 and two older. At the end all six were merged and run together, on Windows and on Linux, with every rig of the round.
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive): three scripts of the Odyssey 3D set-up changed, and an update of the program does not replace them in the data folder.
+
+**Linux, live screen: the range that 1.0.1 let follow the scene is each depth map's own again.** 1.0.1 measured each depth map against a range that follows the scene slowly, so that "the depth as a whole no longer steps when the nearest or the farthest thing in the picture changes a little". Run with the depth model over real pictures, it does the opposite on a desktop. The model's numbers move as a whole from one map to the next (on a desktop where only a counter changes, by about one hundredth of their span); measuring each map against its own lowest and highest number is rid of that, and a range that hardly moves is not. At *Depth steadiness* 60 and *Standard*, 1.0.0 against 1.0.1: the depth of the whole picture changes from map to map by 2.4 and 4.4 thousandths of the range on a desktop that stands still, by 2.8 and 3.9 while text scrolls; when a small window opens, the rest of the picture moves by 0.56 and 1.07 pixels between the two views of a 3840-wide view, and by 1.07 and 2.36 when a window is dragged in; after a hard cut in a film the new scene is nine tenths there after 3 maps and after 6 (22 at the most, more than three seconds on the processor), and is shown at as little as two thirds of its depth meanwhile. With this release every one of these numbers is 1.0.0's again. What is given up is the one case where 1.0.1 was better: where a window comes in over a film that stands still, the background steps back by 13.9 pixels at once as in 1.0.0, where 1.0.1 had 9.9 (0.9.9: 7.0). The following itself stays in the code with nothing to do. **This too has not been seen on the monitor**; `docs/TESTING.md` has the checks, side by side with 1.0.1 if possible. (#183)
+
+**Linux, the Odyssey 3D set-up: a start of Leia's stack no longer leaves before Leia's session is there.** Under Wine 11.21 and 11.22 the process that is started as the session first is one of Wine's own, and the session appears a moment later; in between, nothing has the session's name. A start that left in that moment gave two faults, both seen under real Wine with stand-ins for Leia's programs. The older one: the first start after a login came without eye tracking ("Leia's service is not running"), in five cold starts of five. The one that is new in 1.0.1, whose longer look at Leia's log moved the moment: the lens output and the Odyssey 3D output asked for together started the stack twice, in four pairs of four, and the pair took 39 seconds where it takes 20. The start now waits up to three seconds for the session; a cold start takes a tenth of a second longer under Wine 11.22 and no longer under 11.6. Whether either fault showed on the monitor depends on when Leia's real service writes its line about the board, which the rig could not know. (#185)
+
+**Linux, live screen: a damaged note of the remembered screen no longer keeps the live screen from starting.** The program keeps the desktop's token for the screen that was chosen, so that the next start asks nothing. With something in that file that is no token, every Start ended with "Restore token is not valid" on KDE Plasma and on GNOME; with zero bytes in it, which is what a power cut can leave, the program lost its connection to the session's D-Bus at the first Start and every later one failed, after a new launch too. Only *Choose another screen* got out of it, and nothing said so. Older than 1.0.1 (0.9.9 does the same). Such a token is now not sent, and a request that the desktop refuses as wrong while a token was given is made once more without it: the desktop's dialog comes as at a first start, and a good token is written. (#182)
+
+### Fixed
+
+Linux, the live screen:
+
+- **Each depth map is measured against its own range again**, as above. (#183)
+- **At a depth steadiness of 0 nothing of the range before is kept.** 1.0.1 kept half of it, against the page's own words ("How much of the previous depth map is kept"): after a cut, 15 to 21 % of the old depth was left with the first map, and up to three eighths of the picture lay at the nearest or the farthest. (With the range each map's own this line has nothing to do; it is the correction if the following range comes back.) (#183)
+- **A damaged note of the remembered screen**, as above. (#182)
+
+Linux, the Odyssey 3D set-up (run `any2odyssey-setup` once to have these):
+
+- **A start waits for Leia's session**, as above. (#185)
+- **A clock that was set back no longer makes every request a cold start.** A running stack counted as having the lens board only while the board's link in `/dev` was not newer than the note of the start. On a PC that also starts Windows, with Windows keeping local time, the clock is set back after the boot wherever local time is ahead of Greenwich, and the link stayed "newer" for hours: each request took 20 seconds where it takes a fifth of one. The note now holds the link's own time, and the two are compared for being the same. (#185)
+- **A `wine` on the PATH that is a script of the user's own** ("Known, not fixed" in 1.0.1) is asked where its libraries are. With no other Wine on the machine the set-up stopped at "could not find Wine's x86_64-windows library folder"; with another one it took that one's libraries. The set-up now asks the Wine that runs, once a prefix is there, and notes the folder for the starts that follow. A `wine` that lies beside its libraries, a distribution's or WineHQ's, is asked nothing. (#185)
+
+Linux and Windows, the program:
+
+- **Something in the place of the log's rotation turn no longer stops the rotation for good.** 1.0.1 rotates the log in one process at a time and marks its turn with a file, `companion.rotating`. A folder or a dangling link of that name was never taken away, and the log grew without end; on Windows a folder there was not even looked at. What is old and in the way is now removed, and where it cannot be, the log is rotated without a turn. (#181)
+- **Linux: a log that is a link to a file elsewhere no longer has that file made its owner's alone.** 1.0.1 makes the log 0600 "at the next line"; through a link, that changed the mode of the file the link names. A log made by the program is 0600 as before. (#181)
+- **The guide's *Automatic start & recovery* says that a start which finds another renderer is made once more.** It said "never retried"; the program has made that second try since 0.9.1. (#181)
+
+Windows:
+
+- **The uninstaller's refusal stays on screen where the 64-bit PowerShell cannot be started.** Since 1.0.1 the uninstaller starts itself again in the 64-bit PowerShell when a 32-bit program runs it. Where that one is there and Windows does not start it (a policy, security software), the start's own error ended the script before the part that waits for a key: the window closed with nothing to read. It now says "Use 64-bit PowerShell to uninstall Any2Odyssey." with Windows' reason, and waits as before. (#179)
+- **`--layout-probe` names the file it could not write**, as `--inspect` does. (#179)
+
+### What held
+
+Run for the first time, and found as the notes of 1.0.1 and 1.0.0 say:
+
+- **`any2odyssey-setup` ends with "done" under real Wine** (11.22, wine-staging 11.22 and 11.6; a fresh prefix, and over a set-up made by 0.9.9 and by 1.0.0), and Wine answers the question that 1.0.1 added with yes. Each of 1.0.1's eight corrections of the set-up was seen doing what it says: a failed start is not taken for a running stack, the board's line has to be this start's, the libraries are those of the Wine that runs in eight layouts, a failed import stops the set-up with its reason and a second run repairs it, exactly the entries of the monitors that are gone are removed, and a camera bridge whose note is lost is found again and no other one is ever ended.
+- **Quitting with a helper that does not leave** ("Reasoned from the code, not seen"): 90 quits through the window, nothing left behind, three seconds at the most; 1.0.0 showed the old fault in 7 of 67. **Full screen and the output window** (the same): 53 steps of eight sequences, all right; 1.0.0 fails six as the notes describe.
+- **The log by several programs at once**: on Linux and on Windows, a hundred rounds of two, eight and ten programs with a log over 4 MiB lost no generation and no line; 1.0.0 lost the kept generation in 2 of 100 on Windows and in every round where a rename is slow.
+- **The live screen on real desktops**, 0.9.9 against 1.0.1 on KDE Plasma, GNOME, sway and labwc: the picture is the desktop's own screenshot pixel for pixel in both, a second start restores the screen without a dialog, memory is level over ten minutes. No desktop sends rows with unused bytes after them, and none changes the fourth byte of a pixel alone, so the two corrections of the frame comparison (1.0.0, 1.0.1) are never at work there; they cost 0.5 to 0.7 ms a frame at 3840 × 2160. A 3840 × 2160 screen shown at 720 lines is the screenshot shrunk by an area average, exactly.
+- **The depth model's start and stop**: 1,240 live screens on the processor and 195 on a graphics card, at gaps from nothing to three seconds, never two loads for one screen and never the model let go under one. The depth from the card is the processor's to within a twentieth of a percent of the range.
+- **The pace**: 60 pictures a second in every run, with 1.0.0's every-pixel shrink costing what its notes say (0.9 to 2.0 ms on six threads; 2.6 on four, 4.8 on two, where the 99th picture of a hundred then takes longer than its 15 ms).
+- **The Linux installer against real package managers** (Debian 12 and 13, Ubuntu 22.04, 24.04, 26.04 and the development branch, Arch, Fedora): every correction of 1.0.0 and 1.0.1 does what it says, in German as in English, and `install.sh` is unchanged in this release. The lock of 1.0.0: 152 runs killed at any moment never kept a later run out.
+- **The published files of 1.0.0 and 1.0.1**: eight each, every checksum and every attestation right, and inside them what the tags say.
+- **Windows**: the three questions about a display's colour give the same answers as in 1.0.0 and as Windows gives by three other roads; the package check passes on a PC with the full converter and a newer Any2Odyssey installed; the controls in a window of their own behave as in 0.9.9.
+
+### Corrections to the notes of 1.0.1 and 1.0.0
+
+- 1.0.1, "the depth as a whole no longer steps when the nearest or the farthest thing in the picture changes a little": measured, it stepped about twice as much on a desktop, and a cut took twice as long. Taken back, as above.
+- 1.0.1, "about 36 MB" given back after *Finest* on a 3840 × 2160 screen: 13 to 26 MB were measured.
+- 1.0.1, "Known, not fixed", the jump list on Windows: settled. Windows takes the list, and both entries were read back from it with their titles, "Turn 3D on / off" and "Open 3D controls".
+- 1.0.0, "a large [change] is followed with the next map": with the depth model, at steadiness 60 a new scene is nine tenths there after 3 maps in the middle (5 at the most) where 0.9.9 took 5 (6), and at 95 after 4 (11) where 0.9.9 took 18 (49). Its price is as its notes say and now has a number: where something near comes into a picture that stands still, the background steps back by 13.9 pixels in one map where 0.9.9 had 7.0, and at steadiness 95 the edges of things that move are hardly calmer than at 60.
+
+### Tests and releases
+
+- **Corrections of 1.0.0 and 1.0.1 that no test noticed when they were taken out again have tests now**, or tests that can fail: the two `LC_ALL=C` in front of apt (without them a German environment gets the distribution's old Wine installed again), the installer's wait for its lock where there is no `timeout`, `install.ps1 -PackageOnly` (its test asserted nothing), *Restore overlay* kept until the output window is there, `--inspect` and `--layout-probe` on Windows, the rows of a frame taken without their gaps (#174), the depth thread's side of letting the model go, the failed import of the camera's entries, and the log made through a link. Each area took every correction in its files out by hand, about a hundred in all.
+- **Every order of the supervisor's events is walked against the rule** for a start that meets another renderer (4,224 states); each of 1.0.1's two corrections there, taken out, fails within six events.
+- **The saved files of 1.0.0 and 1.0.1 are in the corpus of releases** and are read back.
+- **A test that showed a window no longer does so on the desktop of whoever runs the tests.** The tray's test makes a small window and asks for the foreground with it; it now runs on a desktop of its own, as the new overlay test does.
+- **`scripts/apt-install.sh` fetches the package lists again before a download is tried again.** `apt-get update` ends well when a mirror cannot be reached, with the old lists; the download then asked three times for a file the mirror had replaced. Seen with real apt against a mirror that was out for 15 seconds and came back with a newer package.
+- **Three tests that failed for reasons of their own are corrected**: 1.0.0's lock test under Debian's BusyBox shell, the uninstall flow's suite under a 32-bit PowerShell (it now refuses to run there: its fixture would have asked for real elevation), and a test of the instance socket that failed about once in a hundred runs on a busy machine.
+- **All six were merged and run together before the release**: every gate on Windows and on Linux, and each of the round's six rigs on the merged tree.
+
+### Known, not fixed
+
+- Linux, live screen: where something near comes into a picture that stands still, the background steps back in one map (1.0.0's limit of a sixteenth, as above), and the depth of the whole picture still moves a little with the model's lowest and highest number. A way to calm both was tried on the round's maps outside the program and is not built in.
+- Linux, live screen: the depth model reads a film's black bars as a frame in front of the picture, in every release alike. A proposal that puts the bars at the far end is an open pull request (#184) and not in this release: it wants eyes on the monitor first.
+- Linux, live screen: whether the pace holds on a 3840 × 2160 screen where KDE Plasma sends 62 to 64 frames a second could not be run without a graphics card under the desktop.
+- Linux, the Odyssey 3D set-up: a clock that is set back during a start makes that one start fail with "did not get the lens board ready"; the next one works. A `wine` script that is pointed at another Wine after the set-up needs the set-up run again.
+- Linux: a helper that does not leave by itself stays when the program is ended by a signal (the program catches none).
+- Windows and Linux: a second *Apply* inside a recovery's countdown waits for the old moment; a wait whose moment has passed reads "Trying once more in 1 seconds" and starts at once. A settings file over 16 MiB is refused with its name, and nothing says what to do with it.
+- Linux, live screen: the page does not say that the remembered screen was not accepted when the desktop asks again.
+- The items of 1.0.1 that are not named above stand as they were.
+
+### Hardware verification
+
+Pending: nothing of this release was run with the monitor, the camera, the lens, or Leia's and Samsung's software; the Odyssey 3D set-up ran under real Wine with stand-ins for Leia's programs. `docs/TESTING.md` lists the checks under "New in 1.0.2". First: `any2odyssey-setup` once, then the first Start output after a login (the picture comes with eye tracking, and the start takes no longer than it did), then Start output twice in a row (the second at once). Then the live screen on a desktop with windows, nothing moving but a clock: by the numbers the picture breathes in depth about half as much as in 1.0.1. The checks of 1.0.1 that are not replaced there, and those of 1.0.0 and 0.9.9, are still to do as well.
+
 ## 1.0.1 (2026-11-20)
 
 A ninth audit release. 1.0.0 was the one release no audit round had read, so this round read its five pull requests first and then the whole program again, in six parts: the shared core, the live screen, the viewer and the controls, the Windows side, the Odyssey 3D set-up under Wine, and the installer with the workflows. Nothing found was grave. Seven findings were of the middle kind and about thirty were small; all but one are corrected here (the one needs a Windows PC to look at, and is under "Known, not fixed").
