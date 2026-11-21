@@ -349,7 +349,9 @@ jobs:
           ../scripts/check-doc-links.sh check
           check/install.sh --prefix "$PWD/prefix" --no-deps --no-udev --no-model --no-odyssey
           prefix/bin/any2odyssey --help
-          desktop-file-validate prefix/share/applications/any2odyssey.desktop || true
+          # The entry the archive's own installer wrote. An error fails the step: with "|| true" behind
+          # it, as up to 1.0.0, this line could not.
+          desktop-file-validate prefix/share/applications/any2odyssey.desktop
           test -x prefix/share/any2odyssey/wine-lens/setup.sh
           ../scripts/check-doc-links.sh prefix/share/doc/any2odyssey
           prefix/share/any2odyssey/install.sh --prefix "$PWD/prefix" --uninstall < /dev/null
