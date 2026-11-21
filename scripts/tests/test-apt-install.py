@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """scripts/apt-install.sh: when it tries again, and when it gives up.
 
-In a workflow it only ever shows that the packages were installed. Here apt-get, timeout and sudo are
+In a workflow it only ever shows that the packages were installed. Here apt-get, timeout, sudo and id are
 stand-ins: apt-get notes how it was called and ends each call with the code the test has planned for it
 (124 is what timeout answers for a call it had to stop). Nothing is installed and no network is used, and
 the pause between two tries is set to nothing (a shell with a sleep of its own would take it in full).
