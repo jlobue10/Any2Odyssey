@@ -57,10 +57,45 @@ impl Logger {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        // The log names window titles like the other files of the data
+        // folder, and was the one file there that other users could read:
+        // it is made for its owner only (0600), as they are.
+        //
+        // And it is opened without waiting. A named pipe where the log
+        // belongs has no reader, and opening it for writing waits for one:
+        // the first line a process logged was as far as it got.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+        }
+        let mut file = options.open(&self.path)?;
+        // Checked on what was opened, so that a path replaced since cannot
+        // make the check wrong: a pipe that does have a reader, or a
+        // device, takes no line.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} is not a regular file and was not written to",
+                        self.path.display()
+                    ),
+                ));
+            }
+            // A log made by 1.0.0 or earlier is still there, readable by
+            // everyone, until it is rotated, which may be never.
+            if metadata.permissions().mode() & 0o077 != 0 {
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+        }
         // `writeln!` on a `File` issues one write per formatted piece, and
         // another process's line can land between any two of them.
         file.write_all(format_line(&now_iso(), message).as_bytes())
@@ -218,6 +253,90 @@ mod tests {
             std::fs::read_to_string(logger.previous_path()).unwrap(),
             text
         );
+    }
+
+    /// A named pipe at `companion.log` (made by mistake, or by another
+    /// program of the same user) used to stop every process at its first
+    /// logged line, the self-test included: opening a pipe for writing
+    /// waits for a reader.
+    #[cfg(unix)]
+    #[test]
+    fn logging_does_not_wait_on_a_pipe_where_the_log_belongs() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("companion.log");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (a system without mkfifo: nothing to try it with)
+            return;
+        }
+        let (done, logged) = std::sync::mpsc::channel();
+        let path = pipe.clone();
+        std::thread::spawn(move || {
+            let logger = Logger::new(path);
+            let result = logger.try_log("to nobody").map_err(|e| e.kind());
+            // The call the rest of the program makes swallows the refusal.
+            logger.log("to nobody");
+            done.send(result)
+        });
+        let logged = logged.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a logger that does wait go, so that the test ends either way.
+        // Kept open: from here on the pipe has a reader.
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&pipe)
+            .unwrap();
+        assert!(
+            matches!(logged, Ok(Err(_))),
+            "logging waited on the pipe, or wrote to it: {logged:?}"
+        );
+        // With a reader the pipe can be opened, and still takes no line.
+        let logger = Logger::new(pipe.clone());
+        let refused = logger.try_log("to a reader").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            refused.to_string().contains("not a regular file"),
+            "{refused}"
+        );
+        let mut read = [0u8; 16];
+        let nothing = std::io::Read::read(&mut reader, &mut read).unwrap_err();
+        assert_eq!(nothing.kind(), std::io::ErrorKind::WouldBlock);
+        // A folder is no log either. A link to a file is logged through.
+        let folder = Logger::new(dir.path().join("folder.log"));
+        std::fs::create_dir(folder.path()).unwrap();
+        assert!(folder.try_log("to a folder").is_err());
+        let link = Logger::new(dir.path().join("link.log"));
+        std::os::unix::fs::symlink("real.log", link.path()).unwrap();
+        link.log("through the link");
+        let text = std::fs::read_to_string(dir.path().join("real.log")).unwrap();
+        assert!(text.ends_with(" through the link\n"), "{text:?}");
+    }
+
+    /// The log was the one file of the data folder made with the default
+    /// permissions (0644 under the usual umask); the rest are 0600.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("companion.log"));
+        logger.log("first");
+        assert_eq!(mode(logger.path()), 0o600);
+        // One an earlier version made is closed to others by the next line,
+        // and keeps what it had.
+        std::fs::set_permissions(logger.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        logger.log("second");
+        assert_eq!(mode(logger.path()), 0o600);
+        let text = std::fs::read_to_string(logger.path()).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        // So is the generation that follows a rotation.
+        assert!(logger.rotate_above(1));
+        logger.log("third");
+        assert_eq!(mode(logger.path()), 0o600);
+        assert_eq!(mode(&logger.previous_path()), 0o600);
     }
 
     /// `<RFC 3339 time> <message>`: the whole shape of the time is checked,
