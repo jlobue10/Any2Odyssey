@@ -133,6 +133,64 @@ class TrackingStopTests(unittest.TestCase):
     def bridge(self):
         return running(re.escape(f"{self.root}/build/any2odyssey-camera-bridge"))
 
+    def bridges(self):
+        """The processes whose program is this folder's bridge."""
+        program = str((self.root / "build/any2odyssey-camera-bridge").resolve())
+        found = []
+        for entry in Path("/proc").iterdir():
+            try:
+                if entry.name.isdigit() and os.readlink(entry / "exe") == program:
+                    found.append(int(entry.name))
+            except OSError:
+                pass
+        return found
+
+    def test_a_bridge_whose_note_is_lost_is_still_the_bridge(self):
+        # Seen as "the camera bridge could not start (is port 47816 taken?)" at every start, until the next
+        # boot: the bridge was known only by the note of its process number, and lived on without it.
+        note = self.root / "run/any2odyssey-camera-bridge.pid"
+        self.start()
+        first = self.bridges()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(note.read_text().split(), [str(first[0])])
+        status = lambda: subprocess.run(self.command("status"), env=self.environment, stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=30).stdout
+        for lost in ("removed", "empty", "of another process", "not a number"):
+            with self.subTest(note=lost):
+                if lost == "removed":
+                    note.unlink()
+                else:
+                    note.write_text({"empty": "", "of another process": f"{os.getpid()}\n"}.get(lost, "none\n"))
+                self.assertIn("camera bridge: running", status())
+                self.start()
+                self.assertEqual(self.bridges(), first, "a second bridge was started beside the first")
+        # Asked where the session's folder is another one (XDG_RUNTIME_DIR set for one caller only).
+        (self.root / "another-run").mkdir()
+        self.environment["XDG_RUNTIME_DIR"] = str(self.root / "another-run")
+        self.start()
+        self.assertEqual(self.bridges(), first)
+        self.stop()
+        self.wait_until(lambda: not self.bridges(), 5)
+        self.assertFalse(self.tracker())
+
+    def test_a_stop_ends_only_this_installations_bridge(self):
+        # The same program from another folder (another installation, or the one a set-up has replaced)
+        # is not this one's bridge, whatever the note says.
+        other = self.root / "another/build/any2odyssey-camera-bridge"
+        other.parent.mkdir(parents=True)
+        other.write_bytes((self.root / "build/any2odyssey-camera-bridge").read_bytes())
+        other.chmod(0o755)
+        stays = subprocess.Popen([str(other), "04e8:20d7", "47816", str(self.root / "camera.secret")])
+        self.addCleanup(stays.wait)
+        self.addCleanup(stays.kill)
+        self.start()
+        self.assertEqual(len(self.bridges()), 1)
+        (self.root / "run/any2odyssey-camera-bridge.pid").write_text(f"{stays.pid}\n")
+        self.stop()
+        self.wait_until(lambda: not self.bridges(), 5)
+        time.sleep(0.3)
+        self.assertIsNone(stays.poll(), "the bridge of another folder was ended")
+
     def test_a_start_right_after_a_stop_has_a_tracker_that_stays(self):
         self.start()
         # Leia's service answers "sc stop" at once; the tracker takes two more seconds to go.
