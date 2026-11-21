@@ -4,6 +4,11 @@
 # quit event is routed to a name of this test's own, so an Any2Odyssey running on this PC is never
 # told to quit.
 $ErrorActionPreference='Stop'
+# The stand-ins are functions of this process. From a 32-bit PowerShell the uninstaller starts itself
+# again in a 64-bit one (since 1.0.1), where they do not reach: it would look at the real process list
+# and ask for a real elevation of the fixture's helper. So this test is not run in one; the uninstaller's
+# start from a 32-bit PowerShell has its own cases at the end, in processes of their own.
+if(-not [Environment]::Is64BitProcess){throw 'Run this test in a 64-bit PowerShell: its stand-ins do not reach the 64-bit process the uninstaller starts from a 32-bit one.'}
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-uninstall-test-'+[Guid]::NewGuid().ToString('N'))
@@ -373,6 +378,24 @@ try{
   if($exitCode -ne 0 -or -not $output.Contains('Any2Odyssey removed.')){Write-Host "Exit code $exitCode; output: $output"}
   Assert ($exitCode -eq 0 -and $output.Contains('Any2Odyssey removed.')) 'Started from 32-bit Windows PowerShell, the uninstaller runs in the 64-bit one and passes its result on'
   Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'The uninstall started from a 32-bit process removes the controls and registration'
+  # The 64-bit PowerShell is there and Windows does not start it (a policy, security software that keeps
+  # one PowerShell from starting another; here a file that is no program stands for it). The start's own
+  # error ended the script at once: with -Pause, as Installed apps runs it, the window closed with it.
+  # It now goes on to the refusal, which says why and waits for a key. (The fixture's count of key waits
+  # is a function of this process; in that one the wait fails, which the uninstaller lets pass.)
+  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+  Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
+  $noProgram=Join-Path $root 'no-program.exe';Set-Content -LiteralPath $noProgram -Value 'A stand-in; no program.'
+  $routed=Get-Content -LiteralPath (Join-Path $app 'Uninstall.ps1') -Raw
+  $unstartable=$routed.Replace('Get-Process Any2Odyssey,Any2OdysseyWorker','Get-Process Any2OdysseyTestAbsent').Replace('$native=$env:SystemRoot+''\Sysnative\WindowsPowerShell\v1.0\powershell.exe''',("`$native='"+$noProgram+"'"))
+  if($unstartable.Contains('Get-Process Any2Odyssey,') -or $unstartable.Contains('Sysnative\WindowsPowerShell')){throw 'Fixture routing incomplete; refusing to run.'}
+  Set-Content -LiteralPath (Join-Path $app 'Uninstall.ps1') -Value $unstartable -Encoding UTF8
+  $modulePath=$env:PSModulePath;$env:PSModulePath=$null
+  try{$output=& $wow -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'Uninstall.ps1') -Pause 2>&1 | Out-String}finally{$env:PSModulePath=$modulePath}
+  $exitCode=$LASTEXITCODE
+  if($exitCode -ne 1 -or -not $output.Contains('Press any key')){Write-Host "Exit code $exitCode; output: $output"}
+  Assert ($exitCode -eq 1 -and $output.Contains('Uninstall did not complete: Use 64-bit PowerShell to uninstall Any2Odyssey. Windows did not start it from this 32-bit one:') -and $output.Contains('Press any key to close this window.')) 'A 64-bit PowerShell that cannot be started is a refusal that stays on screen with -Pause'
+  Assert ((Test-Path -LiteralPath $exe) -and (Test-Path -LiteralPath $registration)) 'Nothing is removed when the 64-bit PowerShell cannot be started'
  }else{Write-Host 'SKIP: no 32-bit Windows PowerShell here to start the uninstaller from.'}
  $passed=$true
 }finally{

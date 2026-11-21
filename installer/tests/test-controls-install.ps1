@@ -77,8 +77,11 @@ try{
  $failed=$false;try{& $installer -ControlsOnly}catch{$failed=$_.Exception.Message.Contains('full installation')};Assert $failed 'Controls-only setup refuses to split an existing full installation'
  # The package check (scripts/verify-package.ps1) is about the package alone: what is installed on
  # the PC, here a full installation that the controls-only preflight refuses, plays no part in it.
+ # It also installs nothing: an installation would write its record anew. (This test passed with the
+ # switch doing nothing at all, the installer then repairing the fixture's installation.)
+ $recordBefore=(Get-FileHash -LiteralPath (Join-Path $app 'version.json')).Hash
  & $installer -PackageOnly
- Assert $true 'The package check passes whatever is installed on the PC'
+ Assert ((Get-FileHash -LiteralPath (Join-Path $app 'version.json')).Hash -eq $recordBefore) 'The package check passes whatever is installed on the PC, and installs nothing'
  $passed=$true
 }finally{
  if(Test-Path -LiteralPath $registration){Remove-Item -LiteralPath $registration -Recurse}

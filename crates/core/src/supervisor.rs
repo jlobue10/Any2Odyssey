@@ -695,6 +695,424 @@ mod tests {
         assert!(msg.ends_with("and turn 3D on again."), "{msg}");
     }
 
+    /// Every order of events the controls can bring about, against the rule
+    /// as the guide and the release notes state it. The tests above each
+    /// walk one order that once went wrong; the two corrections of 1.0.1
+    /// were made in one evening by reading, and this walks all the others.
+    ///
+    /// `World` keeps its own account of the rule from what the supervisor
+    /// is told and what it says, never from its fields:
+    ///
+    /// - a start the user asked for that meets another renderer waits
+    ///   eight seconds and is made once more, with recovery on or off, and
+    ///   only once: a renderer met after that turns 3D off with the advice;
+    /// - a start made while that wait is still to end (Apply) and meeting
+    ///   the renderer again goes on waiting, to the same moment;
+    /// - any other unexpected exit is recovered after eight seconds, three
+    ///   times in a row at most, and only with recovery on;
+    /// - unticking recovery turns 3D off only while a recovery is under
+    ///   way (queued, or relaunched and not ready yet) and no worker runs;
+    /// - whatever happens, a wanted conversion without a worker gets one
+    ///   within eight seconds, and one that keeps failing ends.
+    ///
+    /// Time is counted in whole seconds; two states that differ only in
+    /// how long ago something was are one, so the walk comes to an end.
+    #[test]
+    fn every_order_of_events_keeps_the_rule() {
+        use std::collections::{HashSet, VecDeque};
+
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        enum Worker {
+            None,
+            /// Being validated and spawned: not running yet.
+            Launching,
+            Running,
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum Event {
+            Start,
+            Restart,
+            Stop,
+            Apply,
+            Launched,
+            LaunchFailed,
+            Ready,
+            Exit(i32),
+            Recover(bool),
+            Pass(u64),
+        }
+
+        #[derive(Clone, Debug)]
+        struct World {
+            base: Instant,
+            s: Supervisor,
+            now: u64,
+            worker: Worker,
+            wanted: bool,
+            recover: bool,
+            failures: u32,
+            recovering: bool,
+            recovery_due: Option<u64>,
+            wait_used: bool,
+            wait_due: Option<u64>,
+            ready_since: Option<u64>,
+            waits: u32,
+        }
+
+        type Key = (
+            (
+                Worker,
+                bool,
+                bool,
+                u32,
+                bool,
+                Option<i64>,
+                bool,
+                Option<i64>,
+            ),
+            (Option<u64>, u32),
+            (
+                bool,
+                bool,
+                u32,
+                Option<i64>,
+                bool,
+                Option<u64>,
+                bool,
+                Option<i64>,
+            ),
+        );
+
+        impl World {
+            fn at(&self, seconds: u64) -> Instant {
+                self.base + Duration::from_secs(seconds)
+            }
+            fn off(&mut self) {
+                self.wanted = false;
+                self.recovering = false;
+                self.recovery_due = None;
+                self.wait_due = None;
+                self.ready_since = None;
+            }
+            fn dues(&self) -> Vec<u64> {
+                [self.wait_due, self.recovery_due]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            }
+            fn allowed(&self, event: Event) -> bool {
+                match event {
+                    Event::Start => !self.wanted,
+                    Event::Restart | Event::Stop | Event::Apply => self.wanted,
+                    Event::Launched | Event::LaunchFailed => self.worker == Worker::Launching,
+                    Event::Ready | Event::Exit(_) => self.worker == Worker::Running,
+                    Event::Recover(enabled) => enabled != self.recover,
+                    Event::Pass(_) => true,
+                }
+            }
+            /// One event, and the poll that follows it.
+            fn step(&mut self, event: Event) -> Result<(), String> {
+                let now = self.at(self.now);
+                match event {
+                    Event::Start | Event::Restart => {
+                        if self.s.start_requested() != Action::StartWorker {
+                            return Err("a start the user asked for started nothing".into());
+                        }
+                        self.off();
+                        self.wanted = true;
+                        self.failures = 0;
+                        self.wait_used = false;
+                        self.waits = 0;
+                        self.worker = Worker::Launching;
+                    }
+                    Event::Stop => {
+                        self.s.stop_requested();
+                        self.off();
+                        self.worker = Worker::None;
+                    }
+                    Event::Apply => {
+                        // With no worker one is launched at once, without
+                        // asking the supervisor. A worker there is stopped,
+                        // and the poll below starts the next.
+                        self.worker = match self.worker {
+                            Worker::None => Worker::Launching,
+                            _ => Worker::None,
+                        };
+                        self.ready_since = None;
+                    }
+                    Event::Launched => self.worker = Worker::Running,
+                    Event::LaunchFailed => {
+                        self.s.start_failed();
+                        self.off();
+                        self.worker = Worker::None;
+                    }
+                    Event::Ready => {
+                        self.s.worker_ready(now);
+                        self.recovering = false;
+                        self.recovery_due = None;
+                        self.wait_due = None;
+                        let since = *self.ready_since.get_or_insert(self.now);
+                        if self.now - since >= RECOVERY_RESET_AFTER.as_secs() {
+                            self.failures = 0;
+                        }
+                    }
+                    Event::Exit(code) => {
+                        let said = self.s.worker_exited(code, None, now);
+                        self.worker = Worker::None;
+                        self.ready_since = None;
+                        let expected = if code == exit_code::ALREADY_RUNNING {
+                            if let Some(due) = self.wait_due {
+                                // The wait goes on, to the moment it had.
+                                format!(
+                                    "Another renderer is already running. Trying once more in {} seconds.",
+                                    due.saturating_sub(self.now).max(1)
+                                )
+                            } else if !self.wait_used {
+                                self.wait_used = true;
+                                self.wait_due = Some(self.now + RECOVERY_DELAY.as_secs());
+                                self.waits += 1;
+                                "Another renderer is already running. Trying once more in 8 seconds."
+                                    .to_owned()
+                            } else {
+                                self.off();
+                                "Another renderer is already running. Close it, or Samsung's 3D player, and turn 3D on again.".to_owned()
+                            }
+                        } else if code == exit_code::PREREQUISITES_FAILED {
+                            self.off();
+                            "A prerequisite check failed. Fix the cause and turn 3D on again."
+                                .to_owned()
+                        } else {
+                            let what = match code {
+                                exit_code::READY_AND_STOPPED_CLEANLY => "The 3D engine closed",
+                                exit_code::NEVER_BECAME_READY => "Conversion did not become ready",
+                                _ => "Conversion stopped",
+                            };
+                            if self.recover && self.failures < MAX_RECOVERY_ATTEMPTS {
+                                self.failures += 1;
+                                self.recovering = true;
+                                self.recovery_due = Some(self.now + RECOVERY_DELAY.as_secs());
+                                format!("{what}. Recovery attempt {} in 8 seconds.", self.failures)
+                            } else {
+                                self.off();
+                                format!("{what}. Check the USB connection and logs, then turn 3D on again.")
+                            }
+                        };
+                        if said != expected {
+                            return Err(format!("said {said:?} where the rule says {expected:?}"));
+                        }
+                    }
+                    Event::Recover(enabled) => {
+                        let running = self.worker == Worker::Running;
+                        let said = self.s.recover_changed(enabled, running);
+                        self.recover = enabled;
+                        let cancels = !enabled && self.wanted && !running && self.recovering;
+                        if said.is_some() != cancels {
+                            return Err(format!(
+                                "unticking said {said:?}; a recovery to cancel: {cancels}"
+                            ));
+                        }
+                        if cancels {
+                            // A relaunch in flight is stopped by the caller
+                            // when it reports in.
+                            self.off();
+                            self.worker = Worker::None;
+                        }
+                    }
+                    Event::Pass(seconds) => self.now += seconds,
+                }
+                // The poll: with no worker, the supervisor is asked.
+                if self.worker == Worker::None {
+                    let action = self.s.tick_without_worker(self.at(self.now));
+                    self.ready_since = None;
+                    let dues = self.dues();
+                    let earliest = dues.iter().min().copied();
+                    let latest = dues.iter().max().copied();
+                    let (may, must) = match (self.wanted, earliest, latest) {
+                        (false, ..) => (false, false),
+                        // Apply stopped the worker: the next comes at once.
+                        (true, None, _) | (true, _, None) => (true, true),
+                        (true, Some(earliest), Some(latest)) => {
+                            (self.now >= earliest, self.now >= latest)
+                        }
+                    };
+                    let started = action == Action::StartWorker;
+                    if (started && !may) || (!started && must) {
+                        return Err(format!(
+                            "the poll at {} answered {action:?}; due: {dues:?}, wanted: {}",
+                            self.now, self.wanted
+                        ));
+                    }
+                    if started {
+                        self.worker = Worker::Launching;
+                        self.wait_due = None;
+                        self.recovery_due = None;
+                    }
+                }
+                let pending = self.wanted && !self.dues().is_empty();
+                let same = self.s.wanted == self.wanted
+                    && self.s.recover == self.recover
+                    && self.s.failures() == self.failures
+                    && self.s.recovering() == self.recovering
+                    && self.s.retry_pending() == pending;
+                if !same {
+                    return Err(format!("the supervisor and the rule are apart: {self:?}"));
+                }
+                if self.waits > 1 {
+                    return Err("a second wait for another renderer in one start".into());
+                }
+                if self.failures > MAX_RECOVERY_ATTEMPTS {
+                    return Err("more recovery attempts than three in a row".into());
+                }
+                if self.wanted && self.worker == Worker::None {
+                    let latest = self.dues().into_iter().max();
+                    if !latest.is_some_and(|due| due <= self.now + RECOVERY_DELAY.as_secs()) {
+                        return Err(format!("wanted, no worker, and none to come: {self:?}"));
+                    }
+                }
+                Ok(())
+            }
+            fn key(&self) -> Key {
+                let ahead =
+                    |due: Option<u64>| due.map(|due| (due as i64 - self.now as i64).max(-1));
+                let since = |then: Option<u64>| {
+                    then.map(|then| (self.now - then).min(RECOVERY_RESET_AFTER.as_secs()))
+                };
+                let instant_ahead = |due: Option<Instant>| {
+                    let now = self.at(self.now);
+                    due.map(|due| {
+                        if due >= now {
+                            due.duration_since(now).as_secs() as i64
+                        } else {
+                            -1
+                        }
+                    })
+                };
+                let instant_since = |then: Option<Instant>| {
+                    then.map(|then| {
+                        self.at(self.now)
+                            .saturating_duration_since(then)
+                            .as_secs()
+                            .min(RECOVERY_RESET_AFTER.as_secs())
+                    })
+                };
+                (
+                    (
+                        self.worker,
+                        self.wanted,
+                        self.recover,
+                        self.failures,
+                        self.recovering,
+                        ahead(self.recovery_due),
+                        self.wait_used,
+                        ahead(self.wait_due),
+                    ),
+                    (since(self.ready_since), self.waits),
+                    (
+                        self.s.wanted,
+                        self.s.recover,
+                        self.s.failures,
+                        instant_ahead(self.s.retry_after),
+                        self.s.recovering,
+                        instant_since(self.s.ready_since),
+                        self.s.waited_for_other,
+                        instant_ahead(self.s.repeat_after),
+                    ),
+                )
+            }
+            /// Left to itself with every start failing as `exits` say, in
+            /// turn: 3D is off after a wait and three recoveries at most.
+            fn ends(&self, exits: &[i32]) -> Result<(), String> {
+                let mut world = self.clone();
+                let mut exits = exits.iter().cycle();
+                for _ in 0..40 {
+                    if !world.wanted {
+                        return Ok(());
+                    }
+                    let event = match world.worker {
+                        Worker::None => Event::Pass(RECOVERY_DELAY.as_secs()),
+                        Worker::Launching => Event::Launched,
+                        Worker::Running => Event::Exit(*exits.next().unwrap()),
+                    };
+                    world.step(event)?;
+                }
+                Err(format!("still wanted after forty steps of exits {exits:?}"))
+            }
+        }
+
+        let events = [
+            Event::Start,
+            Event::Restart,
+            Event::Stop,
+            Event::Apply,
+            Event::Launched,
+            Event::LaunchFailed,
+            Event::Ready,
+            Event::Exit(exit_code::READY_AND_STOPPED_CLEANLY),
+            Event::Exit(exit_code::RENDERER_ERROR),
+            Event::Exit(exit_code::ALREADY_RUNNING),
+            Event::Exit(exit_code::PREREQUISITES_FAILED),
+            Event::Exit(exit_code::NEVER_BECAME_READY),
+            Event::Recover(true),
+            Event::Recover(false),
+            Event::Pass(1),
+            Event::Pass(3),
+            Event::Pass(8),
+            Event::Pass(60),
+        ];
+        let endings: [&[i32]; 4] = [
+            &[exit_code::ALREADY_RUNNING],
+            &[exit_code::RENDERER_ERROR],
+            &[exit_code::ALREADY_RUNNING, exit_code::RENDERER_ERROR],
+            &[exit_code::RENDERER_ERROR, exit_code::ALREADY_RUNNING],
+        ];
+        let base = Instant::now();
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::new();
+        for recover in [true, false] {
+            let world = World {
+                base,
+                s: Supervisor::new(recover),
+                now: 0,
+                worker: Worker::None,
+                wanted: false,
+                recover,
+                failures: 0,
+                recovering: false,
+                recovery_due: None,
+                wait_used: false,
+                wait_due: None,
+                ready_since: None,
+                waits: 0,
+            };
+            seen.insert(world.key());
+            queue.push_back((world, Vec::new()));
+        }
+        while let Some((world, trail)) = queue.pop_front() {
+            for exits in endings {
+                if let Err(what) = world.ends(exits) {
+                    panic!("after {trail:?}, then exits {exits:?}: {what}");
+                }
+            }
+            for event in events {
+                if !world.allowed(event) {
+                    continue;
+                }
+                let mut next = world.clone();
+                let mut trail = trail.clone();
+                trail.push(event);
+                if let Err(what) = next.step(event) {
+                    panic!("after {trail:?}: {what}");
+                }
+                if seen.insert(next.key()) {
+                    queue.push_back((next, trail));
+                }
+            }
+        }
+        // The walk has been somewhere: every kind of state was reached.
+        assert!(seen.len() > 1000, "{} states", seen.len());
+    }
+
     #[test]
     fn manual_start_resets_failure_count() {
         let mut s = Supervisor::new(true);
