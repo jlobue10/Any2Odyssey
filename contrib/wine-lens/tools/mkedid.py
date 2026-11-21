@@ -18,6 +18,7 @@ import glob, re, subprocess, sys
 IFACE = "{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"
 ENUM = r"HKEY_LOCAL_MACHINE\System\CurrentControlSet\Enum\DISPLAY"
 CLASSES = r"HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\DeviceClasses" + "\\" + IFACE
+SLOTS = 16                        # monitor slots cleared for every model at each start, at the least
 
 def xrandr_monitors():
     out = subprocess.run(["xrandr", "--listmonitors"], capture_output=True, text=True).stdout
@@ -69,6 +70,16 @@ def preference(monitor):
     edid = edid_of(monitor[0])
     return (not is_odyssey_3d(edid), not any(edid), monitor[0])
 
+def named_before(out):
+    """The monitor entries the registry file of the start before this one names, written or deleted there:
+    {model: {slots}}. Only names that model_of() can give are taken from it."""
+    try: text = open(out, errors="replace").read()
+    except OSError: return {}
+    found = {}
+    for model, slot in re.findall(r"^\[-?" + re.escape(ENUM) + r"\\([@A-Z_]{3}[0-9A-F]{4})\\(\d{4})&0000\]\r?$", text, re.M):
+        if int(slot) < 4 * SLOTS: found.setdefault(model, set()).add(int(slot))
+    return found
+
 def main(probe, out, odyssey=None):
     real = xrandr_monitors()
     if odyssey: note_place(real, odyssey)
@@ -87,9 +98,18 @@ def main(probe, out, odyssey=None):
         name = min(left, key=preference)[0]
         pairs.append((free[0], name, edid_of(name)))
     pairs.sort()
-    models = {model_of(e) for _, _, e in pairs}
+    # Forget the pairings of an earlier layout. Only the slots of the monitors connected now used to be
+    # deleted, for the models connected now: with three monitors at one start and two at a later one, or a
+    # monitor unplugged, the entry of the one that had gone stayed in the prefix for good (Wine's own scan
+    # ignores these entries, so Wine does not remove them either), and Leia's service was shown a monitor
+    # that is not there. Now every model this file named at the start before is deleted too (it is read
+    # before it is written anew, and its deletions are carried along in case Wine did not import it), in
+    # every slot named and in a fixed number of slots at the least.
+    before = named_before(out)
+    models = {model_of(e) for _, _, e in pairs} | set(before)
+    slots = max([SLOTS, len(real)] + [1 + slot for named in before.values() for slot in named])
     lines = ["REGEDIT4", ""]
-    for slot in range(len(real)):                      # forget pairings from an earlier layout
+    for slot in range(slots):
         for model in sorted(models):
             inst = "%04d&0000" % slot
             lines += [f"[-{ENUM}\\{model}\\{inst}]", f"[-{CLASSES}\\##?#DISPLAY#{model}#{inst}#{IFACE}]", ""]
