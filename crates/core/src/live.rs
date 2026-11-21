@@ -439,6 +439,12 @@ impl DepthSmoother {
     /// something in it that is not a number, or with numbers further apart
     /// than a number can say. The previous one stays, and so does the range.
     pub fn update(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32) -> bool {
+        self.step(width, height, raw, steadiness, false)
+    }
+
+    /// One step of [`DepthSmoother::update`], or of [`DepthSmoother::settle`]
+    /// for a picture that is `still`.
+    fn step(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32, still: bool) -> bool {
         let count = width as usize * height as usize;
         if count == 0 || raw.len() != count {
             return false;
@@ -468,7 +474,11 @@ impl DepthSmoother {
         // the range comes round to it.
         let (low, high) = match self.range {
             Some((l, h)) if !fresh => {
-                let slow = (keep + 0.5).min(0.97);
+                // A picture that stands still has nothing entering it: its
+                // range goes as its values do, and both are there together.
+                // At the pace of a moving picture's range a still screen was
+                // redrawn for half a minute before it was at rest.
+                let slow = if still { keep } else { (keep + 0.5).min(0.97) };
                 let lag = (high - low) * MAX_RANGE_LAG;
                 (
                     (l * slow + low * (1.0 - slow)).clamp(low - lag, low + lag),
@@ -510,14 +520,14 @@ impl DepthSmoother {
     /// True once it has arrived and further steps would change nothing; the
     /// last of the way, too small to see ([`SETTLED`]), is taken at once.
     ///
-    /// The range sets how long that takes: a quarter of the map's span off
-    /// at the most ([`MAX_RANGE_LAG`]) and 3 % nearer with each step at a
-    /// steadiness of 0.47 or more, it is there in some 200 steps at the
-    /// most. A still live screen takes a step every 150 ms: half of what
-    /// is left of the way every three to four seconds, and half a minute
-    /// to the end.
+    /// The one difference to `update`'s step: the range keeps `steadiness`
+    /// of itself, as the values do, and not more. Nothing enters a picture
+    /// that stands still, and at the pace of a moving picture's range (3 %
+    /// of the way with each step) the end was some 200 steps away, half a
+    /// minute on a still live screen, which takes a step every 150 ms. This
+    /// way it is some 20 steps at a steadiness of 0.6.
     pub fn settle(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32) -> bool {
-        if !self.update(width, height, raw, steadiness) {
+        if !self.step(width, height, raw, steadiness, true) {
             // A map that cannot be used never will be.
             return true;
         }
@@ -1214,34 +1224,41 @@ mod tests {
             fresh
         };
         for steadiness in [0.0, 0.6, 0.95] {
-            // `again` is asked about the same pixels for ever, as the model
-            // was; `eased` takes the one answer again and again.
-            let mut again = DepthSmoother::default();
-            assert!(again.update(w, h, &before, steadiness));
-            assert!(again.update(w, h, &still, steadiness));
-            let mut eased = again.clone();
+            // The model was asked once; `eased` takes the one answer again
+            // and again.
+            let mut eased = DepthSmoother::default();
+            assert!(eased.update(w, h, &before, steadiness));
+            assert!(eased.update(w, h, &still, steadiness));
             let mut steps = 0;
+            let mut last = eased.values().to_vec();
             loop {
                 steps += 1;
                 assert!(steps < 2000, "never settled at {steadiness}");
-                assert!(again.update(w, h, &still, steadiness));
                 if eased.settle(w, h, &still, steadiness) {
                     break;
                 }
-                assert_eq!(eased.values(), again.values(), "step {steps}");
+                // Eased, not jumped: no step moves a value far.
+                for (a, b) in last.iter().zip(eased.values()) {
+                    assert!((a - b).abs() <= 0.5, "{a} {b} at step {steps}");
+                }
+                last = eased.values().to_vec();
             }
-            // It ends on the picture's own map exactly, a step the eye
-            // cannot see away from where asking again had got to.
+            // It ends on the picture's own map exactly.
             assert_eq!(eased.values(), own.values());
-            for (a, b) in again.values().iter().zip(eased.values()) {
-                assert!((a - b).abs() <= SETTLED, "{a} {b} at {steadiness}");
-            }
+            // And in the time the values take, not in the time a moving
+            // picture's range takes (some 200 steps at 0.6: half a minute
+            // of a still live screen being redrawn).
+            let most = if steadiness == 0.0 {
+                4
+            } else if steadiness <= 0.6 {
+                40
+            } else {
+                400
+            };
+            assert!(steps <= most, "{steps} steps at {steadiness}");
             // More steps change nothing.
             assert!(eased.settle(w, h, &still, steadiness));
             assert_eq!(eased.values(), own.values());
-            // Depth that follows the model at once is there after the range
-            // has caught up; steadier depth takes longer.
-            assert!(steadiness > 0.0 || steps < 40, "{steps}");
         }
         // A flat picture is flat at once (its range has nowhere to ease
         // to), and an unusable map ends the easing.
