@@ -42,6 +42,11 @@ impl Logger {
     /// renamed file. A rename that fails (on Windows, while a program that
     /// does not share the file for deletion has either file open) leaves
     /// everything as it was and is tried again by the next start.
+    ///
+    /// Processes that start together rotate one at a time, so that the
+    /// second cannot move the file the first has just started over the
+    /// generation it kept: `companion.rotating` is there for as long as one
+    /// of them is at it.
     pub fn rotate_if_large(&self) {
         self.rotate_above(ROTATE_ABOVE);
     }
@@ -50,8 +55,54 @@ impl Logger {
         self.path.with_extension("old.log")
     }
     fn rotate_above(&self, limit: u64) -> bool {
-        let large = std::fs::metadata(&self.path).is_ok_and(|m| m.is_file() && m.len() > limit);
-        large && std::fs::rename(&self.path, self.previous_path()).is_ok()
+        let large = || std::fs::metadata(&self.path).is_ok_and(|m| m.is_file() && m.len() > limit);
+        if !large() {
+            return false;
+        }
+        // The controls and the worker start within a moment of each other,
+        // and both could find the log large. One renamed it and logged a
+        // line, which started a new file; the other's rename then moved
+        // that file of one line over the generation just kept, and it was
+        // gone. So one process rotates at a time, and looks again once it
+        // is its turn: what the other has rotated already is small now.
+        let Some(_turn) = self.take_turn() else {
+            return false;
+        };
+        large() && std::fs::rename(&self.path, self.previous_path()).is_ok()
+    }
+    /// The file that is there for as long as one process is rotating.
+    fn turn_path(&self) -> PathBuf {
+        self.path.with_extension("rotating")
+    }
+    /// `None` while another process has the turn: that one rotates, and
+    /// this one has nothing to do. A turn left behind by a process that was
+    /// ended in the middle of its own (they last as long as a rename) is
+    /// removed once it is [`TURN_STALE_AFTER`] old, and the start after
+    /// this one rotates.
+    fn take_turn(&self) -> Option<Turn> {
+        let path = self.turn_path();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(_) => Some(Turn(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A time in the future (the clock was set back) is no age
+                // to wait out.
+                let stale = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at.elapsed().map_or(true, |age| age >= TURN_STALE_AFTER));
+                if stale {
+                    let _ = std::fs::remove_file(&path);
+                }
+                None
+            }
+            Err(_) => None,
+        }
     }
     fn try_log(&self, message: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
@@ -99,6 +150,19 @@ impl Logger {
         // `writeln!` on a `File` issues one write per formatted piece, and
         // another process's line can land between any two of them.
         file.write_all(format_line(&now_iso(), message).as_bytes())
+    }
+}
+
+/// How old the file of a rotation turn must be before it is taken for one
+/// that was left behind.
+const TURN_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One process's turn at rotating the log; its file goes when it is over.
+struct Turn(PathBuf);
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -210,6 +274,88 @@ mod tests {
         assert_eq!(lines[1], "written during the rotation");
         let current = std::fs::read_to_string(logger.path()).unwrap();
         assert!(current.ends_with(" after\n") && current.lines().count() == 1);
+    }
+
+    /// The controls and the worker start together. Both found the log
+    /// large; the second rename moved the file the first had just started
+    /// over the generation it had kept.
+    #[test]
+    fn processes_that_start_together_rotate_once_and_keep_the_generation() {
+        const STARTS: usize = 8;
+        const LIMIT: u64 = 4096;
+        for round in 0..200 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("companion.log");
+            let generation = format!("the generation to keep\n{}\n", "x".repeat(LIMIT as usize));
+            std::fs::write(&path, &generation).unwrap();
+            let together = std::sync::Barrier::new(STARTS);
+            std::thread::scope(|scope| {
+                for _ in 0..STARTS {
+                    scope.spawn(|| {
+                        let logger = Logger::new(path.clone());
+                        together.wait();
+                        logger.rotate_above(LIMIT);
+                        logger.log("started");
+                    });
+                }
+            });
+            let logger = Logger::new(path.clone());
+            let previous = std::fs::read_to_string(logger.previous_path()).unwrap();
+            assert!(
+                previous.starts_with(&generation),
+                "round {round}: the previous generation is {previous:?}"
+            );
+            // Every line is in one of the two files, and nothing else is
+            // left in the folder.
+            let current = std::fs::read_to_string(&path).unwrap_or_default();
+            let started = |text: &str| text.lines().filter(|l| l.ends_with(" started")).count();
+            assert_eq!(started(&previous) + started(&current), STARTS);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_log_is_left_alone_while_another_process_rotates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("companion.log"));
+        logger.log("before");
+        let whole = std::fs::read_to_string(logger.path()).unwrap();
+        // The other process is between its look at the size and its rename.
+        let other = logger.take_turn().unwrap();
+        assert_eq!(other.0, dir.path().join("companion.rotating"));
+        assert!(!logger.rotate_above(1));
+        assert_eq!(std::fs::read_to_string(logger.path()).unwrap(), whole);
+        assert!(!logger.previous_path().exists() && other.0.exists());
+        drop(other);
+        assert!(logger.rotate_above(1));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // A process that was ended in its turn left the file behind. Not
+        // old enough to tell: left. Old enough: removed, and the start
+        // after that rotates.
+        logger.log("next");
+        let left_behind = logger.turn_path();
+        std::fs::write(&left_behind, b"").unwrap();
+        assert!(!logger.rotate_above(1));
+        assert!(left_behind.exists());
+        let then = std::time::SystemTime::now() - 2 * TURN_STALE_AFTER;
+        std::fs::File::options()
+            .write(true)
+            .open(&left_behind)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+        assert!(!logger.rotate_above(1));
+        assert!(!left_behind.exists() && logger.path().exists());
+        assert!(logger.rotate_above(1));
+        let previous = std::fs::read_to_string(logger.previous_path()).unwrap();
+        assert!(previous.ends_with(" next\n"), "{previous:?}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // A small log asks for no turn, so a file left behind is not even
+        // looked at.
+        std::fs::write(&left_behind, b"").unwrap();
+        logger.log("small");
+        assert!(!logger.rotate_above(4096));
+        assert!(left_behind.exists());
     }
 
     /// A program that has the log open without sharing it for deletion (an
