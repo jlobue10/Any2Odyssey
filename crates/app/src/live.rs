@@ -880,11 +880,20 @@ mod tests {
                 .env("ORT_DYLIB_PATH", dir.path().join("missing-runtime.so"))
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
+            let said = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{said}");
+            // The child is asked for this test by its name. Under another
+            // name (the test's or its module's, after a renaming) it runs
+            // no test at all and ends well, and that was all that was
+            // looked at: the test would have stayed green without running.
+            assert!(
+                said.contains("running 1 test\n")
+                    && said.contains("test result: ok. 1 passed; 0 failed;"),
+                "the test did not run in its own process:\n{said}"
             );
             return;
         }
