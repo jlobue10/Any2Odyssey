@@ -80,6 +80,11 @@ impl Logger {
     /// removed once it is [`TURN_STALE_AFTER`] old, and the start after
     /// this one rotates.
     fn take_turn(&self) -> Option<Turn> {
+        self.take_turn_left_for(TURN_STALE_AFTER)
+    }
+    /// [`take_turn`](Self::take_turn), with the age from which what is in
+    /// the turn's place counts as left behind.
+    fn take_turn_left_for(&self, stale_after: std::time::Duration) -> Option<Turn> {
         let path = self.turn_path();
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -89,19 +94,37 @@ impl Logger {
             options.mode(0o600);
         }
         match options.open(&path) {
-            Ok(_) => Some(Turn(path)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(_) => Some(Turn(Some(path))),
+            Err(_) => {
+                // Whatever the refusal was called (for a folder under the
+                // name Windows says "access denied", not "already
+                // exists"): is something there, and how old is it? Where
+                // nothing is, no turn can be had here at all.
+                //
+                // It is what has the name that is asked, not what a link
+                // there leads to: asked through the link, one that leads
+                // nowhere had no age and was never old enough, and neither
+                // it nor a folder was removed by the removing of a file.
+                // Every start then found "another process" at the
+                // rotating, and the log grew without end.
+                //
                 // A time in the future (the clock was set back) is no age
                 // to wait out.
-                let stale = std::fs::metadata(&path)
+                let stale = std::fs::symlink_metadata(&path)
                     .and_then(|m| m.modified())
-                    .is_ok_and(|at| at.elapsed().map_or(true, |age| age >= TURN_STALE_AFTER));
-                if stale {
-                    let _ = std::fs::remove_file(&path);
+                    .is_ok_and(|at| at.elapsed().map_or(true, |age| age >= stale_after));
+                if stale
+                    && std::fs::remove_file(&path).is_err()
+                    && std::fs::remove_dir(&path).is_err()
+                {
+                    // Old, and it cannot be removed (a folder with
+                    // something in it): no process's turn, and nothing
+                    // that will ever go. The log is rotated without a
+                    // turn, as it was before there were turns.
+                    return Some(Turn(None));
                 }
                 None
             }
-            Err(_) => None,
         }
     }
     fn try_log(&self, message: &str) -> std::io::Result<()> {
@@ -167,11 +190,15 @@ impl Logger {
 const TURN_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One process's turn at rotating the log; its file goes when it is over.
-struct Turn(PathBuf);
+/// Without a file where the turn's place is taken for good by something
+/// that is no turn (see [`Logger::take_turn_left_for`]).
+struct Turn(Option<PathBuf>);
 
 impl Drop for Turn {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Some(file) = &self.0 {
+            let _ = std::fs::remove_file(file);
+        }
     }
 }
 
@@ -331,10 +358,11 @@ mod tests {
         let whole = std::fs::read_to_string(logger.path()).unwrap();
         // The other process is between its look at the size and its rename.
         let other = logger.take_turn().unwrap();
-        assert_eq!(other.0, dir.path().join("companion.rotating"));
+        let turn = dir.path().join("companion.rotating");
+        assert_eq!(other.0.as_deref(), Some(turn.as_path()));
         assert!(!logger.rotate_above(1));
         assert_eq!(std::fs::read_to_string(logger.path()).unwrap(), whole);
-        assert!(!logger.previous_path().exists() && other.0.exists());
+        assert!(!logger.previous_path().exists() && turn.exists());
         drop(other);
         assert!(logger.rotate_above(1));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
@@ -365,6 +393,65 @@ mod tests {
         logger.log("small");
         assert!(!logger.rotate_above(4096));
         assert!(left_behind.exists());
+    }
+
+    /// A process leaves an empty file behind and nothing else. Whatever
+    /// else has the turn's name must not keep the log from being rotated
+    /// for good: a folder there, or a link that leads nowhere, was never
+    /// old and never removed, and the log grew at every start.
+    #[test]
+    fn nothing_in_the_place_of_a_turn_keeps_the_log_from_being_rotated_for_good() {
+        let old = std::time::Duration::ZERO;
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("companion.log"));
+        let turn = logger.turn_path();
+        // An empty folder goes like a file that was left behind, and the
+        // start after that has its turn.
+        std::fs::create_dir(&turn).unwrap();
+        assert!(logger.take_turn().is_none(), "not old enough to tell");
+        assert!(turn.is_dir());
+        assert!(logger.take_turn_left_for(old).is_none());
+        assert!(!turn.exists());
+        assert!(logger.take_turn().is_some_and(|turn| turn.0.is_some()));
+        assert!(!turn.exists());
+        // A folder with something in it cannot be removed, and is nobody's
+        // turn: the log is rotated without one, and the folder is left.
+        std::fs::create_dir(&turn).unwrap();
+        std::fs::write(turn.join("kept"), b"kept").unwrap();
+        let without = logger.take_turn_left_for(old).unwrap();
+        assert!(without.0.is_none());
+        drop(without);
+        assert_eq!(std::fs::read(turn.join("kept")).unwrap(), b"kept");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            std::fs::remove_dir_all(&turn).unwrap();
+            // A link that leads nowhere is removed, by its own age.
+            symlink("nothing-there", &turn).unwrap();
+            assert!(logger.take_turn().is_none(), "not old enough to tell");
+            assert!(turn.is_symlink());
+            assert!(logger.take_turn_left_for(old).is_none());
+            assert!(!turn.is_symlink());
+            // So is a link to a file, and not the file.
+            let elsewhere = dir.path().join("elsewhere");
+            std::fs::write(&elsewhere, b"kept").unwrap();
+            symlink(&elsewhere, &turn).unwrap();
+            assert!(logger.take_turn_left_for(old).is_none());
+            assert!(!turn.is_symlink());
+            assert_eq!(std::fs::read(&elsewhere).unwrap(), b"kept");
+            // The folder again, by the clock and through the rotation.
+            std::fs::create_dir(&turn).unwrap();
+            std::fs::write(turn.join("kept"), b"kept").unwrap();
+            let then = std::time::SystemTime::now() - 2 * TURN_STALE_AFTER;
+            std::fs::File::open(&turn)
+                .unwrap()
+                .set_modified(then)
+                .unwrap();
+            logger.log("a line");
+            assert!(logger.rotate_above(1));
+            assert!(logger.previous_path().exists() && !logger.path().exists());
+            assert!(turn.join("kept").exists());
+        }
     }
 
     /// A program that has the log open without sharing it for deletion (an
