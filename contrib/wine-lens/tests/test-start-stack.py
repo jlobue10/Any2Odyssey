@@ -424,7 +424,7 @@ class EnsureStackTests(StackTests):
             program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", f"{self.root}/{name}"])
             self.addCleanup(program.wait)
             self.addCleanup(program.kill)
-        (self.root / "stack.started").write_text("")
+        (self.root / "stack.started").write_text(f"{int((self.root / 'board').stat().st_mtime)}\n")
         deadline = time.monotonic() + 5
         while subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", re.escape(f"{self.root}/SRSession.exe")],
                              stdout=subprocess.DEVNULL).returncode != 0:
@@ -496,18 +496,39 @@ class EnsureStackTests(StackTests):
         start = self.root / "tools/start-stack.sh"
         works = start.read_text()
         start.write_text("#!/bin/sh\n" + self.STARTS)
+        before = (self.root / "board").stat().st_mtime
         later = time.time() + 5
         os.utime(self.root / "board", (later, later))
         result = self.request()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("error: Leia's service did not get the lens board ready", result.stdout)
-        # The board is as old as it was when the stack was last started well, or older (udev made the
-        # link anew at the same second; a clock that was set back).
-        os.utime(self.root / "board", (0, 0))
+        # The board's link has the time again that it had when the stack was last started well (a clock
+        # that was set back, and udev making the link anew at that very second): a note that had stayed
+        # would be this link's.
+        os.utime(self.root / "board", (before, before))
         (self.root / "starts").unlink()
         start.write_text(works)
         self.assertEqual(self.starts(), 1, "a start without the board passed for the one before it")
         self.assertEqual(self.starts(), 0)
+
+    def test_a_board_link_newer_than_the_clock_is_not_a_board_that_came_back(self):
+        # A stack counted as having the board while the board's link was not newer than the note of the
+        # start. A clock that is set back after udev made the link leaves a link newer than every note
+        # written until the clock has caught up with it: a PC that also runs Windows, which keeps local time
+        # in the clock chip, starts hours ahead east of Greenwich and is corrected from the network a little
+        # later. Until then every request started the stack again (seen with real Wine: three requests, three
+        # cold starts of 20 seconds).
+        self.stays("wineserver")
+        later = time.time() + 7200
+        os.utime(self.root / "board", (later, later))
+        self.assertEqual(self.starts(), 1)  # (the note of setUp is that of another link)
+        self.assertEqual(self.starts(), 0, "a board link newer than the clock: the stack was started again")
+        self.assertEqual(self.starts(), 0)
+        # A link made anew is still a board that came back, whatever its time says: later, long ago, now.
+        for when in (later + 60, 0, time.time()):
+            os.utime(self.root / "board", (when, when))
+            self.assertEqual(self.starts(), 1, f"the link was made anew ({when}) and the stack was left as it was")
+            self.assertEqual(self.starts(), 0)
 
     def test_the_board_is_ready_when_leias_service_has_said_so_since_the_start(self):
         # What the service wrote in the run before is not this start's, in whichever file it is.

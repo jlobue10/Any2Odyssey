@@ -31,10 +31,19 @@ server_runs() {
     return 1
 }
 
+# The note of a start that ended well holds the time of the board's link as it was then, and the stack has
+# the board for as long as the link still has that time. (The link itself, not the tty behind it: udev makes
+# it anew when the board returns after a monitor sleep.) The note used to be an empty file whose own time was
+# compared with the link's, and the stack counted while the link was not the newer of the two. That takes a
+# clock that only goes forward. Where the clock is set back after udev made the link (a PC that also runs
+# Windows, which keeps local time in the clock chip: Linux starts hours ahead east of Greenwich and is
+# corrected from the network a little later), the link was newer than every note until the clock had caught
+# up with it, and each request in those hours started the stack again, under whatever was using it.
+board_time() { stat -c %Y "$BOARD" 2>/dev/null; }
+
 stack_ok() {
     pgrep -u "$(id -u)" -f 'bin.SRService\.exe' >/dev/null && pgrep -u "$(id -u)" -f 'SRSession\.exe' >/dev/null &&
-        [ -e "$STAMP" ] && [ "$(stat -c %Y "$BOARD")" -le "$(stat -c %Y "$STAMP")" ] && server_runs
-    # (the link itself, not the tty behind it: udev makes it anew when the board returns after a monitor sleep)
+        [ -s "$STAMP" ] && [ "$(board_time)" = "$(cat "$STAMP" 2>/dev/null)" ] && server_runs
 }
 
 # Whether Leia's service has said, since this start began, that the lens board answered it. The line used to
@@ -94,6 +103,6 @@ if ! stack_ok; then
         [ $i -gt 60 ] && { echo "error: Leia's service did not get the lens board ready (log in $LOGDIR)"; exit 1; }
         sleep 1
     done
-    touch "$STAMP"
+    board_time >"$STAMP"
 fi
 exit 0
