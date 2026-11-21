@@ -20,12 +20,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use any2odyssey_core::dibr::{DepthMap, Params};
+use any2odyssey_core::dibr::Params;
 use any2odyssey_core::live::{self, Depth, DepthSmoother, Placement};
 use any2odyssey_core::slider::{DEPTH, POPOUT};
 use image::RgbaImage;
 
 use crate::capture::{fitted, Capture, CaptureState, Frames};
+use crate::depth::RawDepth;
 use crate::weaver::{self, FrameSink};
 
 /// The time from one picture to the next that is kept to over any stretch
@@ -245,8 +246,11 @@ struct DepthState {
     /// Raised whenever the map changes, so that a picture made with an
     /// earlier one is known to be out of date.
     version: u64,
-    /// The model's newest answer, and the frame and detail it was for.
-    latest: Option<(u64, u32, DepthMap)>,
+    /// The model's newest answer, and the frame and detail it was for. It
+    /// is kept as the model gave it, as the smoother is to have it: a map
+    /// brought to 0..=1 beforehand leaves the smoother's running range
+    /// nothing to follow (`depth::RawDepth`).
+    latest: Option<(u64, u32, RawDepth)>,
     /// That answer has been eased in all the way: the map will not change
     /// until the model answers again.
     settled: bool,
@@ -695,10 +699,16 @@ fn depth_loop(shared: &Shared) {
     // one's thread may still be inside the model when the next has begun.
     static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     RUNNING.fetch_add(1, Ordering::SeqCst);
+    // The model's answer as it gave it, not the map a still image gets
+    // (`depth::RawDepth`).
     depth_loop_with(shared, |frame, detail| {
-        crate::depth::estimate_unless_cancelled(frame, detail, crate::depth::Purpose::Live, || {
-            shared.stop.load(Ordering::Relaxed)
-        })
+        let stopped = || shared.stop.load(Ordering::Relaxed);
+        crate::depth::estimate_raw_unless_cancelled(
+            frame,
+            detail,
+            crate::depth::Purpose::Live,
+            stopped,
+        )
     });
     // The last live screen has ended: the model goes, and with it what it
     // holds of the GPU's memory or the processor's. The next start loads
@@ -712,7 +722,7 @@ fn depth_loop(shared: &Shared) {
 /// the long side the model is to see it at.
 fn depth_loop_with(
     shared: &Shared,
-    estimate: impl Fn(&RgbaImage, u32) -> Result<Option<DepthMap>, String>,
+    estimate: impl Fn(&RgbaImage, u32) -> Result<Option<RawDepth>, String>,
 ) {
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
@@ -894,7 +904,7 @@ mod tests {
             depth: Mutex::new(DepthState {
                 smoother: previous,
                 version: 3,
-                latest: Some((6, 518, DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap())),
+                latest: Some((6, 518, RawDepth::new(2, 1, vec![0.0, 1.0]).unwrap())),
                 settled: true,
             }),
             stats: Mutex::new(Stats {
@@ -950,6 +960,68 @@ mod tests {
     }
 
     #[test]
+    fn the_models_own_numbers_reach_the_smoother_not_a_map_brought_to_0_1_first() {
+        // The depth thread as the program runs it, the model played by the
+        // test: of four points the nearest comes a little nearer (4, then
+        // 5, in the model's numbers), and then much nearer (40).
+        let maps = [
+            [1.0f32, 2.0, 3.0, 4.0],
+            [1.0, 2.0, 3.0, 5.0],
+            [1.0, 2.0, 3.0, 40.0],
+        ];
+        let shared = Arc::new(Shared::new());
+        shared.steadiness.store(60, Ordering::Relaxed);
+        let state = shared.clone();
+        let depth = std::thread::spawn(move || {
+            depth_loop_with(&state, |frame, _| {
+                // (the frame says which of the maps is its own)
+                let raw = maps[frame.as_raw()[0] as usize].to_vec();
+                Ok(Some(RawDepth::new(4, 1, raw).unwrap()))
+            })
+        });
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        for (frame, map) in maps.iter().enumerate() {
+            let serial = frame as u64 + 1;
+            {
+                let mut slot = lock(&shared.for_model);
+                slot.pixels = vec![frame as u8; 4 * 4];
+                (slot.width, slot.height) = (4, 1);
+                (slot.serial, slot.detail) = (serial, 518);
+                (slot.busy, slot.waiting) = (true, true);
+            }
+            shared.model_wanted.notify_one();
+            eventually("the model's answer", || !lock(&shared.for_model).busy);
+            let depth = lock(&shared.depth);
+            // The answer is kept as it came, for the still screen's easing.
+            let (answered, _, latest) = depth.latest.as_ref().unwrap();
+            assert_eq!((*answered, latest.values()), (serial, &map[..]));
+            let values = depth.smoother.values();
+            match frame {
+                0 => assert_eq!(values, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]),
+                // The points behind stay where they were while the range
+                // comes round to the new nearest point. Given the map
+                // brought to 0..=1 (0, 0.25, 0.5, 1), as it was until
+                // 1.0.0, the smoother had them at 0.3 and 0.5625 at once.
+                1 => assert!(
+                    close(values[1], 0.332013) && close(values[2], 0.664026) && values[3] == 1.0,
+                    "{values:?}"
+                ),
+                // So large a change is followed at once, all but a quarter
+                // of the new range (`live::DepthSmoother`).
+                _ => assert!(
+                    close(values[1], 1.0 / 29.25 + 1.0 / 16.0)
+                        && close(values[2], 2.0 / 29.25 + 1.0 / 16.0)
+                        && values[3] == 1.0,
+                    "{values:?}"
+                ),
+            }
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.model_wanted.notify_all();
+        depth.join().unwrap();
+    }
+
+    #[test]
     fn a_large_screen_is_estimated_at_the_chosen_depth_detail() {
         let capture = crate::capture::Fed::start();
         let shared = Arc::new(Shared::new());
@@ -966,7 +1038,7 @@ mod tests {
                 lock(&seen).push((frame.dimensions(), long_side));
                 let (w, h) = crate::depth::model_size(frame.width(), frame.height(), long_side);
                 let values = (0..w * h).map(|i| i as f32).collect();
-                Ok(Some(DepthMap::normalized(w, h, values).unwrap()))
+                Ok(Some(RawDepth::new(w, h, values).unwrap()))
             })
         });
         for ((sw, sh), detail, frame) in [
@@ -1512,7 +1584,7 @@ mod tests {
         let mut depth = DepthState {
             smoother,
             version: 3,
-            latest: Some((6, 518, DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap())),
+            latest: Some((6, 518, RawDepth::new(2, 1, vec![0.0, 1.0]).unwrap())),
             settled: true,
         };
         // The first failure takes the map away: another picture, flat.
@@ -1562,7 +1634,7 @@ mod tests {
         {
             let mut depth = lock(&shared.depth);
             depth.version += 1;
-            depth.latest = Some((5, 518, DepthMap::normalized(1, 1, vec![0.0]).unwrap()));
+            depth.latest = Some((5, 518, RawDepth::new(1, 1, vec![0.0]).unwrap()));
         }
         place.busy = false;
         drop(place);
@@ -1950,15 +2022,18 @@ mod tests {
         assert_eq!(pictures(), 2);
 
         // The model answers, as the depth thread does: a first step
-        // towards the frame's map from the depth of the scene before.
+        // towards the frame's map from the depth of the scene before. The
+        // answer is in the model's own numbers, on another scale than the
+        // scene before; where it ends is the map of this frame by itself.
         let before = [1.0f32, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-        let map = DepthMap::normalized(4, 2, vec![0.0, 0.25, 0.5, 1.0, 0.0, 0.5, 0.75, 1.0]);
-        let map = map.unwrap();
+        let own = [0.0f32, 0.25, 0.5, 1.0, 0.0, 0.5, 0.75, 1.0];
+        let map = RawDepth::new(4, 2, vec![2.0, 3.0, 4.0, 6.0, 2.0, 4.0, 5.0, 6.0]).unwrap();
+        assert_eq!(map.clone().normalized().unwrap().values(), own);
         let steps = {
             let mut depth = lock(&shared.depth);
             assert!(depth.smoother.update(4, 2, &before, 0.0));
             assert!(depth.smoother.update(4, 2, map.values(), 0.2));
-            assert_ne!(depth.smoother.values(), map.values());
+            assert_ne!(depth.smoother.values(), own);
             depth.version += 1;
             depth.latest = Some((1, 518, map.clone()));
             // How many steps the easing will take from here.
@@ -1974,12 +2049,12 @@ mod tests {
         // It is shown and eased in, a picture a step, to the frame's own
         // map exactly; and there it rests.
         eventually("the map is eased in", || lock(&shared.depth).settled);
-        assert_eq!(lock(&shared.depth).smoother.values(), map.values());
+        assert_eq!(lock(&shared.depth).smoother.values(), own);
         // The answer as it came, then every step: a picture each.
         let eased = 2 + 1 + steps;
         eventually("every step is shown", || pictures() == eased);
         let depth = Depth {
-            values: map.values(),
+            values: &own,
             width: 4,
             height: 2,
         };
@@ -2036,9 +2111,9 @@ mod tests {
                     let range = (reds.clone().min().unwrap(), reds.max().unwrap());
                     lock(&seen).push((frame.dimensions(), detail, range));
                     // The map comes back at the size the estimator shows the
-                    // model the frame at (`Estimator::estimate`).
+                    // model the frame at (`Estimator::estimate_raw`).
                     let (w, h) = crate::depth::model_size(frame.width(), frame.height(), detail);
-                    Ok(DepthMap::normalized(w, h, vec![0.0; (w * h) as usize]).ok())
+                    Ok(RawDepth::new(w, h, vec![0.0; (w * h) as usize]).ok())
                 })
             });
             // Columns of black and white one pixel wide, as small text is.
