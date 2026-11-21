@@ -19,9 +19,13 @@ Linux, the Odyssey 3D set-up (run `any2odyssey-setup` once after updating; it en
 
 - **A start of Leia's stack removes the log files Leia's programs left more than two weeks ago.** They begin a file at every run and remove none; the eye tracker writes about 10 MB for every hour it follows a face.
 
+Linux, the Odyssey 3D output:
+
+- **Leia's weaver is told how long a picture takes to be seen: 25 ms.** The weaver places the two views for where the eyes will be when the picture it weaves is on the screen, and reckons with a time of its own choosing unless it is told one: 40 ms on the Odyssey at 120 Hz under Wine. Looked at on that screen while the head moved from side to side, with 60, 40, 32, 25 and 17 ms told to it in turn: the differences show, 25 ms was the best ("still not perfect"), 17 ms "maybe too fast". This is one screen's number, found by eye, on KDE Plasma at 120 Hz; `A2O_WEAVER_LATENCY_US=<microseconds>` in the environment of Any2Odyssey tells the weaver another.
+
 ### Diagnostics
 
-- `A2O_WEAVER_STATS` now begins with the time Leia's weaver reckons with between weaving a picture and its being seen (`latency ... microseconds`), and each second's line also has the mean time of an upload, the shortest turn, and how many turns were half as long again or more (`late turns`): refreshes at which the picture did not follow the eyes, which is what a 66 MB upload on the weaving thread may cost at 2160 lines. `A2O_WEAVER_LATENCY_FRAMES=<n>` tells the weaver n frames instead of its own choice and `A2O_WEAVER_LATENCY_US=<n>` that many microseconds; each second's line says the time again. On the Odyssey at 120 Hz the weaver's own choice was 40000 microseconds, and it said the same right after it was told 3 frames. Both are for finding out whether the flicker that is left when the head moves comes from there; a run without the variables calls nothing new.
+- `A2O_WEAVER_STATS` now begins with the time Leia's weaver reckons with (`latency ... microseconds`) and says it again in each second's line, which also has the mean time of an upload, the shortest turn, and how many turns were half as long again or more (`late turns`; not to be trusted in a second whose shortest turn is far under a refresh). Measured at 2160 lines with a film: 120 weaves a second, an upload of 66 MB takes 4.5 ms in the mean and a turn with one 10 to 14 ms at the longest, so an upload on the weaving thread costs a refresh now and then and no more. `A2O_WEAVER_LATENCY_FRAMES=<n>` tells the weaver n frames instead of a time; right after being told 3 it went on saying 40000 microseconds.
 
 ### Hardware verification
 

@@ -245,23 +245,26 @@ int main(int argc, char **argv)
     CloseHandle(CreateThread(NULL, 0, watch_input, NULL, 0, NULL));
 
     stats = getenv("A2O_WEAVER_STATS") ? fopen(getenv("A2O_WEAVER_STATS"), "w") : NULL;
-    /* Two diagnostics more, for the question whether the picture follows the eyes late. Leia's weaver places
-     * the views for where the eyes will be when the picture it weaves is seen, and has to be told how long
-     * that takes from weave() on; untold, it assumes a number of frames of its own choosing. Under Wine a
-     * picture goes through Xwayland and the desktop's compositor on its way, which Leia did not count on.
-     * A2O_WEAVER_LATENCY_FRAMES=<n> tells the weaver n frames, A2O_WEAVER_LATENCY_US=<n> that many
-     * microseconds, and the statistics begin with the time the weaver reckons with and say it again every
-     * second. (On the Odyssey at 120 Hz under Wine 11.22 the weaver said 40000 microseconds by itself, and
-     * the same right after it was told 3 frames: the time is said again later because it may be worked out
-     * from the frames only once pictures are woven, and the microseconds are there because they leave
-     * nothing to work out.) None of this is touched in a run without these variables. */
-    if (getenv("A2O_WEAVER_LATENCY_US")) {
-        int microseconds = atoi(getenv("A2O_WEAVER_LATENCY_US"));
-        if (microseconds >= 0 && microseconds <= 200000) a2o_weaver_latency_time(weaver, (unsigned long long)microseconds);
-    }
-    if (getenv("A2O_WEAVER_LATENCY_FRAMES")) {
-        int frames = atoi(getenv("A2O_WEAVER_LATENCY_FRAMES"));
-        if (frames >= 0 && frames <= 16) a2o_weaver_latency_frames(weaver, (unsigned long long)frames);
+    /* How long a picture takes from weave() until it is seen. Leia's weaver places the views for where the
+     * eyes will be by then, and has to be told that time; untold, it reckons with one of its own choosing,
+     * which on the Odyssey at 120 Hz under Wine 11.22 is 40000 microseconds. Under Wine a picture goes
+     * through Xwayland and the desktop's compositor on its way, which Leia did not count on. Looked at on
+     * that screen while the head moved from side to side (KDE Plasma 6.8.3, a live screen at 2160 lines):
+     * 60000, 40000, 32000, 25000 and 17000 microseconds were told apart by eye, 25000 was the best of them,
+     * "still not perfect", and 17000 "maybe too fast". So the weaver is told 25000, three refreshes of that
+     * screen. It is one screen's number, found by eye: A2O_WEAVER_LATENCY_US=<n> tells the weaver another,
+     * and A2O_WEAVER_LATENCY_FRAMES=<n> tells it n frames and leaves the time to the weaver (which went on
+     * saying 40000 right after it was told 3 frames; whether it ever works the time out there is not
+     * known). A2O_WEAVER_STATS begins with the time the weaver reckons with and says it again every
+     * second. */
+    {
+        const char *time = getenv("A2O_WEAVER_LATENCY_US"), *frames = getenv("A2O_WEAVER_LATENCY_FRAMES");
+        int microseconds = time ? atoi(time) : 25000;
+        if (time && (microseconds < 0 || microseconds > 200000)) microseconds = 25000;
+        if (frames && !time && atoi(frames) >= 0 && atoi(frames) <= 16)
+            a2o_weaver_latency_frames(weaver, (unsigned long long)atoi(frames));
+        else
+            a2o_weaver_latency_time(weaver, (unsigned long long)microseconds);
     }
     if (stats) {
         const char *frames = getenv("A2O_WEAVER_LATENCY_FRAMES"), *time = getenv("A2O_WEAVER_LATENCY_US");
