@@ -427,7 +427,8 @@ impl DepthSmoother {
     /// map is kept, 0.0 (none) to 0.95.
     ///
     /// The running range moves towards the map's own lowest and highest
-    /// number first, keeping `steadiness` + 0.5 of itself and at most 0.97,
+    /// number first, keeping `steadiness` + 0.5 of itself and at most 0.97
+    /// (and nothing of itself at a steadiness of 0, where nothing is kept),
     /// and each of its ends is then brought to within [`MAX_RANGE_LAG`] of
     /// the map's own span from the map's own end. The map is normalized
     /// with that range, what lies outside it becoming 0 or 1, and blended
@@ -478,7 +479,19 @@ impl DepthSmoother {
                 // range goes as its values do, and both are there together.
                 // At the pace of a moving picture's range a still screen was
                 // redrawn for half a minute before it was at rest.
-                let slow = if still { keep } else { (keep + 0.5).min(0.97) };
+                //
+                // And at a steadiness of nothing, nothing is kept: not of
+                // the range either. Half of it was. After a cut between
+                // two scenes of a film a sixth to a fifth of the old depth
+                // was still there with the new scene's first map, and up
+                // to three pixels in eight of it lay outside the range and
+                // were shown as nearest or farthest, where the page says
+                // of 0 that none of the map before is kept.
+                let slow = if still || keep == 0.0 {
+                    keep
+                } else {
+                    (keep + 0.5).min(0.97)
+                };
                 let lag = (high - low) * MAX_RANGE_LAG;
                 (
                     (l * slow + low * (1.0 - slow)).clamp(low - lag, low + lag),
@@ -1197,6 +1210,30 @@ mod tests {
                     smoother.values()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn at_a_steadiness_of_nothing_each_map_is_shown_by_itself() {
+        // Scenes whose numbers have quite other ranges, one after the
+        // other and back again, as a film cuts between them. "How much of
+        // the previous depth map is kept for each new one", says the
+        // page: at 0, none. Half of the running range was kept all the
+        // same, and a scene was shown squeezed or cut off at its near end
+        // by the range of the scene before.
+        let scenes = [
+            [0.0f32, 2.5, 5.0, 10.0],
+            [0.0, 0.5, 1.0, 2.0],
+            [1.0, 2.0, 3.0, 40.0],
+            [3.0, 3.5, 3.9, 4.0],
+        ];
+        let mut smoother = DepthSmoother::default();
+        for scene in scenes.iter().chain(scenes.iter().rev()) {
+            assert!(smoother.update(4, 1, scene, 0.0));
+            let mut alone = DepthSmoother::default();
+            assert!(alone.update(4, 1, scene, 0.0));
+            assert_eq!(smoother.values(), alone.values(), "{scene:?}");
+            assert_eq!(smoother.range, alone.range, "{scene:?}");
         }
     }
 
