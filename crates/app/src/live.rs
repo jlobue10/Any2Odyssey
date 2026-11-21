@@ -285,9 +285,9 @@ struct DepthState {
     /// earlier one is known to be out of date.
     version: u64,
     /// The model's newest answer, and the frame and detail it was for. It
-    /// is kept as the model gave it, as the smoother is to have it: a map
-    /// brought to 0..=1 beforehand leaves the smoother's running range
-    /// nothing to follow (`depth::RawDepth`).
+    /// is kept as the model gave it, as the smoother is to have it: which
+    /// range a map is brought to 0..=1 with is the smoother's to say
+    /// (`depth::RawDepth`).
     latest: Option<(u64, u32, RawDepth)>,
     /// That answer has been eased in all the way: the map will not change
     /// until the model answers again.
@@ -749,8 +749,20 @@ fn depth_loop(shared: &Shared) {
     // was the last is asked when the model is free to be let go of, not
     // here: another live screen may begin before that
     // (`depth::unload_if`).
-    RUNNING.fetch_sub(1, Ordering::SeqCst);
-    crate::depth::unload_if(|| RUNNING.load(Ordering::SeqCst) == 0);
+    last_one_lets_go(&RUNNING, |unused| crate::depth::unload_if(unused));
+}
+
+/// A depth thread that ends counts itself out of `running`, and
+/// `unload_if` is given the question whether none is left, to ask when the
+/// model is free to be let go of. Answered here and now, a live screen that
+/// begins while `unload_if` waits for a map being made has its model let go
+/// of behind its first map (`depth::unload_if`).
+fn last_one_lets_go(
+    running: &std::sync::atomic::AtomicUsize,
+    unload_if: impl FnOnce(&dyn Fn() -> bool),
+) {
+    running.fetch_sub(1, Ordering::SeqCst);
+    unload_if(&|| running.load(Ordering::SeqCst) == 0);
 }
 
 /// [`depth_loop`] with the model as `estimate`, which is given a frame and
@@ -1002,6 +1014,36 @@ mod tests {
     }
 
     #[test]
+    fn a_live_screen_that_ends_asks_whether_it_was_the_last_once_the_model_is_free() {
+        use std::sync::atomic::AtomicUsize;
+        // One live screen, and it ends. Its letting-go of the model has to
+        // wait for a map that is being made, and another live screen
+        // begins meanwhile: asked then, the model is wanted. (The thread
+        // counted itself out and said "the last" before it waited, and the
+        // new screen's model went behind its first map. `depth::unload_if`
+        // has a test of its own; this is the thread's side of it, which
+        // could be put back as it was with every test passing.)
+        let running = AtomicUsize::new(1);
+        let mut unused = None;
+        last_one_lets_go(&running, |nobody_left| {
+            running.fetch_add(1, Ordering::SeqCst);
+            unused = Some(nobody_left());
+        });
+        assert_eq!(unused, Some(false), "let go of under a new live screen");
+        assert_eq!(running.load(Ordering::SeqCst), 1);
+        // That one ends with none after it: the model goes.
+        let mut unused = None;
+        last_one_lets_go(&running, |nobody_left| unused = Some(nobody_left()));
+        assert_eq!(unused, Some(true));
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        // Of two at once the first to end leaves the model to the other.
+        let running = AtomicUsize::new(2);
+        let mut unused = None;
+        last_one_lets_go(&running, |nobody_left| unused = Some(nobody_left()));
+        assert_eq!(unused, Some(false));
+    }
+
+    #[test]
     fn the_models_own_numbers_reach_the_smoother_not_a_map_brought_to_0_1_first() {
         // The depth thread as the program runs it, the model played by the
         // test: of four points the nearest comes a little nearer (4, then
@@ -1021,7 +1063,8 @@ mod tests {
                 Ok(Some(RawDepth::new(4, 1, raw).unwrap()))
             })
         });
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // What the smoother makes of the same numbers, given them itself.
+        let mut given = DepthSmoother::default();
         for (frame, map) in maps.iter().enumerate() {
             let serial = frame as u64 + 1;
             {
@@ -1037,25 +1080,15 @@ mod tests {
             // The answer is kept as it came, for the still screen's easing.
             let (answered, _, latest) = depth.latest.as_ref().unwrap();
             assert_eq!((*answered, latest.values()), (serial, &map[..]));
+            // And what is shown is what the smoother makes of those
+            // numbers at the steadiness chosen: which range each map is
+            // measured against is the smoother's to say
+            // (`live::DepthSmoother`), from the numbers as they came.
+            assert!(given.update(4, 1, map, 0.6));
             let values = depth.smoother.values();
-            match frame {
-                0 => assert_eq!(values, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]),
-                // The points behind stay where they were while the range
-                // comes round to the new nearest point. Given the map
-                // brought to 0..=1 (0, 0.25, 0.5, 1), as it was until
-                // 1.0.0, the smoother had them at 0.3 and 0.5625 at once.
-                1 => assert!(
-                    close(values[1], 0.332013) && close(values[2], 0.664026) && values[3] == 1.0,
-                    "{values:?}"
-                ),
-                // So large a change is followed at once, all but a quarter
-                // of the new range (`live::DepthSmoother`).
-                _ => assert!(
-                    close(values[1], 1.0 / 29.25 + 1.0 / 16.0)
-                        && close(values[2], 2.0 / 29.25 + 1.0 / 16.0)
-                        && values[3] == 1.0,
-                    "{values:?}"
-                ),
+            assert_eq!(values, given.values(), "map {frame}");
+            if frame == 0 {
+                assert_eq!(values, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
             }
         }
         shared.stop.store(true, Ordering::Relaxed);

@@ -379,40 +379,55 @@ pub const SETTLED: f32 = 1.0 / 2048.0;
 const MAX_DEPTH_LAG: f32 = 1.0 / 16.0;
 
 /// How far either end of the running range may be from the same end of the
-/// newest map's own range, as a part of that map's own span.
+/// newest map's own range, as a part of that map's own span: nothing. The
+/// range a map is measured against is its own lowest and highest number.
 ///
-/// The range follows the scene at 3 % a map at a steadiness of 47 or more.
-/// Left to that alone, a cut to a scene with a fifth of the range before
-/// (0 to 10, then 0 to 2) is shown at a fifth of its depth, and 118 maps
-/// later, some 20 seconds on a processor, at nine tenths of it; a scene
-/// with ten times the range (1 to 4, then 1 to 40) has everything nearer
-/// than a tenth of the way shown as nearest, for about as long. With this
-/// the first is shown at four fifths of its depth from its first map on
-/// and at nine tenths 27 maps later, and the second loses the nearest
-/// quarter of its range and no more. A scene is never shown at less than
-/// two thirds of its depth, and never loses more than a quarter of its
-/// range at either end.
-const MAX_RANGE_LAG: f32 = 1.0 / 4.0;
+/// 1.0.1 had a quarter here, with a range that follows the scene at 3 % a
+/// map, so that something near coming into the picture would not move
+/// everything else back at once. Run with the depth model itself (audit
+/// round 24: two films and four recordings of a desktop, on a processor and
+/// on a graphics card, each release's own smoother over the same maps), it
+/// did the opposite on a desktop. The model's numbers move as a whole from
+/// one map to the next: on a desktop where nothing changes but a counter, a
+/// pixel's number changes by 1.1 % of the map's span from map to map, and
+/// 0.7 % of that is one scale and one shift for the whole map. A map
+/// measured against its own lowest and highest number is rid of that; a map
+/// measured against a range that hardly moves is not. At the default
+/// steadiness the depth of the whole picture stepped 1.8 times as far from
+/// map to map on that desktop and 2.5 times as far while a window was
+/// dragged across it; when a small window opened, the rest of the picture
+/// moved by 1.07 pixels between the two views of a 3840-wide view where it
+/// had moved by 0.56; and after a cut between two scenes of a film the new
+/// scene was nine tenths there after 6 maps where it had been after 3, at
+/// as little as two thirds of its depth meanwhile. What the quarter bought:
+/// where a window comes in over a film that stands still, the background's
+/// largest step in one map was 9.9 such pixels where it is 13.9 so (and 7.0
+/// in 0.9.9); where it ends, 19 to 20 pixels further back, is the model's
+/// doing and the same for all three.
+///
+/// The following itself is left as it was, with nothing to do: a part
+/// above 0 here is all it takes to have it again, and the tests hold for
+/// whatever stands here.
+const MAX_RANGE_LAG: f32 = 0.0;
 
 /// Depth that stays put between frames.
 ///
 /// The model sees every frame afresh: its scale drifts and its surfaces
-/// tremble, which the eyes read as the whole scene breathing. This keeps a
-/// running range to normalize with and blends each new map into the last.
+/// tremble, which the eyes read as the whole scene breathing. This brings
+/// each map to 0..=1 and blends it into the last.
 ///
-/// The maps have to come as the model made them: the range of a map that
-/// was brought to 0..=1 beforehand is 0 to 1 every time, and the running
-/// range then has nothing to follow. That is how the live screen's maps
-/// came until 1.0.0. When the nearest or the farthest point of the scene
-/// changed, everything else changed its depth with it in one map: at the
-/// default steadiness, the second of four points went from 0.333 to 0.3
-/// when the nearest rose from 4 to 5, where the running range leaves it at
-/// 0.332.
+/// The maps come as the model made them, and each is measured against its
+/// own lowest and highest number ([`MAX_RANGE_LAG`]): that is what takes
+/// the drift of the model's scale out of them. The other side of it: when
+/// the nearest or the farthest point of the scene changes, everything else
+/// changes its depth with it in one map, all but what the steadiness and
+/// the sixteenth each pixel may lag by hold back. At the default
+/// steadiness the second of four points goes from 0.333 to 0.3 when the
+/// nearest rises from 4 to 5.
 ///
-/// What follows from the two limits: a small change of the scene's range
-/// is taken slowly, as the steadiness says. A large one is taken at once,
-/// all but a quarter of the new range at each end ([`MAX_RANGE_LAG`]) and a
-/// sixteenth of full depth at each pixel, and the rest slowly.
+/// What follows from the limit of a sixteenth: a small change is taken
+/// slowly, as the steadiness says, and a large one at once, all but that
+/// sixteenth of full depth at each pixel.
 #[derive(Clone, Debug, Default)]
 pub struct DepthSmoother {
     width: u32,
@@ -427,10 +442,12 @@ impl DepthSmoother {
     /// map is kept, 0.0 (none) to 0.95.
     ///
     /// The running range moves towards the map's own lowest and highest
-    /// number first, keeping `steadiness` + 0.5 of itself and at most 0.97,
+    /// number first, keeping `steadiness` + 0.5 of itself and at most 0.97
+    /// (and nothing of itself at a steadiness of 0, where nothing is kept),
     /// and each of its ends is then brought to within [`MAX_RANGE_LAG`] of
-    /// the map's own span from the map's own end. The map is normalized
-    /// with that range, what lies outside it becoming 0 or 1, and blended
+    /// the map's own span from the map's own end: with that at nothing,
+    /// the range is the map's own. The map is normalized with that range,
+    /// what lies outside it (nothing, then) becoming 0 or 1, and blended
     /// into the last one pixel by pixel; no pixel is left further than a
     /// sixteenth from its new value. The first map, and the first of
     /// another size, is taken as it is with its own range.
@@ -467,18 +484,30 @@ impl DepthSmoother {
         }
         let keep = steadiness.clamp(0.0, 0.95);
         let fresh = self.width != width || self.height != height || self.values.len() != count;
-        // The range follows the scene more slowly than the map does, so a
-        // near object entering does not push everything else back at once.
-        // Not further behind than `MAX_RANGE_LAG` allows, though: a scene
-        // with quite another range is not shown squeezed or cut off while
-        // the range comes round to it.
+        // The range may follow the scene more slowly than the map does,
+        // but not further behind than `MAX_RANGE_LAG` allows: a scene with
+        // quite another range is not shown squeezed or cut off while the
+        // range comes round to it. That limit is nothing, by what was
+        // measured: the range is this map's own.
         let (low, high) = match self.range {
             Some((l, h)) if !fresh => {
                 // A picture that stands still has nothing entering it: its
                 // range goes as its values do, and both are there together.
                 // At the pace of a moving picture's range a still screen was
                 // redrawn for half a minute before it was at rest.
-                let slow = if still { keep } else { (keep + 0.5).min(0.97) };
+                //
+                // And at a steadiness of nothing, nothing is kept: not of
+                // the range either. Half of it was. After a cut between
+                // two scenes of a film a sixth to a fifth of the old depth
+                // was still there with the new scene's first map, and up
+                // to three pixels in eight of it lay outside the range and
+                // were shown as nearest or farthest, where the page says
+                // of 0 that none of the map before is kept.
+                let slow = if still || keep == 0.0 {
+                    keep
+                } else {
+                    (keep + 0.5).min(0.97)
+                };
                 let lag = (high - low) * MAX_RANGE_LAG;
                 (
                     (l * slow + low * (1.0 - slow)).clamp(low - lag, low + lag),
@@ -1196,6 +1225,58 @@ mod tests {
                     "{:?} after {map:?} at {steadiness}",
                     smoother.values()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn at_a_steadiness_of_nothing_each_map_is_shown_by_itself() {
+        // Scenes whose numbers have quite other ranges, one after the
+        // other and back again, as a film cuts between them. "How much of
+        // the previous depth map is kept for each new one", says the
+        // page: at 0, none. Half of the running range was kept all the
+        // same, and a scene was shown squeezed or cut off at its near end
+        // by the range of the scene before.
+        let scenes = [
+            [0.0f32, 2.5, 5.0, 10.0],
+            [0.0, 0.5, 1.0, 2.0],
+            [1.0, 2.0, 3.0, 40.0],
+            [3.0, 3.5, 3.9, 4.0],
+        ];
+        let mut smoother = DepthSmoother::default();
+        for scene in scenes.iter().chain(scenes.iter().rev()) {
+            assert!(smoother.update(4, 1, scene, 0.0));
+            let mut alone = DepthSmoother::default();
+            assert!(alone.update(4, 1, scene, 0.0));
+            assert_eq!(smoother.values(), alone.values(), "{scene:?}");
+            assert_eq!(smoother.range, alone.range, "{scene:?}");
+        }
+    }
+
+    #[test]
+    fn a_map_whose_numbers_move_as_a_whole_is_the_same_map() {
+        // The model's numbers are on a scale of its own, another for every
+        // map: of a desktop that stands still they move by about a
+        // hundredth of their span from one map to the next, most of it one
+        // scale and one shift for the whole map (the numbers here are a
+        // real desktop's: 2.05 to 3.43). Nothing in the picture has moved
+        // then, and nothing of its depth may. Measured against a range
+        // that follows at 3 % a map (1.0.1), every pixel moved with the
+        // model's scale.
+        let scene = [2.05f32, 2.4, 2.9, 3.1, 3.43, 2.2];
+        for steadiness in [0.0, 0.6, 0.95] {
+            let mut smoother = DepthSmoother::default();
+            assert!(smoother.update(3, 2, &scene, steadiness));
+            let shown = smoother.values().to_vec();
+            for (scale, shift) in [(1.02f32, 0.05f32), (0.97, -0.04), (1.0, 0.1), (1.05, 0.0)] {
+                let moved: Vec<f32> = scene.iter().map(|v| v * scale + shift).collect();
+                assert!(smoother.update(3, 2, &moved, steadiness));
+                for (was, is) in shown.iter().zip(smoother.values()) {
+                    assert!(
+                        (was - is).abs() < 1e-5,
+                        "{was} became {is}: times {scale}, plus {shift}, at {steadiness}"
+                    );
+                }
             }
         }
     }
@@ -2012,7 +2093,7 @@ mod tests {
     }
 
     #[test]
-    fn the_range_follows_a_new_scene_slowly_and_settling_ends_on_the_maps_own_range() {
+    fn a_map_is_measured_against_a_range_within_the_limit_and_settling_ends_on_its_own() {
         assert_eq!(SETTLED, 1.0 / 2048.0);
         let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
         let mut smoother = DepthSmoother::default();
@@ -2020,24 +2101,24 @@ mod tests {
         assert_eq!(smoother.range, Some((2.0, 6.0)));
         // The model's own numbers, as the live screen hands them over: the
         // nearest point comes a little nearer and the farthest with it.
-        // Keeping 0.2 of the map keeps 0.7 of the range: 2.15 to 6.3.
+        // Keeping 0.2 of the map keeps 0.7 of the range, 2.15 to 6.3, and
+        // each end is then held to the limit: with the limit at nothing,
+        // the range is the map's own and the map is shown as it is.
         assert!(smoother.update(2, 1, &[2.5, 7.0], 0.2));
-        let (low, high) = smoother.range.unwrap();
-        assert!(close(low, 2.15) && close(high, 6.3), "{low} {high}");
-        let values = smoother.values();
-        assert!(
-            close(values[0], 0.8 * (2.5 - 2.15) / 4.15) && close(values[1], 1.0),
-            "{values:?}"
-        );
-        // The range is never kept whole, however steady the map.
-        assert!(smoother.update(2, 1, &[2.5, 7.0], 0.9));
+        let lag = 4.5 * MAX_RANGE_LAG;
         let (low, high) = smoother.range.unwrap();
         assert!(
-            close(low, 2.15 * 0.97 + 2.5 * 0.03) && close(high, 6.3 * 0.97 + 7.0 * 0.03),
+            close(low, 2.15f32.clamp(2.5 - lag, 2.5 + lag))
+                && close(high, 6.3f32.clamp(7.0 - lag, 7.0 + lag)),
             "{low} {high}"
         );
+        let values = smoother.values();
+        assert!(
+            close(values[0], 0.8 * (2.5 - low) / (high - low)) && close(values[1], 1.0),
+            "{values:?}"
+        );
         // The same two maps brought to 0..=1 first, as the live screen's
-        // were until 1.0.0: there is nothing for the range to follow, and
+        // were until 1.0.0: there is nothing for a range to follow, and
         // the far point is where the new map has it at once.
         let mut inert = DepthSmoother::default();
         assert!(inert.update(2, 1, &[0.0, 1.0], 0.2));
@@ -2076,68 +2157,63 @@ mod tests {
     }
 
     #[test]
-    fn the_range_is_at_most_a_quarter_of_a_new_scenes_span_behind_it() {
-        assert_eq!(MAX_RANGE_LAG, 0.25);
+    fn a_new_scene_is_shown_with_its_own_range_from_its_first_map() {
+        // The limit is nothing: the tests below that name numbers are of
+        // that. (With a quarter, as 1.0.1 had it, the first scene here was
+        // shown at four fifths of its depth and the second had lost its
+        // nearest quarter.)
+        assert_eq!(MAX_RANGE_LAG, 0.0);
         let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
         // A cut to a scene with a fifth of the range, at the default
-        // steadiness. The range went to 0..9.76: the scene was shown at
-        // 20 % of its depth and reached 90 % with the 118th map after.
+        // steadiness: it has all of its depth with its first map.
         let (before, after) = ([0.0, 2.5, 5.0, 10.0], [0.0, 0.5, 1.0, 2.0]);
         let mut smoother = DepthSmoother::default();
         assert!(smoother.update(4, 1, &before, 0.6));
         assert!(smoother.update(4, 1, &after, 0.6));
-        assert_eq!(smoother.range, Some((0.0, 2.5)));
-        assert_eq!(shown(&smoother, &after), (0.8, 0.0, 0.0));
+        assert_eq!(smoother.range, Some((0.0, 2.0)));
+        assert_eq!(shown(&smoother, &after), (1.0, 0.0, 0.0));
         let values = smoother.values();
         assert!(
-            close(values[1], 0.23) && close(values[2], 0.46) && close(values[3], 0.8625),
+            values[0] == 0.0 && close(values[1], 0.25) && close(values[2], 0.5) && values[3] == 1.0,
             "{values:?}"
         );
-        let mut maps = 0;
-        while shown(&smoother, &after).0 < 0.9 {
-            assert!(smoother.update(4, 1, &after, 0.6));
-            maps += 1;
-        }
-        assert_eq!(maps, 27);
 
-        // Something comes ten times nearer than the nearest point before.
-        // The range went to 1..5.08, and everything from a tenth of the
-        // way was shown as nearest; now the nearest quarter is.
+        // Something comes ten times nearer than the nearest point before:
+        // nothing of the new scene is cut off.
         let (before, after) = ([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 40.0]);
         let mut smoother = DepthSmoother::default();
         assert!(smoother.update(4, 1, &before, 0.6));
         assert!(smoother.update(4, 1, &after, 0.6));
-        assert_eq!(smoother.range, Some((1.0, 30.25)));
-        assert_eq!(shown(&smoother, &after), (1.0, 0.0, 0.25));
+        assert_eq!(smoother.range, Some((1.0, 40.0)));
+        assert_eq!(shown(&smoother, &after), (1.0, 0.0, 0.0));
         // What was there before is followed at once, all but the
         // sixteenth each pixel may lag by: so large a change is not one to
         // calm.
         let values = smoother.values();
         assert!(
-            close(values[1], 1.0 / 29.25 + MAX_DEPTH_LAG)
-                && close(values[2], 2.0 / 29.25 + MAX_DEPTH_LAG)
+            close(values[1], 1.0 / 39.0 + MAX_DEPTH_LAG)
+                && close(values[2], 2.0 / 39.0 + MAX_DEPTH_LAG)
                 && values[3] == 1.0,
             "{values:?}"
         );
-        // A small rise of the nearest point is calmed: the range is inside
-        // the limit and moves as the steadiness says, and the points
-        // behind stay where they were (0.333 and 0.667; brought to 0..=1
-        // first, the map had them at 0.3 and 0.5625).
+        // A small rise of the nearest point moves the points behind it:
+        // from 0.333 and 0.667 to where the steadiness leaves them on the
+        // way to 0.25 and 0.5 (0.3, and the sixteenth above 0.5).
         let mut smoother = DepthSmoother::default();
         assert!(smoother.update(4, 1, &before, 0.6));
         assert!(smoother.update(4, 1, &[1.0, 2.0, 3.0, 5.0], 0.6));
-        let (low, high) = smoother.range.unwrap();
-        assert!(low == 1.0 && close(high, 4.03), "{low} {high}");
+        assert_eq!(smoother.range, Some((1.0, 5.0)));
         let values = smoother.values();
         assert!(
-            close(values[1], 0.332013) && close(values[2], 0.664026) && values[3] == 1.0,
+            close(values[1], 0.3) && close(values[2], 0.5 + MAX_DEPTH_LAG) && values[3] == 1.0,
             "{values:?}"
         );
 
-        // Whatever the two scenes and the steadiness: the new one is shown
-        // at two thirds of full depth or more, a quarter of its range at
-        // the most is cut off at either end, and it stays so while the
-        // range comes round.
+        // Whatever the two scenes, the steadiness and the limit: the new
+        // scene is shown at no less of full depth than the limit allows
+        // (all of it with none, two thirds with a quarter), no more than
+        // the limit is cut off at either end, and it stays so from map to
+        // map.
         let mut state = 0x2545_f491u32;
         let mut number = move || {
             state ^= state << 13;
@@ -2156,9 +2232,10 @@ mod tests {
                 assert!(smoother.update(3, 2, &next, steadiness));
                 let (depth, far, near) = shown(&smoother, &next);
                 let what = format!("{first:?} then {next:?} at {steadiness}, map {map}");
-                assert!(depth >= 2.0 / 3.0 - 1e-4, "{depth}: {what}");
+                let least = 1.0 / (1.0 + 2.0 * MAX_RANGE_LAG);
+                assert!(depth >= least - 1e-4, "{depth}: {what}");
                 assert!(
-                    far <= 0.25 + 1e-4 && near <= 0.25 + 1e-4,
+                    far <= MAX_RANGE_LAG + 1e-4 && near <= MAX_RANGE_LAG + 1e-4,
                     "{far} {near}: {what}"
                 );
             }

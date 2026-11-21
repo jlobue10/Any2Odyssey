@@ -669,13 +669,12 @@ fn gist(message: &str) -> String {
 ///
 /// A still image's map is brought to 0..=1 at once ([`RawDepth::normalized`]),
 /// which is all there is to do with one picture. A live screen's is not:
-/// its maps are steadied against each other, and the range they are
-/// brought to 0..=1 with follows the scene slowly
-/// (`core::live::DepthSmoother`). That needs each map's own range, and a
-/// map that has been brought to 0..=1 has none left: the live screen was
-/// given such maps until 1.0.0, and when the nearest or the farthest point
-/// of the scene changed, everything else changed its depth with it in one
-/// map.
+/// its maps are steadied against each other, and which range each is
+/// brought to 0..=1 with is for what steadies them to say
+/// (`core::live::DepthSmoother`): its own, by what was measured with the
+/// model, or one that follows the scene, as 1.0.1 had it. That choice needs
+/// each map's own numbers, and a map that has been brought to 0..=1 has
+/// none left; the live screen was given such maps until 1.0.0.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawDepth {
     width: u32,
