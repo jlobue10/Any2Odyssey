@@ -155,15 +155,46 @@ pub fn write_atomic_document_with(
     let Some(write) = write.take().filter(|_| refused) else {
         return Err(error);
     };
-    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return Err(error);
-    }
     write_over(path, write, error)
 }
 
-/// Write a document over the ordinary file `path`, which exists, where the
-/// folder it is in takes no new file; `refused` is what making one there
-/// gave.
+/// The ordinary file at `path`, opened for writing over. `None` where
+/// there is none, where it may not be written to, and for anything that is
+/// not an ordinary file: a link is not followed to one.
+///
+/// The path used to be looked at first and then opened by name. Whatever
+/// was put there between the two was opened: a link was followed and its
+/// target written over, and a named pipe was waited on. On Unix the file
+/// is now opened without following a link and without waiting, and it is
+/// what was opened that is looked at. Windows is left as it was, the path
+/// looked at first: the open that does not follow a link is a different
+/// one there, this code is compiled for it but not run where it is
+/// written, and making a link there takes a privilege that programs do not
+/// have unless they were given it.
+fn open_ordinary_for_writing(path: &Path) -> Option<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
+        let file = options.open(path).ok()?;
+        file.metadata()
+            .is_ok_and(|metadata| metadata.is_file())
+            .then_some(file)
+    }
+    #[cfg(not(unix))]
+    {
+        if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+            return None;
+        }
+        options.open(path).ok()
+    }
+}
+
+/// Write a document over the ordinary file `path`, if there is one, where
+/// the folder it is in takes no new file; `refused` is what making one
+/// there gave, and the answer where there is no such file.
 ///
 /// Up to 0.9.5 an export was written in place, and an existing picture in a
 /// folder the user may not write to (a file that was handed to them in a
@@ -188,7 +219,7 @@ fn write_over(
     let Ok(mut whole) = tempfile::tempfile() else {
         return Err(refused);
     };
-    let Ok(mut file) = fs::OpenOptions::new().write(true).open(path) else {
+    let Some(mut file) = open_ordinary_for_writing(path) else {
         return Err(refused);
     };
     {
@@ -709,6 +740,62 @@ mod tests {
         let failed = write_over(&missing, |writer| writer.write_all(b"new"), refused());
         assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(entries(dir.path()), ["picture.png"]);
+    }
+
+    /// Only an ordinary file is written over, and it is the opened file
+    /// that is asked what it is. The path was looked at before it was
+    /// opened by name: a link put there in between was followed, and a
+    /// pipe was waited on.
+    #[cfg(unix)]
+    #[test]
+    fn nothing_but_an_ordinary_file_is_written_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let refused = || io::Error::from(io::ErrorKind::PermissionDenied);
+        // A link to a file is not followed, whoever looked at the path
+        // before.
+        let victim = dir.path().join("unrelated");
+        fs::write(&victim, b"preserve me").unwrap();
+        let link = dir.path().join("picture.png");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let failed = write_over(&link, |writer| writer.write_all(b"new"), refused());
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&victim).unwrap(), b"preserve me");
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        // Nor is a folder a file.
+        let failed = write_over(dir.path(), |writer| writer.write_all(b"new"), refused());
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        // The file's other names are kept, as before.
+        let file = dir.path().join("file.png");
+        fs::write(&file, b"old").unwrap();
+        let other_name = dir.path().join("other-name.png");
+        fs::hard_link(&file, &other_name).unwrap();
+        write_over(&file, |writer| writer.write_all(b"new"), refused()).unwrap();
+        assert_eq!(fs::read(&other_name).unwrap(), b"new");
+
+        let pipe = dir.path().join("pipe.png");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (a system without mkfifo: nothing to try it with)
+            return;
+        }
+        let (done, written) = std::sync::mpsc::channel();
+        let path = pipe.clone();
+        std::thread::spawn(move || {
+            let result = write_over(&path, |writer| writer.write_all(b"new"), refused());
+            done.send(result.map_err(|e| e.kind()))
+        });
+        let written = written.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a writer that does wait go, so that the test ends either
+        // way. Kept open: with a reader the pipe can be opened, and is
+        // still no file.
+        let _reader = fs::OpenOptions::new().read(true).write(true).open(&pipe);
+        assert_eq!(
+            written,
+            Ok(Err(io::ErrorKind::PermissionDenied)),
+            "writing over waited on the pipe, or wrote to it"
+        );
+        let failed = write_over(&pipe, |writer| writer.write_all(b"new"), refused());
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     /// Undoes [`no_new_files`], so that the test's folder can be removed.
