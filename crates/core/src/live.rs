@@ -185,6 +185,13 @@ fn threads_for(rows: usize) -> usize {
     threads_on(cores).min(rows.max(1))
 }
 
+/// How many threads work that goes over `rows` rows of a live screen's
+/// frame is spread over, for work of that kind done elsewhere (the depth
+/// model's input).
+pub fn band_threads(rows: usize) -> usize {
+    threads_for(rows)
+}
+
 fn threads_on(cores: usize) -> usize {
     (cores / 4).clamp(cores.clamp(1, 2), 6)
 }

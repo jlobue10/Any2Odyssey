@@ -65,6 +65,63 @@ fn next_turn(due: Instant, began: Instant) -> Instant {
     due.max(forgiven) + FRAME_TIME
 }
 
+/// A diagnostic: with `A2O_LIVE_TIMES=<file>` in the environment, a line
+/// is written there for every picture and every depth map of a live
+/// screen, their times in microseconds since the first of them:
+///
+/// - `p <frame> <arrived> <taken> <written> <depth of>`: the picture of
+///   the screen's frame `frame`, which arrived then, was taken by the
+///   render loop then and was in the output's hands then, drawn with a
+///   depth map made from the frame `depth of` (0: none yet).
+/// - `d <frame> <begun> <done>`: the depth map of frame `frame`, from when
+///   the depth thread took the frame until the map was there to draw with.
+///
+/// It answers two questions that cannot be answered from outside: how
+/// evenly a film's pictures arrive as against how evenly they leave, and
+/// how many pictures a depth map is behind. Nothing is opened, timed or
+/// written without the variable.
+mod times {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    fn file() -> Option<&'static (Instant, Mutex<std::io::BufWriter<std::fs::File>>)> {
+        static FILE: OnceLock<Option<(Instant, Mutex<std::io::BufWriter<std::fs::File>>)>> =
+            OnceLock::new();
+        FILE.get_or_init(|| {
+            let path = std::env::var_os("A2O_LIVE_TIMES")?;
+            let file = std::fs::File::create(path).ok()?;
+            Some((Instant::now(), Mutex::new(std::io::BufWriter::new(file))))
+        })
+        .as_ref()
+    }
+
+    /// Whether the times are asked for.
+    pub fn wanted() -> bool {
+        file().is_some()
+    }
+
+    /// Write a line that begins with `kind` and the frame's number,
+    /// followed by `times` as microseconds (0 for a time that is none).
+    pub fn note(kind: char, frame: u64, times: &[Option<Instant>], last: Option<u64>) {
+        let Some((start, file)) = file() else {
+            return;
+        };
+        let mut line = format!("{kind} {frame}");
+        for time in times {
+            let micros = time.map_or(0, |time| time.saturating_duration_since(*start).as_micros());
+            line.push_str(&format!(" {micros}"));
+        }
+        if let Some(last) = last {
+            line.push_str(&format!(" {last}"));
+        }
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+    }
+}
+
 /// What the user can change while the picture runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Controls {
@@ -567,8 +624,10 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // effect without waiting for the screen to change. Most of those
         // turns find nothing to do (`plan`).
         let patience = Duration::from_millis(150);
+        let mut taken_at = None;
         let taken = frames.with_fresh(seen, arrived, FRAME_TIME, patience, |slot| {
             arrived = slot.arrived();
+            taken_at = times::wanted().then(Instant::now);
             let (found, sink) = shared.find(slot.serial);
             let turn = plan(shown.as_ref(), &found);
             let (view, place) = layout((slot.width, slot.height), found.look.lines);
@@ -693,9 +752,11 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             pair = Vec::new();
         }
         let mut depth_shown = 0;
+        let mut depth_of = 0;
         let mut render = |canvas: &mut [u8]| {
             depth_shown = {
                 let depth = lock(&shared.depth);
+                depth_of = depth.latest.as_ref().map_or(0, |latest| latest.0);
                 let (dw, dh) = depth.smoother.size();
                 let map = (!depth.smoother.values().is_empty()).then(|| Depth {
                     values: depth.smoother.values(),
@@ -742,6 +803,15 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             }
             Err(e) => Err(e),
         };
+        if times::wanted() {
+            let written = Some(Instant::now());
+            times::note(
+                'p',
+                found.serial,
+                &[arrived, taken_at, written],
+                Some(depth_of),
+            );
+        }
         // A picture that could not be written is made again next turn.
         shown = written.is_ok().then_some(Shown {
             serial: found.serial,
@@ -944,6 +1014,7 @@ fn depth_loop_with(
         // at twice the chosen detail, in four to five times the time on a
         // processor, and Fine, Finer and Finest were one and the same on a
         // 3840 x 2160 screen.
+        let begun = times::wanted().then(Instant::now);
         let estimated = match RgbaImage::from_raw(width, height, std::mem::take(&mut pixels)) {
             Some(frame) => {
                 let mut estimated = estimate(&frame, detail);
@@ -979,6 +1050,9 @@ fn depth_loop_with(
                         depth.settled = false;
                         depth.latest = Some((serial, detail, map));
                     }
+                }
+                if begun.is_some() {
+                    times::note('d', serial, &[begun, Some(Instant::now())], None);
                 }
                 // Free for the next frame only now that the answer is
                 // there to be seen: the render thread would otherwise send

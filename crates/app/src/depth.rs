@@ -348,8 +348,18 @@ pub fn model_size(width: u32, height: u32, long_side: u32) -> (u32, u32) {
 
 /// `image` as the model's input: planar RGB, normalized, at `width` x `height`.
 fn planar_input(image: &RgbaImage, width: u32, height: u32) -> Vec<f32> {
+    let plane = width as usize * height as usize;
+    let mut data = vec![0.0f32; plane * 3];
+    // A colour as the model wants it, for each of the 256 there are.
+    let wanted: [[f32; 256]; 3] = std::array::from_fn(|channel| {
+        std::array::from_fn(|colour| (colour as f32 / 255.0 - MEAN[channel]) / STD[channel])
+    });
     // A live screen's frames come at the model's size already, or at twice
     // it (`live::model_input_size`): those are halved here.
+    if image.dimensions() == (width * 2, height * 2) && plane > 0 {
+        halved_planes(image, width as usize, height as usize, &wanted, &mut data);
+        return data;
+    }
     let resized = if image.dimensions() == (width, height) {
         std::borrow::Cow::Borrowed(image)
     } else {
@@ -360,15 +370,117 @@ fn planar_input(image: &RgbaImage, width: u32, height: u32) -> Vec<f32> {
             image::imageops::FilterType::Triangle,
         ))
     };
-    let plane = width as usize * height as usize;
-    let mut data = vec![0.0f32; plane * 3];
     for (index, pixel) in resized.pixels().enumerate() {
         for channel in 0..3 {
-            data[channel * plane + index] =
-                (pixel.0[channel] as f32 / 255.0 - MEAN[channel]) / STD[channel];
+            data[channel * plane + index] = wanted[channel][pixel.0[channel] as usize];
         }
     }
     data
+}
+
+/// `image`, which is twice `width` x `height`, halved into the three
+/// planes of `data` with each colour as `wanted` has it.
+///
+/// The halving is the one `image::imageops::resize` does with its triangle
+/// filter, which this used to call: every pixel is made of four columns
+/// and four rows, weighted 1, 3, 3, 1 (three of them at an edge), so that
+/// a line one pixel wide does not come and go as the screen moves under
+/// it (`live::model_input_size` has the numbers). That call works on one
+/// processor core and through numbers with a fraction: for a 3840 x 2160
+/// screen at *Finest* (2548 x 1428 to 1274 x 714) it took 23.8 ms of the
+/// depth thread before the model, which takes about as long, had seen the
+/// frame, and a film's depth map came later than the film's next picture.
+/// Here the same sums are made in whole numbers, in bands over a few
+/// cores (`live::band_threads`).
+fn halved_planes(
+    image: &RgbaImage,
+    width: usize,
+    height: usize,
+    wanted: &[[f32; 256]; 3],
+    data: &mut [f32],
+) {
+    let (source_width, source_height) = (width * 2, height * 2);
+    let source = image.as_raw();
+    // The first of the rows (or columns) a halved one is made of, and
+    // their weights: 1, 3, 3, 1 from one before its own two to one after,
+    // without what would lie outside.
+    let taps = |at: usize, side: usize| -> (usize, [u32; 4]) {
+        let mut weights = [1, 3, 3, 1];
+        if at == 0 {
+            weights[0] = 0;
+        }
+        if at * 2 + 2 >= side {
+            weights[3] = 0;
+        }
+        ((at * 2).saturating_sub(1), weights)
+    };
+    let threads = any2odyssey_core::live::band_threads(height);
+    let band = height.div_ceil(threads);
+    let (red, rest) = data.split_at_mut(width * height);
+    let (green, blue) = rest.split_at_mut(width * height);
+    let work = |first: usize, red: &mut [f32], green: &mut [f32], blue: &mut [f32]| {
+        // One halved row's columns before they are halved: the weighted
+        // sums of its rows, for each colour.
+        let mut sums = vec![[0u32; 3]; source_width];
+        let rows = red
+            .chunks_exact_mut(width)
+            .zip(green.chunks_exact_mut(width))
+            .zip(blue.chunks_exact_mut(width));
+        for (row, ((red, green), blue)) in rows.enumerate() {
+            let (top, down) = taps(first + row, source_height);
+            sums.fill([0; 3]);
+            let mut skipped = 0;
+            for (index, weight) in down.into_iter().enumerate() {
+                if weight == 0 {
+                    skipped += usize::from(index == 0 && top == 0);
+                    continue;
+                }
+                let y = top + index - skipped;
+                let line = &source[y * source_width * 4..(y + 1) * source_width * 4];
+                for (sum, pixel) in sums.iter_mut().zip(line.as_chunks::<4>().0) {
+                    sum[0] += weight * u32::from(pixel[0]);
+                    sum[1] += weight * u32::from(pixel[1]);
+                    sum[2] += weight * u32::from(pixel[2]);
+                }
+            }
+            let down: u32 = down.iter().sum();
+            for x in 0..width {
+                let (left, across) = taps(x, source_width);
+                let mut total = [0u32; 3];
+                let mut skipped = 0;
+                for (index, weight) in across.into_iter().enumerate() {
+                    if weight == 0 {
+                        skipped += usize::from(index == 0 && left == 0);
+                        continue;
+                    }
+                    let sum = sums[left + index - skipped];
+                    total[0] += weight * sum[0];
+                    total[1] += weight * sum[1];
+                    total[2] += weight * sum[2];
+                }
+                let all = down * across.iter().sum::<u32>();
+                let colour = |channel: usize| ((total[channel] * 2 + all) / (all * 2)) as usize;
+                red[x] = wanted[0][colour(0)];
+                green[x] = wanted[1][colour(1)];
+                blue[x] = wanted[2][colour(2)];
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        let work = &work;
+        let bands = red
+            .chunks_mut(band * width)
+            .zip(green.chunks_mut(band * width))
+            .zip(blue.chunks_mut(band * width));
+        for (index, ((red, green), blue)) in bands.enumerate() {
+            if index + 1 == threads || (index + 1) * band >= height {
+                // The last band is this thread's own.
+                work(index * band, red, green, blue);
+            } else {
+                scope.spawn(move || work(index * band, red, green, blue));
+            }
+        }
+    });
 }
 
 /// Make cuDNN's functions available to ONNX Runtime's CUDA provider.
@@ -1745,6 +1857,77 @@ mod tests {
         // (what 0.9.8 asked for: the frame's long side)
         assert_eq!(model_size(1036, 588, 1036), (1036, 588));
         assert_eq!(model_size(1540, 868, 1540), (1274, 714));
+    }
+
+    /// What the depth thread does to a live screen's frame before the model
+    /// sees it, at each depth detail of a 3840 x 2160 screen. No model is
+    /// needed. Run by hand:
+    /// `cargo test --release -p any2odyssey depth::tests::input_timings -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn input_timings() {
+        for (detail, name) in DETAIL {
+            let (w, h) = model_size(3840, 2160, detail);
+            let (fw, fh) = any2odyssey_core::live::model_input_size((3840, 2160), (w, h));
+            let frame = RgbaImage::from_fn(fw, fh, |x, y| {
+                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).to_le_bytes();
+                image::Rgba([v[0], v[1], v[2], 255])
+            });
+            let mut times: Vec<_> = (0..15)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    std::hint::black_box(planar_input(&frame, w, h));
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            println!(
+                "{name}: a frame of {fw}x{fh} to the model's {w}x{h}: {:?}",
+                times[7]
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_of_twice_the_models_size_is_halved_as_the_image_library_halved_it() {
+        // Sizes that give one band and several, with rows left over.
+        for (w, h) in [(1u32, 1u32), (2, 3), (37, 23), (258, 131)] {
+            let frame = RgbaImage::from_fn(w * 2, h * 2, |x, y| {
+                let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)).to_le_bytes();
+                image::Rgba([v[0], v[1] ^ v[3], v[2], v[3]])
+            });
+            let halved =
+                image::imageops::resize(&frame, w, h, image::imageops::FilterType::Triangle);
+            let ours = planar_input(&frame, w, h);
+            let plane = (w * h) as usize;
+            assert_eq!(ours.len(), plane * 3);
+            let step = |channel: usize| 1.0 / 255.0 / STD[channel];
+            for (index, pixel) in halved.pixels().enumerate() {
+                for channel in 0..3 {
+                    let theirs = (pixel.0[channel] as f32 / 255.0 - MEAN[channel]) / STD[channel];
+                    let ours = ours[channel * plane + index];
+                    // The same colour, or its neighbour where the sum lies
+                    // on the border between two and the library's numbers
+                    // with a fraction fall the other way.
+                    assert!(
+                        (ours - theirs).abs() <= step(channel) * 1.01,
+                        "{w}x{h}, pixel {index}, colour {channel}: {ours} against {theirs}"
+                    );
+                }
+            }
+            // Not one in fifty is that neighbour.
+            let other = halved
+                .pixels()
+                .enumerate()
+                .flat_map(|(index, pixel)| (0..3).map(move |channel| (index, channel, pixel)))
+                .filter(|(index, channel, pixel)| {
+                    let theirs =
+                        (pixel.0[*channel] as f32 / 255.0 - MEAN[*channel]) / STD[*channel];
+                    (ours[channel * plane + index] - theirs).abs() > step(*channel) * 0.01
+                })
+                .count();
+            assert!(other * 50 <= plane * 3, "{w}x{h}: {other} of {}", plane * 3);
+        }
     }
 
     #[test]
