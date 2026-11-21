@@ -167,9 +167,30 @@ fn leaving() -> std::sync::MutexGuard<'static, Vec<std::thread::JoinHandle<()>>>
 /// threads that end a helper which does not leave by itself end with the
 /// program, and quitting while the output was on left a helper that hung
 /// (and the window and the lens it held) behind for good.
+///
+/// Nothing but this stands between a closed window and the end of the
+/// program (the poller no longer ends the process once the window has
+/// closed), so the wait has an end of its own: a helper that is not gone
+/// [`END_GRACE`] after it was to be ended is not waited for any longer.
 pub(crate) fn see_helpers_off() {
     let leaving = std::mem::take(&mut *leaving());
-    for thread in leaving {
+    join_within(leaving, LEAVE_GRACE + END_GRACE);
+}
+
+/// How long ending a helper that did not leave may take before the program
+/// stops waiting for it. Ending it is a signal nothing can refuse and takes
+/// no time to speak of; this is for what nobody has thought of.
+const END_GRACE: Duration = Duration::from_secs(2);
+
+fn join_within(threads: Vec<std::thread::JoinHandle<()>>, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    for thread in threads {
+        while !thread.is_finished() {
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let _ = thread.join();
     }
 }
@@ -644,6 +665,25 @@ mod tests {
         assert!(is_over(program), "the helper's program was left running");
         // Nothing to wait for any more: returns at once.
         see_helpers_off();
+    }
+
+    #[test]
+    fn seeing_helpers_off_does_not_wait_for_ever() {
+        let (hold, held) = mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let _ = held.recv_timeout(Duration::from_secs(30));
+        });
+        let quick = std::thread::spawn(|| {});
+        let started = Instant::now();
+        join_within(vec![quick, stuck], Duration::from_millis(200));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(200), "{waited:?}");
+        assert!(waited < Duration::from_secs(20), "{waited:?}");
+        drop(hold);
+        // And not at all for those that are through.
+        let started = Instant::now();
+        join_within(vec![std::thread::spawn(|| {})], Duration::from_secs(30));
+        assert!(started.elapsed() < Duration::from_secs(20));
     }
 
     #[test]
