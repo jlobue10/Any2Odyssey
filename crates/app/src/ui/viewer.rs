@@ -1154,10 +1154,7 @@ impl ViewerState {
         use crate::capture::CaptureState;
         let controls = self.live_controls();
         if self.live.is_none() {
-            let token = std::fs::read_to_string(any2odyssey_core::paths::capture_token_file())
-                .ok()
-                .map(|t| t.trim().to_owned())
-                .filter(|t| !t.is_empty());
+            let token = remembered_token(&any2odyssey_core::paths::capture_token_file());
             let wake = ctx.clone();
             self.forget_screen = false;
             self.live = Some(crate::live::Live::start(
@@ -2027,6 +2024,24 @@ impl ViewerState {
     }
 }
 
+/// The longest file that is taken for a remembered screen's token. The
+/// portal's tokens are a few dozen characters.
+#[cfg(target_os = "linux")]
+const TOKEN_LIMIT: u64 = 4096;
+
+/// The portal's token that [`ViewerState::remember_token`] left in `file`,
+/// if there is one. Read as the settings are (`fsutil::read_limited`): a
+/// named pipe where the file belongs was opened and waited on, with the
+/// window, when the live screen was started, and a file of any size was
+/// read whole.
+#[cfg(target_os = "linux")]
+fn remembered_token(file: &Path) -> Option<String> {
+    any2odyssey_core::fsutil::read_to_string_limited(file, TOKEN_LIMIT)
+        .ok()
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2703,6 +2718,39 @@ mod tests {
             0o600
         );
         assert_eq!(viewer.saved_token.as_deref(), Some("next token"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_remembered_token_is_read_from_a_small_regular_file_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture-token");
+        assert_eq!(remembered_token(&path), None, "no file");
+        std::fs::write(&path, b" a token\n").unwrap();
+        assert_eq!(remembered_token(&path).as_deref(), Some("a token"));
+        std::fs::write(&path, b"\n").unwrap();
+        assert_eq!(remembered_token(&path), None, "an empty one");
+        std::fs::write(&path, vec![b'a'; TOKEN_LIMIT as usize + 1]).unwrap();
+        assert_eq!(remembered_token(&path), None, "no token is that long");
+
+        // A named pipe has no writer: a read that opens it the plain way
+        // waits there, on the thread that draws the window.
+        std::fs::remove_file(&path).unwrap();
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (a system without mkfifo: nothing to try it with)
+            return;
+        }
+        let (done, read_it) = mpsc::channel();
+        let pipe = path.clone();
+        std::thread::spawn(move || done.send(remembered_token(&pipe)));
+        let read = read_it.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a reader that does wait go, so that the test ends either way.
+        let _ = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path);
+        assert_eq!(read, Ok(None), "the read waited on the pipe");
     }
 
     #[cfg(target_os = "linux")]
