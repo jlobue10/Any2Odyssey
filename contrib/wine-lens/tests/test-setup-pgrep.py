@@ -375,7 +375,11 @@ class SetupRunTests(unittest.TestCase):
         # A failure of this import was let pass and never looked at: the set-up said "done", the camera
         # stand-in had neither port nor secret, and Leia's eye tracker never got a camera.
         (self.root / "fails/the camera's entries").touch()
-        self.refused("camera", "registry", "ended with 1")
+        # (The words of the import itself, and nothing asked of Wine after it. With the failure let pass again,
+        # the question that follows the import ended the set-up too, with a line that has "camera", "registry"
+        # and "ended with 1" in it as well: this test passed without the correction it is for.)
+        self.refused("Wine did not import the camera's entries", "wine regedit ended with 1")
+        self.assertNotIn(r"reg query HKLM\Software\Any2Odyssey\Camera /v Secret", self.wine_calls())
 
     def test_camera_entries_that_are_not_in_the_registry_end_the_set_up_with_a_reason(self):
         # Wine's regedit can end well and have imported nothing.
