@@ -1954,6 +1954,17 @@ impl ViewerState {
     /// of its own that the user places on the display they want. Call once
     /// per frame, outside the page's layout.
     pub fn show_output(&mut self, ctx: &egui::Context) {
+        if !self.output_open || self.options.output == Output::Odyssey {
+            // The output window is not drawn on this frame, and a window
+            // that is not drawn is closed: the next one is a new window,
+            // and not full screen. Only stopping the output said so. With
+            // the format changed to Odyssey 3D and back, the new window
+            // was still taken to be full screen: the lens was switched on
+            // over a picture in a window, the line about F11 was missing,
+            // the first F11 did nothing to see, and the first Esc "left
+            // full screen" where it should have closed the output.
+            self.output_fullscreen = false;
+        }
         if !self.output_open {
             // Every way the output ends comes through here on the next frame.
             // One that ends by itself (depth that failed, options the image
@@ -1982,6 +1993,7 @@ impl ViewerState {
         let plain = self.texture.clone();
         if plain.is_none() && !self.shows_pattern() && !awaiting {
             self.output_open = false;
+            self.output_fullscreen = false;
             self.lens.release();
             self.lens_switch.set(false, || {});
             return;
@@ -3226,6 +3238,65 @@ mod tests {
         state.show_output(&ctx);
         assert!(state.status.starts_with(ODYSSEY_ON), "{}", state.status);
         assert!(state.output_open && state.weaver.is_running());
+    }
+
+    /// The output window goes when the format becomes Odyssey 3D, and the
+    /// one that comes when the format is changed back is a new window.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_output_window_after_the_odyssey_output_is_not_taken_to_be_full_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 0);
+        let frame = |state: &mut ViewerState, key: Option<Key>| {
+            let events = key
+                .map(|key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .into_iter()
+                .collect();
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| state.show_output(ctx));
+        };
+        let choose = |state: &mut ViewerState, output: Output| {
+            let before = state.options;
+            state.options.output = output;
+            state.options_edited(before);
+        };
+        // Lens output, made full screen with F11: the lens is asked for.
+        state.options.half_width = false;
+        choose(&mut state, Output::Lens);
+        frame(&mut state, None);
+        assert!(state.output_open && !state.output_fullscreen);
+        assert!(!state.lens_switch.wanted());
+        frame(&mut state, Some(Key::F11));
+        frame(&mut state, None);
+        assert!(state.output_fullscreen && state.lens_switch.wanted());
+
+        // To the Odyssey 3D output and back, without stopping in between.
+        choose(&mut state, Output::Odyssey);
+        frame(&mut state, None);
+        assert!(state.output_open, "{}", state.status);
+        assert!(!state.lens_switch.wanted());
+        assert!(!state.output_fullscreen, "its window has gone");
+        choose(&mut state, Output::Lens);
+        frame(&mut state, None);
+        assert!(state.output_open, "{}", state.status);
+        assert!(!state.output_fullscreen);
+        assert!(
+            !state.lens_switch.wanted(),
+            "the lens is not asked for over a picture in a window"
+        );
+        // Esc closes a window that is not full screen.
+        frame(&mut state, Some(Key::Escape));
+        assert!(!state.output_open);
+        assert_eq!(state.status, OUTPUT_OFF);
     }
 
     #[test]

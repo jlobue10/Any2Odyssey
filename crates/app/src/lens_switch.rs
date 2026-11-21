@@ -223,6 +223,12 @@ impl LensSwitch {
         }
     }
 
+    /// Whether the lens is being asked for at the moment.
+    #[cfg(test)]
+    pub(crate) fn wanted(&self) -> bool {
+        self.wanted
+    }
+
     /// Take in what the helper has said since the last call.
     pub fn poll(&mut self) {
         let Some(running) = &mut self.running else {
