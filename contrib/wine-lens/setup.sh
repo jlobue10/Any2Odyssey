@@ -97,9 +97,11 @@ pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
 # distribution's libraries, or a build of one's own) the version asked for above was one Wine's, and the
 # libraries listed, copied and linked against below the other's: the set-up ended with "done" and nothing in
 # the prefix started. They are now looked for beside the wine that runs first, which is the PATH's wine with
-# every link followed, and in the usual folders only after that (for a wine that is a script of the user's
-# own, which is not read). tools/start-stack.sh has the same function, word for word.
-wine_libraries() {
+# every link followed. A wine that is not kept beside its libraries (a script of the user's own that starts a
+# Wine elsewhere, which is not read) is asked further down, once it has a prefix to run in, and its answer is
+# noted in wine.libs; the usual folders come after both. tools/start-stack.sh has the same function, word
+# for word.
+wine_libraries() { # [beside]: with that word, only the folder beside the wine that runs
     wine_is=$(command -v wine 2>/dev/null) || wine_is=
     case $wine_is in /*) wine_is=$(readlink -f "$wine_is" 2>/dev/null) || wine_is= ;; *) wine_is= ;; esac
     case $wine_is in
@@ -115,6 +117,10 @@ wine_libraries() {
             d=${wine_is%/*}
             if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi ;;
     esac
+    [ "${1:-}" != beside ] || return 1
+    # (not beside it: what the Wine that runs said when setup.sh asked it, while that folder is there)
+    d=$(cat "$T/wine.libs" 2>/dev/null) || d=
+    if [ -n "$d" ] && [ -f "$d/cfgmgr32.dll" ]; then echo "$d"; return 0; fi
     for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
              /usr/lib64/wine-wow64/wine/x86_64-windows \
              /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
@@ -122,7 +128,8 @@ wine_libraries() {
     done
     return 1
 }
-WINELIB=$(wine_libraries) || die "could not find Wine's x86_64-windows library folder"
+# (Found nowhere, they are not beside the wine that runs: the set-up goes on until that Wine can be asked.)
+WINELIB=$(wine_libraries) || WINELIB=
 
 export WINEPREFIX=$T/prefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
 SYS=$WINEPREFIX/drive_c/windows/system32
@@ -164,6 +171,36 @@ else
         setsid timeout 300 wine cmd /c exit >/dev/null 2>&1 </dev/null ||
         die "Wine did not get the prefix $WINEPREFIX ready (it updates a prefix that an earlier Wine made). Moved out of the way, a new one is made by this script: mv '$WINEPREFIX' '$WINEPREFIX.old'"
     wineserver -k 2>/dev/null || true
+fi
+
+# The wine on the PATH is not kept beside its libraries: a script of the user's own that starts a Wine
+# elsewhere. The folder taken above is then the first of the usual ones, and where another Wine is installed
+# there it was that Wine's: with a script that starts Wine 11.22 and WineHQ's wine-stable under /opt, the
+# set-up said "done" with all five copies and the stand-ins' lists taken from the other Wine, and with no
+# other Wine it stopped at "could not find Wine's x86_64-windows library folder". Now that there is a prefix
+# to run in, the Wine that runs is asked: it tells its programs where its libraries are (WINEDLLDIR0, as
+# "\??\Z:\opt\wine-devel\lib\wine"; Z: is "/" in a prefix that Wine made), with its own five libraries in
+# place of the stand-ins that a prefix from an earlier set-up has. The answer is noted for
+# tools/start-stack.sh, which has to know the folder before it runs any program of Wine's.
+if wine_libraries beside >/dev/null; then
+    rm -f "$T/wine.libs"
+else
+    rm -f "$T/wine.libs"
+    # (every "\" of the answer becomes "/" before it is looked at)
+    asked=$(WINEDLLOVERRIDES="cfgmgr32,dxva2,wtsapi32,mf,mfreadwrite=b;$WINEDLLOVERRIDES" \
+        setsid timeout 120 wine cmd /c 'echo %WINEDLLDIR0%' 2>/dev/null </dev/null |
+        tr -d '\r' | tr "\\\\" / | head -n 1) || asked=
+    wineserver -k 2>/dev/null || true
+    case $asked in
+        '/??/Z:/'* | '/??/z:/'*)
+            asked=/${asked#/??/?:/}/x86_64-windows
+            if [ -f "$asked/cfgmgr32.dll" ]; then
+                WINELIB=$asked
+                echo "$WINELIB" >"$T/wine.libs"
+            fi ;;
+    esac
+    [ -n "$WINELIB" ] || die "could not find Wine's x86_64-windows library folder"
+    echo "setup: the wine on the PATH is not kept beside Wine's libraries; they are taken from $WINELIB"
 fi
 
 echo "setup: copying Leia's runtime from $WIN"

@@ -229,6 +229,13 @@ case "$*" in
 "sc create SR Eye Tracker "*)
     if [ -e "$ROOT/fails/to register the tracker" ]; then exit 1; fi
     touch "$R/tracker" ;;
+"cmd /c echo %WINEDLLDIR0%")
+    # (as Wine's cmd prints it: the folder above x86_64-windows, as a path of Windows' own kind)
+    if [ -e "$ROOT/libraries-are-in" ]; then
+        printf '\\??\\Z:%s\r\n' "$(tr / '\\' <"$ROOT/libraries-are-in")"
+    else
+        printf '%%WINEDLLDIR0%%\r\n'
+    fi ;;
 "reg query HKLM\Software\Any2Odyssey\Camera /v Secret")
     if ! grep -q '^"Secret"="' "$R/camera" 2>/dev/null; then
         echo "reg: Unable to find the specified registry key or value"
@@ -375,7 +382,11 @@ class SetupRunTests(unittest.TestCase):
         # A failure of this import was let pass and never looked at: the set-up said "done", the camera
         # stand-in had neither port nor secret, and Leia's eye tracker never got a camera.
         (self.root / "fails/the camera's entries").touch()
-        self.refused("camera", "registry", "ended with 1")
+        # (The words of the import itself, and nothing asked of Wine after it. With the failure let pass again,
+        # the question that follows the import ended the set-up too, with a line that has "camera", "registry"
+        # and "ended with 1" in it as well: this test passed without the correction it is for.)
+        self.refused("Wine did not import the camera's entries", "wine regedit ended with 1")
+        self.assertNotIn(r"reg query HKLM\Software\Any2Odyssey\Camera /v Secret", self.wine_calls())
 
     def test_camera_entries_that_are_not_in_the_registry_end_the_set_up_with_a_reason(self):
         # Wine's regedit can end well and have imported nothing.
@@ -388,6 +399,57 @@ class SetupRunTests(unittest.TestCase):
         (self.root / "fails/to register the tracker").touch()
         self.refused("Leia's eye tracker could not be registered")
         self.assertIn("sc query SR Eye Tracker", self.wine_calls())
+
+    def elsewhere(self, folder):
+        """Wine's libraries in this folder of the test's, and none beside the stand-in for wine."""
+        (self.root / folder).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / "lib/wine").rename(self.root / folder)
+        for library in (self.root / folder / "x86_64-windows").iterdir():
+            library.write_text(f"Wine's own {library.stem}, elsewhere\n")
+
+    def usual_folder(self):
+        listed = re.findall(r"(?<=[ \t])/(?:usr|opt)/\S+/x86_64-windows", SETUP.read_text())
+        return next((folder for folder in listed if os.path.isfile(f"{folder}/cfgmgr32.dll")), "")
+
+    def test_a_wine_that_is_not_kept_beside_its_libraries_is_asked_where_they_are(self):
+        # A wine on the PATH that is a script of the user's own, which starts a Wine elsewhere. Its
+        # libraries were taken from the usual folders: another Wine's, where one is installed there.
+        self.elsewhere("built/wine 11.22/lib/wine")
+        (self.root / "libraries-are-in").write_text(f"{self.root}/built/wine 11.22/lib/wine")
+        done = self.run_setup()
+        self.assertEqual((done.returncode, done.stderr), (0, ""), done.stdout)
+        wanted = f"{self.root}/built/wine 11.22/lib/wine/x86_64-windows"
+        self.assertIn(f"setup: the wine on the PATH is not kept beside Wine's libraries; they are taken from {wanted}\n",
+                      done.stdout)
+        self.assertIn("setup: done.", done.stdout)
+        system32 = self.lens / "prefix/drive_c/windows/system32"
+        for library, copy in (("cfgmgr32", "cfgmgw"), ("dxva2", "dxva2w"), ("wtsapi32", "wtsapiw"), ("mf", "mfw"),
+                              ("mfreadwrite", "mfreadww")):
+            self.assertEqual((system32 / f"{copy}.dll").read_text(), f"Wine's own {library}, elsewhere\n")
+        # Noted for tools/start-stack.sh, which cannot ask; and asked after the prefix was there, once.
+        self.assertEqual((self.lens / "wine.libs").read_text(), wanted + "\n")
+        calls = self.wine_calls()
+        self.assertEqual(calls.count("cmd /c echo %WINEDLLDIR0%"), 1, calls)
+        self.assertLess(calls.index("cmd /c echo %WINEDLLDIR0%"), calls.index("regedit /S device.reg"))
+        # A wine that is kept beside them again (the folder put on the PATH): the note goes, nothing is asked.
+        (self.root / "built/wine 11.22/lib/wine").rename(self.root / "lib/wine")
+        (self.root / "wine-calls").unlink()
+        done = self.run_setup()
+        self.assertEqual((done.returncode, done.stderr), (0, ""), done.stdout)
+        self.assertNotIn("not kept beside", done.stdout)
+        self.assertFalse((self.lens / "wine.libs").exists())
+        self.assertNotIn("cmd /c echo %WINEDLLDIR0%", self.wine_calls())
+
+    def test_a_wine_that_does_not_say_where_its_libraries_are_ends_the_set_up_with_a_reason(self):
+        if self.usual_folder():
+            self.skipTest("this machine has a Wine in one of the usual folders, which the set-up would take")
+        self.elsewhere("built/wine/lib/wine")
+        for answer in (None, f"{self.root}/built/nothing/lib/wine"):
+            with self.subTest(answer=answer):
+                if answer:
+                    (self.root / "libraries-are-in").write_text(answer)
+                self.refused("could not find Wine's x86_64-windows library folder")
+                self.assertFalse((self.lens / "wine.libs").exists())
 
     def test_the_camera_bridge_of_an_earlier_set_up_is_ended_without_a_note_of_it(self):
         # tools/tracking.sh notes the bridge's process number; the note can be lost while the bridge lives.
@@ -430,10 +492,12 @@ class WineLibrariesTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name).resolve()
         self.function = re.search(self.FUNCTION, SETUP.read_text(), re.S | re.M).group(0)
-        (self.root / "ask.sh").write_text(f"set -eu\n{self.function}\nwine_libraries\n")
-        # The one program the function runs, and nothing else of this machine: no wine it may have.
+        # (T is the Wine side's folder in both scripts; the function reads setup.sh's note there)
+        (self.root / "ask.sh").write_text(f'set -eu\nT="{self.root}/wine-lens"\n{self.function}\nwine_libraries "$@"\n')
+        # The two programs the function runs, and nothing else of this machine: no wine it may have.
         (self.root / "tools").mkdir()
-        (self.root / "tools/readlink").symlink_to(shutil.which("readlink"))
+        for program in ("readlink", "cat"):
+            (self.root / "tools" / program).symlink_to(shutil.which(program))
         self.shell = [shutil.which(SHELL[0]), *SHELL[1:]]
 
     def test_both_scripts_look_in_the_same_places(self):
@@ -454,12 +518,12 @@ class WineLibrariesTests(unittest.TestCase):
             (self.root / folder / "x86_64-windows").mkdir(parents=True)
             (self.root / folder / "x86_64-windows/cfgmgr32.dll").touch()
 
-    def asked(self, *path):
+    def asked(self, *path, only=()):
         """What the function says with these folders (below the test's) on the PATH: (it found one, which)."""
         environment = dict(os.environ, PATH=os.pathsep.join([*(str(self.root / folder) for folder in path),
                                                               str(self.root / "tools")]))
-        done = subprocess.run([*self.shell, str(self.root / "ask.sh")], env=environment, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=30)
+        done = subprocess.run([*self.shell, str(self.root / "ask.sh"), *only], env=environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
         self.assertEqual(done.stderr, "")
         self.assertIn(done.returncode, (0, 1))
         self.assertEqual(done.returncode == 0, bool(done.stdout))
@@ -530,6 +594,27 @@ class WineLibrariesTests(unittest.TestCase):
         self.wine("empty/usr/bin/wine")
         (self.root / "empty/usr/lib/wine/x86_64-windows").mkdir(parents=True)
         self.assertEqual(self.asked("empty/usr/bin"), self.usual())
+
+    def test_what_the_wine_that_runs_said_comes_before_the_usual_folders(self):
+        # setup.sh asks a wine that is not kept beside its libraries and notes the answer (wine.libs).
+        self.wine("home/bin/wine")
+        self.libraries("built/wine 11.22/lib/wine")
+        (self.root / "wine-lens").mkdir()
+        note = self.root / "wine-lens/wine.libs"
+        note.write_text(f"{self.root}/built/wine 11.22/lib/wine/x86_64-windows\n")
+        self.assertEqual(self.asked("home/bin"), f"{self.root}/built/wine 11.22/lib/wine/x86_64-windows")
+        # Asked for the folder beside the wine alone, there is none; and a note is not looked at.
+        self.assertEqual(self.asked("home/bin", only=["beside"]), "")
+        # A wine that is kept beside its libraries is not given the folder of the note.
+        self.wine("usr/bin/wine")
+        self.libraries("usr/lib/wine")
+        self.assertEqual(self.asked("usr/bin", "home/bin"), f"{self.root}/usr/lib/wine/x86_64-windows")
+        self.assertEqual(self.asked("usr/bin", only=["beside"]), f"{self.root}/usr/lib/wine/x86_64-windows")
+        # A note of a folder that has gone, or of nothing: the usual folders, as without one.
+        note.write_text(f"{self.root}/built/wine 11.21/lib/wine/x86_64-windows\n")
+        self.assertEqual(self.asked("home/bin"), self.usual())
+        note.write_text("")
+        self.assertEqual(self.asked("home/bin"), self.usual())
 
 
 if __name__ == "__main__":
