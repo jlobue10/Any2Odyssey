@@ -32,16 +32,17 @@ use crate::weaver::{self, FrameSink};
 /// The time from one picture to the next that is kept to over any stretch
 /// of pictures ([`next_turn`]): 66 a second at the most.
 ///
-/// It has to be shorter than the time a desktop leaves between the frames
-/// it sends, or the frames come faster than they are taken: each then waits
-/// longer than the one before, until one is left out and the wait begins
-/// again from nothing. A desktop is asked for `capture::MOST_A_SECOND` (62)
-/// frames at the most, and KDE Plasma spaces its frames by whole
-/// milliseconds, 16 for 62 a second, which is 62.5; 62 to 64 a second were
-/// counted arriving there. With 16 ms here the frames of a screen that
-/// sent 62.5 or 64 a second were 13 ms old in the middle when their
-/// pictures reached the output, where those of a screen of 60 were 5, and
-/// 24 to 69 of them were left out in 40 seconds.
+/// It has to be shorter than the time between the frames of what is
+/// commonly shown, 60 a second, or the frames come faster than they are
+/// taken: each then waits longer than the one before, until one is left
+/// out and the wait begins again from nothing. A desktop was asked for 62
+/// frames at the most for a long time, and KDE Plasma spaced them by 16
+/// ms; with 16 ms here the frames of such a screen were 13 ms old in the
+/// middle when their pictures reached the output, where those of a screen
+/// of 60 were 5, and 24 to 69 of them were left out in 40 seconds. A
+/// desktop is asked for more now (`capture::MOST_A_SECOND`), and of a
+/// screen that does change faster than this every second or third frame
+/// is taken, as it arrives (`capture::fresh_from`).
 const FRAME_TIME: Duration = Duration::from_micros(15_000);
 
 /// When the turn of the render loop may begin that follows one which was
@@ -544,6 +545,8 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let (mut resting, mut still) = (None::<Instant>, false);
     // When the next turn may begin.
     let mut due = Instant::now();
+    // When the frame taken last arrived.
+    let mut arrived = None;
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // A little more than sixty pictures a second at most: a faster
         // screen (the Odyssey runs at 165) would double the work for depth
@@ -559,7 +562,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // has just appeared arrives after it, and the controls must take
         // effect without waiting for the screen to change. Most of those
         // turns find nothing to do (`plan`).
-        let taken = frames.with_newest(seen, Duration::from_millis(150), |slot| {
+        let patience = Duration::from_millis(150);
+        let taken = frames.with_fresh(seen, arrived, FRAME_TIME, patience, |slot| {
+            arrived = slot.arrived();
             let (found, sink) = shared.find(slot.serial);
             let turn = plan(shown.as_ref(), &found);
             let (view, place) = layout((slot.width, slot.height), found.look.lines);
@@ -2065,10 +2070,18 @@ mod tests {
         let (mut now, mut due) = (start, start);
         let mut seen = None;
         let mut taken = Vec::new();
+        let fresh = crate::capture::fresh_from(FRAME_TIME, micros(every));
         for turn in 0..turns {
             // The loop sleeps until the turn is due...
             now = now.max(due);
             due = next_turn(due, now);
+            // ...lets the frames pass that come too soon after the one it
+            // took last, where they come faster than turns
+            // (`Frames::with_fresh`; a frame always comes in time here)...
+            if let (Some(seen), Some((from, _))) = (seen, fresh) {
+                let from = (micros(seen * every) + from).as_micros() as u64;
+                now = now.max(start + micros(from.div_ceil(every) * every));
+            }
             // ...and waits for a frame it has not seen.
             let newest = (now - start).as_micros() as u64 / every;
             let frame = if seen == Some(newest) {
@@ -2138,25 +2151,59 @@ mod tests {
             assert!(count <= most + 2, "{count} pictures from {from:?}");
             from += Duration::from_millis(100);
         }
-        // Never two turns closer than a turn's own work, and after the one
-        // that makes up for a late turn the pace is `FRAME_TIME` again.
-        let gaps: Vec<Duration> = taken.windows(2).map(|w| w[1].0 - w[0].0).collect();
-        let short = gaps.iter().filter(|gap| **gap < FRAME_TIME).count();
-        // (The turn that is forgiven comes after 5 ms, and the one after it
-        // 10 ms later: back on the pace of the turns before the late one.)
-        assert_eq!(short, 4, "{gaps:?}");
+        // Every third frame is taken, as it arrives: 55 pictures a second,
+        // each as far from the one before as the others. Taken as they
+        // lay waiting, they were two and three frames apart in turns.
+        for (index, pair) in taken.windows(2).enumerate() {
+            let late = [100, 200].contains(&index);
+            assert!(late || pair[1].1 - pair[0].1 == 3, "turn {index}: {pair:?}");
+            assert!(
+                late || pair[1].2 == Duration::ZERO,
+                "turn {index}: {pair:?}"
+            );
+        }
         // Frames are left out, never taken twice or out of order.
         assert!(taken.windows(2).all(|w| w[1].1 > w[0].1));
     }
 
     #[test]
-    fn the_loop_is_faster_than_the_frames_a_desktop_is_asked_for() {
-        // KDE Plasma spaces the frames it sends by whole milliseconds.
-        let desktop = Duration::from_millis(1000 / u64::from(crate::capture::MOST_A_SECOND));
-        assert!(
-            FRAME_TIME + Duration::from_micros(500) <= desktop,
-            "{FRAME_TIME:?} against {desktop:?}"
-        );
+    fn of_a_screen_that_changes_at_every_refresh_every_second_frame_is_taken() {
+        // What a desktop sends of a screen of 120 Hz now that it is asked
+        // for more than 62 a second, with the frames a little early and a
+        // little late by turns. With a frame taken as it lay waiting when
+        // a turn was due, every ninth picture was one frame after the one
+        // before it and the others two.
+        for every in [8_333, 8_342, 8_000] {
+            let taken = paced(every, 5_000, 300, &[(50, 30_000)]);
+            for (index, pair) in taken.windows(2).enumerate() {
+                let late = index == 50;
+                assert!(
+                    late || pair[1].1 - pair[0].1 == 2,
+                    "{every}, {index}: {pair:?}"
+                );
+                assert!(
+                    late || pair[1].2 == Duration::ZERO,
+                    "{every}, {index}: {pair:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frames_that_come_no_faster_than_pictures_are_made_are_each_taken() {
+        // 60 a second and the 62 to 64 of a desktop that keeps to an older
+        // limit: nothing is let pass.
+        for every in [16_667, 16_129, 15_625] {
+            let spacing = Duration::from_micros(every);
+            assert_eq!(crate::capture::fresh_from(FRAME_TIME, spacing), None);
+        }
+        // A screen of 120 Hz: the frame 8.3 ms after the one taken last is
+        // let pass, the one 16.7 ms after it is taken, and when nothing
+        // has come 23.3 ms after it the wait is over.
+        let (from, until) =
+            crate::capture::fresh_from(FRAME_TIME, Duration::from_micros(8_333)).unwrap();
+        assert!(Duration::from_micros(8_333) < from && from < Duration::from_micros(16_000));
+        assert_eq!(until, FRAME_TIME + Duration::from_micros(8_333));
     }
 
     #[test]
