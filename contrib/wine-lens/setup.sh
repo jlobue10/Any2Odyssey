@@ -89,14 +89,37 @@ pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
 [ -e "$BOARD" ] || die "$BOARD is missing. Install the udev rule and wake the monitor:
     sudo cp '$HERE/70-any2odyssey-lens.rules' /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger"
 
-# Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them.
-WINELIB=
-for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
-         /usr/lib64/wine-wow64/wine/x86_64-windows \
-         /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
-    [ -f "$d/cfgmgr32.dll" ] && WINELIB=$d && break
-done
-[ -n "$WINELIB" ] || die "could not find Wine's x86_64-windows library folder"
+# Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them. They used to be taken from a
+# list of usual folders, whichever wine runs. With two Wines on one machine (WineHQ's under /opt beside a
+# distribution's libraries, or a build of one's own) the version asked for above was one Wine's, and the
+# libraries listed, copied and linked against below the other's: the set-up ended with "done" and nothing in
+# the prefix started. They are now looked for beside the wine that runs first, which is the PATH's wine with
+# every link followed, and in the usual folders only after that (for a wine that is a script of the user's
+# own, which is not read). tools/start-stack.sh has the same function, word for word.
+wine_libraries() {
+    wine_is=$(command -v wine 2>/dev/null) || wine_is=
+    case $wine_is in /*) wine_is=$(readlink -f "$wine_is" 2>/dev/null) || wine_is= ;; *) wine_is= ;; esac
+    case $wine_is in
+        */bin/*)
+            # <root>/bin/wine: the libraries where a distribution or WineHQ's packages keep them under <root>
+            wine_root=${wine_is%/bin/*}
+            for d in "$wine_root/lib/wine" "$wine_root/lib64/wine" "$wine_root/lib/x86_64-linux-gnu/wine" \
+                     "$wine_root/lib64/wine-wow64/wine" "$wine_root/wine"; do
+                if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi
+            done ;;
+        /*)
+            # (a wine that is kept beside its libraries)
+            d=${wine_is%/*}
+            if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi ;;
+    esac
+    for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
+             /usr/lib64/wine-wow64/wine/x86_64-windows \
+             /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
+        if [ -f "$d/cfgmgr32.dll" ]; then echo "$d"; return 0; fi
+    done
+    return 1
+}
+WINELIB=$(wine_libraries) || die "could not find Wine's x86_64-windows library folder"
 
 export WINEPREFIX=$T/prefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
 SYS=$WINEPREFIX/drive_c/windows/system32

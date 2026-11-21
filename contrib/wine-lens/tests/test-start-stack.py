@@ -203,17 +203,20 @@ echo
 echo "The Function Table (interpreted .pdata section contents)"
 """
 
-    def wine_libraries(self, installed, copies, listed):
-        """Wine's libraries as installed now, the copies the set-up made, and the names its stand-ins list."""
+    def wine_libraries(self, installed, copies, listed, beside=None):
+        """Wine's libraries as installed now, the copies the set-up made, and the names its stand-ins list.
+
+        The libraries are in the first of the usual folders, or `beside` the wine that runs, which is bin/wine."""
         text = (TOOLS / "start-stack.sh").read_text()
         self.assertEqual(text.count(self.WINE_LIBRARIES), 1)
         (self.root / "tools/start-stack.sh").write_text(
             text.replace(self.WINE_LIBRARIES, f"for d in {self.root}/wine-libraries "))
         self.system32 = self.root / "prefix/drive_c/windows/system32"
-        for folder in (self.root / "wine-libraries", self.system32):
+        libraries = self.root / (f"{beside}/x86_64-windows" if beside else "wine-libraries")
+        for folder in (libraries, self.system32):
             folder.mkdir(parents=True)
         for name, (names, build) in installed.items():
-            (self.root / "wine-libraries" / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
+            (libraries / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
         for name, (names, build) in copies.items():
             (self.system32 / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
         for name, names in listed.items():
@@ -269,6 +272,23 @@ echo "The Function Table (interpreted .pdata section contents)"
         seen = (self.root / "libraries seen").read_text().splitlines()
         self.assertEqual(set(seen), {f"{self.STAND_INS} with Wine 11.22"})
         self.assertNotIn("wine cmd /c exit", (self.root / "calls").read_text())
+
+    def test_the_copies_are_brought_up_to_the_wine_that_runs_not_to_another_one(self):
+        # Two Wines on one machine: the one that runs (WineHQ's, say, under /opt) and the libraries of
+        # another in one of the usual folders, which is where the script used to look alone. The copies were
+        # then compared with that other Wine's libraries, and after an upgrade brought "up" to them.
+        same = "CM_Get_Child CM_Get_Parent"
+        self.wine_libraries(installed={"cfgmgr32": (same, "Wine 11.22, the one that runs")},
+                            copies={"cfgmgw": (same, "Wine 11.17")}, listed={"cfgmgr32": same}, beside="lib64/wine")
+        (self.root / "wine-libraries").mkdir()
+        (self.root / "wine-libraries/cfgmgr32.dll").write_text(f"names: {same}\nWine 10.0, the distribution's\n")
+        self.calls()
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.22, the one that runs\n")
+        # A copy that is the running Wine's is left alone, and no update is asked of Wine for it.
+        (self.root / "calls").unlink()
+        self.calls()
+        self.assertNotIn("wine cmd /c exit", (self.root / "calls").read_text())
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.22, the one that runs\n")
 
     def test_an_update_of_the_prefix_that_does_not_end_well_is_tried_again_at_the_next_start(self):
         same = "CM_Get_Child CM_Get_Parent"

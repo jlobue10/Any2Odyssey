@@ -47,12 +47,33 @@ done
 # asked the stand-in for a name it did not have, and nothing in the prefix started): that takes setup.sh,
 # and this start says so instead of trying.
 SYS=$WINEPREFIX/drive_c/windows/system32
-WINELIB=
-for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
-         /usr/lib64/wine-wow64/wine/x86_64-windows \
-         /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
-    if [ -f "$d/cfgmgr32.dll" ]; then WINELIB=$d; break; fi
-done
+# (The folder beside the wine that runs, and the usual ones only after it: with two Wines on one machine the
+# copies were compared with, and brought up to, the libraries of the Wine that does not run. The function is
+# setup.sh's, word for word.)
+wine_libraries() {
+    wine_is=$(command -v wine 2>/dev/null) || wine_is=
+    case $wine_is in /*) wine_is=$(readlink -f "$wine_is" 2>/dev/null) || wine_is= ;; *) wine_is= ;; esac
+    case $wine_is in
+        */bin/*)
+            # <root>/bin/wine: the libraries where a distribution or WineHQ's packages keep them under <root>
+            wine_root=${wine_is%/bin/*}
+            for d in "$wine_root/lib/wine" "$wine_root/lib64/wine" "$wine_root/lib/x86_64-linux-gnu/wine" \
+                     "$wine_root/lib64/wine-wow64/wine" "$wine_root/wine"; do
+                if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi
+            done ;;
+        /*)
+            # (a wine that is kept beside its libraries)
+            d=${wine_is%/*}
+            if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi ;;
+    esac
+    for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
+             /usr/lib64/wine-wow64/wine/x86_64-windows \
+             /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
+        if [ -f "$d/cfgmgr32.dll" ]; then echo "$d"; return 0; fi
+    done
+    return 1
+}
+WINELIB=$(wine_libraries) || WINELIB=
 rm -f "$T/stack.error"
 STALE=
 if [ -n "$WINELIB" ]; then
