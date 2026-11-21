@@ -592,6 +592,13 @@ mod tests {
         let text = std::fs::read_to_string(&elsewhere).unwrap();
         assert!(text.starts_with("somebody's notes\n"), "{text:?}");
         assert!(text.ends_with(" through the link\n"), "{text:?}");
+        // A log that is made through a link to nothing is new, and is
+        // made for its owner alone like any other: nothing closes it
+        // afterwards.
+        let made = Logger::new(dir.path().join("made.log"));
+        std::os::unix::fs::symlink("made-elsewhere.txt", made.path()).unwrap();
+        made.log("first");
+        assert_eq!(mode(&dir.path().join("made-elsewhere.txt")), 0o600);
     }
 
     /// `<RFC 3339 time> <message>`: the whole shape of the time is checked,
