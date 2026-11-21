@@ -56,6 +56,9 @@ PACKAGED_RULES_DIR=$TEST_ROOT/usr/lib/udev/rules.d
 # program they have built).
 LOADER=/lib64/ld-linux-x86-64.so.2
 GLIBC_MIN=2.35
+# The oldest Wine the Odyssey 3D set-up takes. The number is wine-lens/setup.sh's (wine_too_old there says
+# why, and refuses an older one); packaging/linux/tests compares the two.
+WINE_MIN=11.6
 # The steps that need root go through sudo; a root shell runs them itself (not every system has sudo).
 SUDO=sudo
 if [ "$(id -u)" = 0 ] || [ -n "$TEST_ROOT" ]; then SUDO=; fi
@@ -792,6 +795,22 @@ present() {
             ;;
     esac
 }
+# Whether the wine that apt would install is older than the set-up takes; WINE_CANDIDATE is its version.
+# Asked of apt's lists, which needs no root. A version that cannot be read (no candidate, no apt-cache) is
+# let through, as setup.sh lets through a Wine whose version it cannot read.
+WINE_CANDIDATE=unasked
+candidate_wine_too_old() {
+    if [ "$WINE_CANDIDATE" = unasked ]; then
+        WINE_CANDIDATE=$(LC_ALL=C apt-cache policy wine 2>/dev/null | sed -n 's/^ *Candidate: *//p' | head -n 1) || WINE_CANDIDATE=
+    fi
+    number=${WINE_CANDIDATE#*:} # (without an epoch)
+    major=${number%%.*}
+    case $major in '' | *[!0-9]*) return 1 ;; esac
+    minor=${number#"$major"}
+    minor=${minor#.}
+    minor=${minor%%[!0-9]*}
+    [ "$major" -lt "${WINE_MIN%%.*}" ] || { [ "$major" -eq "${WINE_MIN%%.*}" ] && [ "${minor:-0}" -lt "${WINE_MIN#*.}" ]; }
+}
 MISSING= UNNAMED= ABSENT=
 check() { # <list> : adds the packages of what is missing to MISSING
     for line in $1; do
@@ -827,6 +846,26 @@ look() { # sets MISSING and UNNAMED to what is not there now
     fi
     [ -z "$WANT_ODYSSEY" ] || check "$WINE_SIDE"
     MISSING=${MISSING# }
+    # Debian 12 and 13 and Ubuntu up to 26.04 have Wine 8.0 to 10.0, and setup.sh refuses anything below
+    # WINE_MIN. Up to 1.0.0 a missing wine was installed from the distribution all the same: a long
+    # download, then "this Wine is too old" from the set-up, and a package that is in the way of WineHQ's.
+    # Such a wine is left out of the list; a note below says where a newer one is, and step 5 is skipped.
+    # (Not with --no-deps, which leaves the packages to the user: apt is not asked anything then.)
+    WINE_OLD=
+    if [ "$FAMILY" = 3 ] && [ -n "$WANT_DEPS" ]; then
+        case " $MISSING " in
+            *" wine "*)
+                if candidate_wine_too_old; then
+                    WINE_OLD=$WINE_CANDIDATE
+                    KNOWN=
+                    for package in $MISSING; do
+                        [ "$package" = wine ] || KNOWN="$KNOWN $package"
+                    done
+                    MISSING=${KNOWN# }
+                fi
+                ;;
+        esac
+    fi
 }
 look
 # One name that the release's package lists do not have makes apt-get refuse the whole list: Ubuntu 24.04
@@ -874,6 +913,9 @@ else
             [ -z "$STILL" ] || say "   not installed (not in this system's package lists, or the package manager could not install them):$STILL"
         fi
     fi
+fi
+if [ -n "$WINE_OLD" ]; then
+    warn "Wine is not installed, and the one in this system's package lists ($WINE_OLD) is older than Wine $WINE_MIN, which the Odyssey 3D set-up needs: it is not installed, because the set-up would refuse it and it would be in the way of a newer one. WineHQ's own packages for Debian and Ubuntu are new enough: add WineHQ's repository as the download page of https://www.winehq.org describes, install winehq-devel or winehq-staging from it, then run this script again. Everything else works without Wine."
 fi
 if [ -n "$ONNX_ON_CPU" ]; then
     warn "the ONNX Runtime installed here has no CUDA part (onnxruntime-cpu, or another package that provides onnxruntime): 2D -> 3D depth works and runs on the processor. To run it on the NVIDIA GPU, put onnxruntime-cuda in its place; the two cannot be installed together, so this script does not do that unasked: ${SUDO:+sudo }pacman -S onnxruntime-cuda cudnn (pacman asks whether to remove the installed one; answer yes)"
@@ -938,6 +980,8 @@ fi
 step "5. The Odyssey 3D's lens, eye tracker and weaver (Leia's runtime under Wine)"
 if [ -z "$WANT_ODYSSEY" ]; then
     say "   skipped"
+elif [ -n "$WINE_OLD" ]; then
+    say "   skipped: this part needs Wine $WINE_MIN or newer, and this system's package lists have an older one (see the note in step 2)"
 elif ! find_windows; then
     : # it has said why
 elif [ ! -f "$WIN/$SERVICE" ]; then

@@ -1856,6 +1856,108 @@ done
         self.assertEqual(len(lines), 1, result.stdout)
         self.assertIn("procps-ng", lines[0].split())
 
+    def distribution_wine(self, candidate):
+        """Say that apt's lists have wine in the version `candidate` (None: no such package there)."""
+        policy = self.root / "tools/apt-cache"
+        policy.unlink(missing_ok=True)
+        answer = "" if candidate is None else (
+            f"wine:\\n  Installed: (none)\\n  Candidate: {candidate}\\n  Version table:\\n     {candidate} 500\\n")
+        policy.write_text(f'#!/bin/sh\n[ "$1 $2" = "policy wine" ] || exit 1\nprintf "{answer}"\n')
+        policy.chmod(0o755)
+
+    def test_a_distribution_wine_that_the_set_up_would_refuse_is_not_installed(self):
+        # Debian 12 and 13 and Ubuntu up to 26.04 have Wine 8.0 to 10.0, and setup.sh refuses anything
+        # below 11.6. 1.0.0 installed the distribution's wine all the same: the Odyssey 3D step then
+        # ended at "this Wine is too old", and the package was in the way of WineHQ's.
+        self.only_package_manager("apt-get", "exit 0")
+        for name in ("wine", "x86_64-w64-mingw32-gcc"):
+            (self.root / "tools" / name).unlink(missing_ok=True)
+        (self.system / "dev/odyssey-lens").touch()
+        self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        flags = ["--prefix", str(self.root / "prefix"), "--no-udev", "--no-model", "--yes"]
+
+        def packages_and_output():
+            self.setup_log.unlink(missing_ok=True)
+            result = self.run_installer(*flags)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            lines = [line for line in result.stdout.splitlines() if line.startswith("   missing packages: ")]
+            self.assertEqual(len(lines), 1, result.stdout)
+            return lines[0].removeprefix("   missing packages: ").split(), result.stdout
+
+        for candidate in ["10.0~repack-6", "8.0~repack-4", "9.0~repack-4build3", "1:10.0-1", "11.5~trixie-1", "11"]:
+            with self.subTest(candidate=candidate):
+                self.distribution_wine(candidate)
+                missing, output = packages_and_output()
+                self.assertNotIn("wine", missing)
+                self.assertIn("gcc-mingw-w64-x86-64", missing)
+                notes = [line for line in output.splitlines() if line.startswith("note: ") and "winehq-devel" in line]
+                self.assertEqual(len(notes), 1, output)
+                self.assertIn(f"({candidate}) is older than Wine 11.6", notes[0])
+                self.assertIn("winehq-staging", notes[0])
+                self.assertIn("   skipped: this part needs Wine 11.6 or newer", output)
+                self.assertIsNone(self.setup_ran_with(), "the set-up was started without a Wine it takes")
+        # One that is new enough, one whose version cannot be read, none in the lists, no apt-cache:
+        # asked for as before.
+        for candidate in ["11.6~trixie-1", "11.20~trixie-1", "12.0~repack-1", "2:11.6-1", "(none)", "staging", None]:
+            with self.subTest(candidate=candidate):
+                self.distribution_wine(candidate)
+                missing, output = packages_and_output()
+                self.assertIn("wine", missing)
+                self.assertNotIn("winehq", output)
+                self.assertNotIn("this part needs Wine", output)
+        (self.root / "tools/apt-cache").unlink()
+        missing, output = packages_and_output()
+        self.assertIn("wine", missing)
+        # With --no-deps the packages are the user's business, and apt is asked nothing: the list is
+        # what is missing, and the set-up says itself what it thinks of the Wine it finds.
+        asked = self.root / "apt-cache-asked"
+        self.distribution_wine("10.0~repack-6")
+        policy = self.root / "tools/apt-cache"
+        policy.write_text(policy.read_text().replace("#!/bin/sh\n", f'#!/bin/sh\necho asked > "{asked}"\n'))
+        flags.append("--no-deps")
+        missing, output = packages_and_output()
+        self.assertIn("wine", missing)
+        self.assertNotIn("winehq", output)
+        self.assertFalse(asked.exists(), "apt was asked although --no-deps was given")
+        self.assertIsNotNone(self.setup_ran_with())
+        flags.remove("--no-deps")
+        # A Wine that is installed is the set-up's to judge: nothing is said of the lists.
+        self.distribution_wine("10.0~repack-6")
+        (self.root / "tools/wine").write_text("#!/bin/sh\necho wine-11.20\n")
+        (self.root / "tools/wine").chmod(0o755)
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("winehq", result.stdout)
+        self.assertIsNotNone(self.setup_ran_with())
+
+    def test_the_command_for_apt_leaves_out_a_wine_that_is_too_old(self):
+        # As a dry run names the command, without the stand-in for / (with it no package is installed).
+        self.only_package_manager("apt-get", "exit 0")
+        for name in ("wine", "x86_64-w64-mingw32-gcc"):
+            (self.root / "tools" / name).unlink(missing_ok=True)
+        self.distribution_wine("10.0~repack-6")
+        del self.env["A2O_INSTALL_TEST_ROOT"]
+        prefix = self.root / "prefix"
+        result = self.run_installer("--prefix", str(prefix), "--dry-run", "--yes", "--no-udev", "--no-model",
+                                    "--windows-root", str(self.root / "no such drive"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(prefix.exists())
+        lines = [line for line in result.stdout.splitlines() if "apt-get install -y " in line]
+        self.assertEqual(len(lines), 1, result.stdout)
+        self.assertIn("gcc-mingw-w64-x86-64", lines[0].split())
+        self.assertNotIn("wine", lines[0].split())
+        self.assertIn("winehq-devel", result.stdout)
+        self.assertIn("   skipped: this part needs Wine 11.6 or newer", result.stdout)
+
+    def test_the_oldest_wine_is_the_one_the_set_up_names(self):
+        # install.sh keeps the number beside a comment that names setup.sh, which decides it.
+        ours = [line for line in (LINUX / "install.sh").read_text().splitlines() if line.startswith("WINE_MIN=")]
+        self.assertEqual(len(ours), 1)
+        oldest = ours[0].removeprefix("WINE_MIN=")
+        setup = (LINUX.parents[1] / "contrib/wine-lens/setup.sh").read_text()
+        self.assertIn(f"Wine {oldest} or newer is needed", setup)
+        self.assertIn(f"Wine {oldest} or newer", (LINUX / "INSTALL.txt").read_text())
+
     def a_program_as_released(self):
         """The archive's program as an ELF file, as the released one is (the installer reads its first bytes)."""
         (self.archive / "any2odyssey").write_bytes(b"\x7fELF\x02\x01\x01" + bytes(57))
