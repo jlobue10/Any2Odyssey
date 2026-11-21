@@ -244,8 +244,10 @@ impl LensSwitch {
         }
     }
 
-    /// Whether the lens is being asked for at the moment.
-    #[cfg(test)]
+    /// Whether the lens is being asked for at the moment. (For the one
+    /// test that asks, which runs where the weaver's helper can be stood
+    /// in for.)
+    #[cfg(all(test, unix))]
     pub(crate) fn wanted(&self) -> bool {
         self.wanted
     }
