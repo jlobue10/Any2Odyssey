@@ -48,8 +48,11 @@ fn a_probe_says_which_file_it_could_not_write() {
             .unwrap();
         assert_eq!(output.status.code(), Some(1), "{arguments:?}");
         let said = String::from_utf8_lossy(&output.stderr);
+        // In a session without a display the layout probe has said so and
+        // never comes to its report.
+        let no_display = said.contains("No primary monitor");
         assert!(
-            said.contains("Could not write") && said.contains(report),
+            no_display || (said.contains("Could not write") && said.contains(report)),
             "{arguments:?}: {said:?}"
         );
     }
