@@ -249,3 +249,132 @@ impl OverlayController {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WINDOW_EX_STYLE, WNDCLASSW,
+        WS_POPUP,
+    };
+
+    /// Run `test` on a thread whose windows are on a desktop of their own,
+    /// which is never shown: the raise under test shows its window, topmost,
+    /// and that belongs on nobody's screen. Where Windows gives no such
+    /// desktop the test runs on the one it was started on.
+    fn on_a_desktop_of_its_own(test: impl FnOnce() + Send) {
+        use std::ptr::null;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn CreateDesktopW(
+                name: *const u16,
+                device: *const u16,
+                mode: *const std::ffi::c_void,
+                flags: u32,
+                access: u32,
+                security: *const std::ffi::c_void,
+            ) -> isize;
+            fn SetThreadDesktop(desktop: isize) -> i32;
+            fn CloseDesktop(desktop: isize) -> i32;
+        }
+        const GENERIC_ALL: u32 = 0x1000_0000;
+        let name = win::wide(&format!("Any2Odyssey-overlay-test-{}", current_pid()));
+        // SAFETY: a NUL-terminated name that outlives the call; the other
+        // pointers are optional and absent.
+        let desktop =
+            unsafe { CreateDesktopW(name.as_ptr(), null(), null(), 0, GENERIC_ALL, null()) };
+        let outcome = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    if desktop != 0 {
+                        // SAFETY: a new thread, which has no window yet.
+                        let _ = unsafe { SetThreadDesktop(desktop) };
+                    }
+                    test()
+                })
+                .join()
+        });
+        if desktop != 0 {
+            // SAFETY: the handle made above; its one thread has ended.
+            let _ = unsafe { CloseDesktop(desktop) };
+        }
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    unsafe extern "system" fn procedure(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+        unsafe { DefWindowProcW(h, m, w, l) }
+    }
+
+    /// Ctrl+Alt+F8 while the engine is still starting. The request is an
+    /// auto-reset event, read once; with no output window yet it was dropped
+    /// at the early return, under a log line that it had been asked for.
+    #[test]
+    fn a_restore_asked_for_before_the_output_window_exists_is_carried_out_when_it_comes() {
+        on_a_desktop_of_its_own(|| {
+            let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+            let sink = lines.clone();
+            // Keep 3D above apps off: nothing but a requested restore raises.
+            let mut controller = OverlayController::new(
+                0,
+                false,
+                false,
+                Box::new(move |line| sink.borrow_mut().push(line.to_owned())),
+            );
+            let restores = || {
+                lines
+                    .borrow()
+                    .iter()
+                    .filter(|line| line.starts_with("Restored 3D overlay without activation"))
+                    .count()
+            };
+            controller.tick(true).unwrap();
+            controller.tick(false).unwrap();
+            assert!(!controller.attached() && restores() == 0);
+
+            // The 3D picture comes: a stand-in for the engine's window, of
+            // its class and with its title, in this process.
+            let class_name = win::wide(ipc::ENGINE_OUTPUT_CLASS);
+            let title = win::wide(ipc::ENGINE_OUTPUT_TITLE);
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(procedure),
+                lpszClassName: PCWSTR(class_name.as_ptr()),
+                ..Default::default()
+            };
+            assert_ne!(unsafe { RegisterClassW(&class) }, 0);
+            let window = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    PCWSTR(class_name.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    WS_POPUP,
+                    0,
+                    0,
+                    64,
+                    64,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap();
+
+            controller.tick(false).unwrap();
+            assert!(controller.attached());
+            assert_eq!(restores(), 1, "{:?}", lines.borrow());
+            // The request is spent: the next tick does not restore again.
+            controller.tick(false).unwrap();
+            assert_eq!(restores(), 1, "{:?}", lines.borrow());
+            // With the window there a request is carried out at once.
+            controller.tick(true).unwrap();
+            assert_eq!(restores(), 2, "{:?}", lines.borrow());
+            unsafe { DestroyWindow(window) }.unwrap();
+        });
+    }
+}
