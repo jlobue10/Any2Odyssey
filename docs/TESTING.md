@@ -140,9 +140,17 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 1.0.2 (audit rounds 11 to 24, the Windows setup program, and the five pull requests of 1.0.0) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 1.0.3 (audit rounds 11 to 24, the Windows setup program, and the five pull requests of 1.0.0) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
+
+New in 1.0.3 (one change, a film's black bars on a live screen; none of it was seen on the monitor before the release, and 1.0.2 is the release without it):
+
+- Linux, live screen, a film with black bars above and below, full screen, with 1.0.2 beside it if possible: the bars lie at the back and do not float in front of the film, and the film has more depth than in 1.0.2, a wide shot most of all. The edge between the film and a bar is clean: no line of the film lies back with the bar, and no line of the bar stands forward.
+- Linux, live screen, the same film with subtitles in the lower bar: the film's depth does not pump when a line comes and goes. The subtitles lie at the back with the bar, behind the film: say whether that reads well. The same with the player's controls shown over a bar, and with the pointer resting in one.
+- Linux, live screen, a film or a game with a dark scene and no bars, full screen: nothing of the picture is flattened or pushed back at its edges, and a fade to black and back shows nothing odd.
+- Linux, live screen, an upright video in a player with black at both sides: the black lies at the back, the video keeps its depth.
+- Linux, live screen, a desktop in a dark theme with windows: panels and title bars lie where they did in 1.0.2.
 
 New in 1.0.2:
 

@@ -2,6 +2,43 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 1.0.3 (2026-11-21)
+
+One change: the pull request that 1.0.2 left open (#184). On Linux, a film's black bars no longer take part of the depth of a live screen. It comes from the same round as 1.0.2 (audit round 24) and was kept out of that release because it "wants eyes on the monitor first". It is released here as it was proposed, so that it can be looked at on the monitor: **nothing of it has been seen there**, it changes what is shown for every film with black bars, and it rests on a few rules of thumb, which are given below. 1.0.2 is the release without it; nothing else differs between the two but the version. Windows is unchanged.
+
+Coming from 1.0.2, nothing is to do after updating. Coming from 1.0.1 or older, run `any2odyssey-setup` once, as the notes of 1.0.2 say.
+
+**Linux, live screen: a film's black bars lie at the far end of the depth.** The depth model does not know a black bar for nothing. Over 100 seconds of a film of 1280 × 534 on a screen of 1280 × 720 it has the bars at three quarters of the way from far to near in the mean, as a frame in front of the picture, and the nearest point of the whole map lies in a bar in 480 of 600 maps. The range from far to near is the map's, so the film between the bars is left three quarters of the depth in the middle, two fifths or less in every tenth map, and 27 % at the least: a wide shot of a town lies flat behind two bars that float in front. This is the same in every release up to 1.0.2. The depth thread now looks at the frame it gives the model for rows and columns that are black from end to end at its edges, and puts those rows and columns of the model's answer, and one more beside each, where the farthest point of the rest is. Both loops as the program runs them, fed 20 seconds of the film in real time with the model on a graphics card: the bars were shown at 0.68 of the way from far to near and are at 0.06; the film had 44 % of the range in the middle and has 97 %. How steady the picture is then lies between the same film with its bars as the model said them and the same film cropped to fill the screen (change of the whole picture from map to map: 4.9, 5.9 and 6.1 thousandths of the range). A picture without bars is told by its first row and its first column. (#184)
+
+### Changed
+
+Linux, the live screen:
+
+- **Rows and columns that are black from end to end at the edges of the screen are put at the far end of the depth**, as above. The rules of thumb, so that they can be judged: a pixel is black at 24 of 255 or less; a bar is a hundredth of the side or more; the bars together are three quarters of the side at the most (a picture that is black all over has none and is treated as before). (#184)
+- **A bar with something in it is a bar as high as the other.** A film's two bars are of one height. Where one of them reaches further and the same rows at the other edge are black in four pixels of five, that one is a bar as high, with what stands in it: subtitles, a player's controls, the pointer. Without this rule a bar ended where a subtitle began and the rest of it was the picture's again: with two lines of subtitles in the lower bar for two seconds in every four, the film had 98 % of the range while no subtitle stood and 81 % while one did, and its depth pumped with them (its share jumped by more than a tenth of the range 12 times in 463 maps). With the rule: 98 % and 99 %, no jump. What stands in a bar is then as far back as the bar, the subtitles too; whether that reads well needs eyes. (#184)
+
+### Not covered
+
+- Bars that are not black.
+- Something in both bars at once: both are then as high as the one that is black from end to end for longer.
+- Something in a bar at the side of an upright video: the bars at the sides are not taken to be of one width.
+- A title on black: more than three quarters dark, taken for a dark picture, as before.
+- A film with bars in a window that does not fill the screen: its bars are not at the screen's edges, and it is shown as before.
+
+### Tests
+
+- New tests, run with the rest: the black bars of a frame found, with the pointer in one and subtitles in the other, and a dark picture, a border and a picture black all over not taken for bars; the depth thread with a model that has the bars nearest; the map's edges put far. Each of eight parts of the change, taken out again by hand, fails one of them.
+- The numbers above are from both loops of a live screen as the program runs them, with the capture fed by hand and the depth model on a graphics card, over 20 seconds of Tears of Steel (the Blender Foundation's, not in the repository) with and without subtitles in the lower bar. They were measured on the proposal's two commits; the three files that hold the live screen's depth are the same in this release, byte for byte.
+- Every gate was run on the release's tree, on Windows and on Linux. The Windows program is 1.0.2's but for the version.
+
+### Known, not fixed
+
+- The items of 1.0.2 stand as they were, but for the one about a film's black bars, which this release answers.
+
+### Hardware verification
+
+Pending: nothing of this release was run with the monitor. `docs/TESTING.md` lists the checks under "New in 1.0.3", with 1.0.2 beside it if possible: a film with black bars above and below, full screen (the bars lie at the back, the film has more depth); the same with subtitles in the lower bar (the film's depth does not pump, and the subtitles lie at the back with the bar); a dark scene without bars (nothing of it is flattened); an upright video with black at both sides. The checks of 1.0.2 and of the releases before it are still to do as well.
+
 ## 1.0.2 (2026-11-21)
 
 A tenth audit release: six pull requests (#179 to #183 and #185) from a round that ran what the round before it had reasoned. 1.0.1 was made by reading, on Linux alone, and its notes say so in several places. This round put it on the rigs: the depth model itself on the processor and on a graphics card over real film and recordings of a desktop, the Odyssey 3D set-up under real Wine in three versions, the live screen on KDE Plasma, GNOME, sway, labwc and COSMIC with their own portals, the Linux installer against real apt and real pacman in root trees of eight distributions, and the Windows side on a Windows PC for the first time since 0.9.9. Most of 1.0.1 held, the two corrections it had "reasoned from the code, not seen" among them. One of its claims did not hold and is taken back here. Nothing found was grave; three findings were of the middle kind, one of them new in 1.0.1 and two older. At the end all six were merged and run together, on Windows and on Linux, with every rig of the round.
