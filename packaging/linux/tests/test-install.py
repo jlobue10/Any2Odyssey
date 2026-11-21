@@ -344,7 +344,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(rules.read_text(), "# the rules\n")
         self.assertEqual(rules.stat().st_mode & 0o777, 0o644)
         self.assertIn("would run: udevadm control --reload\n", result.stdout)
-        self.assertIn("would run: udevadm trigger --subsystem-match=tty\n", result.stdout)
+        # The link to the lens board is waited for: step 5 looks for it right after this one.
+        self.assertIn("would run: udevadm trigger --subsystem-match=tty\n   would run: udevadm settle --timeout=5\n",
+                      result.stdout)
         result = self.run_installer(*flags, "--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("udev rules for the Odyssey 3D\n   already installed\n", result.stdout)

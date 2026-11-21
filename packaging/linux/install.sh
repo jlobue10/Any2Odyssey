@@ -857,6 +857,11 @@ elif ask "Install $RULES_DIR/$RULES_NAME (lens board for you at the seat, no USB
     else
         { udev control --reload && udev trigger --subsystem-match=tty; } ||
             warn "the udev rules are installed but could not be put into effect now (see the message above); they are read at the next start of the system"
+        # The trigger only asks for the events: udev makes /dev/odyssey-lens a moment later. With nothing
+        # slow between here and step 5 (the depth model is there already, or --no-model) that step looked
+        # for the link before it was made and said the lens board is not available, over rules that had
+        # just been installed. The events are waited for, a few seconds at most.
+        udev settle --timeout=5 || true
         # The webcam rule acts when the camera appears; for one that is here already, set it now.
         if CAM=$(webcam_dir); then
             run $SUDO sh -c "echo on > '$CAM/power/control'" || true
