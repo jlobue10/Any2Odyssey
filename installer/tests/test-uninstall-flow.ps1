@@ -4,6 +4,11 @@
 # quit event is routed to a name of this test's own, so an Any2Odyssey running on this PC is never
 # told to quit.
 $ErrorActionPreference='Stop'
+# The stand-ins are functions of this process. From a 32-bit PowerShell the uninstaller starts itself
+# again in a 64-bit one (since 1.0.1), where they do not reach: it would look at the real process list
+# and ask for a real elevation of the fixture's helper. So this test is not run in one; the uninstaller's
+# start from a 32-bit PowerShell has its own cases at the end, in processes of their own.
+if(-not [Environment]::Is64BitProcess){throw 'Run this test in a 64-bit PowerShell: its stand-ins do not reach the 64-bit process the uninstaller starts from a 32-bit one.'}
 $repo=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $installerDir=Join-Path $repo 'installer'
 $root=Join-Path ([IO.Path]::GetTempPath()) ('Any2Odyssey-uninstall-test-'+[Guid]::NewGuid().ToString('N'))
