@@ -43,6 +43,8 @@ void a2o_weaver_input(void *w, unsigned texture, int width, int height, unsigned
 void a2o_weaver_weave(void *w);
 void a2o_weaver_eyes(void *w, float *left, float *right);
 void a2o_weaver_destroy(void *w);
+unsigned long long a2o_weaver_latency(void *w);
+void a2o_weaver_latency_frames(void *w, unsigned long long frames);
 
 #define GL_RGBA8 0x8058
 #define GL_CLAMP_TO_EDGE 0x812F
@@ -161,7 +163,7 @@ int main(int argc, char **argv)
     FILE *stats;
     LARGE_INTEGER qpf, last_turn, stats_since, before_upload, after_upload, after_swap;
     BOOL (WINAPI *swap_interval)(int);
-    double worst_ms = 0, worst_upload_ms = 0;
+    double worst_ms = 0, worst_upload_ms = 0, upload_sum_ms = 0, turn_ms[512];
     unsigned turns = 0, uploads = 0;
     bool uploaded;
     HWND window;
@@ -242,6 +244,22 @@ int main(int argc, char **argv)
     CloseHandle(CreateThread(NULL, 0, watch_input, NULL, 0, NULL));
 
     stats = getenv("A2O_WEAVER_STATS") ? fopen(getenv("A2O_WEAVER_STATS"), "w") : NULL;
+    /* Two diagnostics more, for the question whether the picture follows the eyes late. Leia's weaver places
+     * the views for where the eyes will be when the picture it weaves is seen, and has to be told how long
+     * that takes from weave() on; untold, it assumes a number of frames of its own choosing. Under Wine a
+     * picture goes through Xwayland and the desktop's compositor on its way, which Leia did not count on.
+     * A2O_WEAVER_LATENCY_FRAMES=<n> tells the weaver n frames, and the statistics begin with the time the
+     * weaver reckons with. Neither is touched in a run without these variables. */
+    if (getenv("A2O_WEAVER_LATENCY_FRAMES")) {
+        int frames = atoi(getenv("A2O_WEAVER_LATENCY_FRAMES"));
+        if (frames >= 0 && frames <= 16) a2o_weaver_latency_frames(weaver, (unsigned long long)frames);
+    }
+    if (stats) {
+        fprintf(stats, "latency %llu microseconds%s%s\n", a2o_weaver_latency(weaver),
+                getenv("A2O_WEAVER_LATENCY_FRAMES") ? ", asked for frames: " : " (the weaver's own choice)",
+                getenv("A2O_WEAVER_LATENCY_FRAMES") ? getenv("A2O_WEAVER_LATENCY_FRAMES") : "");
+        fflush(stats);
+    }
     QueryPerformanceFrequency(&qpf);
     QueryPerformanceCounter(&last_turn);
     stats_since = last_turn;
@@ -298,12 +316,22 @@ int main(int argc, char **argv)
             last_turn = t;
             if (ms > worst_ms) worst_ms = ms;
             if (upload_ms > worst_upload_ms) worst_upload_ms = upload_ms;
+            if (turns < ARRAYSIZE(turn_ms)) turn_ms[turns] = ms;
             turns++;
-            if (uploaded) uploads++;
+            if (uploaded) uploads++, upload_sum_ms += upload_ms;
             if (t.QuadPart - stats_since.QuadPart >= qpf.QuadPart) {
-                fprintf(stats, "weaves %u pictures %u longest turn %.1f ms longest upload %.1f ms\n", turns, uploads, worst_ms, worst_upload_ms);
+                /* A turn is one refresh of the display long when nothing holds it up. The shortest of the
+                 * second stands for that, and the turns half as long again or more are counted: each of
+                 * them is a refresh at which the picture did not follow the eyes. */
+                double shortest = worst_ms;
+                unsigned late = 0, kept = turns < ARRAYSIZE(turn_ms) ? turns : ARRAYSIZE(turn_ms);
+                for (unsigned i = 0; i < kept; i++) if (turn_ms[i] < shortest) shortest = turn_ms[i];
+                for (unsigned i = 0; i < kept; i++) if (turn_ms[i] >= shortest * 1.5) late++;
+                fprintf(stats, "weaves %u pictures %u longest turn %.1f ms longest upload %.1f ms mean upload %.1f ms "
+                               "shortest turn %.1f ms late turns %u\n",
+                        turns, uploads, worst_ms, worst_upload_ms, uploads ? upload_sum_ms / uploads : 0.0, shortest, late);
                 fflush(stats);
-                turns = uploads = 0; worst_ms = worst_upload_ms = 0; stats_since = t;
+                turns = uploads = 0; worst_ms = worst_upload_ms = upload_sum_ms = 0; stats_since = t;
             }
         }
         if (tex_w && !announced) {

@@ -2,6 +2,31 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+Four changes on Linux that come from measuring 1.0.3 while it showed a film on the Odyssey's own screen (KDE Plasma 6.8.3, the screen at 120 Hz, 2160 lines, *Finest*), and two diagnostics. The measurements were taken from outside the running program; **nothing of the changes has been seen on the monitor yet**.
+
+### Changed
+
+Linux, the live screen:
+
+- **A picture is seen when the screen draws it, not on a grid of 1/62 s.** A desktop was asked for 62 frames a second at the most. KDE Plasma draws the Odyssey's own screen at every refresh while the 3D picture lies on it, so its cast ran at that limit all the time and the screen was seen 62 times a second, whatever it showed and when. A film of 24 pictures a second reached the output 32.1 and 48.4 ms apart (two and three of those frames; 597 and 841 times in a minute) where its pictures are 41.7 ms apart: the unevenness of a film on a 60 Hz television, which the screen itself, at 120 Hz, does not have. A video of 60 a second lost or doubled a picture about twice a second the same way. The desktop is now asked for 125 a second, more than a screen of 120 Hz draws, so a frame comes at every refresh. A screen of more than 120 Hz is still seen on a grid, of 8 ms.
+- **Of a screen that changes faster than pictures are made, every second or third frame is taken, as it arrives.** Pictures are made 66 times a second at the most. With more frames than that arriving, one always lay waiting when a turn began and was taken as it was, and how long it had waited drifted: of 120 frames a second every ninth picture came one frame after the one before it and the others two. The frames that come too soon after the one taken last are now let pass and the first that does not is taken at once, so the pictures are a whole number of frames apart (60 a second of 120, 55 of 165). Reasoned and tested on a clock of the test's own, not measured with a game.
+- **A frame that is the same as the one before is told before it is copied.** Every frame was copied out of the stream's buffer (3.3 ms for 3840 x 2160) and compared afterwards: under the film, 62 a second were copied for 38 to be thrown away. A frame is now compared where it lies, and copied only when it is another picture.
+- **The picture is made where the output reads it.** It was made in room of the render loop's own and copied into the file the output reads: at 2160 lines 66 MB a picture, 10 to 11 ms of the 23 a turn took. `live::bench::turn_timings` on the same machine, while the film ran: a turn at 2160 lines takes 11.2 ms where it took 22.9 (89 pictures a second possible where 44 were), at 1440 lines 5.8 where 9.3, at 1080 lines 4.0 where 6.1. The program also holds 66 MB less at 2160 lines. Where the file is not in memory the picture is made and written as before.
+
+Linux, the Odyssey 3D set-up (run `any2odyssey-setup` once after updating; it ends the stack, so not while a picture shows):
+
+- **A start of Leia's stack removes the log files Leia's programs left more than two weeks ago.** They begin a file at every run and remove none; the eye tracker writes about 10 MB for every hour it follows a face.
+
+### Diagnostics
+
+- `A2O_WEAVER_STATS` now begins with the time Leia's weaver reckons with between weaving a picture and its being seen (`latency ... microseconds`), and each second's line also has the mean time of an upload, the shortest turn, and how many turns were half as long again or more (`late turns`): refreshes at which the picture did not follow the eyes, which is what a 66 MB upload on the weaving thread may cost at 2160 lines. `A2O_WEAVER_LATENCY_FRAMES=<n>` tells the weaver n frames instead of its own choice. Both are for finding out whether the flicker that is left when the head moves comes from there; a run without the variables calls nothing new.
+
+### Hardware verification
+
+Pending: `docs/TESTING.md`, "Since 1.0.3".
+
 ## 1.0.3 (2026-11-21)
 
 One change: the pull request that 1.0.2 left open (#184). On Linux, a film's black bars no longer take part of the depth of a live screen. It comes from the same round as 1.0.2 (audit round 24) and was kept out of that release because it "wants eyes on the monitor first". It is released here as it was proposed, so that it can be looked at on the monitor: **nothing of it has been seen there**, it changes what is shown for every film with black bars, and it rests on a few rules of thumb, which are given below. 1.0.2 is the release without it; nothing else differs between the two but the version. Windows is unchanged.
