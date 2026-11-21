@@ -739,6 +739,81 @@ fn narrow_tens(
     }
 }
 
+/// A frame as a buffer holds it: `height` rows of `width` pixels in `rows`,
+/// each row `stride` bytes after the one before, its pixels packed and its
+/// picture turned as the stream says.
+#[derive(Clone, Copy)]
+struct Lying<'a> {
+    rows: &'a [u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    packing: Packing,
+    turned: Turned,
+}
+
+impl Lying<'_> {
+    /// Write the frame into `spare` as it is handed on: upright, a byte a
+    /// colour, its rows with nothing between them. The upright picture's
+    /// width and height, and whether blue comes first in a pixel; `None`
+    /// for a frame that is not whole. `narrowed` is room for a frame of ten
+    /// bits a colour on its way to being turned; a frame of any other kind
+    /// lets go of it.
+    ///
+    /// This was done where the stream's buffers are read, and nothing
+    /// tried it: with a frame's rows taken as they came again, gaps and
+    /// all, every test passed.
+    fn taken(self, spare: &mut Vec<u8>, narrowed: &mut Vec<u8>) -> Option<(u32, u32, bool)> {
+        let Lying {
+            rows: frame,
+            width,
+            height,
+            stride,
+            packing,
+            turned,
+        } = self;
+        let row = width as usize * 4;
+        let lying = |bytes, stride| Source {
+            bytes,
+            width,
+            height,
+            stride,
+            // Not looked at: a pixel's bytes are moved as they are.
+            order: PixelOrder::Bgr,
+        };
+        let (tens_wide, tens_high) = (width as usize, height as usize);
+        // Keep only visible rows. Padding can change on an otherwise
+        // identical frame, which would wake the renderer and depth model.
+        let wanted = row * tens_high;
+        fitted(spare, wanted);
+        fitted(narrowed, wanted);
+        let taken = match (packing, turned) {
+            (Packing::Bytes { bgr }, Turned::Upright) if stride == row => {
+                spare.clear();
+                spare.extend_from_slice(frame);
+                (width, height, bgr)
+            }
+            (Packing::Tens { red_high }, Turned::Upright) => {
+                narrow_tens(frame, tens_wide, tens_high, stride, red_high, spare);
+                (width, height, true)
+            }
+            (Packing::Bytes { bgr }, _) => {
+                let (width, height) = live::turn_upright(lying(frame, stride), turned, spare)?;
+                (width, height, bgr)
+            }
+            (Packing::Tens { red_high }, _) => {
+                narrow_tens(frame, tens_wide, tens_high, stride, red_high, narrowed);
+                let (width, height) = live::turn_upright(lying(narrowed, row), turned, spare)?;
+                (width, height, true)
+            }
+        };
+        if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
+            *narrowed = Vec::new();
+        }
+        Some(taken)
+    }
+}
+
 /// The note a frame carries about how its picture lies in the buffer
 /// (`SPA_META_VideoTransform`): one number, read by
 /// [`Turned::from_note`]. The PipeWire library's own type for it is there
@@ -1143,54 +1218,20 @@ fn stream(
                 data.shared.no_picture(no_picture_in(told));
                 return;
             };
-            let row = width as usize * 4;
-            let lying = |bytes, stride| Source {
-                bytes,
+            let lying = Lying {
+                rows: frame,
                 width,
                 height,
                 stride,
-                // Not looked at: a pixel's bytes are moved as they are.
-                order: PixelOrder::Bgr,
+                packing,
+                turned,
             };
-            let (tens_wide, tens_high) = (width as usize, height as usize);
-            // Keep only visible rows. Padding can change on an otherwise
-            // identical frame, which would wake the renderer and depth model.
-            let wanted = row * tens_high;
-            fitted(&mut data.spare, wanted);
-            fitted(&mut data.narrowed, wanted);
-            let (width, height, stride, bgr) = match (packing, turned) {
-                (Packing::Bytes { bgr }, Turned::Upright) if stride == row => {
-                    data.spare.clear();
-                    data.spare.extend_from_slice(frame);
-                    (width, height, stride, bgr)
-                }
-                (Packing::Tens { red_high }, Turned::Upright) => {
-                    let spare = &mut data.spare;
-                    narrow_tens(frame, tens_wide, tens_high, stride, red_high, spare);
-                    (width, height, row, true)
-                }
-                (Packing::Bytes { bgr }, _) => {
-                    let upright = live::turn_upright(lying(frame, stride), turned, &mut data.spare);
-                    let Some((width, height)) = upright else {
-                        data.shared.no_picture(TOO_SMALL);
-                        return;
-                    };
-                    (width, height, width as usize * 4, bgr)
-                }
-                (Packing::Tens { red_high }, _) => {
-                    let narrowed = &mut data.narrowed;
-                    narrow_tens(frame, tens_wide, tens_high, stride, red_high, narrowed);
-                    let upright = live::turn_upright(lying(narrowed, row), turned, &mut data.spare);
-                    let Some((width, height)) = upright else {
-                        data.shared.no_picture(TOO_SMALL);
-                        return;
-                    };
-                    (width, height, width as usize * 4, true)
-                }
+            let taken = lying.taken(&mut data.spare, &mut data.narrowed);
+            let Some((width, height, bgr)) = taken else {
+                data.shared.no_picture(TOO_SMALL);
+                return;
             };
-            if !matches!(packing, Packing::Tens { .. }) || turned == Turned::Upright {
-                data.narrowed = Vec::new();
-            }
+            let stride = width as usize * 4;
             data.shared
                 .frame_arrived(&mut data.spare, width, height, stride, bgr);
         })
@@ -1825,6 +1866,101 @@ mod tests {
         // A frame shorter than it says gives the rows it has, and no more.
         narrow_tens(&frame[..14], 2, 2, 12, true, &mut out);
         assert_eq!(out.len(), 8);
+    }
+
+    #[test]
+    fn a_frame_is_taken_without_what_lies_after_its_rows() {
+        // Two rows of three pixels, and the same with `gap` bytes after
+        // each row but the last, which no pixel owns: `left` is in them.
+        let pixels: Vec<u8> = (1..=24).collect();
+        let gapped = |gap: usize, left: u8| {
+            let mut rows = pixels[..12].to_vec();
+            rows.extend(std::iter::repeat_n(left, gap));
+            rows.extend_from_slice(&pixels[12..]);
+            rows
+        };
+        fn lying(rows: &[u8], stride: usize, packing: Packing, turned: Turned) -> Lying<'_> {
+            Lying {
+                rows,
+                width: 3,
+                height: 2,
+                stride,
+                packing,
+                turned,
+            }
+        }
+        let bgrx = Packing::Bytes { bgr: true };
+        let (mut spare, mut narrowed) = (vec![9; 100], Vec::new());
+        // Rows with nothing between them are taken as they are.
+        let tight = lying(&pixels, 12, bgrx, Turned::Upright);
+        assert_eq!(tight.taken(&mut spare, &mut narrowed), Some((3, 2, true)));
+        assert_eq!(spare, pixels);
+        // Rows with something between them are taken without it, whatever
+        // their distance (one that is no whole number of pixels too) and
+        // whatever lies there. They were copied as they came, and what
+        // lay there made a frame another picture than the one before.
+        let shared = Shared::new();
+        for gap in [1, 3, 4, 5, 64] {
+            for left in [0xEE, 0x11] {
+                let rows = gapped(gap, left);
+                let frame = lying(&rows, 12 + gap, bgrx, Turned::Upright);
+                assert_eq!(frame.taken(&mut spare, &mut narrowed), Some((3, 2, true)));
+                assert_eq!(spare, pixels, "{gap} bytes of {left} after a row");
+                shared.frame_arrived(&mut spare, 3, 2, 12, true);
+                assert_eq!(lock(&shared.slot).serial, 1);
+            }
+        }
+        // (a colour that differs is a new picture as ever)
+        let mut rows = gapped(4, 0xEE);
+        rows[16 + 1] ^= 1;
+        let frame = lying(&rows, 16, bgrx, Turned::Upright);
+        assert!(frame.taken(&mut spare, &mut narrowed).is_some());
+        shared.frame_arrived(&mut spare, 3, 2, 12, true);
+        assert_eq!(lock(&shared.slot).serial, 2);
+        // Red first: said so, the bytes as they are.
+        let rows = gapped(4, 0xEE);
+        let rgbx = lying(&rows, 16, Packing::Bytes { bgr: false }, Turned::Upright);
+        assert_eq!(rgbx.taken(&mut spare, &mut narrowed), Some((3, 2, false)));
+        assert_eq!(spare, pixels);
+        // Ten bits a colour: as `narrow_tens` writes them, blue first.
+        let tens = Packing::Tens { red_high: true };
+        let mut narrow = Vec::new();
+        narrow_tens(&rows, 3, 2, 16, true, &mut narrow);
+        let frame = lying(&rows, 16, tens, Turned::Upright);
+        assert_eq!(frame.taken(&mut spare, &mut narrowed), Some((3, 2, true)));
+        assert_eq!(spare, narrow);
+        assert!(narrowed.is_empty());
+        // A frame that lies on its side is taken upright, three rows of
+        // two pixels, with or without gaps in the buffer.
+        let quarter = Turned::from_note(1).unwrap();
+        let source = Source {
+            bytes: &pixels,
+            width: 3,
+            height: 2,
+            stride: 12,
+            order: PixelOrder::Bgr,
+        };
+        let mut upright = Vec::new();
+        assert_eq!(
+            live::turn_upright(source, quarter, &mut upright),
+            Some((2, 3))
+        );
+        for (rows, stride) in [(&pixels, 12), (&rows, 16)] {
+            let frame = lying(rows, stride, bgrx, quarter);
+            assert_eq!(frame.taken(&mut spare, &mut narrowed), Some((2, 3, true)));
+            assert_eq!(spare, upright);
+        }
+        // Ten bits on their side go through `narrowed`, which the next
+        // frame of another kind lets go of.
+        let frame = lying(&rows, 16, tens, quarter);
+        assert_eq!(frame.taken(&mut spare, &mut narrowed), Some((2, 3, true)));
+        assert_eq!((spare.len(), narrowed.len()), (24, 24));
+        assert!(tight.taken(&mut spare, &mut narrowed).is_some());
+        assert_eq!(narrowed.capacity(), 0);
+        // A turned frame that is not all there is none, and nothing is
+        // handed on in its place.
+        let short = lying(&rows[..20], 16, bgrx, quarter);
+        assert_eq!(short.taken(&mut spare, &mut narrowed), None);
     }
 
     #[test]
