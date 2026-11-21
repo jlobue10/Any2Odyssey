@@ -105,14 +105,17 @@ chmod 700 "$T" # the prefix's registry will hold the camera secret
 wineserver -k 2>/dev/null || true
 # A camera bridge still running from an earlier set-up is the program as it was built then. The camera
 # stand-in built below need not speak its handshake, and tools/tracking.sh neither takes it for the bridge
-# once its file has been replaced nor can start another while it holds the port. It is ended here, if the
-# process of the noted number is that program.
-BRIDGE_PID=$(cat "${XDG_RUNTIME_DIR:-$T}/any2odyssey-camera-bridge.pid" 2>/dev/null) || BRIDGE_PID=
-case $BRIDGE_PID in '' | *[!0-9]*) ;; *)
-    case $(readlink "/proc/$BRIDGE_PID/exe" 2>/dev/null) in
-        "$(readlink -f "$T/build")/any2odyssey-camera-bridge"*) kill "$BRIDGE_PID" 2>/dev/null || true ;;
-    esac ;;
-esac
+# once its file has been replaced nor can start another while it holds the port. It is ended here: the
+# process of the noted number, and any other of this user's processes (the note can be lost while the bridge
+# lives, see tools/tracking.sh), if its program is that one.
+BRIDGE_IS=$(readlink -f "$T/build")/any2odyssey-camera-bridge
+for pid in $(cat "${XDG_RUNTIME_DIR:-$T}/any2odyssey-camera-bridge.pid" 2>/dev/null) \
+           $(pgrep -u "$(id -u)" -f 'any2odyssey-camera-[b]ridge' 2>/dev/null); do
+    case $pid in *[!0-9]*) continue ;; esac
+    case $(readlink "/proc/$pid/exe" 2>/dev/null) in
+        "$BRIDGE_IS" | "$BRIDGE_IS (deleted)") kill "$pid" 2>/dev/null || true ;;
+    esac
+done
 
 echo "setup: Wine prefix in $WINEPREFIX"
 # A prefix with no finished set-up behind it (this script puts its tools into place last) is what a first run

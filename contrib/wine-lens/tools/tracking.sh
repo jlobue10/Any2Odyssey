@@ -20,12 +20,23 @@ PIDFILE=$RUN/any2odyssey-camera-bridge.pid
 # the "start" that made it: "stop" waits for that request before it decides what there is to stop.
 STARTING=$RUN/any2odyssey-tracker.starting
 
-bridge_pid() {
-    pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
-    case $pid in '' | *[!0-9]*) return 1 ;; esac
-    [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "$(readlink -f "$BRIDGE")" ] && echo "$pid"
+# The note can be lost while the bridge lives: the session's folder is removed at logout while a stop is slow,
+# XDG_RUNTIME_DIR is set for one caller and not for another, or a start is ended between starting the bridge
+# and noting it. The bridge was then known to nobody: every later start launched a second one, which could
+# not have the port ("the camera bridge could not start (is port 47816 taken?)"), and no stop ended the
+# first, until the next boot. So the bridge is also looked for among this user's own processes, and there
+# too only a process whose program is this installation's bridge counts.
+bridge_pids() {
+    is=$(readlink -f "$BRIDGE" 2>/dev/null) || return 1
+    found=
+    for pid in $(cat "$PIDFILE" 2>/dev/null) $(pgrep -u "$(id -u)" -f 'any2odyssey-camera-[b]ridge' 2>/dev/null); do
+        case $pid in *[!0-9]*) continue ;; esac
+        [ "$(readlink -f "/proc/$pid/exe" 2>/dev/null)" = "$is" ] || continue
+        case " $found " in *" $pid "*) ;; *) found="$found $pid" ;; esac
+    done
+    [ -n "$found" ] && echo $found
 }
-bridge_running() { bridge_pid >/dev/null; }
+bridge_running() { bridge_pids >/dev/null; }
 tracker_running() { pgrep -u "$(id -u)" -f '[S]REyeTracker\.exe' >/dev/null; }
 
 camera_dir() {
@@ -92,7 +103,7 @@ stop)
             sleep 0.2
         done
     fi
-    pid=$(bridge_pid) && kill "$pid" 2>/dev/null
+    for pid in $(bridge_pids); do kill "$pid" 2>/dev/null; done
     rm -f "$PIDFILE"
     ;;
 status)
