@@ -1564,6 +1564,49 @@ done
         missing, _ = self.missing_packages()
         self.assertNotIn("onnxruntime-devel", missing)
 
+    def test_on_arch_the_cuda_runtime_is_not_asked_for_over_an_installed_runtime_without_it(self):
+        # onnxruntime-cuda and onnxruntime-cpu both provide onnxruntime and conflict with it. On a machine
+        # with an NVIDIA GPU and onnxruntime-cpu, 1.0.0 put onnxruntime-cuda into the one pacman
+        # transaction: with --yes (--noconfirm) pacman answers its "Remove onnxruntime-cpu? [y/N]" with
+        # no and installs nothing at all, so curl, zenity, Wine and the compilers stayed missing at
+        # every run.
+        self.only_package_manager("pacman", "exit 0")
+        (self.root / "tools/nvidia-smi").unlink(missing_ok=True)
+        (self.root / "tools/nvidia-smi").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "tools/nvidia-smi").chmod(0o755)
+
+        def swap_notes(output):
+            return [line for line in output.splitlines() if line.startswith("note: ") and "onnxruntime-cuda" in line]
+
+        # No runtime at all: the CUDA build and what it needs.
+        missing, output = self.missing_packages()
+        self.assertIn("onnxruntime-cuda", missing)
+        self.assertIn("cudnn", missing)
+        self.assertNotIn("onnxruntime-cpu", missing)
+        self.assertEqual(swap_notes(output), [])
+        # The runtime for the processor is installed: nothing that conflicts with it is asked for, and
+        # a note says how to change over.
+        (self.system / "usr/lib").mkdir(parents=True)
+        (self.system / "usr/lib/libonnxruntime.so").touch()
+        missing, output = self.missing_packages()
+        self.assertNotIn("onnxruntime-cuda", missing)
+        self.assertNotIn("cudnn", missing)
+        self.assertIn("libpipewire", missing)
+        notes = swap_notes(output)
+        self.assertEqual(len(notes), 1, output)
+        self.assertIn("runs on the processor", notes[0])
+        self.assertIn("pacman -S onnxruntime-cuda cudnn", notes[0])
+        # Not when the depth model is not wanted.
+        missing, output = self.missing_packages("--no-model")
+        self.assertNotIn("onnxruntime-cuda", missing)
+        self.assertEqual(swap_notes(output), [])
+        # The CUDA build is installed: what it still lacks is asked for, and there is nothing to note.
+        (self.system / "usr/lib/libonnxruntime_providers_cuda.so").touch()
+        missing, output = self.missing_packages()
+        self.assertNotIn("onnxruntime-cuda", missing)
+        self.assertIn("cudnn", missing)
+        self.assertEqual(swap_notes(output), [])
+
     def test_an_installed_library_is_not_reported_missing_when_another_folder_has_none(self):
         # Without ldconfig (not on an ordinary user's PATH on Debian) the two usual folders were listed in
         # one ls, which fails when either pattern matches nothing: every library was reported missing.

@@ -787,12 +787,22 @@ check() { # <list> : adds the packages of what is missing to MISSING
     done
 }
 look() { # sets MISSING and UNNAMED to what is not there now
-    MISSING= UNNAMED=
+    MISSING= UNNAMED= ONNX_ON_CPU=
     check "$NEEDED"
     have zenity || have kdialog || check "$DIALOG"
     if [ -n "$MODEL" ]; then
         # An NVIDIA GPU gets the CUDA build; depth then takes milliseconds instead of a tenth of a second.
-        if have nvidia-smi && [ "$FAMILY" = 2 ]; then check "$ONNX_GPU"; else check "$ONNX_CPU"; fi
+        # Only on Arch, whose packages have one; the other families get the one runtime they have.
+        # Not over a runtime that is installed without it: Arch's onnxruntime-cuda and onnxruntime-cpu
+        # conflict (each provides onnxruntime), and pacman installs neither that nor anything else of its
+        # list while one question is answered with no, which is what --noconfirm does with "Remove
+        # onnxruntime-cpu? [y/N]". With --yes on such a machine 1.0.0 installed no package at all, at every
+        # run. The runtime that is there is kept, and a note below says how to change over.
+        if have nvidia-smi && [ "$FAMILY" = 2 ]; then
+            if present "${ONNX_CPU%%|*}" && ! present "${ONNX_GPU%%|*}"; then ONNX_ON_CPU=1; else check "$ONNX_GPU"; fi
+        else
+            check "$ONNX_CPU"
+        fi
     fi
     [ -z "$WANT_ODYSSEY" ] || check "$WINE_SIDE"
     MISSING=${MISSING# }
@@ -843,6 +853,9 @@ else
             [ -z "$STILL" ] || say "   not installed (not in this system's package lists, or the package manager could not install them):$STILL"
         fi
     fi
+fi
+if [ -n "$ONNX_ON_CPU" ]; then
+    warn "the ONNX Runtime installed here has no CUDA part (onnxruntime-cpu, or another package that provides onnxruntime): 2D -> 3D depth works and runs on the processor. To run it on the NVIDIA GPU, put onnxruntime-cuda in its place; the two cannot be installed together, so this script does not do that unasked: ${SUDO:+sudo }pacman -S onnxruntime-cuda cudnn (pacman asks whether to remove the installed one; answer yes)"
 fi
 
 # ---------------------------------------------------------------------------------------------------------
