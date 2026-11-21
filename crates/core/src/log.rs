@@ -42,6 +42,11 @@ impl Logger {
     /// renamed file. A rename that fails (on Windows, while a program that
     /// does not share the file for deletion has either file open) leaves
     /// everything as it was and is tried again by the next start.
+    ///
+    /// Processes that start together rotate one at a time, so that the
+    /// second cannot move the file the first has just started over the
+    /// generation it kept: `companion.rotating` is there for as long as one
+    /// of them is at it.
     pub fn rotate_if_large(&self) {
         self.rotate_above(ROTATE_ABOVE);
     }
@@ -50,20 +55,114 @@ impl Logger {
         self.path.with_extension("old.log")
     }
     fn rotate_above(&self, limit: u64) -> bool {
-        let large = std::fs::metadata(&self.path).is_ok_and(|m| m.is_file() && m.len() > limit);
-        large && std::fs::rename(&self.path, self.previous_path()).is_ok()
+        let large = || std::fs::metadata(&self.path).is_ok_and(|m| m.is_file() && m.len() > limit);
+        if !large() {
+            return false;
+        }
+        // The controls and the worker start within a moment of each other,
+        // and both could find the log large. One renamed it and logged a
+        // line, which started a new file; the other's rename then moved
+        // that file of one line over the generation just kept, and it was
+        // gone. So one process rotates at a time, and looks again once it
+        // is its turn: what the other has rotated already is small now.
+        let Some(_turn) = self.take_turn() else {
+            return false;
+        };
+        large() && std::fs::rename(&self.path, self.previous_path()).is_ok()
+    }
+    /// The file that is there for as long as one process is rotating.
+    fn turn_path(&self) -> PathBuf {
+        self.path.with_extension("rotating")
+    }
+    /// `None` while another process has the turn: that one rotates, and
+    /// this one has nothing to do. A turn left behind by a process that was
+    /// ended in the middle of its own (they last as long as a rename) is
+    /// removed once it is [`TURN_STALE_AFTER`] old, and the start after
+    /// this one rotates.
+    fn take_turn(&self) -> Option<Turn> {
+        let path = self.turn_path();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(_) => Some(Turn(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A time in the future (the clock was set back) is no age
+                // to wait out.
+                let stale = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|at| at.elapsed().map_or(true, |age| age >= TURN_STALE_AFTER));
+                if stale {
+                    let _ = std::fs::remove_file(&path);
+                }
+                None
+            }
+            Err(_) => None,
+        }
     }
     fn try_log(&self, message: &str) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        // The log names window titles like the other files of the data
+        // folder, and was the one file there that other users could read:
+        // it is made for its owner only (0600), as they are.
+        //
+        // And it is opened without waiting. A named pipe where the log
+        // belongs has no reader, and opening it for writing waits for one:
+        // the first line a process logged was as far as it got.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+        }
+        let mut file = options.open(&self.path)?;
+        // Checked on what was opened, so that a path replaced since cannot
+        // make the check wrong: a pipe that does have a reader, or a
+        // device, takes no line.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} is not a regular file and was not written to",
+                        self.path.display()
+                    ),
+                ));
+            }
+            // A log made by 1.0.0 or earlier is still there, readable by
+            // everyone, until it is rotated, which may be never.
+            if metadata.permissions().mode() & 0o077 != 0 {
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+        }
         // `writeln!` on a `File` issues one write per formatted piece, and
         // another process's line can land between any two of them.
         file.write_all(format_line(&now_iso(), message).as_bytes())
+    }
+}
+
+/// How old the file of a rotation turn must be before it is taken for one
+/// that was left behind.
+const TURN_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One process's turn at rotating the log; its file goes when it is over.
+struct Turn(PathBuf);
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -177,6 +276,88 @@ mod tests {
         assert!(current.ends_with(" after\n") && current.lines().count() == 1);
     }
 
+    /// The controls and the worker start together. Both found the log
+    /// large; the second rename moved the file the first had just started
+    /// over the generation it had kept.
+    #[test]
+    fn processes_that_start_together_rotate_once_and_keep_the_generation() {
+        const STARTS: usize = 8;
+        const LIMIT: u64 = 4096;
+        for round in 0..200 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("companion.log");
+            let generation = format!("the generation to keep\n{}\n", "x".repeat(LIMIT as usize));
+            std::fs::write(&path, &generation).unwrap();
+            let together = std::sync::Barrier::new(STARTS);
+            std::thread::scope(|scope| {
+                for _ in 0..STARTS {
+                    scope.spawn(|| {
+                        let logger = Logger::new(path.clone());
+                        together.wait();
+                        logger.rotate_above(LIMIT);
+                        logger.log("started");
+                    });
+                }
+            });
+            let logger = Logger::new(path.clone());
+            let previous = std::fs::read_to_string(logger.previous_path()).unwrap();
+            assert!(
+                previous.starts_with(&generation),
+                "round {round}: the previous generation is {previous:?}"
+            );
+            // Every line is in one of the two files, and nothing else is
+            // left in the folder.
+            let current = std::fs::read_to_string(&path).unwrap_or_default();
+            let started = |text: &str| text.lines().filter(|l| l.ends_with(" started")).count();
+            assert_eq!(started(&previous) + started(&current), STARTS);
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_log_is_left_alone_while_another_process_rotates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("companion.log"));
+        logger.log("before");
+        let whole = std::fs::read_to_string(logger.path()).unwrap();
+        // The other process is between its look at the size and its rename.
+        let other = logger.take_turn().unwrap();
+        assert_eq!(other.0, dir.path().join("companion.rotating"));
+        assert!(!logger.rotate_above(1));
+        assert_eq!(std::fs::read_to_string(logger.path()).unwrap(), whole);
+        assert!(!logger.previous_path().exists() && other.0.exists());
+        drop(other);
+        assert!(logger.rotate_above(1));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // A process that was ended in its turn left the file behind. Not
+        // old enough to tell: left. Old enough: removed, and the start
+        // after that rotates.
+        logger.log("next");
+        let left_behind = logger.turn_path();
+        std::fs::write(&left_behind, b"").unwrap();
+        assert!(!logger.rotate_above(1));
+        assert!(left_behind.exists());
+        let then = std::time::SystemTime::now() - 2 * TURN_STALE_AFTER;
+        std::fs::File::options()
+            .write(true)
+            .open(&left_behind)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+        assert!(!logger.rotate_above(1));
+        assert!(!left_behind.exists() && logger.path().exists());
+        assert!(logger.rotate_above(1));
+        let previous = std::fs::read_to_string(logger.previous_path()).unwrap();
+        assert!(previous.ends_with(" next\n"), "{previous:?}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // A small log asks for no turn, so a file left behind is not even
+        // looked at.
+        std::fs::write(&left_behind, b"").unwrap();
+        logger.log("small");
+        assert!(!logger.rotate_above(4096));
+        assert!(left_behind.exists());
+    }
+
     /// A program that has the log open without sharing it for deletion (an
     /// editor, a `type` in progress) makes Windows refuse the rename.
     #[cfg(windows)]
@@ -218,6 +399,90 @@ mod tests {
             std::fs::read_to_string(logger.previous_path()).unwrap(),
             text
         );
+    }
+
+    /// A named pipe at `companion.log` (made by mistake, or by another
+    /// program of the same user) used to stop every process at its first
+    /// logged line, the self-test included: opening a pipe for writing
+    /// waits for a reader.
+    #[cfg(unix)]
+    #[test]
+    fn logging_does_not_wait_on_a_pipe_where_the_log_belongs() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("companion.log");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            // (a system without mkfifo: nothing to try it with)
+            return;
+        }
+        let (done, logged) = std::sync::mpsc::channel();
+        let path = pipe.clone();
+        std::thread::spawn(move || {
+            let logger = Logger::new(path);
+            let result = logger.try_log("to nobody").map_err(|e| e.kind());
+            // The call the rest of the program makes swallows the refusal.
+            logger.log("to nobody");
+            done.send(result)
+        });
+        let logged = logged.recv_timeout(std::time::Duration::from_secs(10));
+        // Let a logger that does wait go, so that the test ends either way.
+        // Kept open: from here on the pipe has a reader.
+        let mut reader = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&pipe)
+            .unwrap();
+        assert!(
+            matches!(logged, Ok(Err(_))),
+            "logging waited on the pipe, or wrote to it: {logged:?}"
+        );
+        // With a reader the pipe can be opened, and still takes no line.
+        let logger = Logger::new(pipe.clone());
+        let refused = logger.try_log("to a reader").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            refused.to_string().contains("not a regular file"),
+            "{refused}"
+        );
+        let mut read = [0u8; 16];
+        let nothing = std::io::Read::read(&mut reader, &mut read).unwrap_err();
+        assert_eq!(nothing.kind(), std::io::ErrorKind::WouldBlock);
+        // A folder is no log either. A link to a file is logged through.
+        let folder = Logger::new(dir.path().join("folder.log"));
+        std::fs::create_dir(folder.path()).unwrap();
+        assert!(folder.try_log("to a folder").is_err());
+        let link = Logger::new(dir.path().join("link.log"));
+        std::os::unix::fs::symlink("real.log", link.path()).unwrap();
+        link.log("through the link");
+        let text = std::fs::read_to_string(dir.path().join("real.log")).unwrap();
+        assert!(text.ends_with(" through the link\n"), "{text:?}");
+    }
+
+    /// The log was the one file of the data folder made with the default
+    /// permissions (0644 under the usual umask); the rest are 0600.
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let logger = Logger::new(dir.path().join("companion.log"));
+        logger.log("first");
+        assert_eq!(mode(logger.path()), 0o600);
+        // One an earlier version made is closed to others by the next line,
+        // and keeps what it had.
+        std::fs::set_permissions(logger.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        logger.log("second");
+        assert_eq!(mode(logger.path()), 0o600);
+        let text = std::fs::read_to_string(logger.path()).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        // So is the generation that follows a rotation.
+        assert!(logger.rotate_above(1));
+        logger.log("third");
+        assert_eq!(mode(logger.path()), 0o600);
+        assert_eq!(mode(&logger.previous_path()), 0o600);
     }
 
     /// `<RFC 3339 time> <message>`: the whole shape of the time is checked,

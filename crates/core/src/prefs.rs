@@ -175,9 +175,16 @@ impl Preferences {
 
     /// Explicit recovery after a load error: preserve the existing bytes in a
     /// unique backup before replacing the file with settings chosen in the UI.
+    ///
+    /// A file over [`RECOVERY_COPY_LIMIT`] is not settings of ours, damaged
+    /// or not: it is refused with an error naming it, and left as it is.
     pub fn save_recovering_to(&mut self, path: &Path) -> io::Result<Option<PathBuf>> {
+        self.save_recovering_within(path, RECOVERY_COPY_LIMIT)
+    }
+
+    fn save_recovering_within(&mut self, path: &Path, limit: u64) -> io::Result<Option<PathBuf>> {
         let backup = match crate::fsutil::open_regular(path) {
-            Ok(mut original) => {
+            Ok(original) => {
                 let parent = path
                     .parent()
                     .filter(|p| !p.as_os_str().is_empty())
@@ -191,7 +198,23 @@ impl Preferences {
                     .prefix(PREFIX)
                     .suffix(SUFFIX)
                     .tempfile_in(long.as_deref().unwrap_or(parent))?;
-                std::io::copy(&mut original, &mut backup)?;
+                // The copy is made on the window's thread, at Apply. Settings
+                // are read up to a mebibyte and no further, but whatever
+                // stood at the path was copied whole: a file of gigabytes
+                // there kept the window from answering for as long as that
+                // took, and filled the disk a second time.
+                use std::io::Read;
+                let copied = io::copy(&mut original.take(limit.saturating_add(1)), &mut backup)?;
+                if copied > limit {
+                    // The unfinished copy goes with `backup`.
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{} is larger than {limit} bytes and was not replaced",
+                            path.display()
+                        ),
+                    ));
+                }
                 backup.as_file().sync_all()?;
                 Some(backup.keep().map_err(|e| e.error)?.1)
             }
@@ -211,6 +234,10 @@ impl Preferences {
         Ok(backup)
     }
 }
+
+/// The largest settings file that recovery keeps a copy of before it
+/// replaces it: 16 MiB, sixteen times what is ever read as settings.
+pub const RECOVERY_COPY_LIMIT: u64 = 16 * SMALL_FILE_LIMIT;
 
 /// Desktop-only presentation settings, saved separately from conversion.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -383,6 +410,53 @@ mod tests {
         );
         assert!(prefs.save_recovering_to(dir.path()).is_err());
         assert!(dir.path().is_dir());
+    }
+
+    /// Whatever stood where the settings belong was copied whole before it
+    /// was replaced, on the window's thread, however large it was.
+    #[test]
+    fn recovery_refuses_a_file_too_large_to_be_settings_and_leaves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut prefs = Preferences {
+            auto_convert: false,
+            ..Default::default()
+        };
+        std::fs::write(&path, [b'x'; 65]).unwrap();
+        let error = prefs.save_recovering_within(&path, 64).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        let text = error.to_string();
+        assert!(
+            text.contains("settings.json") && text.contains("larger than 64 bytes"),
+            "{text}"
+        );
+        // Neither replaced nor copied, and no part of a copy is left.
+        assert_eq!(std::fs::read(&path).unwrap(), [b'x'; 65]);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // A file exactly at the limit is kept whole and replaced.
+        std::fs::write(&path, [b'y'; 64]).unwrap();
+        let backup = prefs.save_recovering_within(&path, 64).unwrap().unwrap();
+        assert_eq!(std::fs::read(backup).unwrap(), [b'y'; 64]);
+        assert!(!Preferences::load_from(&path).unwrap().auto_convert);
+        // The limit in use is far above any settings and far below a file
+        // that would be felt.
+        assert_eq!(RECOVERY_COPY_LIMIT, 16 * 1024 * 1024);
+        let sparse = dir.path().join("sparse").join("settings.json");
+        std::fs::create_dir(sparse.parent().unwrap()).unwrap();
+        std::fs::File::create(&sparse)
+            .unwrap()
+            .set_len(RECOVERY_COPY_LIMIT + 1)
+            .unwrap();
+        let error = prefs.save_recovering_to(&sparse).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::metadata(&sparse).unwrap().len(),
+            RECOVERY_COPY_LIMIT + 1
+        );
+        assert_eq!(
+            std::fs::read_dir(sparse.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[test]
