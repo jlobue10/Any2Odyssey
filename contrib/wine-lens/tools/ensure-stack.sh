@@ -87,6 +87,14 @@ if ! stack_ok; then
     # well: a start that failed, or a caller ended while it waited for the board below, left Leia's programs
     # and Wine's server up with the old note, and the next request took that for a stack that had the board.
     rm -f "$STAMP"
+    # Leia's programs begin a log file at every run and remove none. On Windows that is Leia's to look
+    # after; here nothing did, and the eye tracker alone writes about 10 MB for every hour it follows a
+    # face (880 kB in the first five minutes of a film, counted on the Odyssey). So the files that no
+    # program has written to for two weeks go, now that Leia's programs are about to be started and none
+    # of them has such a file open: the service's, the tracker's, and those of the programs that asked
+    # the service for something. Nothing else in those folders is touched.
+    find "$WINEPREFIX/drive_c/ProgramData/Simulated Reality" -path '*/Log/*.txt' -type f -mtime +14 \
+        -exec rm -f -- {} + 2>/dev/null
     note_logs
     "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- || {
         # (start-stack.sh leaves its reason there when it has one of its own)
