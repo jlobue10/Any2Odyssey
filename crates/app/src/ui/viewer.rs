@@ -326,7 +326,14 @@ fn decode(path: &Path) -> Result<RgbaImage, String> {
             file.len() / 1_000_000
         )));
     }
-    let mut reader = image::ImageReader::open(path).map_err(|e| failed(&e))?;
+    // What the file is, is read from its first bytes; its name only decides
+    // where they say nothing. By the name alone a picture saved without an
+    // ending, with another format's, or as "pair.png.part" was refused,
+    // while the file manager that offered this program for it had looked at
+    // the content. The formats taken are the same either way.
+    let mut reader = image::ImageReader::open(path)
+        .and_then(image::ImageReader::with_guessed_format)
+        .map_err(|e| failed(&e))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_SIDE);
     limits.max_image_height = Some(MAX_IMAGE_SIDE);
@@ -3294,6 +3301,41 @@ mod tests {
         if file.set_len(MAX_FILE_BYTES + 1).is_ok() {
             let error = decode(&sparse).unwrap_err();
             assert!(error.contains("too large (1073 MB on disk)"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_picture_is_opened_by_what_it_is_not_by_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        pair().write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        // Another format's ending, none, and a download's.
+        for name in ["pair.jpg", "pair", "pair.png.part", "pair.PNG"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, &png).unwrap();
+            assert_eq!(decode(&path), Ok(pair()), "{name}");
+        }
+        let mut bmp = std::io::Cursor::new(Vec::new());
+        pair().write_to(&mut bmp, image::ImageFormat::Bmp).unwrap();
+        let path = dir.path().join("pair.png");
+        std::fs::write(&path, bmp.into_inner()).unwrap();
+        assert_eq!(decode(&path), Ok(pair()), "a BMP named .png");
+        // What is no picture stays none whatever it is called, and so does
+        // one in a format this program does not read (the first bytes of a
+        // GIF and of a WebP file).
+        for (name, content) in [
+            ("notes.png", &b"not a picture at all"[..]),
+            ("notes", b"not a picture at all"),
+            ("moving.png", b"GIF89a\x01\0\x01\0\0\0\0;"),
+            ("moving", b"GIF89a\x01\0\x01\0\0\0\0;"),
+            ("photo.jpg", b"RIFF\x04\0\0\0WEBPVP8 "),
+            ("empty.png", b""),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            let error = decode(&path).unwrap_err();
+            assert!(error.starts_with("Could not open "), "{name}: {error}");
         }
     }
 
