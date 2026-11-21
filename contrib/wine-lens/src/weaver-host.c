@@ -45,6 +45,7 @@ void a2o_weaver_eyes(void *w, float *left, float *right);
 void a2o_weaver_destroy(void *w);
 unsigned long long a2o_weaver_latency(void *w);
 void a2o_weaver_latency_frames(void *w, unsigned long long frames);
+void a2o_weaver_latency_time(void *w, unsigned long long microseconds);
 
 #define GL_RGBA8 0x8058
 #define GL_CLAMP_TO_EDGE 0x812F
@@ -248,16 +249,25 @@ int main(int argc, char **argv)
      * the views for where the eyes will be when the picture it weaves is seen, and has to be told how long
      * that takes from weave() on; untold, it assumes a number of frames of its own choosing. Under Wine a
      * picture goes through Xwayland and the desktop's compositor on its way, which Leia did not count on.
-     * A2O_WEAVER_LATENCY_FRAMES=<n> tells the weaver n frames, and the statistics begin with the time the
-     * weaver reckons with. Neither is touched in a run without these variables. */
+     * A2O_WEAVER_LATENCY_FRAMES=<n> tells the weaver n frames, A2O_WEAVER_LATENCY_US=<n> that many
+     * microseconds, and the statistics begin with the time the weaver reckons with and say it again every
+     * second. (On the Odyssey at 120 Hz under Wine 11.22 the weaver said 40000 microseconds by itself, and
+     * the same right after it was told 3 frames: the time is said again later because it may be worked out
+     * from the frames only once pictures are woven, and the microseconds are there because they leave
+     * nothing to work out.) None of this is touched in a run without these variables. */
+    if (getenv("A2O_WEAVER_LATENCY_US")) {
+        int microseconds = atoi(getenv("A2O_WEAVER_LATENCY_US"));
+        if (microseconds >= 0 && microseconds <= 200000) a2o_weaver_latency_time(weaver, (unsigned long long)microseconds);
+    }
     if (getenv("A2O_WEAVER_LATENCY_FRAMES")) {
         int frames = atoi(getenv("A2O_WEAVER_LATENCY_FRAMES"));
         if (frames >= 0 && frames <= 16) a2o_weaver_latency_frames(weaver, (unsigned long long)frames);
     }
     if (stats) {
-        fprintf(stats, "latency %llu microseconds%s%s\n", a2o_weaver_latency(weaver),
-                getenv("A2O_WEAVER_LATENCY_FRAMES") ? ", asked for frames: " : " (the weaver's own choice)",
-                getenv("A2O_WEAVER_LATENCY_FRAMES") ? getenv("A2O_WEAVER_LATENCY_FRAMES") : "");
+        const char *frames = getenv("A2O_WEAVER_LATENCY_FRAMES"), *time = getenv("A2O_WEAVER_LATENCY_US");
+        fprintf(stats, "latency %llu microseconds%s%s%s%s\n", a2o_weaver_latency(weaver),
+                frames ? ", asked for frames: " : "", frames ? frames : "",
+                time ? ", asked for microseconds: " : "", time ? time : "");
         fflush(stats);
     }
     QueryPerformanceFrequency(&qpf);
@@ -328,8 +338,9 @@ int main(int argc, char **argv)
                 for (unsigned i = 0; i < kept; i++) if (turn_ms[i] < shortest) shortest = turn_ms[i];
                 for (unsigned i = 0; i < kept; i++) if (turn_ms[i] >= shortest * 1.5) late++;
                 fprintf(stats, "weaves %u pictures %u longest turn %.1f ms longest upload %.1f ms mean upload %.1f ms "
-                               "shortest turn %.1f ms late turns %u\n",
-                        turns, uploads, worst_ms, worst_upload_ms, uploads ? upload_sum_ms / uploads : 0.0, shortest, late);
+                               "shortest turn %.1f ms late turns %u latency %llu\n",
+                        turns, uploads, worst_ms, worst_upload_ms, uploads ? upload_sum_ms / uploads : 0.0, shortest, late,
+                        a2o_weaver_latency(weaver));
                 fflush(stats);
                 turns = uploads = 0; worst_ms = worst_upload_ms = upload_sum_ms = 0; stats_since = t;
             }

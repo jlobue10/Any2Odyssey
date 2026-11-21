@@ -21,7 +21,7 @@ Linux, the Odyssey 3D set-up (run `any2odyssey-setup` once after updating; it en
 
 ### Diagnostics
 
-- `A2O_WEAVER_STATS` now begins with the time Leia's weaver reckons with between weaving a picture and its being seen (`latency ... microseconds`), and each second's line also has the mean time of an upload, the shortest turn, and how many turns were half as long again or more (`late turns`): refreshes at which the picture did not follow the eyes, which is what a 66 MB upload on the weaving thread may cost at 2160 lines. `A2O_WEAVER_LATENCY_FRAMES=<n>` tells the weaver n frames instead of its own choice. Both are for finding out whether the flicker that is left when the head moves comes from there; a run without the variables calls nothing new.
+- `A2O_WEAVER_STATS` now begins with the time Leia's weaver reckons with between weaving a picture and its being seen (`latency ... microseconds`), and each second's line also has the mean time of an upload, the shortest turn, and how many turns were half as long again or more (`late turns`): refreshes at which the picture did not follow the eyes, which is what a 66 MB upload on the weaving thread may cost at 2160 lines. `A2O_WEAVER_LATENCY_FRAMES=<n>` tells the weaver n frames instead of its own choice and `A2O_WEAVER_LATENCY_US=<n>` that many microseconds; each second's line says the time again. On the Odyssey at 120 Hz the weaver's own choice was 40000 microseconds, and it said the same right after it was told 3 frames. Both are for finding out whether the flicker that is left when the head moves comes from there; a run without the variables calls nothing new.
 
 ### Hardware verification
 

@@ -50,9 +50,10 @@ void a2o_weaver_input(void *w, unsigned texture, int width, int height, unsigned
 }
 void a2o_weaver_weave(void *w) { ((SR::IGLWeaver1 *)w)->weave(); }
 void a2o_weaver_eyes(void *w, float *left, float *right) { ((SR::IGLWeaver1 *)w)->getPredictedEyePositions(left, right); }
-// The two below are for a measurement only (weaver-host.c, A2O_WEAVER_STATS and A2O_WEAVER_LATENCY_FRAMES):
+// The three below are for a measurement only (weaver-host.c, A2O_WEAVER_STATS, A2O_WEAVER_LATENCY_FRAMES and A2O_WEAVER_LATENCY_US):
 // nothing calls them in an ordinary run.
 unsigned long long a2o_weaver_latency(void *w) { return ((SR::IGLWeaver1 *)w)->getLatency(); }
 void a2o_weaver_latency_frames(void *w, unsigned long long frames) { ((SR::IGLWeaver1 *)w)->setLatencyInFrames(frames); }
+void a2o_weaver_latency_time(void *w, unsigned long long microseconds) { ((SR::IGLWeaver1 *)w)->setLatency(microseconds); }
 void a2o_weaver_destroy(void *w) { ((SR::IGLWeaver1 *)w)->destroy(); }
 }
