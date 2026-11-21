@@ -285,9 +285,9 @@ struct DepthState {
     /// earlier one is known to be out of date.
     version: u64,
     /// The model's newest answer, and the frame and detail it was for. It
-    /// is kept as the model gave it, as the smoother is to have it: a map
-    /// brought to 0..=1 beforehand leaves the smoother's running range
-    /// nothing to follow (`depth::RawDepth`).
+    /// is kept as the model gave it, as the smoother is to have it: which
+    /// range a map is brought to 0..=1 with is the smoother's to say
+    /// (`depth::RawDepth`).
     latest: Option<(u64, u32, RawDepth)>,
     /// That answer has been eased in all the way: the map will not change
     /// until the model answers again.
@@ -1021,7 +1021,8 @@ mod tests {
                 Ok(Some(RawDepth::new(4, 1, raw).unwrap()))
             })
         });
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // What the smoother makes of the same numbers, given them itself.
+        let mut given = DepthSmoother::default();
         for (frame, map) in maps.iter().enumerate() {
             let serial = frame as u64 + 1;
             {
@@ -1037,25 +1038,15 @@ mod tests {
             // The answer is kept as it came, for the still screen's easing.
             let (answered, _, latest) = depth.latest.as_ref().unwrap();
             assert_eq!((*answered, latest.values()), (serial, &map[..]));
+            // And what is shown is what the smoother makes of those
+            // numbers at the steadiness chosen: which range each map is
+            // measured against is the smoother's to say
+            // (`live::DepthSmoother`), from the numbers as they came.
+            assert!(given.update(4, 1, map, 0.6));
             let values = depth.smoother.values();
-            match frame {
-                0 => assert_eq!(values, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]),
-                // The points behind stay where they were while the range
-                // comes round to the new nearest point. Given the map
-                // brought to 0..=1 (0, 0.25, 0.5, 1), as it was until
-                // 1.0.0, the smoother had them at 0.3 and 0.5625 at once.
-                1 => assert!(
-                    close(values[1], 0.332013) && close(values[2], 0.664026) && values[3] == 1.0,
-                    "{values:?}"
-                ),
-                // So large a change is followed at once, all but a quarter
-                // of the new range (`live::DepthSmoother`).
-                _ => assert!(
-                    close(values[1], 1.0 / 29.25 + 1.0 / 16.0)
-                        && close(values[2], 2.0 / 29.25 + 1.0 / 16.0)
-                        && values[3] == 1.0,
-                    "{values:?}"
-                ),
+            assert_eq!(values, given.values(), "map {frame}");
+            if frame == 0 {
+                assert_eq!(values, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]);
             }
         }
         shared.stop.store(true, Ordering::Relaxed);
