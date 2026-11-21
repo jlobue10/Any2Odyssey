@@ -261,3 +261,12 @@ if [ -n "$TRACKING" ]; then
     echo "       Eye tracking is prepared too: '$T/tools/tracking.sh' start | stop | status"
     echo "       (start it while the lens helper is running; it needs Leia's service up)."
 fi
+
+# What this Wine side was made from: a digest of the set-up's own files (this script, the sources of the
+# stand-ins, the tools). The installer (packaging/linux/install.sh, older_wine_side) makes the same digest of
+# the set-up it has installed and says so when the two differ. Up to 1.0.0 it compared the copied scripts
+# only: a release that changed nothing but a stand-in's source left the old libraries in the prefix, and
+# nothing said so. Noted last: a set-up that stopped on the way leaves no note, or the one before it.
+(cd "$HERE" && sha256sum setup.sh any2odyssey-lens-helper any2odyssey-weaver src/*.* tools/*.* | LC_ALL=C sort |
+    sha256sum | cut -d' ' -f1) >"$T/made-from" 2>/dev/null || true
+[ -s "$T/made-from" ] || rm -f "$T/made-from"

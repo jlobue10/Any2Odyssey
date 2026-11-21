@@ -997,17 +997,42 @@ fi
 # on with the scripts of the version that had made it, and nothing said so: what 0.9.8 changed in the start
 # of Leia's programs reached nobody who did not run the setup once more. It is said now, here and in what
 # any2odyssey-setup prints.
+#
+# That looked at the scripts setup.sh copies, and at nothing else: the libraries it compiles from
+# wine-lens/src, the board description tools/mkboard.py writes and what setup.sh itself does to the prefix
+# were not compared, and a release that changed only those left the old ones in place without a word.
+# setup.sh now notes in the Wine side what it was made from (made-from: a digest of the set-up's own files,
+# by the command that made_from repeats here), and the note is compared with the set-up installed now.
+# A Wine side without the note was made by 1.0.0 or earlier, or on a system without sha256sum. Its copied
+# scripts are compared as before; where they are the same, it counts as older only when this version's
+# sources of what is compiled (src, tools/mkboard.py) are not the ones 1.0.0 had. Not for the mere lack of
+# the note: that would tell everybody who updates to make the Wine side again, with the Windows drive
+# mounted, also after an update that changed nothing in it.
+STAMP_FILES='setup.sh any2odyssey-lens-helper any2odyssey-weaver src/*.* tools/*.*'
+BUILT_FILES='src/*.* tools/mkboard.py'
+BUILT_1_0_0=e38a9c8eeb3186d9717bf6b1fbf59a33d6c218f012e3285eeacec42533fae0f2
+made_from() { # <files of the set-up, as patterns>: their digest, or nothing where it cannot be made
+    have sha256sum && [ -f "$WINE_LENS/setup.sh" ] || return 0
+    # shellcheck disable=SC2086  # patterns, for the set-up's folder
+    (cd "$WINE_LENS" 2>/dev/null && sha256sum $1 2>/dev/null | LC_ALL=C sort | sha256sum 2>/dev/null | cut -d' ' -f1) || true
+}
 older_wine_side() {
     [ -f "$DATA/wine-lens/tools/start-stack.sh" ] || return 1
+    made=$(cat "$DATA/wine-lens/made-from" 2>/dev/null) || made=
+    now=$(made_from "$STAMP_FILES")
+    if [ -n "$made" ] && [ -n "$now" ]; then
+        [ "$made" != "$now" ] || return 1
+        return 0
+    fi
     for script in any2odyssey-lens-helper any2odyssey-weaver tools/start-stack.sh tools/ensure-stack.sh \
         tools/tracking.sh tools/noxon.sh tools/mkedid.py tools/kwin-overlay.js; do
         [ -f "$WINE_LENS/$script" ] || continue
         cmp -s "$WINE_LENS/$script" "$DATA/wine-lens/$script" || return 0
     done
-    return 1
+    [ -z "$made" ] && [ -n "$now" ] && [ "$(made_from "$BUILT_FILES")" != "$BUILT_1_0_0" ]
 }
 if [ -z "$DRY" ] && older_wine_side; then
-    warn "the Odyssey 3D's Wine side in $DATA/wine-lens was made by another version of Any2Odyssey and still runs that version's scripts; what this version changed in them does not apply until it is made again. With the Windows drive mounted and the monitor awake, run this script again, or: $(quoted "$WINE_LENS/setup.sh") /path/to/that/drive"
+    warn "the Odyssey 3D's Wine side in $DATA/wine-lens was made by another version of Any2Odyssey and still runs that version's scripts and stand-in libraries; what this version changed in them does not apply until it is made again. With the Windows drive mounted and the monitor awake, run this script again, or: $(quoted "$WINE_LENS/setup.sh") /path/to/that/drive"
 fi
 
 say ""

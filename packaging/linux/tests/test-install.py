@@ -6,6 +6,7 @@ The installed fixture only records its argv; it never opens an image or a UI.
 """
 
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import pty
@@ -1093,6 +1094,88 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(seen, ["update-desktop-database 0", "gtk-update-icon-cache 0", "wineserver 0"],
                          result.stdout + result.stderr)
 
+    def a_setup_that_copies_its_scripts(self):
+        """The archive's setup, as far as the installer's look at a Wine side goes: it puts its scripts
+        into the data folder and notes what the Wine side was made from, with the lines the real
+        setup.sh ends with (so that the installer is tried against the note as that script writes it)."""
+        real = (LINUX.parents[1] / "contrib/wine-lens/setup.sh").read_text()
+        noting = real[real.index("# What this Wine side was made from"):]
+        self.assertIn("made-from", noting)
+        (self.archive / "wine-lens/setup.sh").write_text(
+            '#!/bin/sh\nset -eu\nprintf "%s\\000" "$@" > "$A2O_INSTALL_TEST_SETUP_LOG"\n'
+            'HERE=$(cd "$(dirname "$0")" && pwd)\nT=$ANY2ODYSSEY_DATA_DIR/wine-lens\n'
+            'mkdir -p "$T/tools"\ncp "$HERE"/tools/*.sh "$T/tools/"\n'
+            'for script in any2odyssey-lens-helper any2odyssey-weaver; do\n'
+            '    [ ! -f "$HERE/$script" ] || cp "$HERE/$script" "$T/"\ndone\n'
+            + noting)
+
+    def digest_of(self, folder, names):
+        """The digest setup.sh and the installer make of files of the set-up (sha256sum's lines, sorted)."""
+        lines = sorted(f"{hashlib.sha256((folder / name).read_bytes()).hexdigest()}  {name}\n" for name in names)
+        return hashlib.sha256("".join(lines).encode()).hexdigest()
+
+    def test_an_update_that_changes_only_what_the_setup_compiles_says_so(self):
+        # The look at a Wine side compared the eight scripts setup.sh copies. A release that changed only a
+        # stand-in's C source, tools/mkboard.py or setup.sh itself left the libraries of the version
+        # before in the prefix, and neither the installer nor any2odyssey-setup said so.
+        if not shutil.which("sha256sum"):
+            self.skipTest("needs sha256sum (coreutils), which the Wine side's note is made with")
+        data = Path(self.env["ANY2ODYSSEY_DATA_DIR"])
+        files = {"tools/start-stack.sh": "#!/bin/sh\n", "tools/mkboard.py": "# the board\n",
+                 "any2odyssey-lens-helper": "#!/bin/sh\n", "any2odyssey-weaver": "#!/bin/sh\n",
+                 "src/cfgshim.c": "/* the stand-in */\n", "src/a2ocam.def": "EXPORTS\n"}
+        for name, text in files.items():
+            (self.archive / "wine-lens" / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.archive / "wine-lens" / name).write_text(text)
+        self.a_setup_that_copies_its_scripts()
+        prefix = self.root / "prefix"
+        flags = ["--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model"]
+
+        def said(*extra):
+            result = self.run_installer(*flags, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return [line for line in result.stdout.splitlines() if "another version" in line]
+
+        (self.system / "dev/odyssey-lens").touch()
+        self.windows_drive("mnt/windows", self.block_device("a2ofix", "pci0000:00/nvme0"))
+        self.assertEqual(said("--yes"), [])
+        self.assertIsNotNone(self.setup_ran_with())
+        # The note is what the real setup.sh's lines write: one digest, of the files as this test reads them.
+        note = data / "wine-lens/made-from"
+        self.assertEqual(note.read_text(), self.digest_of(self.archive / "wine-lens", ["setup.sh", *files]) + "\n")
+        self.assertEqual(said("--no-odyssey"), [])
+        # The next version changes one source that is compiled, and nothing that is copied.
+        for name in ["src/cfgshim.c", "tools/mkboard.py", "setup.sh"]:
+            with self.subTest(changed=name):
+                changed = self.archive / "wine-lens" / name
+                before = changed.read_text()
+                changed.write_text(before + "# changed in the next version\n")
+                lines = said("--no-odyssey")
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn(f"{data}/wine-lens was made by another version", lines[0])
+                changed.write_text(before)
+                self.assertEqual(said("--no-odyssey"), [])
+        # Made again by the version that changed it: nothing to say.
+        (self.archive / "wine-lens/src/cfgshim.c").write_text("/* the stand-in of the next version */\n")
+        self.assertEqual(len(said("--no-odyssey")), 1)
+        self.assertEqual(said("--yes"), [])
+        self.assertEqual(said("--no-odyssey"), [])
+        # A Wine side without the note, as 1.0.0 and earlier made it, with the same copied scripts: older
+        # when what this version compiles from is not what 1.0.0 compiled from ...
+        note.unlink()
+        self.assertEqual(len(said("--no-odyssey")), 1)
+        # ... and not for the lack of the note alone, where the sources are the ones 1.0.0 had.
+        installer = self.archive / "install.sh"
+        text = installer.read_text()
+        ours = [line for line in text.splitlines() if line.startswith("BUILT_1_0_0=")]
+        self.assertEqual(len(ours), 1)
+        compiled = self.digest_of(self.archive / "wine-lens", ["src/cfgshim.c", "src/a2ocam.def", "tools/mkboard.py"])
+        installer.write_text(text.replace(ours[0], f"BUILT_1_0_0={compiled}"))
+        self.assertEqual(said("--no-odyssey"), [])
+        # (its copied scripts still count, as before)
+        (data / "wine-lens/tools/start-stack.sh").write_text("#!/bin/sh\n# of the version before\n")
+        self.assertEqual(len(said("--no-odyssey")), 1)
+
     def test_an_update_says_when_the_wine_side_still_runs_another_versions_scripts(self):
         # Seen with the published archives and Arch packages of 0.9.7 and 0.9.8: after the update the data
         # folder's start-stack.sh was still 0.9.7's, in every run that did not make the Wine side again, and
@@ -1102,12 +1185,7 @@ class InstallerTests(unittest.TestCase):
         for name in scripts:
             (self.archive / "wine-lens" / name).parent.mkdir(parents=True, exist_ok=True)
             (self.archive / "wine-lens" / name).write_text(f"#!/bin/sh\n# {name} of this version\n")
-        # The setup, as far as this goes: it puts its scripts into the data folder.
-        (self.archive / "wine-lens/setup.sh").write_text(
-            '#!/bin/sh\nprintf "%s\\000" "$@" > "$A2O_INSTALL_TEST_SETUP_LOG"\nhere=$(dirname "$0")\n'
-            'mkdir -p "$ANY2ODYSSEY_DATA_DIR/wine-lens/tools"\n'
-            'cp "$here"/tools/*.sh "$ANY2ODYSSEY_DATA_DIR/wine-lens/tools/"\n'
-            'cp "$here/any2odyssey-lens-helper" "$ANY2ODYSSEY_DATA_DIR/wine-lens/"\n')
+        self.a_setup_that_copies_its_scripts()
         prefix = self.root / "prefix"
         flags = ["--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model"]
 
