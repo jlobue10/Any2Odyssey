@@ -765,6 +765,94 @@ fn last_one_lets_go(
     unload_if(&|| running.load(Ordering::SeqCst) == 0);
 }
 
+/// How bright a pixel of a black bar may be at the most, in each colour: a
+/// video's black is 16, and a player and the shrinking add a little.
+const BAR_BLACK: u8 = 24;
+
+/// The black bars a film is shown between on a screen of another shape:
+/// how many rows at the top and at the bottom of `frame`, and how many
+/// columns at its left and at its right, are black from end to end (top,
+/// bottom, left, right).
+///
+/// The model does not know a bar for nothing. It reads the bars of a film
+/// as a frame in front of the picture: over 100 seconds of a film of
+/// 1280 x 534 on a screen of 1280 x 720 (audit round 24, Tears of Steel) it
+/// had the bars at three quarters of the way from far to near in the mean,
+/// and the nearest point of the whole map lay in a bar in 480 of 600 maps.
+/// The range from far to near is the map's, so the film itself was left
+/// three quarters of it in the middle, two fifths or less in every tenth
+/// map and 27 % at the least. With the bars named, the depth thread puts
+/// them where the farthest point of the picture is
+/// (`depth::RawDepth::far_at_the_edges`), and the range is the picture's.
+///
+/// A bar has to be a hundredth of the side or more (a border of a pixel or
+/// two is none), and together the two of a side at most three quarters of
+/// it (an upright video on a wide screen has two thirds): what is dark for
+/// more than that is a dark picture, and a picture that is black all over
+/// has no bars. Rows are looked at first, columns between them: a frame
+/// that is no film between bars is told by its first row and column. The
+/// bar above and the bar below are taken to be of one height where one of
+/// them has subtitles, a player's controls or the pointer in it.
+fn black_bars(frame: &RgbaImage) -> (u32, u32, u32, u32) {
+    let (w, h) = (frame.width() as usize, frame.height() as usize);
+    let pixels = frame.as_raw().as_chunks::<4>().0;
+    let black = |p: &[u8; 4]| p[..3].iter().all(|&colour| colour <= BAR_BLACK);
+    let bars = |first: usize, last: usize, side: usize| {
+        let bar = |bar: usize| if bar * 100 >= side { bar } else { 0 };
+        if (first + last) * 4 > side * 3 {
+            (0, 0)
+        } else {
+            (bar(first), bar(last))
+        }
+    };
+    let row = |y: usize| pixels[y * w..(y + 1) * w].iter().all(black);
+    let top = (0..h).take_while(|&y| row(y)).count();
+    if top == h {
+        return (0, 0, 0, 0);
+    }
+    let bottom = (0..h).rev().take_while(|&y| row(y)).count();
+    // A bar with something in it: subtitles, a player's controls, the
+    // pointer. Its rows are black from end to end only as far as that
+    // reaches, and the rest of the bar would be the picture's: the range
+    // would be the bar's again for as long as a subtitle stands, and the
+    // film's depth would pump with every line of them. A film's two bars
+    // are of one height. Where one reaches further than the other and the
+    // same rows at the other edge are black in four pixels of five (two
+    // long lines of subtitles leave about that), that one is a bar as
+    // high, with what stands in it.
+    let mostly_black = |rows: std::ops::Range<usize>| {
+        let dark = pixels[rows.start * w..rows.end * w]
+            .iter()
+            .filter(|pixel| black(pixel))
+            .count();
+        dark * 5 >= rows.len() * w * 4
+    };
+    let (top, bottom) = match (top, bottom) {
+        (top, bottom) if top > bottom && top <= h / 2 && mostly_black(h - top..h) => (top, top),
+        (top, bottom) if bottom > top && bottom <= h / 2 && mostly_black(0..bottom) => {
+            (bottom, bottom)
+        }
+        as_found => as_found,
+    };
+    let (top, bottom) = bars(top, bottom, h);
+    let column = |x: usize| (top..h - bottom).all(|y| black(&pixels[y * w + x]));
+    let left = (0..w).take_while(|&x| column(x)).count();
+    let right = (0..w).rev().take_while(|&x| column(x)).count();
+    let (left, right) = bars(left, right, w);
+    (top as u32, bottom as u32, left as u32, right as u32)
+}
+
+/// The rows (or columns) of a depth map of `map` rows that a bar of `bar`
+/// rows of the model's frame of `frame` rows takes: every row the bar
+/// reaches into, and one more, where the model's answer is on its way from
+/// what it says of the bar to what it says of the picture.
+fn bar_in_map(bar: u32, frame: u32, map: u32) -> u32 {
+    match bar {
+        0 => 0,
+        bar => (u64::from(bar) * u64::from(map)).div_ceil(u64::from(frame.max(1))) as u32 + 1,
+    }
+}
+
 /// [`depth_loop`] with the model as `estimate`, which is given a frame and
 /// the long side the model is to see it at.
 fn depth_loop_with(
@@ -816,7 +904,15 @@ fn depth_loop_with(
         // 3840 x 2160 screen.
         let estimated = match RgbaImage::from_raw(width, height, std::mem::take(&mut pixels)) {
             Some(frame) => {
-                let estimated = estimate(&frame, detail);
+                let mut estimated = estimate(&frame, detail);
+                // What the model says of black bars is not the picture's
+                // depth (`black_bars`).
+                if let Ok(Some(map)) = &mut estimated {
+                    let (top, bottom, left, right) = black_bars(&frame);
+                    let rows = |bar| bar_in_map(bar, height, map.height());
+                    let columns = |bar| bar_in_map(bar, width, map.width());
+                    map.far_at_the_edges(rows(top), rows(bottom), columns(left), columns(right));
+                }
                 pixels = frame.into_raw();
                 estimated
             }
@@ -1011,6 +1107,172 @@ mod tests {
         // Recovery must begin with the new map, without blending the old scene.
         assert!(depth.update(2, 1, &[1.0, 0.0], 0.9));
         assert_eq!(depth.values(), &[1.0, 0.0]);
+    }
+
+    /// A frame of `w` x `h` pixels, each as `pixel(x, y)` says (red, green
+    /// and blue alike).
+    fn grey_frame(w: u32, h: u32, pixel: impl Fn(u32, u32) -> u8) -> RgbaImage {
+        RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([pixel(x, y), pixel(x, y), pixel(x, y), 255])
+        })
+    }
+
+    #[test]
+    fn the_black_bars_around_a_picture_are_found_and_a_dark_picture_is_not_bars() {
+        // A film of 1280 x 534 on a screen of 1280 x 720, as the model's
+        // frame of 1036 x 588: 76 rows above and below, a video's black.
+        let film = grey_frame(1036, 588, |x, y| match y {
+            76..512 => 40 + ((x + y) % 200) as u8,
+            _ => 16,
+        });
+        assert_eq!(black_bars(&film), (76, 76, 0, 0));
+        // An upright video on a wide screen: bars at the sides, of two
+        // widths, and a little noise in them.
+        let upright = grey_frame(400, 200, |x, y| match x {
+            0..150 => ((x * 7 + y * 3) % 20) as u8,
+            150..290 => 30 + (y % 100) as u8,
+            _ => ((x + y) % 24) as u8,
+        });
+        assert_eq!(black_bars(&upright), (0, 0, 150, 110));
+        // Bars all around.
+        let small = grey_frame(200, 100, |x, y| {
+            if (20..180).contains(&x) && (10..95).contains(&y) {
+                200
+            } else {
+                0
+            }
+        });
+        assert_eq!(black_bars(&small), (10, 5, 20, 20));
+        // One pixel in a row that is not black, and the row is not black
+        // from end to end: a bar at one edge alone ends there.
+        let one_bar = grey_frame(1036, 588, |x, y| match y {
+            0..76 => 16,
+            _ => 40 + ((x + y) % 200) as u8,
+        });
+        assert_eq!(black_bars(&one_bar), (76, 0, 0, 0));
+        let mut marked = one_bar.clone();
+        marked.put_pixel(1000, 70, image::Rgba([25, 0, 0, 255]));
+        assert_eq!(black_bars(&marked), (70, 0, 0, 0));
+        // The film again with something in a bar: the pointer in the upper
+        // one, two lines of subtitles in the lower one. Each is still a
+        // bar as high as the other; a subtitle that comes and goes does
+        // not move the picture's edge.
+        let mut pointed = film.clone();
+        pointed.put_pixel(1000, 70, image::Rgba([255, 255, 255, 255]));
+        assert_eq!(black_bars(&pointed), (76, 76, 0, 0));
+        let subtitled = grey_frame(1036, 588, |x, y| match y {
+            76..512 => 40 + ((x + y) % 200) as u8,
+            525..540 | 548..563 if (200..840).contains(&x) && x % 3 == 0 => 235,
+            _ => 16,
+        });
+        assert_eq!(black_bars(&subtitled), (76, 76, 0, 0));
+        // With something in both bars at once, both are as high as the
+        // one that is black from end to end for longer.
+        let mut both = subtitled.clone();
+        both.put_pixel(1000, 70, image::Rgba([255, 255, 255, 255]));
+        assert_eq!(black_bars(&both), (70, 70, 0, 0));
+        // A bar above a picture whose lower rows are merely dark is one
+        // bar: three pixels of ten are lit there.
+        let dark_below = grey_frame(1036, 588, |x, y| match y {
+            0..76 => 16,
+            512.. if x % 10 < 7 => 10,
+            _ => 40 + ((x + y) % 200) as u8,
+        });
+        assert_eq!(black_bars(&dark_below), (76, 0, 0, 0));
+        // No bars: a picture to its edges, a border of one row (less than
+        // a hundredth of the side), a picture that is black all over, and
+        // a dark picture with something in one corner: more than three
+        // quarters of it are black, which is a picture and no bars.
+        assert_eq!(
+            black_bars(&grey_frame(64, 36, |x, y| 30 + (x + y) as u8)),
+            (0, 0, 0, 0)
+        );
+        let bordered = grey_frame(300, 300, |_, y| if y == 0 || y == 299 { 0 } else { 90 });
+        assert_eq!(black_bars(&bordered), (0, 0, 0, 0));
+        assert_eq!(black_bars(&grey_frame(64, 36, |_, _| 3)), (0, 0, 0, 0));
+        let night = grey_frame(100, 100, |x, y| if x > 90 && y > 90 { 255 } else { 0 });
+        assert_eq!(black_bars(&night), (0, 0, 0, 0));
+        // A bar of three rows of a hundred is one; in a map of half the
+        // rows it takes the two rows it reaches into and one more.
+        let thin = grey_frame(100, 100, |_, y| if y < 3 { 0 } else { 90 });
+        assert_eq!(black_bars(&thin), (3, 0, 0, 0));
+        assert_eq!(bar_in_map(3, 100, 50), 3);
+        assert_eq!(bar_in_map(76, 588, 294), 39);
+        assert_eq!(bar_in_map(0, 588, 294), 0);
+    }
+
+    #[test]
+    fn what_the_model_says_of_black_bars_does_not_take_the_pictures_depth() {
+        // The depth thread as the program runs it. The frame: a picture
+        // between bars of two rows above and below. The model, as the
+        // real one does, has the bars nearer than anything in the picture
+        // (9, where the picture goes from 1 to 4), in a map of half the
+        // frame's size.
+        let frame = grey_frame(16, 12, |x, y| {
+            if (2..10).contains(&y) {
+                60 + x as u8
+            } else {
+                16
+            }
+        });
+        let said: Vec<f32> = (0..6u32)
+            .flat_map(|y| {
+                (0..8u32).map(move |x| match y {
+                    0 | 5 => 9.0,
+                    1 | 4 => 5.0 + x as f32 * 0.1,
+                    2 => 1.0 + x as f32 * 0.25,
+                    _ => 4.0 - x as f32 * 0.25,
+                })
+            })
+            .collect();
+        let shared = Arc::new(Shared::new());
+        let (state, answer) = (shared.clone(), said.clone());
+        let depth = std::thread::spawn(move || {
+            depth_loop_with(&state, |_, _| {
+                Ok(Some(RawDepth::new(8, 6, answer.clone()).unwrap()))
+            })
+        });
+        {
+            let mut slot = lock(&shared.for_model);
+            slot.pixels = frame.into_raw();
+            (slot.width, slot.height) = (16, 12);
+            (slot.serial, slot.detail) = (1, 518);
+            (slot.busy, slot.waiting) = (true, true);
+        }
+        shared.model_wanted.notify_one();
+        eventually("the model's answer", || !lock(&shared.for_model).busy);
+        {
+            let depth = lock(&shared.depth);
+            let values = depth.smoother.values();
+            // The bars' rows of the map, and the row beside each where the
+            // model's answer is between bar and picture, are as far as the
+            // farthest point of the picture; the picture has the whole
+            // range from far to near. (Given the map as the model said
+            // it, the picture was left three eighths of the range.)
+            for y in [0, 1, 4, 5] {
+                assert!(
+                    values[y * 8..(y + 1) * 8].iter().all(|&v| v == 0.0),
+                    "row {y}: {values:?}"
+                );
+            }
+            let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+            assert!(
+                values[16] == 0.0 && close(values[23], 1.75 / 3.0),
+                "{values:?}"
+            );
+            assert!(
+                close(values[24], 1.0) && close(values[31], 1.25 / 3.0),
+                "{values:?}"
+            );
+            // The answer that is kept for a still screen's easing is the
+            // same one.
+            let (_, _, latest) = depth.latest.as_ref().unwrap();
+            assert_eq!(latest.values()[..16], [1.0; 16]);
+            assert_eq!(latest.values()[16..32], said[16..32]);
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.model_wanted.notify_all();
+        depth.join().unwrap();
     }
 
     #[test]

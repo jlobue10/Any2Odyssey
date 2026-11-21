@@ -725,6 +725,31 @@ impl RawDepth {
         &self.values
     }
 
+    /// Put the map's outermost rows and columns, so many at the `top`, the
+    /// `bottom`, the `left` and the `right`, where the farthest point of
+    /// the rest is: what the model said of black bars around a picture
+    /// (`live::black_bars`) then says nothing about how near the picture
+    /// is. Nothing changes where no rows or columns are named, or none
+    /// would be left.
+    pub fn far_at_the_edges(&mut self, top: u32, bottom: u32, left: u32, right: u32) {
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (top, bottom) = (top as usize, bottom as usize);
+        let (left, right) = (left as usize, right as usize);
+        if top + bottom + left + right == 0 || top + bottom >= h || left + right >= w {
+            return;
+        }
+        let inside =
+            |x: usize, y: usize| (top..h - bottom).contains(&y) && (left..w - right).contains(&x);
+        let far = (top..h - bottom)
+            .flat_map(|y| &self.values[y * w + left..(y + 1) * w - right])
+            .fold(f32::INFINITY, |far, &v| far.min(v));
+        for (index, value) in self.values.iter_mut().enumerate() {
+            if !inside(index % w, index / w) {
+                *value = far;
+            }
+        }
+    }
+
     /// The map for one picture by itself: 0 its farthest point, 1 its
     /// nearest.
     pub fn normalized(self) -> Result<DepthMap, String> {
@@ -1508,6 +1533,45 @@ mod tests {
         // Numbers further apart than a number can say would make a map of
         // "not a number" whoever brought them to 0..=1.
         assert!(answer(&[1, 1, 2], &[-f32::MAX, f32::MAX]).is_err());
+    }
+
+    #[test]
+    fn the_edges_of_a_map_are_put_where_the_rest_is_farthest() {
+        // Four columns, five rows; the outermost rows and the left column
+        // hold what the model said of black bars: nearer than the rest.
+        let said: Vec<f32> = (0..20)
+            .map(|i| match (i % 4, i / 4) {
+                (_, 0) | (_, 4) | (0, _) => 9.0,
+                (x, y) => 2.0 + (x + y) as f32,
+            })
+            .collect();
+        let mut map = RawDepth::new(4, 5, said.clone()).unwrap();
+        map.far_at_the_edges(1, 1, 1, 0);
+        let expected: Vec<f32> = (0..20)
+            .map(|i| match (i % 4, i / 4) {
+                (_, 0) | (_, 4) | (0, _) => 4.0,
+                (x, y) => 2.0 + (x + y) as f32,
+            })
+            .collect();
+        assert_eq!(map.values(), expected);
+        // The range is the rest's: 4 (far) to 8.
+        let shown = map.clone().normalized().unwrap();
+        assert_eq!(
+            (shown.values()[0], shown.values()[5], shown.values()[15]),
+            (0.0, 0.0, 1.0)
+        );
+        // Nothing named, or nothing left: the map as it was.
+        for edges in [
+            (0, 0, 0, 0),
+            (3, 2, 0, 0),
+            (5, 0, 0, 0),
+            (0, 0, 2, 2),
+            (0, 0, 0, 4),
+        ] {
+            let mut map = RawDepth::new(4, 5, said.clone()).unwrap();
+            map.far_at_the_edges(edges.0, edges.1, edges.2, edges.3);
+            assert_eq!(map.values(), said, "{edges:?}");
+        }
     }
 
     #[test]
