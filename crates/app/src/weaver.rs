@@ -345,6 +345,10 @@ struct FrameFile {
     /// and how many bytes of each have had memory set aside.
     mapped: Option<mapped::Places>,
     reserved: [usize; PLACES as usize],
+    /// What each place was drawn in last ([`FrameFile::draw_bottom_up`]):
+    /// the drawer's mark and the bytes of its picture. `None` for a place
+    /// that holds anything else.
+    drawn: [Option<(u64, usize)>; PLACES as usize],
 }
 
 impl FrameFile {
@@ -427,6 +431,7 @@ impl FrameFile {
             flipped: Vec::new(),
             mapped,
             reserved: [0; PLACES as usize],
+            drawn: [None; PLACES as usize],
         })
     }
 
@@ -475,6 +480,7 @@ impl FrameFile {
             return Err(does_not_fit());
         }
         let place = (self.place + 1) % PLACES;
+        self.drawn[place as usize] = None;
         if let Some(memory) = self.memory_of(place, rgba.len()) {
             // Turned upside down on its way into its place.
             for (into, pixels) in memory
@@ -503,11 +509,50 @@ impl FrameFile {
             return Err(does_not_fit());
         }
         let place = (self.place + 1) % PLACES;
+        self.drawn[place as usize] = None;
         match self.memory_of(place, rgba.len()) {
             Some(memory) => memory.copy_from_slice(rgba),
             None => self.put(FrameFile::start_of(place), rgba)?,
         }
         self.point_at(width, height, place)
+    }
+
+    /// Replace the picture with one that `draw` makes in its place, rows
+    /// from the bottom up, and say true; false, with nothing drawn, where
+    /// the places are not memory that can be drawn in, and the picture has
+    /// to be made elsewhere and given to [`FrameFile::show_bottom_up`].
+    ///
+    /// A live screen's picture was made in room of the render loop's own
+    /// and copied from there: at 2160 lines 66 MB a picture, 10 ms of the
+    /// 24 a turn took (`live::bench::turn_timings` on the machine the
+    /// output was measured on), for a picture that could as well be made
+    /// where it goes.
+    ///
+    /// `draw` is told whether the place holds anything but a picture of
+    /// this size drawn under the same `mark`: what it does not draw over
+    /// (the black beside a screen of another shape) it has to make then.
+    /// A place comes round again after two others, so what a drawer left
+    /// there is three pictures old.
+    fn draw_bottom_up(
+        &mut self,
+        width: u32,
+        height: u32,
+        mark: u64,
+        draw: impl FnOnce(&mut [u8], bool),
+    ) -> std::io::Result<bool> {
+        let bytes = (u64::from(width) * u64::from(height) * 4) as usize;
+        if !FrameFile::fits(width, height, bytes) {
+            return Err(does_not_fit());
+        }
+        let place = (self.place + 1) % PLACES;
+        let drawn = self.drawn[place as usize].replace((mark, bytes));
+        let Some(memory) = self.memory_of(place, bytes) else {
+            self.drawn[place as usize] = None;
+            return Ok(false);
+        };
+        draw(memory, drawn != Some((mark, bytes)));
+        self.point_at(width, height, place)?;
+        Ok(true)
     }
 
     /// Point the header at the picture in `place`, which is whole by now.
@@ -596,6 +641,22 @@ impl FrameSink {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .show_bottom_up(width, height, rgba)
+    }
+
+    /// Replace the picture with one that `draw` makes where it goes, or
+    /// say false where that cannot be; see [`FrameFile::draw_bottom_up`].
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn draw_bottom_up(
+        &self,
+        width: u32,
+        height: u32,
+        mark: u64,
+        draw: impl FnOnce(&mut [u8], bool),
+    ) -> std::io::Result<bool> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .draw_bottom_up(width, height, mark, draw)
     }
 }
 
@@ -1264,6 +1325,77 @@ mod tests {
         if on_a_disk == 0 {
             eprintln!("skipped in part: no folder on a disk to make a frame file in");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_picture_drawn_in_its_place_is_the_picture_a_reader_finds() {
+        let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+            eprintln!("skipped: no /dev/shm to make a frame file in");
+            return;
+        };
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        if sink.0.lock().unwrap().mapped.is_none() {
+            eprintln!("skipped: /dev/shm is not a file system in memory here");
+            return;
+        }
+        // Each picture is drawn into the next of the three places. A place
+        // is stale until a picture of this size was drawn in it under the
+        // same mark: the first three times, and never after.
+        let mut stale = Vec::new();
+        for shade in 1..=7u8 {
+            let drawn = sink.draw_bottom_up(2, 1, 5, |canvas, was_stale| {
+                assert_eq!(canvas.len(), 8);
+                stale.push(was_stale);
+                canvas.fill(shade);
+            });
+            assert!(drawn.unwrap());
+            assert_eq!(sink.written(), (u32::from(shade), 2, 1, vec![shade; 8]));
+        }
+        assert_eq!(stale, [true, true, true, false, false, false, false]);
+        // Another mark, another size, or a picture put there another way:
+        // each makes a place stale once more (the two pictures shown the
+        // other way went to the second and the third place).
+        let is_stale = |width: u32, mark: u64| {
+            let mut stale = None;
+            let drawn = sink.draw_bottom_up(width, 1, mark, |canvas, was_stale| {
+                stale = Some(was_stale);
+                canvas.fill(9);
+            });
+            assert!(drawn.unwrap());
+            stale.unwrap()
+        };
+        assert_eq!(
+            [6, 6, 6, 6].map(|mark| is_stale(2, mark)),
+            [true, true, true, false]
+        );
+        assert_eq!(
+            [3, 3, 3, 3].map(|width| is_stale(width, 6)),
+            [true, true, true, false]
+        );
+        sink.show_bottom_up(3, 1, &[4; 12]).unwrap();
+        sink.show(3, 1, &[4; 12]).unwrap();
+        assert_eq!(
+            [3, 3, 3, 3].map(|width| is_stale(width, 6)),
+            [false, true, true, false]
+        );
+        // A picture that does not fit is refused before anything is drawn.
+        let refused = sink.draw_bottom_up(0, 1, 6, |_, _| panic!("nothing to draw in"));
+        assert!(refused.is_err());
+        assert_eq!(sink.written().0, 7 + 4 + 4 + 2 + 4);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn where_the_places_are_no_memory_nothing_is_drawn_and_the_caller_is_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        sink.0.lock().unwrap().mapped = None;
+        let drawn = sink.draw_bottom_up(2, 1, 1, |_, _| panic!("nothing to draw in"));
+        assert!(!drawn.unwrap());
+        // The picture made elsewhere is written as before.
+        sink.show_bottom_up(2, 1, &[3; 8]).unwrap();
+        assert_eq!(sink.written(), (1, 2, 1, vec![3; 8]));
     }
 
     #[cfg(all(

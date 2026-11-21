@@ -537,7 +537,11 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let (mut picture, mut pair, mut canvas, mut small) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut shown: Option<Shown> = None;
+    // The place and size the picture was last made for, the mark of
+    // that (0 is nobody's), and the mark the room here was made black
+    // under.
     let mut blank = None;
+    let (mut mark, mut canvas_mark) = (0u64, 0u64);
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
     // Since when there has been no picture to make, and whether the page
@@ -666,16 +670,19 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         };
         // Black wherever the screen's shape leaves room: made afresh when
         // the picture's size or place changes, or old pixels would stay.
+        // The mark is another for each such change, and whatever holds a
+        // picture made under another mark is made black first.
         let placed = (view, x, y, w, h);
-        if canvas.len() != place.bytes() || blank != Some(placed) {
+        if blank != Some(placed) {
             blank = Some(placed);
-            fitted(&mut canvas, place.bytes());
-            canvas.clear();
-            canvas.resize(place.bytes(), 0);
+            mark += 1;
+        }
+        let black = |canvas: &mut [u8]| {
+            canvas.fill(0);
             for alpha in canvas.as_chunks_mut::<4>().0 {
                 alpha[3] = 255;
             }
-        }
+        };
         // Without sharpening the views are rendered where they go. With
         // it they are rendered side by side first, and sharpened from
         // there into their places.
@@ -685,26 +692,56 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         } else if pair.capacity() > 0 {
             pair = Vec::new();
         }
-        let depth_shown = {
-            let depth = lock(&shared.depth);
-            let (dw, dh) = depth.smoother.size();
-            let map = (!depth.smoother.values().is_empty()).then(|| Depth {
-                values: depth.smoother.values(),
-                width: dw,
-                height: dh,
-            });
+        let mut depth_shown = 0;
+        let mut render = |canvas: &mut [u8]| {
+            depth_shown = {
+                let depth = lock(&shared.depth);
+                let (dw, dh) = depth.smoother.size();
+                let map = (!depth.smoother.values().is_empty()).then(|| Depth {
+                    values: depth.smoother.values(),
+                    width: dw,
+                    height: dh,
+                });
+                if look.sharpness > 0 {
+                    live::render_pair(&picture, w, h, map, params, &mut pair);
+                } else {
+                    live::render_placed(&picture, w, h, map, params, place, canvas);
+                }
+                depth.version
+            };
             if look.sharpness > 0 {
-                live::render_pair(&picture, w, h, map, params, &mut pair);
-            } else {
-                live::render_placed(&picture, w, h, map, params, place, &mut canvas);
+                let amount = look.sharpness as f32 / 100.0;
+                live::place_pair(&pair, w, h, amount, place, canvas);
             }
-            depth.version
         };
-        if look.sharpness > 0 {
-            let amount = look.sharpness as f32 / 100.0;
-            live::place_pair(&pair, w, h, amount, place, &mut canvas);
-        }
-        let written = sink.show_bottom_up(view.0 * 2, view.1, &canvas);
+        // The picture is made where the output reads it. Only where that
+        // is no memory to draw in is it made here and handed over.
+        let drawn = sink.draw_bottom_up(view.0 * 2, view.1, mark, |canvas, stale| {
+            if stale {
+                black(canvas);
+            }
+            render(canvas);
+        });
+        let written = match drawn {
+            Ok(true) => {
+                if canvas.capacity() > 0 {
+                    (canvas, canvas_mark) = (Vec::new(), 0);
+                }
+                Ok(())
+            }
+            Ok(false) => {
+                if canvas.len() != place.bytes() || canvas_mark != mark {
+                    canvas_mark = mark;
+                    fitted(&mut canvas, place.bytes());
+                    canvas.clear();
+                    canvas.resize(place.bytes(), 0);
+                    black(&mut canvas);
+                }
+                render(&mut canvas);
+                sink.show_bottom_up(view.0 * 2, view.1, &canvas)
+            }
+            Err(e) => Err(e),
+        };
         // A picture that could not be written is made again next turn.
         shown = written.is_ok().then_some(Shown {
             serial: found.serial,
@@ -2753,8 +2790,13 @@ mod bench {
         }
         .unwrap();
         let sink = FrameSink::in_folder(dir.path()).unwrap();
-        for lines in [1080, 1440, 2160] {
-            for sharpness in [0, 50] {
+        // `copied`: as it was done before, the picture made here and
+        // copied into the file.
+        for (lines, sharpness, copied) in [1080, 1440, 2160]
+            .into_iter()
+            .flat_map(|lines| [(0, false), (50, false), (0, true)].map(|(s, c)| (lines, s, c)))
+        {
+            {
                 let (view, (x, y, w, h)) = layout((sw, sh), lines);
                 let place = Placement {
                     view,
@@ -2779,18 +2821,31 @@ mod bench {
                     let t0 = Instant::now();
                     live::shrink_to_rgba(source, &mut picture, w, h);
                     let t1 = Instant::now();
-                    if sharpness > 0 {
-                        live::render_pair(&picture, w, h, depth, params, &mut pair);
-                    } else {
-                        live::render_placed(&picture, w, h, depth, params, place, &mut canvas);
+                    let (mut t2, mut t3) = (t1, t1);
+                    // As the render loop does it: the picture is made in
+                    // its place in the file, and only where that cannot be
+                    // is it made here and handed over.
+                    let mut make = |canvas: &mut [u8]| {
+                        if sharpness > 0 {
+                            live::render_pair(&picture, w, h, depth, params, &mut pair);
+                        } else {
+                            live::render_placed(&picture, w, h, depth, params, place, canvas);
+                        }
+                        t2 = Instant::now();
+                        if sharpness > 0 {
+                            let amount = sharpness as f32 / 100.0;
+                            live::place_pair(&pair, w, h, amount, place, canvas);
+                        }
+                        t3 = Instant::now();
+                    };
+                    let direct = !copied
+                        && sink
+                            .draw_bottom_up(view.0 * 2, view.1, 1, |canvas, _| make(canvas))
+                            .unwrap();
+                    if !direct {
+                        make(&mut canvas);
+                        sink.show_bottom_up(view.0 * 2, view.1, &canvas).unwrap();
                     }
-                    let t2 = Instant::now();
-                    if sharpness > 0 {
-                        let amount = sharpness as f32 / 100.0;
-                        live::place_pair(&pair, w, h, amount, place, &mut canvas);
-                    }
-                    let t3 = Instant::now();
-                    sink.show_bottom_up(view.0 * 2, view.1, &canvas).unwrap();
                     let t4 = Instant::now();
                     // The first turns make the buffers and the file's pages.
                     if frame >= 5 {
@@ -2803,7 +2858,8 @@ mod bench {
                 }
                 let turn = median(&mut turn);
                 println!(
-                    "{lines} lines, sharpness {sharpness}: scale {:.2} ms, render {:.2}, sharpen {:.2}, hand over {:.2}; a turn {turn:.2} ms ({:.0} a second)",
+                    "{lines} lines, sharpness {sharpness}{}: scale {:.2} ms, render {:.2}, sharpen {:.2}, hand over {:.2}; a turn {turn:.2} ms ({:.0} a second)",
+                    if copied { ", copied" } else { "" },
                     median(&mut scale),
                     median(&mut render),
                     median(&mut sharpen),
