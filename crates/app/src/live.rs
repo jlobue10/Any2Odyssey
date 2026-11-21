@@ -20,12 +20,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use any2odyssey_core::dibr::{DepthMap, Params};
+use any2odyssey_core::dibr::Params;
 use any2odyssey_core::live::{self, Depth, DepthSmoother, Placement};
 use any2odyssey_core::slider::{DEPTH, POPOUT};
 use image::RgbaImage;
 
 use crate::capture::{fitted, Capture, CaptureState, Frames};
+use crate::depth::RawDepth;
 use crate::weaver::{self, FrameSink};
 
 /// The time from one picture to the next that is kept to over any stretch
@@ -238,6 +239,44 @@ struct ForModel {
     detail: u32,
 }
 
+impl ForModel {
+    /// Make `frame` a buffer of `bytes` bytes for the next frame to be
+    /// shrunk into, with no more room than that.
+    ///
+    /// The three buffers kept the room of the finest depth detail chosen
+    /// since the output was started, as the pictures' buffers once did
+    /// (`capture::fitted`): 14.6 MB each after *Finest* on a 3840 x 2160
+    /// screen, where *Standard* needs 2.4 MB, so 36 MB too many. Here and
+    /// where the buffers change places each is let go of when it is larger
+    /// than the frame on its way: all three after the first frame of a
+    /// coarser detail.
+    fn room(frame: &mut Vec<u8>, bytes: usize) {
+        fitted(frame, bytes);
+        frame.resize(bytes, 0);
+    }
+
+    /// The render thread puts `frame` here for the depth thread and gets
+    /// the buffer that was here for its next one.
+    fn give(&mut self, frame: &mut Vec<u8>, size: (u32, u32), serial: u64, detail: u32) {
+        std::mem::swap(&mut self.pixels, frame);
+        fitted(frame, self.pixels.len());
+        (self.width, self.height) = size;
+        (self.serial, self.detail) = (serial, detail);
+        (self.busy, self.waiting) = (true, true);
+    }
+
+    /// The depth thread takes the frame that is waiting into `pixels` and
+    /// leaves the buffer of its last one: the frame's size, which frame it
+    /// is and the detail it was made for. The frame's place stays taken
+    /// (`busy`) until the thread says it is done.
+    fn take(&mut self, pixels: &mut Vec<u8>) -> (u32, u32, u64, u32) {
+        self.waiting = false;
+        std::mem::swap(&mut self.pixels, pixels);
+        fitted(&mut self.pixels, pixels.len());
+        (self.width, self.height, self.serial, self.detail)
+    }
+}
+
 /// The depth map the pictures are rendered with.
 #[derive(Default)]
 struct DepthState {
@@ -245,8 +284,11 @@ struct DepthState {
     /// Raised whenever the map changes, so that a picture made with an
     /// earlier one is known to be out of date.
     version: u64,
-    /// The model's newest answer, and the frame and detail it was for.
-    latest: Option<(u64, u32, DepthMap)>,
+    /// The model's newest answer, and the frame and detail it was for. It
+    /// is kept as the model gave it, as the smoother is to have it: a map
+    /// brought to 0..=1 beforehand leaves the smoother's running range
+    /// nothing to follow (`depth::RawDepth`).
+    latest: Option<(u64, u32, RawDepth)>,
     /// That answer has been eased in all the way: the map will not change
     /// until the model answers again.
     settled: bool,
@@ -539,7 +581,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                 // is brought down the rest of the way there
                 // (`live::model_input_size`).
                 let (mw, mh) = live::model_input_size((slot.width, slot.height), model);
-                small.resize(mw as usize * mh as usize * 4, 0);
+                ForModel::room(&mut small, mw as usize * mh as usize * 4);
                 live::shrink_to_rgba(slot.source(), &mut small, mw, mh).then_some((mw, mh))
             });
             Some((found, sink, turn, view, place, for_model.flatten()))
@@ -548,13 +590,8 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             continue;
         };
         seen = found.serial;
-        if let Some((width, height)) = for_model {
-            let mut slot = lock(&shared.for_model);
-            std::mem::swap(&mut slot.pixels, &mut small);
-            (slot.width, slot.height) = (width, height);
-            (slot.serial, slot.detail) = (found.serial, found.detail);
-            (slot.busy, slot.waiting) = (true, true);
-            drop(slot);
+        if let Some(size) = for_model {
+            lock(&shared.for_model).give(&mut small, size, found.serial, found.detail);
             shared.model_wanted.notify_one();
         }
         // The depth map's version as this turn leaves it.
@@ -695,24 +732,32 @@ fn depth_loop(shared: &Shared) {
     // one's thread may still be inside the model when the next has begun.
     static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     RUNNING.fetch_add(1, Ordering::SeqCst);
+    // The model's answer as it gave it, not the map a still image gets
+    // (`depth::RawDepth`).
     depth_loop_with(shared, |frame, detail| {
-        crate::depth::estimate_unless_cancelled(frame, detail, crate::depth::Purpose::Live, || {
-            shared.stop.load(Ordering::Relaxed)
-        })
+        let stopped = || shared.stop.load(Ordering::Relaxed);
+        crate::depth::estimate_raw_unless_cancelled(
+            frame,
+            detail,
+            crate::depth::Purpose::Live,
+            stopped,
+        )
     });
     // The last live screen has ended: the model goes, and with it what it
     // holds of the GPU's memory or the processor's. The next start loads
-    // it again, in about a second, while the output comes up.
-    if RUNNING.fetch_sub(1, Ordering::SeqCst) == 1 {
-        crate::depth::unload();
-    }
+    // it again, in about a second, while the output comes up. Whether this
+    // was the last is asked when the model is free to be let go of, not
+    // here: another live screen may begin before that
+    // (`depth::unload_if`).
+    RUNNING.fetch_sub(1, Ordering::SeqCst);
+    crate::depth::unload_if(|| RUNNING.load(Ordering::SeqCst) == 0);
 }
 
 /// [`depth_loop`] with the model as `estimate`, which is given a frame and
 /// the long side the model is to see it at.
 fn depth_loop_with(
     shared: &Shared,
-    estimate: impl Fn(&RgbaImage, u32) -> Result<Option<DepthMap>, String>,
+    estimate: impl Fn(&RgbaImage, u32) -> Result<Option<RawDepth>, String>,
 ) {
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
@@ -734,9 +779,7 @@ fn depth_loop_with(
                 // The frame's place stays taken while the model runs, so
                 // the render thread does not make another one meanwhile.
                 if slot.waiting {
-                    slot.waiting = false;
-                    std::mem::swap(&mut slot.pixels, &mut pixels);
-                    break (slot.width, slot.height, slot.serial, slot.detail);
+                    break slot.take(&mut pixels);
                 }
                 slot = shared
                     .model_wanted
@@ -870,11 +913,20 @@ mod tests {
                 .env("ORT_DYLIB_PATH", dir.path().join("missing-runtime.so"))
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
+            let said = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "{said}");
+            // The child is asked for this test by its name. Under another
+            // name (the test's or its module's, after a renaming) it runs
+            // no test at all and ends well, and that was all that was
+            // looked at: the test would have stayed green without running.
+            assert!(
+                said.contains("running 1 test\n")
+                    && said.contains("test result: ok. 1 passed; 0 failed;"),
+                "the test did not run in its own process:\n{said}"
             );
             return;
         }
@@ -894,7 +946,7 @@ mod tests {
             depth: Mutex::new(DepthState {
                 smoother: previous,
                 version: 3,
-                latest: Some((6, 518, DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap())),
+                latest: Some((6, 518, RawDepth::new(2, 1, vec![0.0, 1.0]).unwrap())),
                 settled: true,
             }),
             stats: Mutex::new(Stats {
@@ -950,6 +1002,126 @@ mod tests {
     }
 
     #[test]
+    fn the_models_own_numbers_reach_the_smoother_not_a_map_brought_to_0_1_first() {
+        // The depth thread as the program runs it, the model played by the
+        // test: of four points the nearest comes a little nearer (4, then
+        // 5, in the model's numbers), and then much nearer (40).
+        let maps = [
+            [1.0f32, 2.0, 3.0, 4.0],
+            [1.0, 2.0, 3.0, 5.0],
+            [1.0, 2.0, 3.0, 40.0],
+        ];
+        let shared = Arc::new(Shared::new());
+        shared.steadiness.store(60, Ordering::Relaxed);
+        let state = shared.clone();
+        let depth = std::thread::spawn(move || {
+            depth_loop_with(&state, |frame, _| {
+                // (the frame says which of the maps is its own)
+                let raw = maps[frame.as_raw()[0] as usize].to_vec();
+                Ok(Some(RawDepth::new(4, 1, raw).unwrap()))
+            })
+        });
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        for (frame, map) in maps.iter().enumerate() {
+            let serial = frame as u64 + 1;
+            {
+                let mut slot = lock(&shared.for_model);
+                slot.pixels = vec![frame as u8; 4 * 4];
+                (slot.width, slot.height) = (4, 1);
+                (slot.serial, slot.detail) = (serial, 518);
+                (slot.busy, slot.waiting) = (true, true);
+            }
+            shared.model_wanted.notify_one();
+            eventually("the model's answer", || !lock(&shared.for_model).busy);
+            let depth = lock(&shared.depth);
+            // The answer is kept as it came, for the still screen's easing.
+            let (answered, _, latest) = depth.latest.as_ref().unwrap();
+            assert_eq!((*answered, latest.values()), (serial, &map[..]));
+            let values = depth.smoother.values();
+            match frame {
+                0 => assert_eq!(values, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0]),
+                // The points behind stay where they were while the range
+                // comes round to the new nearest point. Given the map
+                // brought to 0..=1 (0, 0.25, 0.5, 1), as it was until
+                // 1.0.0, the smoother had them at 0.3 and 0.5625 at once.
+                1 => assert!(
+                    close(values[1], 0.332013) && close(values[2], 0.664026) && values[3] == 1.0,
+                    "{values:?}"
+                ),
+                // So large a change is followed at once, all but a quarter
+                // of the new range (`live::DepthSmoother`).
+                _ => assert!(
+                    close(values[1], 1.0 / 29.25 + 1.0 / 16.0)
+                        && close(values[2], 2.0 / 29.25 + 1.0 / 16.0)
+                        && values[3] == 1.0,
+                    "{values:?}"
+                ),
+            }
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.model_wanted.notify_all();
+        depth.join().unwrap();
+    }
+
+    #[test]
+    fn the_frames_for_the_model_keep_no_more_room_than_the_detail_chosen_needs() {
+        // A 3840 x 2160 screen: its frames go to the model at twice the
+        // model's size (`live::model_input_size`).
+        let bytes = |detail: u32| {
+            let model = crate::depth::model_size(3840, 2160, detail);
+            let (w, h) = live::model_input_size((3840, 2160), model);
+            ((w, h), w as usize * h as usize * 4)
+        };
+        let (finest, standard) = (bytes(1274), bytes(518));
+        assert_eq!((finest.1, standard.1), (14_554_176, 2_436_672));
+        // The render thread's buffer, the one between the threads and the
+        // depth thread's, as the two loops pass a frame along.
+        let (mut small, mut slot, mut pixels) = (Vec::new(), ForModel::default(), Vec::new());
+        let mut serial = 0;
+        let mut frame =
+            |detail, (size, bytes), small: &mut Vec<u8>, slot: &mut ForModel, pixels: &mut _| {
+                serial += 1;
+                ForModel::room(small, bytes);
+                assert_eq!(small.len(), bytes);
+                slot.give(small, size, serial, detail);
+                assert!(slot.busy && slot.waiting);
+                assert_eq!(slot.take(pixels), (size.0, size.1, serial, detail));
+                assert!(slot.busy && !slot.waiting);
+                assert_eq!(pixels.len(), bytes);
+            };
+        for _ in 0..4 {
+            frame(1274, finest, &mut small, &mut slot, &mut pixels);
+        }
+        let held = |small: &Vec<u8>, slot: &ForModel, pixels: &Vec<u8>| {
+            small.capacity() + slot.pixels.capacity() + pixels.capacity()
+        };
+        // While the detail stays, the three buffers change places and none
+        // is made anew.
+        assert_eq!(held(&small, &slot, &pixels), finest.1 * 3);
+        let places = [small.as_ptr(), slot.pixels.as_ptr(), pixels.as_ptr()];
+        for _ in 0..3 {
+            frame(1274, finest, &mut small, &mut slot, &mut pixels);
+        }
+        assert_eq!(
+            [small.as_ptr(), slot.pixels.as_ptr(), pixels.as_ptr()],
+            places
+        );
+        // Standard is chosen: with its first frame the room of the finest
+        // is gone. (All three kept it: 43.7 MB held where 7.3 MB do.)
+        frame(518, standard, &mut small, &mut slot, &mut pixels);
+        assert_eq!(held(&small, &slot, &pixels), standard.1);
+        for _ in 0..3 {
+            frame(518, standard, &mut small, &mut slot, &mut pixels);
+        }
+        assert_eq!(held(&small, &slot, &pixels), standard.1 * 3);
+        // And back to a finer one: each buffer grows as its turn comes.
+        for _ in 0..3 {
+            frame(1022, bytes(1022), &mut small, &mut slot, &mut pixels);
+        }
+        assert_eq!(held(&small, &slot, &pixels), bytes(1022).1 * 3);
+    }
+
+    #[test]
     fn a_large_screen_is_estimated_at_the_chosen_depth_detail() {
         let capture = crate::capture::Fed::start();
         let shared = Arc::new(Shared::new());
@@ -966,7 +1138,7 @@ mod tests {
                 lock(&seen).push((frame.dimensions(), long_side));
                 let (w, h) = crate::depth::model_size(frame.width(), frame.height(), long_side);
                 let values = (0..w * h).map(|i| i as f32).collect();
-                Ok(Some(DepthMap::normalized(w, h, values).unwrap()))
+                Ok(Some(RawDepth::new(w, h, values).unwrap()))
             })
         });
         for ((sw, sh), detail, frame) in [
@@ -1512,7 +1684,7 @@ mod tests {
         let mut depth = DepthState {
             smoother,
             version: 3,
-            latest: Some((6, 518, DepthMap::normalized(2, 1, vec![0.0, 1.0]).unwrap())),
+            latest: Some((6, 518, RawDepth::new(2, 1, vec![0.0, 1.0]).unwrap())),
             settled: true,
         };
         // The first failure takes the map away: another picture, flat.
@@ -1562,7 +1734,7 @@ mod tests {
         {
             let mut depth = lock(&shared.depth);
             depth.version += 1;
-            depth.latest = Some((5, 518, DepthMap::normalized(1, 1, vec![0.0]).unwrap()));
+            depth.latest = Some((5, 518, RawDepth::new(1, 1, vec![0.0]).unwrap()));
         }
         place.busy = false;
         drop(place);
@@ -1950,15 +2122,18 @@ mod tests {
         assert_eq!(pictures(), 2);
 
         // The model answers, as the depth thread does: a first step
-        // towards the frame's map from the depth of the scene before.
+        // towards the frame's map from the depth of the scene before. The
+        // answer is in the model's own numbers, on another scale than the
+        // scene before; where it ends is the map of this frame by itself.
         let before = [1.0f32, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-        let map = DepthMap::normalized(4, 2, vec![0.0, 0.25, 0.5, 1.0, 0.0, 0.5, 0.75, 1.0]);
-        let map = map.unwrap();
+        let own = [0.0f32, 0.25, 0.5, 1.0, 0.0, 0.5, 0.75, 1.0];
+        let map = RawDepth::new(4, 2, vec![2.0, 3.0, 4.0, 6.0, 2.0, 4.0, 5.0, 6.0]).unwrap();
+        assert_eq!(map.clone().normalized().unwrap().values(), own);
         let steps = {
             let mut depth = lock(&shared.depth);
             assert!(depth.smoother.update(4, 2, &before, 0.0));
             assert!(depth.smoother.update(4, 2, map.values(), 0.2));
-            assert_ne!(depth.smoother.values(), map.values());
+            assert_ne!(depth.smoother.values(), own);
             depth.version += 1;
             depth.latest = Some((1, 518, map.clone()));
             // How many steps the easing will take from here.
@@ -1974,12 +2149,12 @@ mod tests {
         // It is shown and eased in, a picture a step, to the frame's own
         // map exactly; and there it rests.
         eventually("the map is eased in", || lock(&shared.depth).settled);
-        assert_eq!(lock(&shared.depth).smoother.values(), map.values());
+        assert_eq!(lock(&shared.depth).smoother.values(), own);
         // The answer as it came, then every step: a picture each.
         let eased = 2 + 1 + steps;
         eventually("every step is shown", || pictures() == eased);
         let depth = Depth {
-            values: map.values(),
+            values: &own,
             width: 4,
             height: 2,
         };
@@ -2036,9 +2211,9 @@ mod tests {
                     let range = (reds.clone().min().unwrap(), reds.max().unwrap());
                     lock(&seen).push((frame.dimensions(), detail, range));
                     // The map comes back at the size the estimator shows the
-                    // model the frame at (`Estimator::estimate`).
+                    // model the frame at (`Estimator::estimate_raw`).
                     let (w, h) = crate::depth::model_size(frame.width(), frame.height(), detail);
-                    Ok(DepthMap::normalized(w, h, vec![0.0; (w * h) as usize]).ok())
+                    Ok(RawDepth::new(w, h, vec![0.0; (w * h) as usize]).ok())
                 })
             });
             // Columns of black and white one pixel wide, as small text is.
