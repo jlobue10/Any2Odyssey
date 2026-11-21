@@ -69,18 +69,40 @@ class AptInstall(unittest.TestCase):
 
     def test_a_download_that_was_stopped_or_failed_is_tried_again(self):
         # Stopped by timeout (a slow mirror), then failed by itself, then through.
-        done = self.run_script([0, 124, 100], "--update", "one", "two")
+        done = self.run_script([0, 124, 0, 100, 0], "--update", "one", "two")
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(self.noted("apt-get"), [UPDATE, DOWNLOAD, DOWNLOAD, DOWNLOAD, INSTALL])
+        self.assertEqual(self.noted("apt-get"), [UPDATE, DOWNLOAD, UPDATE, DOWNLOAD, UPDATE, DOWNLOAD, INSTALL])
         self.assertIn("downloading the packages was stopped after 300 seconds, try 1 of 3", done.stderr)
         self.assertIn("downloading the packages failed (exit 100), try 2 of 3", done.stderr)
+
+    def test_the_lists_are_fetched_again_before_a_download_is_tried_again(self):
+        # apt-get update ends with 0 when a mirror could not be reached, and the lists that are there
+        # then name files the mirror may not have any more: the download fails with 404 at every try
+        # unless the lists are fetched again. Whether --update was given or not.
+        for arguments, before in ((["--update", "one", "two"], [UPDATE]), (["one", "two"], [])):
+            with self.subTest(arguments=arguments):
+                done = self.run_script([0] * len(before) + [100, 0, 0], *arguments)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(self.noted("apt-get"), [*before, DOWNLOAD, UPDATE, DOWNLOAD, INSTALL])
+                # With the lists' time limit, not the download's.
+                self.assertEqual(self.noted("timeout")[len(before):],
+                                 ["--kill-after=10 300 apt-get", "--kill-after=10 60 apt-get", "--kill-after=10 300 apt-get"])
+
+    def test_lists_that_cannot_be_fetched_again_do_not_end_the_tries(self):
+        # The download decides: the second fetch of the lists fails or is stopped, the try after it gets through.
+        for code in (100, 124):
+            with self.subTest(code=code):
+                done = self.run_script([0, 100, code, 0], "--update", "one", "two")
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(self.noted("apt-get"), [UPDATE, DOWNLOAD, UPDATE, DOWNLOAD, INSTALL])
+                self.assertIn("the package lists could not be fetched again", done.stderr)
 
     def test_a_download_that_never_finishes_fails_and_nothing_is_installed(self):
         for code in (124, 137, 100):
             with self.subTest(code=code):
-                done = self.run_script([code, code, code], "one", "two")
+                done = self.run_script([code, 0, code, 0, code], "one", "two")
                 self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
-                self.assertEqual(self.noted("apt-get"), [DOWNLOAD, DOWNLOAD, DOWNLOAD])
+                self.assertEqual(self.noted("apt-get"), [DOWNLOAD, UPDATE, DOWNLOAD, UPDATE, DOWNLOAD])
                 self.assertIn("try 3 of 3", done.stderr)
                 self.assertIn("the packages could not be downloaded; nothing was installed", done.stderr)
 
