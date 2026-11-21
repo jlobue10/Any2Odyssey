@@ -239,6 +239,44 @@ struct ForModel {
     detail: u32,
 }
 
+impl ForModel {
+    /// Make `frame` a buffer of `bytes` bytes for the next frame to be
+    /// shrunk into, with no more room than that.
+    ///
+    /// The three buffers kept the room of the finest depth detail chosen
+    /// since the output was started, as the pictures' buffers once did
+    /// (`capture::fitted`): 14.6 MB each after *Finest* on a 3840 x 2160
+    /// screen, where *Standard* needs 2.4 MB, so 36 MB too many. Here and
+    /// where the buffers change places each is let go of when it is larger
+    /// than the frame on its way: all three after the first frame of a
+    /// coarser detail.
+    fn room(frame: &mut Vec<u8>, bytes: usize) {
+        fitted(frame, bytes);
+        frame.resize(bytes, 0);
+    }
+
+    /// The render thread puts `frame` here for the depth thread and gets
+    /// the buffer that was here for its next one.
+    fn give(&mut self, frame: &mut Vec<u8>, size: (u32, u32), serial: u64, detail: u32) {
+        std::mem::swap(&mut self.pixels, frame);
+        fitted(frame, self.pixels.len());
+        (self.width, self.height) = size;
+        (self.serial, self.detail) = (serial, detail);
+        (self.busy, self.waiting) = (true, true);
+    }
+
+    /// The depth thread takes the frame that is waiting into `pixels` and
+    /// leaves the buffer of its last one: the frame's size, which frame it
+    /// is and the detail it was made for. The frame's place stays taken
+    /// (`busy`) until the thread says it is done.
+    fn take(&mut self, pixels: &mut Vec<u8>) -> (u32, u32, u64, u32) {
+        self.waiting = false;
+        std::mem::swap(&mut self.pixels, pixels);
+        fitted(&mut self.pixels, pixels.len());
+        (self.width, self.height, self.serial, self.detail)
+    }
+}
+
 /// The depth map the pictures are rendered with.
 #[derive(Default)]
 struct DepthState {
@@ -543,7 +581,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                 // is brought down the rest of the way there
                 // (`live::model_input_size`).
                 let (mw, mh) = live::model_input_size((slot.width, slot.height), model);
-                small.resize(mw as usize * mh as usize * 4, 0);
+                ForModel::room(&mut small, mw as usize * mh as usize * 4);
                 live::shrink_to_rgba(slot.source(), &mut small, mw, mh).then_some((mw, mh))
             });
             Some((found, sink, turn, view, place, for_model.flatten()))
@@ -552,13 +590,8 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             continue;
         };
         seen = found.serial;
-        if let Some((width, height)) = for_model {
-            let mut slot = lock(&shared.for_model);
-            std::mem::swap(&mut slot.pixels, &mut small);
-            (slot.width, slot.height) = (width, height);
-            (slot.serial, slot.detail) = (found.serial, found.detail);
-            (slot.busy, slot.waiting) = (true, true);
-            drop(slot);
+        if let Some(size) = for_model {
+            lock(&shared.for_model).give(&mut small, size, found.serial, found.detail);
             shared.model_wanted.notify_one();
         }
         // The depth map's version as this turn leaves it.
@@ -744,9 +777,7 @@ fn depth_loop_with(
                 // The frame's place stays taken while the model runs, so
                 // the render thread does not make another one meanwhile.
                 if slot.waiting {
-                    slot.waiting = false;
-                    std::mem::swap(&mut slot.pixels, &mut pixels);
-                    break (slot.width, slot.height, slot.serial, slot.detail);
+                    break slot.take(&mut pixels);
                 }
                 slot = shared
                     .model_wanted
@@ -1028,6 +1059,64 @@ mod tests {
         shared.stop.store(true, Ordering::Relaxed);
         shared.model_wanted.notify_all();
         depth.join().unwrap();
+    }
+
+    #[test]
+    fn the_frames_for_the_model_keep_no_more_room_than_the_detail_chosen_needs() {
+        // A 3840 x 2160 screen: its frames go to the model at twice the
+        // model's size (`live::model_input_size`).
+        let bytes = |detail: u32| {
+            let model = crate::depth::model_size(3840, 2160, detail);
+            let (w, h) = live::model_input_size((3840, 2160), model);
+            ((w, h), w as usize * h as usize * 4)
+        };
+        let (finest, standard) = (bytes(1274), bytes(518));
+        assert_eq!((finest.1, standard.1), (14_554_176, 2_436_672));
+        // The render thread's buffer, the one between the threads and the
+        // depth thread's, as the two loops pass a frame along.
+        let (mut small, mut slot, mut pixels) = (Vec::new(), ForModel::default(), Vec::new());
+        let mut serial = 0;
+        let mut frame =
+            |detail, (size, bytes), small: &mut Vec<u8>, slot: &mut ForModel, pixels: &mut _| {
+                serial += 1;
+                ForModel::room(small, bytes);
+                assert_eq!(small.len(), bytes);
+                slot.give(small, size, serial, detail);
+                assert!(slot.busy && slot.waiting);
+                assert_eq!(slot.take(pixels), (size.0, size.1, serial, detail));
+                assert!(slot.busy && !slot.waiting);
+                assert_eq!(pixels.len(), bytes);
+            };
+        for _ in 0..4 {
+            frame(1274, finest, &mut small, &mut slot, &mut pixels);
+        }
+        let held = |small: &Vec<u8>, slot: &ForModel, pixels: &Vec<u8>| {
+            small.capacity() + slot.pixels.capacity() + pixels.capacity()
+        };
+        // While the detail stays, the three buffers change places and none
+        // is made anew.
+        assert_eq!(held(&small, &slot, &pixels), finest.1 * 3);
+        let places = [small.as_ptr(), slot.pixels.as_ptr(), pixels.as_ptr()];
+        for _ in 0..3 {
+            frame(1274, finest, &mut small, &mut slot, &mut pixels);
+        }
+        assert_eq!(
+            [small.as_ptr(), slot.pixels.as_ptr(), pixels.as_ptr()],
+            places
+        );
+        // Standard is chosen: with its first frame the room of the finest
+        // is gone. (All three kept it: 43.7 MB held where 7.3 MB do.)
+        frame(518, standard, &mut small, &mut slot, &mut pixels);
+        assert_eq!(held(&small, &slot, &pixels), standard.1);
+        for _ in 0..3 {
+            frame(518, standard, &mut small, &mut slot, &mut pixels);
+        }
+        assert_eq!(held(&small, &slot, &pixels), standard.1 * 3);
+        // And back to a finer one: each buffer grows as its turn comes.
+        for _ in 0..3 {
+            frame(1022, bytes(1022), &mut small, &mut slot, &mut pixels);
+        }
+        assert_eq!(held(&small, &slot, &pixels), bytes(1022).1 * 3);
     }
 
     #[test]
