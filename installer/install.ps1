@@ -119,6 +119,8 @@ foreach($folder in $shortcutFolders){$operations+=[pscustomobject]@{Source=$shor
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}
 # Installed apps resolves a bare powershell.exe through the caller's PATH; name the system one.
+# A 32-bit caller is redirected to the 32-bit one all the same; Uninstall.ps1 then starts itself
+# again in the 64-bit one.
 $uninstall='"'+(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')+'" -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Uninstall.ps1')+'" -Pause'
 $properties=@{DisplayName='Any2Odyssey';DisplayVersion=$versionText;Publisher='Jonathan LoBue';InstallLocation=$app;DisplayIcon=(Join-Path $app 'Any2Odyssey.ico')+',0';UninstallString=$uninstall;URLInfoAbout='https://github.com/jlobue10/Any2Odyssey'}
 if($ControlsOnly){$properties.DisplayName='Any2Odyssey (controls only)'}
