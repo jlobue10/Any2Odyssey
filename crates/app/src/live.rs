@@ -749,8 +749,20 @@ fn depth_loop(shared: &Shared) {
     // was the last is asked when the model is free to be let go of, not
     // here: another live screen may begin before that
     // (`depth::unload_if`).
-    RUNNING.fetch_sub(1, Ordering::SeqCst);
-    crate::depth::unload_if(|| RUNNING.load(Ordering::SeqCst) == 0);
+    last_one_lets_go(&RUNNING, |unused| crate::depth::unload_if(unused));
+}
+
+/// A depth thread that ends counts itself out of `running`, and
+/// `unload_if` is given the question whether none is left, to ask when the
+/// model is free to be let go of. Answered here and now, a live screen that
+/// begins while `unload_if` waits for a map being made has its model let go
+/// of behind its first map (`depth::unload_if`).
+fn last_one_lets_go(
+    running: &std::sync::atomic::AtomicUsize,
+    unload_if: impl FnOnce(&dyn Fn() -> bool),
+) {
+    running.fetch_sub(1, Ordering::SeqCst);
+    unload_if(&|| running.load(Ordering::SeqCst) == 0);
 }
 
 /// [`depth_loop`] with the model as `estimate`, which is given a frame and
@@ -999,6 +1011,36 @@ mod tests {
         // Recovery must begin with the new map, without blending the old scene.
         assert!(depth.update(2, 1, &[1.0, 0.0], 0.9));
         assert_eq!(depth.values(), &[1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_live_screen_that_ends_asks_whether_it_was_the_last_once_the_model_is_free() {
+        use std::sync::atomic::AtomicUsize;
+        // One live screen, and it ends. Its letting-go of the model has to
+        // wait for a map that is being made, and another live screen
+        // begins meanwhile: asked then, the model is wanted. (The thread
+        // counted itself out and said "the last" before it waited, and the
+        // new screen's model went behind its first map. `depth::unload_if`
+        // has a test of its own; this is the thread's side of it, which
+        // could be put back as it was with every test passing.)
+        let running = AtomicUsize::new(1);
+        let mut unused = None;
+        last_one_lets_go(&running, |nobody_left| {
+            running.fetch_add(1, Ordering::SeqCst);
+            unused = Some(nobody_left());
+        });
+        assert_eq!(unused, Some(false), "let go of under a new live screen");
+        assert_eq!(running.load(Ordering::SeqCst), 1);
+        // That one ends with none after it: the model goes.
+        let mut unused = None;
+        last_one_lets_go(&running, |nobody_left| unused = Some(nobody_left()));
+        assert_eq!(unused, Some(true));
+        assert_eq!(running.load(Ordering::SeqCst), 0);
+        // Of two at once the first to end leaves the model to the other.
+        let running = AtomicUsize::new(2);
+        let mut unused = None;
+        last_one_lets_go(&running, |nobody_left| unused = Some(nobody_left()));
+        assert_eq!(unused, Some(false));
     }
 
     #[test]
