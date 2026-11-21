@@ -225,10 +225,13 @@ jobs:
       # again. scripts/check-build-paths.sh looks at the packaged program below.
       - name: Name source files without this machine's folders
         run: echo "RUSTFLAGS=--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$GITHUB_WORKSPACE=/any2odyssey" >> "$GITHUB_ENV"
+      # As in ci.yml: apt-get does not give up on a mirror that answers slowly, so the package lists and
+      # the downloads get a time limit and three tries each from scripts/apt-install.sh, which then fails
+      # and says so; timeout-minutes is the bound on the whole step.
       - name: Desktop build dependencies (eframe; PipeWire for live capture)
+        timeout-minutes: 25
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          scripts/apt-install.sh --update \
             libgtk-3-dev libxdo-dev libayatana-appindicator3-dev libxkbcommon-dev libwayland-dev \
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev libxrandr-dev \
             libxi-dev libgl1-mesa-dev libssl-dev pkg-config libpipewire-0.3-dev libclang-dev clang \
@@ -295,8 +298,10 @@ jobs:
       # whole Odyssey 3D set-up there. Compiled only (setup.sh links them against files it generates), and
       # only the sources that are for Windows; a2ousb.c needs a header setup.sh generates.
       - name: Wine stand-ins compile with this Ubuntu's MinGW
+        timeout-minutes: 20
         run: |
-          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+          # (with a time limit and three tries: see the build dependencies' step above)
+          scripts/apt-install.sh gcc-mingw-w64-x86-64
           for source in a2ocam a2otoast cfgshim connreset dxvashim lens-helper-win monprobe powernotify weaver-host wtsshim; do
             x86_64-w64-mingw32-gcc -O2 -c -o /dev/null "contrib/wine-lens/src/$source.c"
           done
@@ -493,6 +498,10 @@ jobs:
         run: python3 scripts/tests/test-third-party-linux.py
       - name: The check for the build machine's folders in a program refuses what it should
         run: python3 scripts/tests/test-check-build-paths.py
+      # As in ci.yml: scripts/apt-install.sh tries a download again that was stopped or failed, and fails
+      # when the third try has not finished either.
+      - name: The package installation gives up when it should (stand-in for apt-get)
+        run: python3 scripts/tests/test-apt-install.py
       - name: Every action's commit is under a tag or on a branch of its repository
         env:
           GH_TOKEN: ${{ github.token }}
