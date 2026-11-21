@@ -391,12 +391,14 @@ class EnsureStackTests(StackTests):
         # that the board was missing)
         (self.root / "tools/ensure-stack.sh").write_text(text.replace(BOARD, f'BOARD="{self.root}/board"'))
         (self.root / "board").write_text("")
-        for name, body in (("start-stack.sh", 'echo started >>"$ROOT/starts"'), ("noxon.sh", "exit 0")):
+        # A start, and Leia's service saying in its log that the board answered: into the file it has, which
+        # holds the same line from the run before.
+        for name, body in (("start-stack.sh", self.STARTS + self.SAYS.format(">>", "service.txt")), ("noxon.sh", "exit 0")):
             (self.root / "tools" / name).write_text(f"#!/bin/sh\n{body}\n")
             (self.root / "tools" / name).chmod(0o755)
         log = self.root / "prefix/drive_c/ProgramData/Simulated Reality/Server/Log"
         log.mkdir(parents=True)
-        (log / "service.txt").write_text("lens board responded to initial disable\n")
+        (log / "service.txt").write_text("the run before\nlens board responded to initial disable\nand what came after\n")
         # Leia's service and session, in the list of processes, and a start that came after the board did.
         for name in ("bin/SRService.exe", "SRSession.exe"):
             program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", f"{self.root}/{name}"])
@@ -408,6 +410,12 @@ class EnsureStackTests(StackTests):
                              stdout=subprocess.DEVNULL).returncode != 0:
             self.assertLess(time.monotonic(), deadline, "timed out")
             time.sleep(0.02)
+
+    # (The real start takes half a minute. This one takes long enough for a file written after it began
+    # to be newer than one written before, where the file system keeps its times by the clock's tick.)
+    STARTS = 'echo started >>"$ROOT/starts"\n"$REAL_SLEEP" 0.1\n'
+    SAYS = ('echo "lens board responded to initial disable" {}'
+            '"$ROOT/prefix/drive_c/ProgramData/Simulated Reality/Server/Log/{}"\n')
 
     def starts(self):
         """How often the stack was started again by one request."""
@@ -465,9 +473,9 @@ class EnsureStackTests(StackTests):
         self.assertEqual(self.starts(), 0)
         # The board has been away and is back (a monitor standby): the start goes through, and Leia's
         # service never says that it has the board.
-        log = self.root / "prefix/drive_c/ProgramData/Simulated Reality/Server/Log/service.txt"
-        said = log.read_text()
-        log.unlink()
+        start = self.root / "tools/start-stack.sh"
+        works = start.read_text()
+        start.write_text("#!/bin/sh\n" + self.STARTS)
         later = time.time() + 5
         os.utime(self.root / "board", (later, later))
         result = self.request()
@@ -477,9 +485,53 @@ class EnsureStackTests(StackTests):
         # link anew at the same second; a clock that was set back).
         os.utime(self.root / "board", (0, 0))
         (self.root / "starts").unlink()
-        log.write_text(said)
+        start.write_text(works)
         self.assertEqual(self.starts(), 1, "a start without the board passed for the one before it")
         self.assertEqual(self.starts(), 0)
+
+    def test_the_board_is_ready_when_leias_service_has_said_so_since_the_start(self):
+        # What the service wrote in the run before is not this start's, in whichever file it is.
+        self.no_waiting()
+        start = self.root / "tools/start-stack.sh"
+        log = self.root / "prefix/drive_c/ProgramData/Simulated Reality/Server/Log"
+        before = (log / "service.txt").read_text()
+
+        def asked(body):
+            start.write_text("#!/bin/sh\n" + self.STARTS + body)
+            (self.root / "stack.started").unlink(missing_ok=True)
+            result = self.request()
+            if result.returncode:
+                self.assertIn("error: Leia's service did not get the lens board ready", result.stdout)
+                self.assertFalse((self.root / "stack.started").exists())
+            else:
+                self.assertEqual(result.stdout, "")
+                self.assertTrue((self.root / "stack.started").exists())
+            return result.returncode
+
+        log_file = '"$ROOT/prefix/drive_c/ProgramData/Simulated Reality/Server/Log/{}"'
+        # Nothing written at all, and the line of the run before in the newest file: not ready.
+        self.assertEqual(asked(""), 1)
+        # Written into the same file, but not that line.
+        self.assertEqual(asked(f'echo "lens board did not answer" >>{log_file.format("service.txt")}\n'), 1)
+        # A file of its own for each run, the line in it: ready. Without the line: not.
+        self.assertEqual(asked(self.SAYS.format(">", "service 2.txt")), 0)
+        self.assertEqual(asked(f'echo "started" >{log_file.format("service 3.txt")}\n'), 1)
+        # A file of the same name written anew, shorter than it was and as long as it was.
+        self.assertGreater(len((log / "service.txt").read_text()), len(before))
+        self.assertEqual(asked(self.SAYS.format(">", "service.txt")), 0)
+        again = f'echo "Lens board responded to initial disable" >{log_file.format("service.txt")}\n'
+        self.assertEqual(asked(again), 0)
+        # Written anew and longer than it was, the line in the part that is as long as the file before.
+        (log / "service.txt").write_text("short\n")
+        more = f'echo "and more" >>{log_file.format("service.txt")}\n'
+        self.assertEqual(asked(self.SAYS.format(">", "service.txt") + more), 0)
+        # Added to, the line of the run before in what was there.
+        self.assertEqual(asked(more), 1)
+        # No log file at all before the start (a prefix that is new).
+        for path in log.iterdir():
+            path.unlink()
+        self.assertEqual(asked(""), 1)
+        self.assertEqual(asked(self.SAYS.format(">>", "service.txt")), 0)
 
     def test_a_start_that_ends_with_a_reason_of_its_own_is_reported_with_it(self):
         def asked(body):
