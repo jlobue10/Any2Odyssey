@@ -887,10 +887,10 @@ class InstallerTests(unittest.TestCase):
         (self.archive / "any2odyssey").write_bytes(b"updated program")
         tools = self.root / "tools"
         tools.mkdir()
-        called = self.root / "called"
-        for name, result in [("flock", 1), ("timeout", 124)]:
+        called, timed = self.root / "called", self.root / "timed"
+        for name, result, note in [("flock", 1, called), ("timeout", 124, timed)]:
             tool = tools / name
-            tool.write_text(f'#!/bin/sh\n: >"{called}"\nexit {result}\n')
+            tool.write_text(f'#!/bin/sh\n: >"{note}"\nexit {result}\n')
             tool.chmod(0o755)
         path = self.env["PATH"]
         self.env["PATH"] = f"{tools}{os.pathsep}{path}"
@@ -909,6 +909,11 @@ class InstallerTests(unittest.TestCase):
         (tools / "flock").unlink()
         if shutil.which("flock", path=path) is None:
             return
+        if not timed.exists():
+            # BusyBox's shell can run its own timeout without looking on the PATH while flock is a program
+            # (Debian's and Ubuntu's does: their BusyBox has no flock). The five minutes are then real:
+            # the installer waited them, and this test ended in an error when its own patience was over.
+            self.skipTest("this shell runs a built-in timeout: the five minutes cannot be stood in for (the half with a stand-in for flock passed)")
         held = os.open(prefix, os.O_RDONLY)
         try:
             fcntl.flock(held, fcntl.LOCK_EX)
@@ -923,6 +928,41 @@ class InstallerTests(unittest.TestCase):
         result = self.install(prefix)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(program.read_bytes(), b"updated program")
+
+    def test_failed_wait_without_timeout_stops_install_and_uninstall(self):
+        # Where no timeout is there to bound the wait, a wait that fails stops the run as well: up to
+        # 0.9.9 the run went on beside the other one "when the wait failed for any reason". 1.0.0
+        # changed both ways of waiting and tried the one with timeout; this one, taken out again, was
+        # noticed by no test.
+        prefix = self.root / "prefix"
+        self.assertEqual(self.install(prefix).returncode, 0)
+        program = prefix / "bin/any2odyssey"
+        original = program.read_bytes()
+        (self.archive / "any2odyssey").write_bytes(b"updated program")
+        tools = self.root / "tools"
+        tools.mkdir()
+        for folder in reversed(os.get_exec_path(self.env)):  # an earlier folder's program wins
+            for tool in (Path(folder).iterdir() if Path(folder).is_dir() else []):
+                if tool.name not in ("timeout", "flock"):
+                    (tools / tool.name).unlink(missing_ok=True)
+                    (tools / tool.name).symlink_to(tool)
+        called = self.root / "called"
+        (tools / "flock").write_text(f'#!/bin/sh\necho "$*" >>"{called}"\nexit 1\n')
+        (tools / "flock").chmod(0o755)
+        self.env["PATH"] = str(tools)
+        if subprocess.run([*SHELL, "-c", "command -v timeout"], env=self.env, capture_output=True).returncode == 0:
+            self.skipTest("this shell has a timeout of its own (BusyBox's): the wait without one is not reached")
+        result = self.install(prefix)
+        if not called.exists():
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.skipTest("this shell runs a built-in flock, which the test cannot stand in for")
+        for result in [result, self.run_installer("--prefix", str(prefix), "--uninstall")]:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("waiting for it to finish", result.stdout)
+            self.assertIn("busy lock", result.stderr)
+            self.assertEqual(program.read_bytes(), original)
+        # Asked without waiting, then waited for, by each of the two runs.
+        self.assertEqual(called.read_text().splitlines(), ["-n 9", "9", "-n 9", "9"])
 
     def second_run_while_the_first_copies(self, prefix, *second):
         """Update the installation in `prefix` and start `install.sh <second>` while that run copies the Wine setup.
@@ -1692,12 +1732,18 @@ class InstallerTests(unittest.TestCase):
         # nothing ("E: Unable to locate package"): not PipeWire's library, without which the program does
         # not start, and not curl.
         called = self.root / "apt-argv"
+        # (in the user's language, as the real apt-get writes: "E: Paket ... kann nicht gefunden werden."
+        # is what apt 2.4 to 3.3 say in German)
         self.only_package_manager("apt-get", f'''echo "$*" >> "{called}"
 [ "$1 $2" = "install -s" ] || exit 1
+case ${{LC_ALL:-${{LC_MESSAGES:-${{LANG:-}}}}}} in de*) german=1 ;; *) german= ;; esac
 for name in "$@"; do
     case $name in
-        libonnxruntime-dev) echo "E: Unable to locate package $name"; failed=1 ;;
-        zenity) echo "E: Package '$name' has no installation candidate"; failed=1 ;;
+        libonnxruntime-dev | zenity)
+            failed=1
+            if [ -n "$german" ]; then echo "E: Paket $name kann nicht gefunden werden."
+            elif [ "$name" = zenity ]; then echo "E: Package '$name' has no installation candidate"
+            else echo "E: Unable to locate package $name"; fi ;;
     esac
 done
 [ -z "$failed" ] || exit 100''')
@@ -1708,6 +1754,16 @@ done
         absent = [line for line in output.splitlines() if "not in this system's package lists" in line]
         self.assertEqual(len(absent), 1, output)
         self.assertIn("libonnxruntime-dev", absent[0].split())
+        # The same on a system in another language: the installer asks in a way whose answer it can read.
+        # Taken out, that was noticed by no test, and a German system was back at "nothing installed".
+        english = dict(self.env)
+        self.env.update(LANG="de_DE.UTF-8", LC_ALL="de_DE.UTF-8", LANGUAGE="de:en")
+        try:
+            german_missing, german_output = self.missing_packages()
+        finally:
+            self.env = english
+        self.assertEqual(german_missing, missing, german_output)
+        self.assertIn(absent[0], german_output.splitlines())
         # Asked for --no-deps the package manager is not run at all, and the names are listed as before.
         called.unlink()
         missing, output = self.missing_packages("--no-deps")
@@ -1940,7 +1996,12 @@ done
         policy.unlink(missing_ok=True)
         answer = "" if candidate is None else (
             f"wine:\\n  Installed: (none)\\n  Candidate: {candidate}\\n  Version table:\\n     {candidate} 500\\n")
-        policy.write_text(f'#!/bin/sh\n[ "$1 $2" = "policy wine" ] || exit 1\nprintf "{answer}"\n')
+        # In the user's language, as the real apt-cache answers (seen with apt 2.4 to 3.3 on Debian 12
+        # and 13 and Ubuntu 22.04 to 27.04); LANGUAGE has no say there once LC_ALL is C.
+        german = (answer.replace("Installed: (none)", "Installiert:           (keine)")
+                  .replace("Candidate:", "Installationskandidat:").replace("Version table:", "Versionstabelle:"))
+        policy.write_text(f'#!/bin/sh\n[ "$1 $2" = "policy wine" ] || exit 1\n'
+                          f'case ${{LC_ALL:-${{LC_MESSAGES:-${{LANG:-}}}}}} in de*) printf "{german}" ;; *) printf "{answer}" ;; esac\n')
         policy.chmod(0o755)
 
     def test_a_distribution_wine_that_the_set_up_would_refuse_is_not_installed(self):
@@ -1974,6 +2035,18 @@ done
                 self.assertIn("winehq-staging", notes[0])
                 self.assertIn("   skipped: this part needs Wine 11.6 or newer", output)
                 self.assertIsNone(self.setup_ran_with(), "the set-up was started without a Wine it takes")
+        # On a system in another language apt-cache names the candidate in that language
+        # ("Installationskandidat:"): the installer has to ask in a way whose answer it can read, or a
+        # German system gets the old wine as before. No test asked this; real apt was asked in round 24.
+        self.distribution_wine("10.0~repack-6")
+        english = dict(self.env)
+        self.env.update(LANG="de_DE.UTF-8", LC_ALL="de_DE.UTF-8", LANGUAGE="de:en")
+        try:
+            missing, output = packages_and_output()
+        finally:
+            self.env = english
+        self.assertNotIn("wine", missing)
+        self.assertIn("(10.0~repack-6) is older than Wine 11.6", output)
         # One that is new enough, one whose version cannot be read, none in the lists, no apt-cache:
         # asked for as before.
         for candidate in ["11.6~trixie-1", "11.20~trixie-1", "12.0~repack-1", "2:11.6-1", "(none)", "staging", None]:
