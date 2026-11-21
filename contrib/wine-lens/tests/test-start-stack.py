@@ -43,8 +43,12 @@ echo $(( $(cat "$ROOT/clock") + $1 )) >"$ROOT/clock.new" && mv "$ROOT/clock.new"
 """
 PASS_ON = '#!/bin/sh\nexec "$@"\n'
 TIMEOUT = '#!/bin/sh\nshift\nexec "$@"\n'
-# A program that stays: under the name of Wine's loader, of Wine's server, or of the serial port's keeper.
+# A program that stays: under the name of Wine's loader, of Wine's server, of the serial port's keeper, or of
+# Leia's session.
 STAYS = "#include <unistd.h>\nint main(void) { for (;;) pause(); }\n"
+# What the command line of Leia's session begins with under Wine 11.21 and 11.22 (seen with WineHQ's builds);
+# up to 11.17 it is "SRSession.exe" alone.
+SESSION_PATH = r"C:\Program Files\LeiaSR\Platform\bin\SRSession.exe"
 
 
 class StackTests(unittest.TestCase):
@@ -54,7 +58,7 @@ class StackTests(unittest.TestCase):
         cls.addClassCleanup(cls.built.cleanup)
         source = Path(cls.built.name) / "stays.c"
         source.write_text(STAYS)
-        for name in ("wine", "wineserver", "any2odyssey-noxon"):
+        for name in ("wine", "wineserver", "any2odyssey-noxon", "SRSession.exe", SESSION_PATH):
             subprocess.run(["cc", "-o", str(Path(cls.built.name) / name), str(source)], check=True)
 
     def setUp(self):
@@ -420,16 +424,23 @@ class EnsureStackTests(StackTests):
         log.mkdir(parents=True)
         (log / "service.txt").write_text("the run before\nlens board responded to initial disable\nand what came after\n")
         # Leia's service and session, in the list of processes, and a start that came after the board did.
-        for name in ("bin/SRService.exe", "SRSession.exe"):
-            program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", f"{self.root}/{name}"])
-            self.addCleanup(program.wait)
-            self.addCleanup(program.kill)
+        program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", f"{self.root}/bin/SRService.exe"])
+        self.addCleanup(program.wait)
+        self.addCleanup(program.kill)
+        self.leias_session = self.session()
         (self.root / "stack.started").write_text(f"{int((self.root / 'board').stat().st_mtime)}\n")
         deadline = time.monotonic() + 5
-        while subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", re.escape(f"{self.root}/SRSession.exe")],
+        while subprocess.run(["pgrep", "-u", str(os.getuid()), "-f", re.escape(f"SRSession.exe ({self.root})")],
                              stdout=subprocess.DEVNULL).returncode != 0:
             self.assertLess(time.monotonic(), deadline, "timed out")
             time.sleep(0.02)
+
+    def session(self):
+        """Leia's session among the processes, its command line as Wine 11.22 has it (the folder's name after it)."""
+        program = subprocess.Popen([SESSION_PATH, f"({self.root})"], executable=str(Path(self.built.name) / "SRSession.exe"))
+        self.addCleanup(program.wait)
+        self.addCleanup(program.kill)
+        return program
 
     # (The real start takes half a minute. This one takes long enough for a file written after it began
     # to be newer than one written before, where the file system keeps its times by the clock's tick.)
@@ -529,6 +540,56 @@ class EnsureStackTests(StackTests):
             os.utime(self.root / "board", (when, when))
             self.assertEqual(self.starts(), 1, f"the link was made anew ({when}) and the stack was left as it was")
             self.assertEqual(self.starts(), 0)
+
+    def test_a_second_request_does_not_start_the_stack_again_under_the_first(self):
+        # Leia's session is the last thing a start launches. Wine 11.21 and 11.22 start it through a program
+        # of their own: the process started as "wine SRSession.exe" is soon named "start.exe /exec", and the
+        # session comes a moment later as a process of its own, named by its Windows path. In between no
+        # process has the session's name. A request that had waited at the lock for the one that started
+        # the stack looked for the session in that moment, and started the stack again under the first
+        # request's program (real Wine 11.22, two requests at once: six pairs of eight). Up to Wine 11.17
+        # the process that was started is the session, and is named "SRSession.exe".
+        self.stays("wineserver")
+        sessions = re.escape(f"SRSession.exe ({self.root})")
+        start = self.root / "tools/start-stack.sh"
+        says = self.STARTS + self.SAYS.format(">>", "service.txt")
+        # (programs run by their bare names, so that their command lines begin as Wine's processes' do)
+        run = f'cd "{self.built.name}" && PATH=.:$PATH && '
+        # As Wine 11.22 has it: "wine SRSession.exe" at once, gone three tenths of a second later, and the
+        # session under its path six tenths of a second after the start has come back.
+        first = f'({run}{{ wine SRSession.exe "({self.root})" & "$REAL_SLEEP" 0.3; kill $!; }}) >/dev/null 2>&1 &\n'
+        comes = f"({run}\"$REAL_SLEEP\" 0.6 && exec '{SESSION_PATH}' \"({self.root})\") >/dev/null 2>&1 &\n"
+        # As Wine 11.17 has it: the process that was started, named "SRSession.exe" a moment later.
+        older = f'({run}"$REAL_SLEEP" 0.6 && exec SRSession.exe "({self.root})") >/dev/null 2>&1 &\n'
+
+        def asked(body, pause=0):
+            subprocess.run(["pkill", "-KILL", "-u", str(os.getuid()), "-f", sessions])
+            # (collected too: a process that was ended and not waited for keeps its name, and is found by it)
+            self.leias_session.wait()
+            (self.root / "stack.started").unlink(missing_ok=True)
+            start.write_text("#!/bin/sh\n" + says + body)
+            began = time.monotonic()
+            self.assertEqual(self.starts(), 1)
+            took = time.monotonic() - began
+            time.sleep(pause)
+            return self.starts(), took
+
+        for name, body in (("Wine 11.22", comes), ("Wine 11.17", older)):
+            with self.subTest(session=name):
+                again, took = asked(body)
+                self.assertEqual(again, 0, "the request after the one that started the stack started it again")
+                self.assertEqual(self.starts(), 0)
+                # (and the session that came was seen to have come: the wait did not run to its end)
+                self.assertLess(took, 2.5)
+        # The process Wine starts first has the session's name in its command line and is not the session:
+        # a request that comes when it has gone and the session is not there yet.
+        again, took = asked(first + comes, pause=0.3)
+        self.assertEqual(again, 0, "the program that starts the session was taken for it")
+        # A session that does not come at all holds the request up for three seconds, not for good, and the
+        # request ends as it always did; the next one starts the stack again.
+        again, took = asked("")
+        self.assertEqual(again, 1)
+        self.assertLess(took, 30)
 
     def test_the_board_is_ready_when_leias_service_has_said_so_since_the_start(self):
         # What the service wrote in the run before is not this start's, in whichever file it is.

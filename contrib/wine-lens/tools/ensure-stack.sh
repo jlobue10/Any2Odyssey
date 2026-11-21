@@ -103,6 +103,22 @@ if ! stack_ok; then
         [ $i -gt 60 ] && { echo "error: Leia's service did not get the lens board ready (log in $LOGDIR)"; exit 1; }
         sleep 1
     done
+    # Leia's session is the last thing the start launches, and Wine 11.21 and 11.22 start it through a
+    # program of their own: the process that was started as "wine SRSession.exe" becomes "start.exe /exec",
+    # and the session comes a moment later as a process of its own, named by its Windows path. In between,
+    # no process has the session's name. Where the board had answered by then, this request left in that
+    # moment, and a second request that had been waiting at the lock above (the lens helper and the weaver
+    # ask at the same time) looked for the session, did not find it and started the stack again, under the
+    # first request's program: of eight such pairs under real Wine 11.22 six started the stack twice, and
+    # in five the first helper never said "on". So the session itself is waited for here: a process whose
+    # command line begins with the session's name ("SRSession.exe" up to Wine 11.17) or with a Windows path
+    # to it, which "wine SRSession.exe" does not. Three seconds at the most: a session that does not come,
+    # or has ended at once, is what the next request finds, as before.
+    i=0
+    until pgrep -u "$(id -u)" -f '^([A-Za-z]:.*)?SRSession\.exe' >/dev/null || [ $i -ge 30 ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
     board_time >"$STAMP"
 fi
 exit 0
