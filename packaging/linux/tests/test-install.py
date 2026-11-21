@@ -588,6 +588,44 @@ class InstallerTests(unittest.TestCase):
         self.assert_removed(prefix)
         self.assertNotIn("any2odyssey", cache.read_text())
 
+    def test_no_icon_cache_is_made_where_there_was_none(self):
+        # Up to 1.0.0 the installer ran gtk-update-icon-cache on <prefix>/share/icons/hicolor whatever
+        # was there: in ~/.local, where there usually is no cache, that made one, --uninstall left it,
+        # and GTK then missed the icons other programs added later. A cache that is there is refreshed.
+        tools = self.root / "tools"
+        tools.mkdir()
+        called = self.root / "icon-cache-argv"
+        (tools / "gtk-update-icon-cache").write_text(
+            f'#!/bin/sh\necho "$*" >> "{called}"\nfor last; do :; done\necho made > "$last/icon-theme.cache"\n')
+        (tools / "gtk-update-icon-cache").chmod(0o755)
+        self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        prefix = self.root / "prefix"
+        icons = prefix / "share/icons/hicolor"
+        cache = icons / "icon-theme.cache"
+        long_ago = 1_000_000_000
+
+        def run_and_see(*arguments):
+            """Run with the icons folder's time set back; returns whether the run set it anew."""
+            if icons.is_dir():
+                os.utime(icons, (long_ago, long_ago))
+            result = self.run_installer("--prefix", str(prefix), *arguments)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return icons.stat().st_mtime > long_ago + 1
+
+        installing = ["--no-deps", "--no-udev", "--no-model", "--no-odyssey"]
+        run_and_see(*installing)
+        self.assertTrue(run_and_see(*installing), "GTK is not told to look at the icons again")
+        self.assertFalse(run_and_see("--uninstall", "--dry-run"), "a dry run changed something")
+        self.assertTrue(run_and_see("--uninstall"), "GTK is not told to look at the icons again")
+        self.assertFalse(cache.exists(), "an icon cache was made where there was none")
+        self.assertFalse(called.exists(), called.read_text() if called.exists() else "")
+        # With a cache there, as a system-wide prefix has it: made again by both.
+        for arguments in (installing, ["--uninstall"]):
+            cache.write_text("as it was\n")
+            run_and_see(*arguments)
+            self.assertEqual(cache.read_text(), "made\n")
+        self.assertEqual(called.read_text(), f"-q -t {icons}\n" * 2)
+
     def usual_place(self):
         """A stand-in home with nothing naming another data folder: ~/.local/share/any2odyssey is then
         both where the installer keeps its own files and the program's data folder."""
@@ -1038,6 +1076,9 @@ class InstallerTests(unittest.TestCase):
         self.windows_drive(f"run/media/{login}/Windows", self.block_device("a2ofix", "pci0000:00/ata1"))
         (self.system / "dev/odyssey-lens").touch()
         prefix = self.root / "prefix"
+        # (an icon cache that is there: without one its tool is not run)
+        (prefix / "share/icons/hicolor").mkdir(parents=True)
+        (prefix / "share/icons/hicolor/icon-theme.cache").touch()
         result = self.run_installer("--prefix", str(prefix), "--no-deps", "--no-udev", "--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         seen = (self.root / "lock seen").read_text().splitlines()

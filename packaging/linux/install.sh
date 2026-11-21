@@ -242,6 +242,20 @@ drop_the_old_setup() {
     done
 }
 
+# Tell GTK that the icons under the prefix have changed. An icon cache that is there is made again. Where
+# there is none (the usual state of ~/.local/share/icons/hicolor) none is made: up to 1.0.0 this script made
+# one, --uninstall left it, and GTK then believed that cache and did not see the icons other programs put
+# there later without refreshing it. The folder's time is set instead, which is what makes GTK look again
+# (and pass over a cache that could not be refreshed).
+refresh_icons() {
+    [ -d "$SHARE/icons/hicolor" ] || return 0
+    if [ -f "$SHARE/icons/hicolor/icon-theme.cache" ] && have gtk-update-icon-cache &&
+        run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1; then
+        return 0
+    fi
+    run touch "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
+}
+
 # One run at a time puts files into a prefix or takes them out, the others wait their turn. The program and
 # the desktop entry are each moved into place whole, but the rest is copied file by file and the Wine setup
 # is removed and copied again: of two runs started together (0.9.4) one stopped at "File exists" in most
@@ -307,7 +321,7 @@ if [ -n "$UNINSTALL" ]; then
         unlock_prefix
         # The caches the installation refreshed still name the entry and the icon that are gone now.
         [ -d "$SHARE/applications" ] && have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
-        [ -d "$SHARE/icons/hicolor" ] && have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
+        refresh_icons
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
@@ -512,7 +526,7 @@ if [ -z "$PACKAGED" ]; then
     fi
     unlock_prefix
     have update-desktop-database && run update-desktop-database "$SHARE/applications" >/dev/null 2>&1 || true
-    have gtk-update-icon-cache && run gtk-update-icon-cache -q -t "$SHARE/icons/hicolor" >/dev/null 2>&1 || true
+    refresh_icons
     case ":$PATH:" in *":$BIN:"*) ;; *) warn "$BIN is not on your PATH; start the program from the application menu, or as $BIN/any2odyssey" ;; esac
 else
     step "1. The program is installed by your distribution's package"
