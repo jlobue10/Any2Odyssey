@@ -46,6 +46,11 @@ pub struct Supervisor {
     /// A start has already been repeated because another renderer held the
     /// engine. Only one such wait is made per start the user asked for.
     waited_for_other: bool,
+    /// When that repeat is due, for as long as it is still to come. Kept
+    /// apart from `retry_after`, which a recovery attempt sets as well, and
+    /// from `recovering`: the wait is made with recovery off too, and the
+    /// recovery checkbox has nothing of it to cancel.
+    repeat_after: Option<Instant>,
 }
 
 impl Default for Supervisor {
@@ -58,6 +63,7 @@ impl Default for Supervisor {
             recovering: false,
             ready_since: None,
             waited_for_other: false,
+            repeat_after: None,
         }
     }
 }
@@ -76,6 +82,7 @@ impl Supervisor {
         self.wanted && self.retry_after.is_some()
     }
     /// A recovery attempt is queued or its relaunch has not become ready yet.
+    /// The one wait for another renderer is not one.
     pub fn recovering(&self) -> bool {
         self.recovering
     }
@@ -104,6 +111,7 @@ impl Supervisor {
     /// Nothing is queued, relaunching or ready any more.
     fn end_attempt(&mut self) {
         self.retry_after = None;
+        self.repeat_after = None;
         self.recovering = false;
         self.ready_since = None;
     }
@@ -120,6 +128,7 @@ impl Supervisor {
     pub fn worker_ready(&mut self, now: Instant) {
         self.recovering = false;
         self.retry_after = None;
+        self.repeat_after = None;
         let since = *self.ready_since.get_or_insert(now);
         if now.saturating_duration_since(since) >= RECOVERY_RESET_AFTER {
             self.failures = 0;
@@ -155,18 +164,22 @@ impl Supervisor {
         // A start made while that repeat is still to come (Apply or a tray
         // mode command relaunches at once, without asking here) meets the
         // same renderer. It is not the repeat: the wait goes on to its end.
-        let repeat_to_come = self.waited_for_other && self.retry_after.is_some();
+        //
+        // Whether the repeat is still to come was read off `retry_after`,
+        // which a queued recovery attempt sets too. With the repeat made
+        // and its worker ready, a later failure queued a recovery, and a
+        // relaunch during that countdown which met another renderer was
+        // given a second wait. And the wait set `recovering`, so that
+        // unticking the recovery checkbox during it turned 3D off with
+        // "Automatic recovery cancelled", with recovery off all along.
         if exit_code == exit_code::ALREADY_RUNNING
             && self.wanted
-            && (!self.waited_for_other || repeat_to_come)
+            && (!self.waited_for_other || self.repeat_after.is_some())
         {
-            let at = match self.retry_after {
-                Some(at) if repeat_to_come => at,
-                _ => now + RECOVERY_DELAY,
-            };
+            let at = self.repeat_after.unwrap_or(now + RECOVERY_DELAY);
             self.waited_for_other = true;
+            self.repeat_after = Some(at);
             self.retry_after = Some(at);
-            self.recovering = true;
             return format!(
                 "{what}. Trying once more in {} seconds.",
                 at.saturating_duration_since(now)
@@ -203,7 +216,10 @@ impl Supervisor {
         self.ready_since = None;
         match self.retry_after {
             Some(at) if self.wanted && now >= at => {
+                // Whichever start was queued, it is made now: the repeat
+                // for another renderer is no longer to come.
                 self.retry_after = None;
+                self.repeat_after = None;
                 Action::StartWorker
             }
             None if self.wanted => Action::StartWorker,
@@ -217,8 +233,9 @@ impl Supervisor {
     /// still queued or its relaunch is already in flight (the caller then
     /// stops that worker when it reports in). A recovery that already reached
     /// ready is over: a restart the user asked for afterwards (Apply, the
-    /// tray's mode commands) is not a recovery and is left alone. Returns a
-    /// status line when something user-visible changed.
+    /// tray's mode commands) is not a recovery and is left alone. Nor is the
+    /// one wait for another renderer, which goes on. Returns a status line
+    /// when something user-visible changed.
     pub fn recover_changed(&mut self, enabled: bool, worker_running: bool) -> Option<String> {
         self.recover = enabled;
         if !enabled && self.wanted && !worker_running && self.recovering {
@@ -577,7 +594,7 @@ mod tests {
             msg,
             "Another renderer is already running. Trying once more in 6 seconds."
         );
-        assert!(s.wanted && s.retry_pending() && s.recovering());
+        assert!(s.wanted && s.retry_pending() && !s.recovering());
         assert_eq!(s.failures(), 0);
         // The repeat is made when it was due, not eight seconds after this.
         assert_eq!(
@@ -589,6 +606,93 @@ mod tests {
         let msg = s.worker_exited(exit_code::ALREADY_RUNNING, None, later);
         assert!(msg.ends_with("and turn 3D on again."), "{msg}");
         assert!(!s.wanted && !s.retry_pending());
+    }
+
+    #[test]
+    fn the_recovery_checkbox_leaves_the_wait_for_another_renderer_alone() {
+        // The wait is made with recovery off too, so it is no recovery to
+        // cancel. Unticking the checkbox during it used to turn 3D off with
+        // "Automatic recovery cancelled", and so did ticking and unticking
+        // it where recovery had been off from the start.
+        for recover in [true, false] {
+            let mut s = Supervisor::new(recover);
+            s.start_requested();
+            let now = t0();
+            s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+            assert!(!s.recovering(), "waiting is not recovering");
+            assert_eq!(s.recover_changed(true, false), None);
+            assert_eq!(s.recover_changed(false, false), None);
+            assert!(s.wanted && s.retry_pending() && !s.recover);
+            assert_eq!(
+                s.tick_without_worker(now + RECOVERY_DELAY),
+                Action::StartWorker,
+                "the repeat is made when it was due"
+            );
+            // While the repeat has not reported in, there is as little to
+            // cancel.
+            assert_eq!(s.recover_changed(false, false), None);
+            assert!(s.wanted);
+        }
+        // A recovery that meets another renderer is still a recovery, and
+        // the checkbox still cancels it.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let now = t0();
+        s.worker_exited(1, None, now);
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        assert!(s.recovering() && s.retry_pending());
+        assert!(s.recover_changed(false, false).is_some());
+        assert!(!s.wanted && !s.retry_pending());
+        assert_eq!(s.tick_without_worker(now + RECOVERY_DELAY), Action::None);
+    }
+
+    #[test]
+    fn a_queued_recovery_is_not_taken_for_the_repeat_still_to_come() {
+        // One wait for another renderer per start the user asked for. This
+        // start has had its wait, and the repeat worked. A later failure
+        // queues a recovery; Apply during that countdown relaunches at
+        // once, and that worker meets a renderer. It used to be told
+        // "Trying once more", the queued recovery passing for the repeat.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let mut now = t0();
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        now += RECOVERY_DELAY;
+        assert_eq!(s.tick_without_worker(now), Action::StartWorker);
+        s.worker_ready(now);
+        now += Duration::from_secs(20);
+        let msg = s.worker_exited(1, None, now);
+        assert!(msg.contains("Recovery attempt 1 in 8 seconds"), "{msg}");
+        now += Duration::from_secs(1);
+        let msg = s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        assert_eq!(
+            msg,
+            "Another renderer is already running. Close it, or Samsung's 3D player, and turn 3D on again."
+        );
+        assert!(!s.wanted && !s.retry_pending() && !s.recovering());
+        assert_eq!(s.tick_without_worker(now + RECOVERY_DELAY), Action::None);
+        // The same where the repeat itself failed for another reason and
+        // its recovery is what is queued.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let mut now = t0();
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        now += RECOVERY_DELAY;
+        assert_eq!(s.tick_without_worker(now), Action::StartWorker);
+        s.worker_exited(1, None, now);
+        let msg = s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        assert!(msg.ends_with("and turn 3D on again."), "{msg}");
+        assert!(!s.wanted);
+        // A relaunch that becomes ready during the wait ends the wait: the
+        // other renderer is gone, and one met later is not waited for.
+        let mut s = Supervisor::new(true);
+        s.start_requested();
+        let now = t0();
+        s.worker_exited(exit_code::ALREADY_RUNNING, None, now);
+        s.worker_ready(now + Duration::from_secs(2));
+        assert!(!s.retry_pending());
+        let msg = s.worker_exited(exit_code::ALREADY_RUNNING, None, now + RECOVERY_DELAY);
+        assert!(msg.ends_with("and turn 3D on again."), "{msg}");
     }
 
     #[test]

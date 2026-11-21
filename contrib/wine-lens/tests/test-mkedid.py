@@ -78,11 +78,15 @@ class MkedidTests(unittest.TestCase):
             self.assertRegex(key, r"\A\[-?HKEY_LOCAL_MACHINE\\[^\[\]]+\]\Z")
         self.assertIn('"DeviceInstance"="DISPLAY\\\\___1234\\\\0000&0000"', [line.rstrip("\r") for line in lines])
 
-    def run_main(self, monitors, edids, probe_lines, place=False):
-        """main() for these xrandr monitors and EDIDs: the registry file's lines, what it said, the place."""
+    def run_main(self, monitors, edids, probe_lines, place=False, again=False):
+        """main() for these xrandr monitors and EDIDs: the registry file's lines, what it said, the place.
+
+        A first start, with no registry file of a start before it, unless it is one `again`."""
         self.tool.xrandr_monitors = lambda: list(monitors)
         self.tool.edid_of = lambda connector: edids[connector]
         probe, out, noted = self.root / "probe", self.root / "out.reg", self.root / "noted"
+        if not again:
+            out.unlink(missing_ok=True)
         probe.write_text("".join(probe_lines))
         stderr, sys.stderr = sys.stderr, open(self.root / "said", "w")
         try:
@@ -133,6 +137,91 @@ class MkedidTests(unittest.TestCase):
         # A mirrored pair beside a monitor Wine lists without a usable name: the slot left over is still its.
         _, said, _ = self.run_main(monitors, edids, probe[:1])
         self.assertEqual(said, "slot 0: DP-2 SAM7412\nslot 1: DP-3 DEL0002\n")
+
+    ENUM = "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Enum\\DISPLAY\\"
+    CLASSES = ("HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Control\\DeviceClasses\\"
+               "{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}\\##?#DISPLAY#")
+
+    def entries(self, lines):
+        """What a registry file does with the monitor entries: ({deleted}, {written}) as "MODEL slot"."""
+        deleted, written, linked = set(), set(), set()
+        for line in lines:
+            entry = re.fullmatch(r"\[(-?)" + re.escape(self.ENUM) + r"([^\\\]]+)\\(\d{4})&0000\]", line)
+            if entry and entry.group(2) != "Default_Monitor":
+                (deleted if entry.group(1) else written).add(f"{entry.group(2)} {int(entry.group(3))}")
+            link = re.fullmatch(r"\[-" + re.escape(self.CLASSES) + r"([^#]+)#(\d{4})&0000#\{[-0-9a-f]+\}\]", line)
+            if link:
+                linked.add(f"{link.group(1)} {int(link.group(2))}")
+        # Every entry goes with its interface (which holds Linked=1), and is deleted before it is written.
+        self.assertEqual(linked, deleted)
+        self.assertLessEqual(written, deleted)
+        for name in written:
+            model, slot = name.split()
+            key = lambda sign: f"[{sign}{self.ENUM}{model}\\{int(slot):04d}&0000]"
+            self.assertLess(lines.index(key("-")), lines.index(key("")))
+        return deleted, written
+
+    THREE = [("DP-1", 3840, 2160, 0, 0), ("DP-2", 1920, 1080, 3840, 0), ("DP-3", 1920, 1080, 5760, 0)]
+    PROBE = ["0001 \\\\.\\DISPLAY1 3840x2160 at 0,0 id=[]\n", "0002 \\\\.\\DISPLAY2 1920x1080 at 3840,0 id=[]\n",
+             "0003 \\\\.\\DISPLAY3 1920x1080 at 5760,0 id=[]\n"]
+
+    def test_a_monitor_fewer_than_at_the_start_before_leaves_no_entry_behind(self):
+        # Three monitors of one model, then two: the third one's entry stayed in the prefix with Linked=1,
+        # and Leia's service was shown a monitor that was not there.
+        same = edid((4 << 10) | (5 << 5) | 12, 0x0001)
+        edids = {"DP-1": same, "DP-2": same, "DP-3": same}
+        _, written = self.entries(self.run_main(self.THREE, edids, self.PROBE)[0])
+        self.assertEqual(written, {"DEL0001 0", "DEL0001 1", "DEL0001 2"})
+        deleted, written = self.entries(self.run_main(self.THREE[:2], edids, self.PROBE[:2], again=True)[0])
+        self.assertEqual(written, {"DEL0001 0", "DEL0001 1"})
+        self.assertIn("DEL0001 2", deleted)
+
+    def test_a_model_that_is_gone_leaves_no_entry_behind(self):
+        samsung, other = (19 << 10) | (1 << 5) | 13, (4 << 10) | (5 << 5) | 12
+        edids = {"DP-1": edid(samsung, 0x7412), "DP-2": edid(other, 0x0001), "DP-3": edid(other, 0x0002)}
+        _, written = self.entries(self.run_main(self.THREE, edids, self.PROBE)[0])
+        self.assertEqual(written, {"SAM7412 0", "DEL0001 1", "DEL0002 2"})
+        # The second one unplugged: the third moves up a slot, and nothing of the second is kept.
+        two = [self.THREE[0], ("DP-3", 1920, 1080, 3840, 0)]
+        deleted, written = self.entries(self.run_main(two, edids, self.PROBE[:2], again=True)[0])
+        self.assertEqual(written, {"SAM7412 0", "DEL0002 1"})
+        self.assertLessEqual({"DEL0001 1", "DEL0002 2", "DEL0002 1", "SAM7412 0"}, deleted)
+        # And at the starts after it (the file may not have been imported: Wine did not start, or the start
+        # was ended before it), for as long as the model stays away.
+        for _ in range(2):
+            deleted, written = self.entries(self.run_main(two, edids, self.PROBE[:2], again=True)[0])
+            self.assertEqual(written, {"SAM7412 0", "DEL0002 1"})
+            self.assertLessEqual({"DEL0001 1", "DEL0002 2"}, deleted)
+        # Plugged in again, it has its entry again.
+        _, written = self.entries(self.run_main(self.THREE, edids, self.PROBE, again=True)[0])
+        self.assertEqual(written, {"SAM7412 0", "DEL0001 1", "DEL0002 2"})
+
+    def test_slots_no_start_named_are_cleared_too(self):
+        # An installation from before this was kept track of: what an earlier layout left in higher slots of
+        # a model that is connected goes, without any file naming it.
+        deleted, written = self.entries(self.run_main(self.THREE[:1], {"DP-1": edid(1)}, self.PROBE[:1])[0])
+        self.assertEqual(written, {"@@A1234 0"})
+        self.assertEqual(deleted, {f"@@A1234 {slot}" for slot in range(16)})
+
+    def test_only_monitor_entries_are_taken_from_the_file_of_the_start_before(self):
+        # The file is the user's own, but what is deleted in Wine's registry is never read out of it as
+        # written: a model as an EDID gives it, a slot number, and nothing else. (tools/start-stack.sh adds
+        # other entries to the file, and a start that was ended can leave any part of it.)
+        out = self.root / "out.reg"
+        lines = ["REGEDIT4", "", f"[{self.ENUM}DEL0001\\0020&0000]", f"[-{self.ENUM}ABC00FF\\0003&0000]",
+                 f"[{self.ENUM}Default_Monitor\\0005&0000]", f"[{self.ENUM}DEL0001\\9999&0000]", f"[{self.ENUM}..\\..\\Services\\0001&0000]",
+                 f"[{self.ENUM}DEL0001\\0021&0000\\Device Parameters]", f"[-{self.ENUM}del0001\\0001&0000]",
+                 f" [{self.ENUM}XYZ0001\\0001&0000]", f"[{self.ENUM}XYZ0002\\0001&0000] ",
+                 "[HKEY_LOCAL_MACHINE\\Software\\Microsoft\\WindowsRuntime\\ActivatableClassId\\A.Class]",
+                 "\x00\xff not a registry file at all"]
+        out.write_bytes("\r\n".join(lines).encode("latin-1"))
+        deleted, written = self.entries(self.run_main(self.THREE[:1], {"DP-1": edid(1)}, self.PROBE[:1], again=True)[0])
+        self.assertEqual(written, {"@@A1234 0"})
+        self.assertEqual(deleted, {f"{model} {slot}" for model in ("@@A1234", "DEL0001", "ABC00FF") for slot in range(21)})
+        # No file: a first start.
+        out.unlink()
+        deleted, _ = self.entries(self.run_main(self.THREE[:1], {"DP-1": edid(1)}, self.PROBE[:1])[0])
+        self.assertEqual(len(deleted), 16)
 
     def test_a_slot_where_no_monitor_is_says_so(self):
         with self.assertRaises(SystemExit) as stopped:

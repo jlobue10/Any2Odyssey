@@ -1173,7 +1173,24 @@ pub fn is_minimized(_: isize) -> Option<bool> {
     None
 }
 pub fn open_path(path: &Path) {
-    let _ = open::that_detached(path);
+    launch_apart(path.to_owned(), |path| {
+        let _ = open::that_detached(path);
+    });
+}
+
+/// Hand `path` to `launch` on a thread of its own. The desktop's launcher
+/// is watched for a quarter of a second before it is taken to have worked,
+/// and each one that fails gives way to the next: "View logs" did that
+/// waiting on the thread that draws the window, with the shared state held,
+/// so the window and the poller stood still for as long. The caller is
+/// back at once now, as it is on Windows; what the launcher answers is not
+/// told to anyone, as before.
+fn launch_apart(path: PathBuf, launch: impl FnOnce(PathBuf) + Send + 'static) {
+    // Without a thread to do it on, nothing is opened: the window is not
+    // kept waiting for it after all.
+    let _ = std::thread::Builder::new()
+        .name("open-path".into())
+        .spawn(move || launch(path));
 }
 pub fn install_jump_list() {}
 pub fn check_updates() -> Result<Comparison, String> {
@@ -1183,6 +1200,23 @@ pub fn check_updates() -> Result<Comparison, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_a_path_does_not_wait_for_the_launcher() {
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let (done, launched) = std::sync::mpsc::channel();
+        launch_apart(PathBuf::from("/some/folder"), move |path| {
+            // A launcher that takes its time: until the caller is back.
+            let released = held.recv_timeout(Duration::from_secs(10)).is_ok();
+            let _ = done.send((path, released));
+        });
+        // Back while the launcher is still at it. Done on the caller's
+        // thread, the launcher would have waited its ten seconds out.
+        hold.send(()).unwrap();
+        let (path, released) = launched.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(path, PathBuf::from("/some/folder"));
+        assert!(released, "the caller waited for the launcher");
+    }
 
     #[test]
     fn message_reads_are_bounded_and_require_a_complete_utf8_line() {

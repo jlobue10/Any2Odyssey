@@ -79,8 +79,11 @@ wine_too_old() { # <what "wine --version" says>
     [ "$major" -lt 11 ] || { [ "$major" -eq 11 ] && [ "${minor:-0}" -lt 6 ]; }
 }
 WINE_IS=$(wine --version 2>/dev/null | head -n 1) || WINE_IS=
+# (WineHQ's packages by the names that put a wine on the PATH: winehq-devel and winehq-staging. The message
+# named wine-devel and wine-staging, which install under /opt alone, and this check then found the old Wine
+# again.)
 if wine_too_old "$WINE_IS"; then
-    die "this Wine is too old for the Odyssey 3D set-up: $WINE_IS, and Wine 11.6 or newer is needed (older ones cannot tell Leia's service where the lens board is). Where the distribution's own Wine is older, WineHQ's packages (wine-devel or wine-staging) are new enough."
+    die "this Wine is too old for the Odyssey 3D set-up: $WINE_IS, and Wine 11.6 or newer is needed (older ones cannot tell Leia's service where the lens board is). Where the distribution's own Wine is older, WineHQ's packages winehq-devel or winehq-staging are new enough."
 fi
 # The tools tell whether Leia's service runs by looking among this user's own processes. BusyBox's pgrep
 # cannot (it has no -u) and fails instead: every start of the lens helper would restart the service.
@@ -89,14 +92,37 @@ pgrep -u "$(id -u)" -f . >/dev/null 2>&1 ||
 [ -e "$BOARD" ] || die "$BOARD is missing. Install the udev rule and wake the monitor:
     sudo cp '$HERE/70-any2odyssey-lens.rules' /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger"
 
-# Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them.
-WINELIB=
-for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
-         /usr/lib64/wine-wow64/wine/x86_64-windows \
-         /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
-    [ -f "$d/cfgmgr32.dll" ] && WINELIB=$d && break
-done
-[ -n "$WINELIB" ] || die "could not find Wine's x86_64-windows library folder"
+# Wine's own 64-bit Windows libraries: the stand-ins forward to copies of them. They used to be taken from a
+# list of usual folders, whichever wine runs. With two Wines on one machine (WineHQ's under /opt beside a
+# distribution's libraries, or a build of one's own) the version asked for above was one Wine's, and the
+# libraries listed, copied and linked against below the other's: the set-up ended with "done" and nothing in
+# the prefix started. They are now looked for beside the wine that runs first, which is the PATH's wine with
+# every link followed, and in the usual folders only after that (for a wine that is a script of the user's
+# own, which is not read). tools/start-stack.sh has the same function, word for word.
+wine_libraries() {
+    wine_is=$(command -v wine 2>/dev/null) || wine_is=
+    case $wine_is in /*) wine_is=$(readlink -f "$wine_is" 2>/dev/null) || wine_is= ;; *) wine_is= ;; esac
+    case $wine_is in
+        */bin/*)
+            # <root>/bin/wine: the libraries where a distribution or WineHQ's packages keep them under <root>
+            wine_root=${wine_is%/bin/*}
+            for d in "$wine_root/lib/wine" "$wine_root/lib64/wine" "$wine_root/lib/x86_64-linux-gnu/wine" \
+                     "$wine_root/lib64/wine-wow64/wine" "$wine_root/wine"; do
+                if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi
+            done ;;
+        /*)
+            # (a wine that is kept beside its libraries)
+            d=${wine_is%/*}
+            if [ -f "$d/x86_64-windows/cfgmgr32.dll" ]; then echo "$d/x86_64-windows"; return 0; fi ;;
+    esac
+    for d in /usr/lib/wine/x86_64-windows /usr/lib64/wine/x86_64-windows /usr/lib/x86_64-linux-gnu/wine/x86_64-windows \
+             /usr/lib64/wine-wow64/wine/x86_64-windows \
+             /opt/wine-stable/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows /opt/wine-staging/lib/wine/x86_64-windows; do
+        if [ -f "$d/cfgmgr32.dll" ]; then echo "$d"; return 0; fi
+    done
+    return 1
+}
+WINELIB=$(wine_libraries) || die "could not find Wine's x86_64-windows library folder"
 
 export WINEPREFIX=$T/prefix WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
 SYS=$WINEPREFIX/drive_c/windows/system32
@@ -105,14 +131,17 @@ chmod 700 "$T" # the prefix's registry will hold the camera secret
 wineserver -k 2>/dev/null || true
 # A camera bridge still running from an earlier set-up is the program as it was built then. The camera
 # stand-in built below need not speak its handshake, and tools/tracking.sh neither takes it for the bridge
-# once its file has been replaced nor can start another while it holds the port. It is ended here, if the
-# process of the noted number is that program.
-BRIDGE_PID=$(cat "${XDG_RUNTIME_DIR:-$T}/any2odyssey-camera-bridge.pid" 2>/dev/null) || BRIDGE_PID=
-case $BRIDGE_PID in '' | *[!0-9]*) ;; *)
-    case $(readlink "/proc/$BRIDGE_PID/exe" 2>/dev/null) in
-        "$(readlink -f "$T/build")/any2odyssey-camera-bridge"*) kill "$BRIDGE_PID" 2>/dev/null || true ;;
-    esac ;;
-esac
+# once its file has been replaced nor can start another while it holds the port. It is ended here: the
+# process of the noted number, and any other of this user's processes (the note can be lost while the bridge
+# lives, see tools/tracking.sh), if its program is that one.
+BRIDGE_IS=$(readlink -f "$T/build")/any2odyssey-camera-bridge
+for pid in $(cat "${XDG_RUNTIME_DIR:-$T}/any2odyssey-camera-bridge.pid" 2>/dev/null) \
+           $(pgrep -u "$(id -u)" -f 'any2odyssey-camera-[b]ridge' 2>/dev/null); do
+    case $pid in *[!0-9]*) continue ;; esac
+    case $(readlink "/proc/$pid/exe" 2>/dev/null) in
+        "$BRIDGE_IS" | "$BRIDGE_IS (deleted)") kill "$pid" 2>/dev/null || true ;;
+    esac
+done
 
 echo "setup: Wine prefix in $WINEPREFIX"
 # A prefix with no finished set-up behind it (this script puts its tools into place last) is what a first run
@@ -216,7 +245,10 @@ cp "$WINELIB/dxva2.dll" "$SYS/dxva2w.dll"
 cp "$WINELIB/wtsapi32.dll" "$SYS/wtsapiw.dll"
 cp "$B/a2otoast.dll" "$B/cfgmgr32.dll" "$B/dxva2.dll" "$B/wtsapi32.dll" "$SYS/"
 cp "$B/a2ousb.sys" "$SYS/drivers/"
-(cd "$B" && setsid timeout 120 wine regedit /S device.reg >/dev/null 2>&1 </dev/null)
+# (Each of the three requests to Wine below that can fail now ends the set-up with its reason. Under "set -e"
+# this first one ended the script without a word, after two minutes when it was Wine that did not come back.)
+(cd "$B" && setsid timeout 120 wine regedit /S device.reg >/dev/null 2>&1 </dev/null) ||
+    die "Wine did not import the lens board's entries into the prefix's registry (wine regedit ended with $?; 124 means it had not ended after two minutes). The set-up is not finished; run it again."
 (cd "$WINEPREFIX/drive_c/Program Files/LeiaSR/Platform/bin" && setsid timeout 120 wine SRService.exe -install >/dev/null 2>&1 </dev/null) || true
 timeout 60 wine sc query "SR Service" 2>/dev/null | grep -q "SERVICE_NAME" || die "Leia's service could not be registered in the prefix"
 if [ -n "$TRACKING" ]; then
@@ -236,13 +268,23 @@ if [ -n "$TRACKING" ]; then
        printf '"SymbolicLink"="%s"\n"FriendlyName"="3D Stereo WebCam"\n' \
            '\\\\?\\USB#VID_04E8&PID_20D7&MI_00#8&2939E249&0&0000#{E5323777-F976-4F5B-9B55-B94699C46E44}\\GLOBAL'
      } >"$B/camera.reg")
-    (cd "$B" && setsid timeout 120 wine regedit /S camera.reg >/dev/null 2>&1 </dev/null) || true
+    # A failure of this import was let pass and never looked at: the set-up said "done", the camera stand-in
+    # found neither the port nor the secret, and Leia's eye tracker never got a camera. It ends the set-up
+    # now, and so does a secret that Wine does not have afterwards (asked for by its name only; what Wine
+    # answers is not kept).
+    (cd "$B" && setsid timeout 120 wine regedit /S camera.reg >/dev/null 2>&1 </dev/null) ||
+        die "Wine did not import the camera's entries into the prefix's registry (wine regedit ended with $?; 124 means it had not ended after two minutes). The set-up is not finished; run it again."
     rm -f "$B/camera.reg" # it holds the secret
+    timeout 60 wine reg query 'HKLM\Software\Any2Odyssey\Camera' /v Secret >/dev/null 2>&1 </dev/null ||
+        die "the camera's entries are not there in the prefix's registry after Wine imported them (wine reg query ended with $?): Leia's eye tracker would get no camera. The set-up is not finished; run it again."
+    # (The request to register the tracker was the last of an "||" list: under "set -e" its failure ended the
+    # script before the line after it could say what had failed.)
     timeout 60 wine sc query "SR Eye Tracker" 2>/dev/null | grep -q "SERVICE_NAME" ||
         setsid timeout 60 wine sc create "SR Eye Tracker" \
-            binPath= 'C:\Program Files\LeiaSR\Tracker\bin\SREyeTracker.exe' start= demand >/dev/null 2>&1 </dev/null
+            binPath= 'C:\Program Files\LeiaSR\Tracker\bin\SREyeTracker.exe' start= demand >/dev/null 2>&1 </dev/null ||
+        true
     timeout 60 wine sc query "SR Eye Tracker" 2>/dev/null | grep -q "SERVICE_NAME" ||
-        die "Leia's eye tracker could not be registered in the prefix"
+        die "Leia's eye tracker could not be registered in the prefix (after \"wine sc create\", Wine has no service \"SR Eye Tracker\"). The set-up is not finished; run it again."
 fi
 wineserver -k 2>/dev/null || true
 
@@ -261,3 +303,12 @@ if [ -n "$TRACKING" ]; then
     echo "       Eye tracking is prepared too: '$T/tools/tracking.sh' start | stop | status"
     echo "       (start it while the lens helper is running; it needs Leia's service up)."
 fi
+
+# What this Wine side was made from: a digest of the set-up's own files (this script, the sources of the
+# stand-ins, the tools). The installer (packaging/linux/install.sh, older_wine_side) makes the same digest of
+# the set-up it has installed and says so when the two differ. Up to 1.0.0 it compared the copied scripts
+# only: a release that changed nothing but a stand-in's source left the old libraries in the prefix, and
+# nothing said so. Noted last: a set-up that stopped on the way leaves no note, or the one before it.
+(cd "$HERE" && sha256sum setup.sh any2odyssey-lens-helper any2odyssey-weaver src/*.* tools/*.* | LC_ALL=C sort |
+    sha256sum | cut -d' ' -f1) >"$T/made-from" 2>/dev/null || true
+[ -s "$T/made-from" ] || rm -f "$T/made-from"

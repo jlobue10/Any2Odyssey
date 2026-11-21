@@ -37,6 +37,31 @@ stack_ok() {
     # (the link itself, not the tty behind it: udev makes it anew when the board returns after a monitor sleep)
 }
 
+# Whether Leia's service has said, since this start began, that the lens board answered it. The line used to
+# be looked for in the whole of the newest log file: where the service goes on writing into the file of the
+# run before, the line of that run was found at once, and the start counted as ready before the board was.
+# So every log file's checksum and size are noted before the start (in $LOGS, whose own time marks the
+# start), and the line counts only in a file written since, and there only in what is new: all of a file
+# that was not there or does not begin as it did (the service wrote it anew), and what was added to one
+# that does.
+LOGS=$T/stack.logs
+note_logs() { cksum "$LOGDIR"/*.txt >"$LOGS" 2>/dev/null; }
+board_ready() {
+    find "$LOGDIR"/*.txt -newer "$LOGS" 2>/dev/null | (
+        while IFS= read -r log; do
+            had=$(LOG=$log awk '{ name = substr($0, length($1) + length($2) + 3) }
+                                name == ENVIRON["LOG"] { print $1, $2; exit }' "$LOGS")
+            from=0
+            if [ -n "$had" ]; then
+                size=${had#* }
+                [ "$(head -c "$size" "$log" 2>/dev/null | cksum | awk '{ print $1, $2 }')" = "$had" ] && from=$size
+            fi
+            tail -c "+$((from + 1))" "$log" 2>/dev/null | grep -a -q 'responded to initial disable' && exit 0
+        done
+        exit 1
+    )
+}
+
 # One caller at a time may (re)start the service; the others wait for it.
 exec 9>"$T/stack.lock"
 flock 9
@@ -49,6 +74,11 @@ if ! stack_ok; then
     case $old in '' | *[!0-9]*) ;; *) grep -q -a -e 'noxon\.sh' -e 'any2odyssey-noxon' "/proc/$old/cmdline" 2>/dev/null && kill "$old" 2>/dev/null ;; esac
     setsid "$T/tools/noxon.sh" </dev/null >/dev/null 2>&1 9>&- &
     echo $! >"$NOXON"
+    # The note of an earlier start goes before this one begins. It used to stay until this start had ended
+    # well: a start that failed, or a caller ended while it waited for the board below, left Leia's programs
+    # and Wine's server up with the old note, and the next request took that for a stack that had the board.
+    rm -f "$STAMP"
+    note_logs
     "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- || {
         # (start-stack.sh leaves its reason there when it has one of its own)
         if [ -s "$T/stack.error" ]; then
@@ -59,7 +89,7 @@ if ! stack_ok; then
         exit 1
     }
     i=0
-    until grep -a -q 'responded to initial disable' "$(ls -t "$LOGDIR"/*.txt 2>/dev/null | head -1)" 2>/dev/null; do
+    until board_ready; do
         i=$((i + 1))
         [ $i -gt 60 ] && { echo "error: Leia's service did not get the lens board ready (log in $LOGDIR)"; exit 1; }
         sleep 1

@@ -203,17 +203,20 @@ echo
 echo "The Function Table (interpreted .pdata section contents)"
 """
 
-    def wine_libraries(self, installed, copies, listed):
-        """Wine's libraries as installed now, the copies the set-up made, and the names its stand-ins list."""
+    def wine_libraries(self, installed, copies, listed, beside=None):
+        """Wine's libraries as installed now, the copies the set-up made, and the names its stand-ins list.
+
+        The libraries are in the first of the usual folders, or `beside` the wine that runs, which is bin/wine."""
         text = (TOOLS / "start-stack.sh").read_text()
         self.assertEqual(text.count(self.WINE_LIBRARIES), 1)
         (self.root / "tools/start-stack.sh").write_text(
             text.replace(self.WINE_LIBRARIES, f"for d in {self.root}/wine-libraries "))
         self.system32 = self.root / "prefix/drive_c/windows/system32"
-        for folder in (self.root / "wine-libraries", self.system32):
+        libraries = self.root / (f"{beside}/x86_64-windows" if beside else "wine-libraries")
+        for folder in (libraries, self.system32):
             folder.mkdir(parents=True)
         for name, (names, build) in installed.items():
-            (self.root / "wine-libraries" / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
+            (libraries / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
         for name, (names, build) in copies.items():
             (self.system32 / f"{name}.dll").write_text(f"names: {names}\n{build}\n")
         for name, names in listed.items():
@@ -269,6 +272,23 @@ echo "The Function Table (interpreted .pdata section contents)"
         seen = (self.root / "libraries seen").read_text().splitlines()
         self.assertEqual(set(seen), {f"{self.STAND_INS} with Wine 11.22"})
         self.assertNotIn("wine cmd /c exit", (self.root / "calls").read_text())
+
+    def test_the_copies_are_brought_up_to_the_wine_that_runs_not_to_another_one(self):
+        # Two Wines on one machine: the one that runs (WineHQ's, say, under /opt) and the libraries of
+        # another in one of the usual folders, which is where the script used to look alone. The copies were
+        # then compared with that other Wine's libraries, and after an upgrade brought "up" to them.
+        same = "CM_Get_Child CM_Get_Parent"
+        self.wine_libraries(installed={"cfgmgr32": (same, "Wine 11.22, the one that runs")},
+                            copies={"cfgmgw": (same, "Wine 11.17")}, listed={"cfgmgr32": same}, beside="lib64/wine")
+        (self.root / "wine-libraries").mkdir()
+        (self.root / "wine-libraries/cfgmgr32.dll").write_text(f"names: {same}\nWine 10.0, the distribution's\n")
+        self.calls()
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.22, the one that runs\n")
+        # A copy that is the running Wine's is left alone, and no update is asked of Wine for it.
+        (self.root / "calls").unlink()
+        self.calls()
+        self.assertNotIn("wine cmd /c exit", (self.root / "calls").read_text())
+        self.assertEqual((self.system32 / "cfgmgw.dll").read_text(), f"names: {same}\nWine 11.22, the one that runs\n")
 
     def test_an_update_of_the_prefix_that_does_not_end_well_is_tried_again_at_the_next_start(self):
         same = "CM_Get_Child CM_Get_Parent"
@@ -391,12 +411,14 @@ class EnsureStackTests(StackTests):
         # that the board was missing)
         (self.root / "tools/ensure-stack.sh").write_text(text.replace(BOARD, f'BOARD="{self.root}/board"'))
         (self.root / "board").write_text("")
-        for name, body in (("start-stack.sh", 'echo started >>"$ROOT/starts"'), ("noxon.sh", "exit 0")):
+        # A start, and Leia's service saying in its log that the board answered: into the file it has, which
+        # holds the same line from the run before.
+        for name, body in (("start-stack.sh", self.STARTS + self.SAYS.format(">>", "service.txt")), ("noxon.sh", "exit 0")):
             (self.root / "tools" / name).write_text(f"#!/bin/sh\n{body}\n")
             (self.root / "tools" / name).chmod(0o755)
         log = self.root / "prefix/drive_c/ProgramData/Simulated Reality/Server/Log"
         log.mkdir(parents=True)
-        (log / "service.txt").write_text("lens board responded to initial disable\n")
+        (log / "service.txt").write_text("the run before\nlens board responded to initial disable\nand what came after\n")
         # Leia's service and session, in the list of processes, and a start that came after the board did.
         for name in ("bin/SRService.exe", "SRSession.exe"):
             program = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)", f"{self.root}/{name}"])
@@ -408,6 +430,12 @@ class EnsureStackTests(StackTests):
                              stdout=subprocess.DEVNULL).returncode != 0:
             self.assertLess(time.monotonic(), deadline, "timed out")
             time.sleep(0.02)
+
+    # (The real start takes half a minute. This one takes long enough for a file written after it began
+    # to be newer than one written before, where the file system keeps its times by the clock's tick.)
+    STARTS = 'echo started >>"$ROOT/starts"\n"$REAL_SLEEP" 0.1\n'
+    SAYS = ('echo "lens board responded to initial disable" {}'
+            '"$ROOT/prefix/drive_c/ProgramData/Simulated Reality/Server/Log/{}"\n')
 
     def starts(self):
         """How often the stack was started again by one request."""
@@ -429,6 +457,101 @@ class EnsureStackTests(StackTests):
         self.stays("wineserver")
         self.assertEqual(self.starts(), 0)
         self.assertEqual(self.starts(), 0)
+
+    def request(self):
+        return subprocess.run([*SHELL, str(self.root / "tools/ensure-stack.sh")], env=self.environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+
+    def no_waiting(self):
+        """The script's pauses take no time (not under BusyBox's shell, which has a sleep of its own)."""
+        (self.root / "bin/sleep").write_text("#!/bin/sh\nexit 0\n")
+        (self.root / "bin/sleep").chmod(0o755)
+        self.environment["PATH"] = f"{self.root}/bin{os.pathsep}{os.environ['PATH']}"
+
+    def test_a_start_that_did_not_end_well_is_not_taken_for_the_one_before_it(self):
+        # The stack had been started once, and the note of that start stayed while it was started again. A
+        # restart that failed left Leia's programs and Wine's server up, with a board the service never got,
+        # and that note: the next request found a running stack at once and started nothing.
+        start = self.root / "tools/start-stack.sh"
+        works = start.read_text()
+        self.assertEqual(self.starts(), 1)  # (no server of Wine: what is there was left behind)
+        self.assertTrue((self.root / "stack.started").exists())
+        start.write_text('#!/bin/sh\necho started >>"$ROOT/starts"\nexit 1\n')
+        result = self.request()
+        self.assertEqual((result.returncode, result.stdout),
+                         (1, f"error: could not start Leia's service (see {self.root}/edid.pairs)\n"))
+        # As far as that start got, Wine's server and Leia's programs are up.
+        self.stays("wineserver")
+        start.write_text(works)
+        (self.root / "starts").unlink()
+        self.assertEqual(self.starts(), 1, "a start that failed passed for the one before it")
+        self.assertEqual(self.starts(), 0)
+
+    def test_a_board_that_did_not_get_ready_is_not_taken_for_the_one_before_it(self):
+        self.no_waiting()
+        self.stays("wineserver")
+        self.assertEqual(self.starts(), 0)
+        # The board has been away and is back (a monitor standby): the start goes through, and Leia's
+        # service never says that it has the board.
+        start = self.root / "tools/start-stack.sh"
+        works = start.read_text()
+        start.write_text("#!/bin/sh\n" + self.STARTS)
+        later = time.time() + 5
+        os.utime(self.root / "board", (later, later))
+        result = self.request()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("error: Leia's service did not get the lens board ready", result.stdout)
+        # The board is as old as it was when the stack was last started well, or older (udev made the
+        # link anew at the same second; a clock that was set back).
+        os.utime(self.root / "board", (0, 0))
+        (self.root / "starts").unlink()
+        start.write_text(works)
+        self.assertEqual(self.starts(), 1, "a start without the board passed for the one before it")
+        self.assertEqual(self.starts(), 0)
+
+    def test_the_board_is_ready_when_leias_service_has_said_so_since_the_start(self):
+        # What the service wrote in the run before is not this start's, in whichever file it is.
+        self.no_waiting()
+        start = self.root / "tools/start-stack.sh"
+        log = self.root / "prefix/drive_c/ProgramData/Simulated Reality/Server/Log"
+        before = (log / "service.txt").read_text()
+
+        def asked(body):
+            start.write_text("#!/bin/sh\n" + self.STARTS + body)
+            (self.root / "stack.started").unlink(missing_ok=True)
+            result = self.request()
+            if result.returncode:
+                self.assertIn("error: Leia's service did not get the lens board ready", result.stdout)
+                self.assertFalse((self.root / "stack.started").exists())
+            else:
+                self.assertEqual(result.stdout, "")
+                self.assertTrue((self.root / "stack.started").exists())
+            return result.returncode
+
+        log_file = '"$ROOT/prefix/drive_c/ProgramData/Simulated Reality/Server/Log/{}"'
+        # Nothing written at all, and the line of the run before in the newest file: not ready.
+        self.assertEqual(asked(""), 1)
+        # Written into the same file, but not that line.
+        self.assertEqual(asked(f'echo "lens board did not answer" >>{log_file.format("service.txt")}\n'), 1)
+        # A file of its own for each run, the line in it: ready. Without the line: not.
+        self.assertEqual(asked(self.SAYS.format(">", "service 2.txt")), 0)
+        self.assertEqual(asked(f'echo "started" >{log_file.format("service 3.txt")}\n'), 1)
+        # A file of the same name written anew, shorter than it was and as long as it was.
+        self.assertGreater(len((log / "service.txt").read_text()), len(before))
+        self.assertEqual(asked(self.SAYS.format(">", "service.txt")), 0)
+        again = f'echo "Lens board responded to initial disable" >{log_file.format("service.txt")}\n'
+        self.assertEqual(asked(again), 0)
+        # Written anew and longer than it was, the line in the part that is as long as the file before.
+        (log / "service.txt").write_text("short\n")
+        more = f'echo "and more" >>{log_file.format("service.txt")}\n'
+        self.assertEqual(asked(self.SAYS.format(">", "service.txt") + more), 0)
+        # Added to, the line of the run before in what was there.
+        self.assertEqual(asked(more), 1)
+        # No log file at all before the start (a prefix that is new).
+        for path in log.iterdir():
+            path.unlink()
+        self.assertEqual(asked(""), 1)
+        self.assertEqual(asked(self.SAYS.format(">>", "service.txt")), 0)
 
     def test_a_start_that_ends_with_a_reason_of_its_own_is_reported_with_it(self):
         def asked(body):

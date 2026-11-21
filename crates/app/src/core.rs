@@ -1018,12 +1018,30 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
                 // the worker is already stopped and the preferences saved, so
                 // ending the process is the right outcome, not a zombie that
                 // only Task Manager can remove.
+                //
+                // Only then. This used to end the process when the time was
+                // up whether the window had closed or not, and with the
+                // window closed the program is still at work: it waits for
+                // an output's helper to leave and ends one that does not,
+                // after a time of the same length that starts later than
+                // this one. A helper that hung was so left behind with its
+                // window and the lens on, under a line in the log saying
+                // that the window had not closed.
                 ctx.request_repaint();
-                std::thread::sleep(QUIT_GRACE);
-                if let Ok(core) = core.lock() {
-                    core.log("The window did not close after the quit request; exiting directly.");
+                let deadline = Instant::now() + QUIT_GRACE;
+                while Instant::now() < deadline && !ENDING.window_has_closed() {
+                    std::thread::sleep(QUIT_LOOK);
                 }
-                std::process::exit(0);
+                if ENDING.end_without_the_window() {
+                    if let Ok(core) = core.lock() {
+                        core.log(
+                            "The window did not close after the quit request; exiting directly.",
+                        );
+                    }
+                    std::process::exit(0);
+                }
+                // The window has closed: the program ends by itself.
+                break;
             }
         })
         .expect("poller thread");
@@ -1032,6 +1050,54 @@ pub fn spawn_poller(core: Arc<Mutex<Core>>, ctx: egui::Context) {
 /// How long the poller gives the GUI to close the window after a quit
 /// request before it ends the process itself.
 const QUIT_GRACE: Duration = Duration::from_secs(3);
+/// How often it looks whether the window has closed in that time.
+const QUIT_LOOK: Duration = Duration::from_millis(20);
+
+/// Who ends the program after a quit request: the main thread, once the
+/// window has closed, or the poller, when the window does not close. It is
+/// one or the other, whichever says so first.
+pub(crate) struct Ending(std::sync::atomic::AtomicU8);
+
+impl Ending {
+    const UNDECIDED: u8 = 0;
+    const WINDOW_CLOSED: u8 = 1;
+    const WITHOUT_THE_WINDOW: u8 = 2;
+
+    const fn new() -> Ending {
+        Ending(std::sync::atomic::AtomicU8::new(Ending::UNDECIDED))
+    }
+
+    fn decide(&self, how: u8) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        match self
+            .0
+            .compare_exchange(Ending::UNDECIDED, how, SeqCst, SeqCst)
+        {
+            Ok(_) => true,
+            Err(decided) => decided == how,
+        }
+    }
+
+    /// The window has closed and the main thread finishes the program.
+    /// False when the poller has given up on the window a moment ago and
+    /// is ending the process.
+    pub(crate) fn window_closed(&self) -> bool {
+        self.decide(Ending::WINDOW_CLOSED)
+    }
+
+    fn window_has_closed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) == Ending::WINDOW_CLOSED
+    }
+
+    /// The window has had its time: whether the poller is to end the
+    /// process, which it is not once the window has closed.
+    fn end_without_the_window(&self) -> bool {
+        self.decide(Ending::WITHOUT_THE_WINDOW)
+    }
+}
+
+/// See [`Ending`]. The main thread says here that the window has closed.
+pub(crate) static ENDING: Ending = Ending::new();
 
 pub fn version_line() -> String {
     format!(
@@ -1050,6 +1116,28 @@ mod tests {
     use super::*;
 
     static SETTINGS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn the_poller_ends_the_process_only_while_the_window_has_not_closed() {
+        // The window never closes: the poller ends the process, and says
+        // so each time it is asked.
+        let ending = Ending::new();
+        assert!(!ending.window_has_closed());
+        assert!(ending.end_without_the_window());
+        assert!(ending.end_without_the_window());
+        // A window that closes after that is too late to be waited for.
+        assert!(!ending.window_closed());
+        assert!(!ending.window_has_closed());
+
+        // The window closes in time: the poller leaves the ending to the
+        // main thread, however long that takes over the helpers.
+        let ending = Ending::new();
+        assert!(ending.window_closed());
+        assert!(ending.window_has_closed());
+        assert!(!ending.end_without_the_window());
+        assert!(ending.window_closed());
+        assert!(ending.window_has_closed());
+    }
 
     struct RestoreDataDir(Option<std::ffi::OsString>);
 

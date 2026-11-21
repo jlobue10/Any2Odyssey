@@ -585,6 +585,12 @@ fn run_gui(
     // helper that hung was otherwise left behind with its window and the
     // lens on. A launch from here on is the instance and is not kept
     // waiting for that.
+    //
+    // The poller is told first: after a quit request it ends the process
+    // when the window does not close, and it did so too while the helpers
+    // were being waited for here. Should it have given up on the window
+    // this very moment, it is ending the process and nothing is lost.
+    core::ENDING.window_closed();
     drop(guard);
     lens_switch::see_helpers_off();
     match run {

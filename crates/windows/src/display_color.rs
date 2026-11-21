@@ -28,7 +28,13 @@ pub fn capture_color(monitor: &str) -> Option<CaptureColor> {
         },
         ..Default::default()
     };
-    if unsafe { DisplayConfigGetDeviceInfo(&mut color.header) } != 0 {
+    // The pointer must cover the whole struct, which `header.size` tells
+    // Windows to fill: one derived from `color.header` alone would not be
+    // valid for the flags word written after it (as for `GetMonitorInfoW`
+    // in `win::monitors`).
+    let whole = &mut color as *mut DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO
+        as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER;
+    if unsafe { DisplayConfigGetDeviceInfo(whole) } != 0 {
         return None;
     }
     // Bit 1 of the flags word: advancedColorEnabled.
@@ -48,7 +54,10 @@ pub fn capture_color(monitor: &str) -> Option<CaptureColor> {
         },
         SDRWhiteLevel: 1000,
     };
-    if unsafe { DisplayConfigGetDeviceInfo(&mut white.header) } == 0 {
+    // The whole struct again: the white level is written after the header.
+    let whole =
+        &mut white as *mut DISPLAYCONFIG_SDR_WHITE_LEVEL as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER;
+    if unsafe { DisplayConfigGetDeviceInfo(whole) } == 0 {
         let value = white.SDRWhiteLevel as f32 / 1000.0;
         return Some(CaptureColor {
             advanced_color: true,
@@ -84,7 +93,10 @@ fn monitor_path(monitor: &str) -> Option<DISPLAYCONFIG_PATH_INFO> {
             },
             ..Default::default()
         };
-        if unsafe { DisplayConfigGetDeviceInfo(&mut name.header) } != 0 {
+        // The whole struct again: the device name is written after the header.
+        let whole = &mut name as *mut DISPLAYCONFIG_SOURCE_DEVICE_NAME
+            as *mut DISPLAYCONFIG_DEVICE_INFO_HEADER;
+        if unsafe { DisplayConfigGetDeviceInfo(whole) } != 0 {
             continue;
         }
         let len = name

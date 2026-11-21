@@ -2,6 +2,88 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 1.0.1 (2026-11-20)
+
+A ninth audit release. 1.0.0 was the one release no audit round had read, so this round read its five pull requests first and then the whole program again, in six parts: the shared core, the live screen, the viewer and the controls, the Windows side, the Odyssey 3D set-up under Wine, and the installer with the workflows. Nothing found was grave. Seven findings were of the middle kind and about thirty were small; all but one are corrected here (the one needs a Windows PC to look at, and is under "Known, not fixed").
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive): five files of the Odyssey 3D set-up changed, and an update of the program does not replace them in the data folder.
+
+**Linux, live screen: the depth as a whole no longer steps when the nearest or the farthest thing in the picture changes a little.** The depth is measured against a range, from the farthest thing in the picture to the nearest, and that range was meant to follow the scene slowly, "so a near object entering does not push everything else back at once". It never did: each map came to that step already brought to 0 to 1 by its own farthest and nearest point, so the range it was measured against was always 0 to 1 and had nothing to follow. Something near that came into the picture moved everything else back in the next map; up to 0.9.9 the blend of old and new depth softened that, and since 1.0.0 only the sixteenth that a place may lag. The live screen is now given the model's own numbers, and the range follows them as it was written to. So that this does not bring a new fault with it, the range may be at most a quarter of the new picture's own span behind it at either end: without that limit, a cut to a scene with a fifth of the range before it would have been shown at a fifth of its depth, and would have needed about 118 maps (some 20 seconds on the processor) to get to nine tenths. With it, such a scene has four fifths of its depth with the first map. A small change is calmed; a large one is taken at once, all but that quarter. In numbers, at steadiness 60: where the nearest point rises by a third of the range, a place in the background moves from 0.333 to 0.332 where it moved to 0.300; where the nearest point rises tenfold, it moves to 0.097 where it moved to 0.088, which is the large change taken at once. A screen that stands still comes to rest as fast as before (about 20 steps of 150 ms at steadiness 60). **None of this has been seen on the monitor**: it is the first thing to look at, and `docs/TESTING.md` says how.
+
+**Linux, the Odyssey 3D set-up: a start of Leia's stack that failed is no longer taken for a running stack.** A start leaves a note when it has ended well, and a later request compares the note with the lens board's link. The note of an earlier start stayed while a new start was under way: when that start failed ("Leia's service did not get the lens board ready"), or the program that asked was ended while it waited, Leia's programs and Wine's server were up with the old note, and the next request found a running stack. The lens helper said "on" and the weaver started with a board the service never got. The note now goes before a start begins. And the line of Leia's log that says the board answered has to be one written during this start: it was looked for in the whole of the newest log file, where the line of the run before can stand.
+
+### Fixed
+
+Linux, the live screen:
+
+- **The depth's range follows the scene**, as above.
+- **A stop and a start of the live screen close together no longer load the depth model twice.** The live screen that ended let go of the model after the new one had loaded it.
+- **The memory of a finer depth detail is given back when a coarser one is chosen.** Three buffers of the model's picture kept the size of the finest detail that had been chosen: about 36 MB on a 3840 × 2160 screen after *Finest*, until the output was stopped.
+- **A frame that differs from the last one only in the byte of each pixel that holds no colour is not a new picture.** 1.0.0 left the unused bytes after the rows out of that comparison; the fourth byte of a pixel in the formats without transparency is as little the desktop's to keep the same. No desktop that was run in the rounds changes it.
+- **A depth map whose numbers lie further apart than a number can say is refused** and no longer stops the program. The model does not make one; the step can now be given numbers of any size.
+
+Linux, the Odyssey 3D set-up (run `any2odyssey-setup` once to have these):
+
+- **A failed start is not taken for a running stack, and the board's line has to be this start's**, as above.
+- **Wine's libraries are taken from the Wine that runs.** The set-up and each start took them from the first of a list of usual folders. With two Wines on one machine (WineHQ's under `/opt` beside a distribution's, or a build of one's own) the version that was checked was one Wine's and the libraries that were listed, copied and linked against the other's, which is how 0.9.9 described a prefix in which nothing started. The folder beside the `wine` on the PATH is now looked at first. A `wine` that is a script of the user's own is not read, and the list is used as before.
+- **The set-up stops with a reason when Wine does not take its registry entries.** A failed import of the lens board's entries ended the set-up without a word; a failed registration of Leia's eye tracker ended it before the line that was to say so; and a failed import of the camera's entries was let pass, so that the set-up said "done" and the eye tracker never got a camera. After the camera's import the set-up now asks Wine whether the entries are there.
+- **A monitor that was unplugged no longer stays in the Wine prefix.** The entries of monitors that were there at an earlier start and not at this one were left, and Leia's service was shown a monitor that is gone. (A monitor that was unplugged before the last start under 1.0.0 is not known any more, and its entries stay.)
+- **Eye tracking finds its camera bridge again when the note of the bridge's process number is lost.** The note is in the session's folder, which goes at logout. A bridge that lived on was known to nobody: every start then made a second one, which could not have the port ("is port 47816 taken?"), until the next boot. The bridge is now also looked for among the user's own processes, by its program file.
+- **The message about a Wine that is too old names WineHQ's `winehq-devel` and `winehq-staging`**, the packages that put a `wine` on the PATH, and so do `INSTALL.txt` and `docs/LENS-SWITCH.md`. They named `wine-devel` and `wine-staging`, which install under `/opt` alone.
+
+Linux, installing:
+
+- **On Arch with an NVIDIA card, `any2odyssey-setup --yes` installs what is missing where `onnxruntime-cpu` is installed.** It asked pacman for `onnxruntime-cuda` in the same request as everything else; the two packages cannot be installed together, pacman's question whether to remove the one is answered with no where nobody is asked, and the whole request was dropped: none of the missing packages was installed, at every run. The installed runtime now stays, and a note gives the command for the other.
+- **Removing an archive installation beside the package no longer removes the Wine side by default.** The package's own note sends a user with both to `install.sh --uninstall`, saying that the settings and the depth model stay; that run then asked whether to remove the Wine side, about 1 GB, with yes as the answer to Enter and to `--yes`, and the Wine side is in the data folder that the packaged program uses too. Where a package is installed as well, the answer is no unless it is given; `any2odyssey-setup --uninstall` is as before.
+- **On Debian and Ubuntu a Wine that the set-up refuses is not installed.** A missing `wine` was installed from the distribution, which has Wine 8 to 10 where 11.6 is needed: the Odyssey 3D step then stopped at "this Wine is too old", with a package in the way of WineHQ's. The installer now asks apt for the version it would install first, names WineHQ's packages where that is too old, and leaves the Odyssey 3D step out with one line.
+- **A Wine side built from other sources is noticed after an update.** The note "made by another version" compared the eight scripts that are copied. A release that changes only the source of a library the set-up compiles left the old library in the prefix and said nothing. The set-up now notes what it was made from, and the installer compares that. A Wine side made by 1.0.0 or earlier has no such note and is compared as before, and with the sources 1.0.0 shipped.
+- **The lens board is waited for after its udev rules are installed.** With nothing slow between the two steps (the depth model there already), the Odyssey 3D step looked for `/dev/odyssey-lens` before udev had made it, and was left out.
+- **No icon cache is made in `~/.local/share/icons/hicolor` where there was none.** GTK takes such a cache for the whole truth, and icons that other programs put there later without renewing it were not found.
+
+Linux, the program:
+
+- **A named pipe where `companion.log` belongs no longer holds the program at its first line of the log.** The log was the one file of the data folder still opened the waiting way: the controls stood still, `--quit` did nothing, and `--self-test` never ended. The log is also made for its owner alone (0600) like the other files there; one that is there already is made so at the next line.
+- **The saved token of the shown screen is read as the settings are**: not waited on where it is a pipe, and not read whole whatever its size.
+- **Quitting no longer leaves a helper behind that did not leave by itself.** After a quit request the program gave the window three seconds to close and then ended the process, also when the window had closed long before and the program was waiting for the lens helper or the weaver to leave, which it ends after three seconds of its own that begin later. A helper that hung was left with its window and the lens on, under a line in the log that the window had not closed. The process is now ended that way only while the window has not closed, and the wait for the helpers has an end of its own (about five seconds). Reasoned from the code, not seen.
+- **Full screen is forgotten when the output window goes.** With the output in full screen, a change of *Output format* to Odyssey 3D and back made a new window, not full screen, that the program took for full screen: with Lens output the lens was switched on over a window, the F11 hint was missing, the first F11 did nothing and the first Esc did not close. Reasoned from the code, not seen.
+- **A picture is opened by what it is, not by its name.** A PNG, JPEG or BMP without an ending, with another one's, or with one more behind it (`.png.part`) was refused, though the desktop offers the program for such files by their content. The formats that are opened are the same three.
+- **`--export-guide` writes where the path leads.** It replaced a symbolic link with a file and a file that may not be written with one that may, where saving a picture does neither. It now writes the link's target, refuses a file that may not be written (exit code 1), and keeps the permissions of a file it replaces.
+- ***View logs* no longer holds the window for a quarter of a second** or more while the file manager is started.
+- **A picture that is replaced by a pipe at the moment it is opened** can no longer leave the viewer at "Opening" for good, and a link or a pipe put in the place of a file that is being saved over is neither followed nor waited on: what was opened is asked, not the name.
+
+Windows and Linux, the program:
+
+- **Unticking *recover* during the wait for another renderer no longer turns 3D off.** Where a start meets another renderer it waits eight seconds and tries once more, with recovery on or off. That wait was counted as a recovery under way, which is what unticking the box ends: "Automatic recovery cancelled", and the second try was never made.
+- **One wait for another renderer per start, as the rule says.** A recovery that was counting down was taken for that wait's second try, and a start in that time that met another renderer waited once more where it was to turn 3D off with its advice.
+- **Two programs that start together with a log over 4 MiB no longer lose the generation that was kept.** Both found the log large; the second moved the new file of one line over `companion.old.log`. One of them now does it at a time (`companion.rotating` is there for as long).
+- **Replacing settings that could not be read no longer copies a file of any size.** The copy that is kept of the old file was made on the window's thread whatever its size; a file over 16 MiB is now refused with its name, and left.
+
+Windows:
+
+- ***Restore overlay* asked for while the conversion is still starting is done when the 3D picture comes.** The request was taken and dropped while Samsung's window was not there yet, under a line in the log that it had been asked for.
+- **The uninstall runs when a 32-bit program starts it.** Windows gives such a program the 32-bit PowerShell, and the uninstall stopped at "Use 64-bit PowerShell to uninstall Any2Odyssey." It now starts itself again in the 64-bit one.
+- **`--layout-probe` and `--inspect` say what failed**, the first without ending with exit code 101 where nobody reads its error output, the second at all.
+- **Three questions to Windows about a display's colour are asked with the whole of what Windows fills in**, not with its first part alone. Nothing was seen to go wrong; the same was corrected for another question in an earlier release.
+- **`scripts/verify-package.ps1` no longer depends on what is installed on the PC.** On a PC with the full converter or a newer Any2Odyssey it called a correct package wrong. `install.ps1` has a switch `-PackageOnly` for it.
+
+### Tests and releases
+
+- **The workflows' `apt-get` steps have a time limit and three tries.** The first run of the checks for 1.0.0's merge was cancelled after 45 minutes, in which one such step had taken 17 minutes and another had not ended: apt-get gives up on a mirror that does not answer, not on one that answers slowly. `scripts/apt-install.sh` fetches with a limit, tries again what was stopped, and fails with a line that says so.
+- **Five tests that could not fail can.** A test that runs itself again in a process of its own passed when that process ran nothing; two tests of how files are written did not test what their comments said; the installer's test of the udev rules looked at a folder the installer never touches; and the workflows' check of the desktop entry had `|| true` behind it.
+- **New tests for what had none**: `tools/mkboard.py` run as a program, `setup.sh` run from its first line to its last against stand-ins for Wine, and the cases above, each with a test that fails without its correction where one could be written.
+- **Run before the release**, on the merged tree, on Linux: the formatter, clippy and the tests of the three Linux packages, the Windows packages compiled and linted for Windows, and the script tests under `sh` and BusyBox. The Windows tests, the installer's suites under both PowerShells and dash ran in the pull request's checks, not before it: of what is new, the PowerShell had been read and not run until then.
+
+### Known, not fixed
+
+- Windows: whether the title of the jump list's entry is given to Windows in a form it takes (`crates/windows/src/taskbar.rs`) could not be settled without a PC; if not, the jump list has no entries, and nothing says so.
+- Linux, the Odyssey 3D set-up: with a `wine` on the PATH that is a script of the user's own, Wine's libraries are still taken from the list of usual folders.
+- Linux, opening a picture and writing over a file: the check of what was opened is made on Linux; on Windows and elsewhere the name is still looked at first.
+- The items of 1.0.0 stand as they were.
+
+### Hardware verification
+
+Pending: nothing of this release was run with the monitor, the camera, the lens, Wine or Leia's and Samsung's software; the Odyssey 3D set-up's scripts were run against stand-ins only. `docs/TESTING.md` lists the checks under "New in 1.0.1". First: `any2odyssey-setup` once, which has to end with "done" (it now asks Wine a question it did not ask before, and stops on a no), and two cold starts of the Odyssey 3D output. Then the live screen with something small and near coming into the picture, and with a hard cut between two scenes. The checks of 1.0.0 and 0.9.9 are still to do as well.
+
 ## 1.0.0 (2026-11-20)
 
 Five pull requests (#172 to #176) that did not come from an audit round of this project: one changes how the depth of the Linux live screen follows what moves and how a large screen is shrunk for the picture, and four close gaps that fixes of earlier releases had left. Each was read against the code it changes; all five were merged and run together, on Windows and on Linux. One of the five (#176) failed the Arch package as it came and was corrected before it went in. There was no audit round for this release.

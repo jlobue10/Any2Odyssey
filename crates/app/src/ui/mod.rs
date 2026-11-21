@@ -10,6 +10,8 @@ mod theme;
 mod viewer;
 mod widgets;
 
+pub(crate) use viewer::resolve_export;
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 

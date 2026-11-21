@@ -378,11 +378,41 @@ pub const SETTLED: f32 = 1.0 / 2048.0;
 // normalized depth units. Small fluctuations still use the chosen steadiness.
 const MAX_DEPTH_LAG: f32 = 1.0 / 16.0;
 
+/// How far either end of the running range may be from the same end of the
+/// newest map's own range, as a part of that map's own span.
+///
+/// The range follows the scene at 3 % a map at a steadiness of 47 or more.
+/// Left to that alone, a cut to a scene with a fifth of the range before
+/// (0 to 10, then 0 to 2) is shown at a fifth of its depth, and 118 maps
+/// later, some 20 seconds on a processor, at nine tenths of it; a scene
+/// with ten times the range (1 to 4, then 1 to 40) has everything nearer
+/// than a tenth of the way shown as nearest, for about as long. With this
+/// the first is shown at four fifths of its depth from its first map on
+/// and at nine tenths 27 maps later, and the second loses the nearest
+/// quarter of its range and no more. A scene is never shown at less than
+/// two thirds of its depth, and never loses more than a quarter of its
+/// range at either end.
+const MAX_RANGE_LAG: f32 = 1.0 / 4.0;
+
 /// Depth that stays put between frames.
 ///
 /// The model sees every frame afresh: its scale drifts and its surfaces
 /// tremble, which the eyes read as the whole scene breathing. This keeps a
 /// running range to normalize with and blends each new map into the last.
+///
+/// The maps have to come as the model made them: the range of a map that
+/// was brought to 0..=1 beforehand is 0 to 1 every time, and the running
+/// range then has nothing to follow. That is how the live screen's maps
+/// came until 1.0.0. When the nearest or the farthest point of the scene
+/// changed, everything else changed its depth with it in one map: at the
+/// default steadiness, the second of four points went from 0.333 to 0.3
+/// when the nearest rose from 4 to 5, where the running range leaves it at
+/// 0.332.
+///
+/// What follows from the two limits: a small change of the scene's range
+/// is taken slowly, as the steadiness says. A large one is taken at once,
+/// all but a quarter of the new range at each end ([`MAX_RANGE_LAG`]) and a
+/// sixteenth of full depth at each pixel, and the rest slowly.
 #[derive(Clone, Debug, Default)]
 pub struct DepthSmoother {
     width: u32,
@@ -392,11 +422,29 @@ pub struct DepthSmoother {
 }
 
 impl DepthSmoother {
-    /// Take the model's raw output (larger is nearer) for a new frame.
-    /// `steadiness` is how much of the previous map is kept, 0.0 (none)
-    /// to 0.95. Returns false for a map that cannot be used; the previous
-    /// one stays.
+    /// Take the model's raw output (larger is nearer, on whatever scale the
+    /// model has) for a new frame. `steadiness` is how much of the previous
+    /// map is kept, 0.0 (none) to 0.95.
+    ///
+    /// The running range moves towards the map's own lowest and highest
+    /// number first, keeping `steadiness` + 0.5 of itself and at most 0.97,
+    /// and each of its ends is then brought to within [`MAX_RANGE_LAG`] of
+    /// the map's own span from the map's own end. The map is normalized
+    /// with that range, what lies outside it becoming 0 or 1, and blended
+    /// into the last one pixel by pixel; no pixel is left further than a
+    /// sixteenth from its new value. The first map, and the first of
+    /// another size, is taken as it is with its own range.
+    ///
+    /// Returns false for a map that cannot be used: of the wrong size, with
+    /// something in it that is not a number, or with numbers further apart
+    /// than a number can say. The previous one stays, and so does the range.
     pub fn update(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32) -> bool {
+        self.step(width, height, raw, steadiness, false)
+    }
+
+    /// One step of [`DepthSmoother::update`], or of [`DepthSmoother::settle`]
+    /// for a picture that is `still`.
+    fn step(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32, still: bool) -> bool {
         let count = width as usize * height as usize;
         if count == 0 || raw.len() != count {
             return false;
@@ -409,22 +457,42 @@ impl DepthSmoother {
             low = low.min(v);
             high = high.max(v);
         }
+        // Numbers that are each finite can still lie further apart than a
+        // number can say (-f32::MAX and f32::MAX). Their span was infinite
+        // then and the map made with it was not a number anywhere, which
+        // the next map's blend stopped the program over. Such a map is
+        // refused like one that holds no numbers.
+        if !(high - low).is_finite() {
+            return false;
+        }
         let keep = steadiness.clamp(0.0, 0.95);
         let fresh = self.width != width || self.height != height || self.values.len() != count;
         // The range follows the scene more slowly than the map does, so a
         // near object entering does not push everything else back at once.
+        // Not further behind than `MAX_RANGE_LAG` allows, though: a scene
+        // with quite another range is not shown squeezed or cut off while
+        // the range comes round to it.
         let (low, high) = match self.range {
             Some((l, h)) if !fresh => {
-                let slow = (keep + 0.5).min(0.97);
+                // A picture that stands still has nothing entering it: its
+                // range goes as its values do, and both are there together.
+                // At the pace of a moving picture's range a still screen was
+                // redrawn for half a minute before it was at rest.
+                let slow = if still { keep } else { (keep + 0.5).min(0.97) };
+                let lag = (high - low) * MAX_RANGE_LAG;
                 (
-                    l * slow + low * (1.0 - slow),
-                    h * slow + high * (1.0 - slow),
+                    (l * slow + low * (1.0 - slow)).clamp(low - lag, low + lag),
+                    (h * slow + high * (1.0 - slow)).clamp(high - lag, high + lag),
                 )
             }
             _ => (low, high),
         };
-        self.range = Some((low, high));
         let span = high - low;
+        // (a span that is finite, and a quarter more of it that is not)
+        if !span.is_finite() {
+            return false;
+        }
+        self.range = Some((low, high));
         let scale = if span > f32::EPSILON { 1.0 / span } else { 0.0 };
         if fresh {
             self.width = width;
@@ -446,11 +514,20 @@ impl DepthSmoother {
     /// Take the map of a picture that has not changed once more, in place
     /// of asking the model about the same pixels again: the same step
     /// [`DepthSmoother::update`] makes, so depth eases towards the still
-    /// picture's own map as it would have. True once it has arrived and
-    /// further steps would change nothing; the last of the way, too small
-    /// to see ([`SETTLED`]), is taken at once.
+    /// picture's own map as it would have. `raw` is the model's output as
+    /// for `update`, and the end is that map normalized with its own range:
+    /// the running range comes to the map's own, and the values to theirs.
+    /// True once it has arrived and further steps would change nothing; the
+    /// last of the way, too small to see ([`SETTLED`]), is taken at once.
+    ///
+    /// The one difference to `update`'s step: the range keeps `steadiness`
+    /// of itself, as the values do, and not more. Nothing enters a picture
+    /// that stands still, and at the pace of a moving picture's range (3 %
+    /// of the way with each step) the end was some 200 steps away, half a
+    /// minute on a still live screen, which takes a step every 150 ms. This
+    /// way it is some 20 steps at a steadiness of 0.6.
     pub fn settle(&mut self, width: u32, height: u32, raw: &[f32], steadiness: f32) -> bool {
-        if !self.update(width, height, raw, steadiness) {
+        if !self.step(width, height, raw, steadiness, true) {
             // A map that cannot be used never will be.
             return true;
         }
@@ -1081,6 +1158,49 @@ mod tests {
     }
 
     #[test]
+    fn a_map_whose_numbers_lie_too_far_apart_to_measure_is_refused_not_a_panic() {
+        // Every number is finite and their span is not. The first such map
+        // was taken and became "not a number" throughout; the second one's
+        // blend then panicked (`clamp` between two of those).
+        let wide = [-f32::MAX, f32::MAX];
+        let mut smoother = DepthSmoother::default();
+        assert!(!smoother.update(2, 1, &wide, 0.5));
+        assert!(!smoother.update(2, 1, &wide, 0.5));
+        assert!(smoother.values().is_empty());
+        // After a map that can be used, it is refused and that one stays;
+        // easing towards it ends at once, as for any map that cannot be
+        // used.
+        assert!(smoother.update(2, 1, &[2.0, 6.0], 0.5));
+        assert!(!smoother.update(2, 1, &wide, 0.5));
+        assert!(smoother.settle(2, 1, &wide, 0.5));
+        assert_eq!(smoother.values(), [0.0, 1.0]);
+        // Maps at the two ends of what a number can say, one after the
+        // other: each has a span, and whatever becomes of the second, the
+        // map stays made of numbers from 0 to 1.
+        for steadiness in [0.0, 0.5, 0.95] {
+            let maps = [
+                [-f32::MAX, -f32::MAX / 2.0],
+                [f32::MAX / 2.0, f32::MAX],
+                [-f32::MAX, 0.0],
+                [0.0, f32::MAX],
+                [f32::MAX / 2.0, f32::MAX],
+                [-1.0, 1.0],
+                [f32::MIN_POSITIVE, 0.0],
+            ];
+            let mut smoother = DepthSmoother::default();
+            for map in maps.iter().chain(maps.iter().rev()) {
+                smoother.update(2, 1, map, steadiness);
+                smoother.settle(2, 1, map, steadiness);
+                assert!(
+                    smoother.values().iter().all(|v| (0.0..=1.0).contains(v)),
+                    "{:?} after {map:?} at {steadiness}",
+                    smoother.values()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_moving_foreground_tracks_both_edges_while_small_fluctuations_stay_smooth() {
         for keep in [0.6, 0.95] {
             let mut smoother = DepthSmoother::default();
@@ -1104,34 +1224,41 @@ mod tests {
             fresh
         };
         for steadiness in [0.0, 0.6, 0.95] {
-            // `again` is asked about the same pixels for ever, as the model
-            // was; `eased` takes the one answer again and again.
-            let mut again = DepthSmoother::default();
-            assert!(again.update(w, h, &before, steadiness));
-            assert!(again.update(w, h, &still, steadiness));
-            let mut eased = again.clone();
+            // The model was asked once; `eased` takes the one answer again
+            // and again.
+            let mut eased = DepthSmoother::default();
+            assert!(eased.update(w, h, &before, steadiness));
+            assert!(eased.update(w, h, &still, steadiness));
             let mut steps = 0;
+            let mut last = eased.values().to_vec();
             loop {
                 steps += 1;
                 assert!(steps < 2000, "never settled at {steadiness}");
-                assert!(again.update(w, h, &still, steadiness));
                 if eased.settle(w, h, &still, steadiness) {
                     break;
                 }
-                assert_eq!(eased.values(), again.values(), "step {steps}");
+                // Eased, not jumped: no step moves a value far.
+                for (a, b) in last.iter().zip(eased.values()) {
+                    assert!((a - b).abs() <= 0.5, "{a} {b} at step {steps}");
+                }
+                last = eased.values().to_vec();
             }
-            // It ends on the picture's own map exactly, a step the eye
-            // cannot see away from where asking again had got to.
+            // It ends on the picture's own map exactly.
             assert_eq!(eased.values(), own.values());
-            for (a, b) in again.values().iter().zip(eased.values()) {
-                assert!((a - b).abs() <= SETTLED, "{a} {b} at {steadiness}");
-            }
+            // And in the time the values take, not in the time a moving
+            // picture's range takes (some 200 steps at 0.6: half a minute
+            // of a still live screen being redrawn).
+            let most = if steadiness == 0.0 {
+                4
+            } else if steadiness <= 0.6 {
+                40
+            } else {
+                400
+            };
+            assert!(steps <= most, "{steps} steps at {steadiness}");
             // More steps change nothing.
             assert!(eased.settle(w, h, &still, steadiness));
             assert_eq!(eased.values(), own.values());
-            // Depth that follows the model at once is there after the range
-            // has caught up; steadier depth takes longer.
-            assert!(steadiness > 0.0 || steps < 40, "{steps}");
         }
         // A flat picture is flat at once (its range has nowhere to ease
         // to), and an unusable map ends the easing.
@@ -1891,22 +2018,32 @@ mod tests {
         let mut smoother = DepthSmoother::default();
         assert!(smoother.update(2, 1, &[2.0, 6.0], 0.2));
         assert_eq!(smoother.range, Some((2.0, 6.0)));
-        // Keeping 0.2 of the map keeps 0.7 of the range: 2.6 to 7.2.
-        assert!(smoother.update(2, 1, &[4.0, 10.0], 0.2));
+        // The model's own numbers, as the live screen hands them over: the
+        // nearest point comes a little nearer and the farthest with it.
+        // Keeping 0.2 of the map keeps 0.7 of the range: 2.15 to 6.3.
+        assert!(smoother.update(2, 1, &[2.5, 7.0], 0.2));
         let (low, high) = smoother.range.unwrap();
-        assert!(close(low, 2.6) && close(high, 7.2), "{low} {high}");
+        assert!(close(low, 2.15) && close(high, 6.3), "{low} {high}");
         let values = smoother.values();
         assert!(
-            close(values[0], 0.8 * (4.0 - 2.6) / 4.6) && close(values[1], 1.0),
+            close(values[0], 0.8 * (2.5 - 2.15) / 4.15) && close(values[1], 1.0),
             "{values:?}"
         );
         // The range is never kept whole, however steady the map.
-        assert!(smoother.update(2, 1, &[4.0, 10.0], 0.9));
+        assert!(smoother.update(2, 1, &[2.5, 7.0], 0.9));
         let (low, high) = smoother.range.unwrap();
         assert!(
-            close(low, 2.6 * 0.97 + 4.0 * 0.03) && close(high, 7.2 * 0.97 + 10.0 * 0.03),
+            close(low, 2.15 * 0.97 + 2.5 * 0.03) && close(high, 6.3 * 0.97 + 7.0 * 0.03),
             "{low} {high}"
         );
+        // The same two maps brought to 0..=1 first, as the live screen's
+        // were until 1.0.0: there is nothing for the range to follow, and
+        // the far point is where the new map has it at once.
+        let mut inert = DepthSmoother::default();
+        assert!(inert.update(2, 1, &[0.0, 1.0], 0.2));
+        assert!(inert.update(2, 1, &[0.0, 1.0], 0.2));
+        assert_eq!(inert.range, Some((0.0, 1.0)));
+        assert_eq!(inert.values(), [0.0, 1.0]);
 
         // A still picture whose farthest point is not at zero.
         let mut eased = DepthSmoother::default();
@@ -1920,6 +2057,119 @@ mod tests {
         assert!(steps > 0, "the map was not there at the first step");
         assert_eq!(eased.values(), [0.0, 1.0, 0.75, 0.25]);
         assert_eq!(eased.range, Some((3.0, 5.0)));
+    }
+
+    /// How much of full depth the scene of the newest map `raw` is shown
+    /// at, and how much of its own range is cut off at the far and at the
+    /// near end.
+    fn shown(smoother: &DepthSmoother, raw: &[f32]) -> (f32, f32, f32) {
+        let (low, high) = smoother.range.unwrap();
+        let own = raw
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+        let span = own.1 - own.0;
+        (
+            (own.1.min(high) - own.0.max(low)) / (high - low),
+            (low - own.0).max(0.0) / span,
+            (own.1 - high).max(0.0) / span,
+        )
+    }
+
+    #[test]
+    fn the_range_is_at_most_a_quarter_of_a_new_scenes_span_behind_it() {
+        assert_eq!(MAX_RANGE_LAG, 0.25);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+        // A cut to a scene with a fifth of the range, at the default
+        // steadiness. The range went to 0..9.76: the scene was shown at
+        // 20 % of its depth and reached 90 % with the 118th map after.
+        let (before, after) = ([0.0, 2.5, 5.0, 10.0], [0.0, 0.5, 1.0, 2.0]);
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(4, 1, &before, 0.6));
+        assert!(smoother.update(4, 1, &after, 0.6));
+        assert_eq!(smoother.range, Some((0.0, 2.5)));
+        assert_eq!(shown(&smoother, &after), (0.8, 0.0, 0.0));
+        let values = smoother.values();
+        assert!(
+            close(values[1], 0.23) && close(values[2], 0.46) && close(values[3], 0.8625),
+            "{values:?}"
+        );
+        let mut maps = 0;
+        while shown(&smoother, &after).0 < 0.9 {
+            assert!(smoother.update(4, 1, &after, 0.6));
+            maps += 1;
+        }
+        assert_eq!(maps, 27);
+
+        // Something comes ten times nearer than the nearest point before.
+        // The range went to 1..5.08, and everything from a tenth of the
+        // way was shown as nearest; now the nearest quarter is.
+        let (before, after) = ([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 40.0]);
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(4, 1, &before, 0.6));
+        assert!(smoother.update(4, 1, &after, 0.6));
+        assert_eq!(smoother.range, Some((1.0, 30.25)));
+        assert_eq!(shown(&smoother, &after), (1.0, 0.0, 0.25));
+        // What was there before is followed at once, all but the
+        // sixteenth each pixel may lag by: so large a change is not one to
+        // calm.
+        let values = smoother.values();
+        assert!(
+            close(values[1], 1.0 / 29.25 + MAX_DEPTH_LAG)
+                && close(values[2], 2.0 / 29.25 + MAX_DEPTH_LAG)
+                && values[3] == 1.0,
+            "{values:?}"
+        );
+        // A small rise of the nearest point is calmed: the range is inside
+        // the limit and moves as the steadiness says, and the points
+        // behind stay where they were (0.333 and 0.667; brought to 0..=1
+        // first, the map had them at 0.3 and 0.5625).
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(4, 1, &before, 0.6));
+        assert!(smoother.update(4, 1, &[1.0, 2.0, 3.0, 5.0], 0.6));
+        let (low, high) = smoother.range.unwrap();
+        assert!(low == 1.0 && close(high, 4.03), "{low} {high}");
+        let values = smoother.values();
+        assert!(
+            close(values[1], 0.332013) && close(values[2], 0.664026) && values[3] == 1.0,
+            "{values:?}"
+        );
+
+        // Whatever the two scenes and the steadiness: the new one is shown
+        // at two thirds of full depth or more, a quarter of its range at
+        // the most is cut off at either end, and it stays so while the
+        // range comes round.
+        let mut state = 0x2545_f491u32;
+        let mut number = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state % 20_001) as f32 / 100.0 - 100.0
+        };
+        for round in 0..2000 {
+            let steadiness = [0.0, 0.2, 0.6, 0.95][round % 4];
+            let scale = [0.001, 1.0, 50.0][round % 3];
+            let mut smoother = DepthSmoother::default();
+            let first: Vec<f32> = (0..6).map(|_| number()).collect();
+            assert!(smoother.update(3, 2, &first, steadiness));
+            let next: Vec<f32> = (0..6).map(|_| number() * scale).collect();
+            for map in 0..3 {
+                assert!(smoother.update(3, 2, &next, steadiness));
+                let (depth, far, near) = shown(&smoother, &next);
+                let what = format!("{first:?} then {next:?} at {steadiness}, map {map}");
+                assert!(depth >= 2.0 / 3.0 - 1e-4, "{depth}: {what}");
+                assert!(
+                    far <= 0.25 + 1e-4 && near <= 0.25 + 1e-4,
+                    "{far} {near}: {what}"
+                );
+            }
+        }
+        // A scene with no depth at all has no span to be behind by: flat
+        // at once, but for what each pixel may lag by.
+        let mut smoother = DepthSmoother::default();
+        assert!(smoother.update(2, 1, &[2.0, 6.0], 0.9));
+        assert!(smoother.update(2, 1, &[5.0, 5.0], 0.9));
+        assert_eq!(smoother.range, Some((5.0, 5.0)));
+        assert_eq!(smoother.values(), [0.0, MAX_DEPTH_LAG]);
     }
 
     #[test]

@@ -352,6 +352,28 @@ try{
  & (Join-Path $app 'Uninstall.ps1')
  Assert ($launches.Count -eq 0) 'Controls-only uninstall never asks for elevation'
  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'Controls-only uninstall removes the controls and registration'
+
+ # A 32-bit caller of the registered uninstall command (a third-party uninstall manager) gets the
+ # 32-bit Windows PowerShell, in which the uninstaller refused to run. It now starts itself again in
+ # the 64-bit one. This runs in processes of their own, where the stubs above do not reach: the
+ # fixture is controls-only (nothing to elevate for), and its look for running instances is routed
+ # to a process name nothing has. Skipped where there is no 32-bit Windows PowerShell.
+ $wow=Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+ if([Environment]::Is64BitProcess -and (Test-Path -LiteralPath $wow -PathType Leaf)){
+  New-Fixture -Elevated $false -Record '{"Version":"0.8.2","ControlsOnly":true}'
+  Remove-Item -LiteralPath $worker;Remove-Item -LiteralPath $helper
+  $routed=Get-Content -LiteralPath (Join-Path $app 'Uninstall.ps1') -Raw
+  $unconsulted=$routed.Replace('Get-Process Any2Odyssey,Any2OdysseyWorker','Get-Process Any2OdysseyTestAbsent')
+  if($unconsulted -ceq $routed){throw 'Fixture routing incomplete; refusing to run.'}
+  Set-Content -LiteralPath (Join-Path $app 'Uninstall.ps1') -Value $unconsulted -Encoding UTF8
+  # Under PowerShell 7 the inherited module path keeps Windows PowerShell from loading its modules.
+  $modulePath=$env:PSModulePath;$env:PSModulePath=$null
+  try{$output=& $wow -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'Uninstall.ps1') 2>&1 | Out-String}finally{$env:PSModulePath=$modulePath}
+  $exitCode=$LASTEXITCODE
+  if($exitCode -ne 0 -or -not $output.Contains('Any2Odyssey removed.')){Write-Host "Exit code $exitCode; output: $output"}
+  Assert ($exitCode -eq 0 -and $output.Contains('Any2Odyssey removed.')) 'Started from 32-bit Windows PowerShell, the uninstaller runs in the 64-bit one and passes its result on'
+  Assert (-not (Test-Path -LiteralPath $exe) -and -not (Test-Path -LiteralPath $registration)) 'The uninstall started from a 32-bit process removes the controls and registration'
+ }else{Write-Host 'SKIP: no 32-bit Windows PowerShell here to start the uninstaller from.'}
  $passed=$true
 }finally{
  $quitEvent.Dispose()

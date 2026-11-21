@@ -4,6 +4,23 @@ $ErrorActionPreference='Stop'
 # registered UninstallString) a failure, or a notice about something left in place, stays on
 # screen until a key is pressed. Callers that capture the error (the README command, the tests)
 # omit the switch and get the throw as before.
+#
+# The registered UninstallString names System32's PowerShell. For a 32-bit caller (a third-party
+# uninstall manager) Windows redirects that to SysWOW64, whose PowerShell is 32-bit, and the
+# uninstall stopped at "Use 64-bit PowerShell" below. Sysnative reaches the 64-bit one from there,
+# as in Install.cmd: this script is started again with it, in the same console, and its exit code
+# is passed on. PSModulePath is cleared for that start as Install.cmd clears it, and put back for a
+# console that goes on after this script. No cmdlet is called here, so none has to be loaded.
+if(-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem){
+ $native=$env:SystemRoot+'\Sysnative\WindowsPowerShell\v1.0\powershell.exe'
+ if([IO.File]::Exists($native)){
+  $relaunch=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath)
+  if($Pause){$relaunch+='-Pause'}
+  $modulePath=$env:PSModulePath;$env:PSModulePath=$null
+  try{& $native @relaunch}finally{$env:PSModulePath=$modulePath}
+  exit $LASTEXITCODE
+ }
+}
 $notices=0
 try{
 $app=Join-Path $env:LOCALAPPDATA 'Programs\Any2Odyssey'

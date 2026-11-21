@@ -75,9 +75,10 @@ What the installer sets up, if you would rather do it by hand
   about 1 GB is copied to your data folder. Without a Windows installation this part is not available;
   everything else works.
   Also needed: Wine 11.6 or newer (the set-up refuses an older one; Debian's and Ubuntu's own Wine is
-  older, and WineHQ's wine-devel or wine-staging packages are new enough), mingw-w64-gcc, clang, a C
-  compiler, Python 3, xrandr, rsync and pgrep (Debian and
-  Ubuntu: wine gcc-mingw-w64-x86-64 clang gcc python3 x11-xserver-utils rsync procps; Fedora: wine
+  older, and the installer does not install it; WineHQ's winehq-devel or winehq-staging package, from
+  WineHQ's own repository, is new enough), mingw-w64-gcc, clang, a C compiler, Python 3, xrandr, rsync
+  and pgrep (Debian and Ubuntu, beside that Wine: gcc-mingw-w64-x86-64 clang gcc python3
+  x11-xserver-utils rsync procps; Fedora: wine
   mingw64-gcc clang gcc python3 xrandr rsync procps-ng; openSUSE: wine mingw64-cross-gcc clang gcc python3
   xrandr rsync procps). Then, as docs/LENS-SWITCH.md explains:
 

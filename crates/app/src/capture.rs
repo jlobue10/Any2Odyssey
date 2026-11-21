@@ -104,8 +104,15 @@ impl Shared {
     /// before. Each of those was a new picture here: shrunk, given to the
     /// depth model, woven and handed over again, and the page read "5
     /// pictures a second" over a screen on which nothing changed. The
-    /// comparison ends at the first byte that differs, and a frame that is
-    /// the same to its last byte costs less than the work it saves.
+    /// comparison ends soon after the first pixel that differs, and a frame
+    /// that is the same to its last pixel costs less than the work it
+    /// saves.
+    ///
+    /// Only the colours are compared ([`same_colours`]): the fourth byte
+    /// of a pixel is nobody's to keep the same in the formats that have
+    /// nothing in it (BGRx, RGBx), and is not looked at here in those that
+    /// call it alpha, so a frame that differs in nothing else makes the
+    /// same pictures.
     fn frame_arrived(
         &self,
         frame: &mut Vec<u8>,
@@ -119,7 +126,14 @@ impl Shared {
             let mut slot = lock(&self.slot);
             if slot.serial != 0
                 && (slot.width, slot.height, slot.stride, slot.bgr) == (width, height, stride, bgr)
-                && slot.bytes == *frame
+                && if stride == width as usize * 4 {
+                    same_colours(&slot.bytes, frame)
+                } else {
+                    // Rows with something between them (no frame of the
+                    // stream comes so: `Capture::start` keeps the rows
+                    // only): every fourth byte is not a pixel's fourth.
+                    slot.bytes == *frame
+                }
             {
                 return;
             }
@@ -154,6 +168,46 @@ impl Shared {
             *state = CaptureState::Starting;
         }
     }
+}
+
+/// Whether two frames of four bytes a pixel, their rows without gaps, are
+/// the same picture: the three colours of every pixel are the same, the
+/// fourth byte may be anything.
+///
+/// The frames were compared byte for byte. The fourth byte of a pixel
+/// holds nothing in BGRx and RGBx, and what a desktop leaves there is no
+/// more its to keep the same than what lies between the rows, which is why
+/// that is no longer kept: a frame that differed there alone was a new
+/// picture, shrunk, given to the depth model and woven again over a screen
+/// on which nothing had changed.
+///
+/// A stretch of pixels is looked through whole before it is asked whether
+/// any differed, which lets the processor take several pixels at once. A
+/// 3840 x 2160 frame that is the same took 0.70 ms byte for byte and takes
+/// 0.85 ms this way; one that differs is told within a stretch of where.
+fn same_colours(a: &[u8], b: &[u8]) -> bool {
+    /// The bytes looked through between two questions: 1024 pixels.
+    const STRETCH: usize = 4096;
+    if a.len() != b.len() {
+        return false;
+    }
+    let colours = u32::from_ne_bytes([255, 255, 255, 0]);
+    let differing = |a: &[[u8; 4]], b: &[[u8; 4]]| {
+        a.iter().zip(b).fold(0, |differing, (a, b)| {
+            differing | ((u32::from_ne_bytes(*a) ^ u32::from_ne_bytes(*b)) & colours)
+        })
+    };
+    let ((a, a_last), (b, b_last)) = (a.as_chunks::<STRETCH>(), b.as_chunks::<STRETCH>());
+    if a.iter()
+        .zip(b)
+        .any(|(a, b)| differing(a.as_chunks().0, b.as_chunks().0) != 0)
+    {
+        return false;
+    }
+    // What is left over: pixels, and bytes that are not a whole pixel
+    // (not in a frame; they count as they are).
+    let ((a, a_odd), (b, b_odd)) = (a_last.as_chunks(), b_last.as_chunks());
+    differing(a, b) == 0 && a_odd == b_odd
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1365,6 +1419,95 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_that_differs_only_in_the_byte_that_holds_no_colour_is_the_same_picture() {
+        // A screen wider than one stretch of the comparison and not a
+        // whole number of them, as BGRx: blue, green, red and a byte that
+        // holds nothing.
+        let (width, height) = (1500u32, 3u32);
+        let bytes = width as usize * height as usize * 4;
+        let picture: Vec<u8> = (0..bytes).map(|i| (i * 31 % 253) as u8).collect();
+        let shared = Shared::new();
+        let serial = || lock(&shared.slot).serial;
+        let arrive = |bytes: &[u8], stride, bgr| {
+            let mut frame = bytes.to_vec();
+            shared.frame_arrived(&mut frame, width, height, stride, bgr);
+        };
+        let row = width as usize * 4;
+        arrive(&picture, row, true);
+        assert_eq!(serial(), 1);
+        // The desktop sends the screen again with other leftovers in
+        // every pixel's fourth byte. It was a new picture each time.
+        for leftover in [0u8, 255, 77] {
+            let mut again = picture.clone();
+            for pixel in again.as_chunks_mut::<4>().0 {
+                pixel[3] = pixel[3].wrapping_mul(7) ^ leftover;
+            }
+            assert_ne!(again, picture);
+            arrive(&again, row, true);
+            assert_eq!(serial(), 1, "fourth bytes {leftover}");
+        }
+        // What the reader has is the frame it was told of.
+        assert_eq!(lock(&shared.slot).source().bytes, &picture[..]);
+        // Any colour of any pixel that differs by anything is a new
+        // picture: the first pixel's, the last one's, one in the middle of
+        // a stretch and those on either side of where two stretches meet.
+        let mut expected = 1;
+        let mut shown = picture.clone();
+        for pixel in [0, 1, 500, 1023, 1024, 1025, 2047, 2048, 4095, 4096, 4499] {
+            for colour in 0..3 {
+                for bit in [1u8, 128] {
+                    shown[pixel * 4 + colour] ^= bit;
+                    arrive(&shown, row, true);
+                    expected += 1;
+                    assert_eq!(serial(), expected, "pixel {pixel}, colour {colour}");
+                    assert_eq!(lock(&shared.slot).source().bytes, &shown[..]);
+                    // (and its fourth byte with it, or alone after it)
+                    shown[pixel * 4 + 3] ^= bit;
+                    arrive(&shown, row, true);
+                    assert_eq!(serial(), expected);
+                }
+            }
+        }
+        // The same for the formats with red first.
+        arrive(&shown, row, false);
+        expected += 1;
+        assert_eq!(serial(), expected);
+        let mut again = shown.clone();
+        again[7] ^= 0xff;
+        arrive(&again, row, false);
+        assert_eq!(serial(), expected);
+
+        // By itself: frames of a few lengths around a stretch and two of
+        // them, one byte of each changed in turn.
+        for pixels in [0usize, 1, 2, 1023, 1024, 1025, 2048, 2051] {
+            let a: Vec<u8> = (0..pixels * 4).map(|i| (i * 13 % 251) as u8).collect();
+            assert!(same_colours(&a, &a));
+            // (a pixel more is another picture, whatever is in it)
+            let mut longer = a.clone();
+            longer.extend_from_slice(&[0; 4]);
+            assert!(!same_colours(&a, &longer) && !same_colours(&longer, &a));
+            for at in (0..pixels * 4).step_by(if pixels > 100 { 97 } else { 1 }) {
+                let mut b = a.clone();
+                b[at] = b[at].wrapping_add(1 + (at % 200) as u8);
+                let fourth = at % 4 == 3;
+                assert_eq!(same_colours(&a, &b), fourth, "{pixels} pixels, {at}");
+                assert_eq!(same_colours(&b, &a), fourth, "{pixels} pixels, {at}");
+            }
+        }
+        // Bytes that are not a whole pixel count as they are.
+        assert!(same_colours(&[1, 2, 3, 4, 5, 6], &[1, 2, 3, 9, 5, 6]));
+        assert!(!same_colours(&[1, 2, 3, 4, 5, 6], &[1, 2, 3, 4, 5, 7]));
+        // Rows with something between them are compared as they are.
+        let padded = Shared::new();
+        let mut frame = picture.clone();
+        padded.frame_arrived(&mut frame, width - 1, height, row, true);
+        let mut frame = picture.clone();
+        frame[3] ^= 1;
+        padded.frame_arrived(&mut frame, width - 1, height, row, true);
+        assert_eq!(lock(&padded.slot).serial, 2);
+    }
+
+    #[test]
     fn a_frame_that_is_the_picture_already_there_is_not_a_new_one() {
         let shared = Shared::new();
         let serial = || lock(&shared.slot).serial;
@@ -1389,9 +1532,9 @@ mod tests {
         }
         assert_eq!(serial(), 1);
         assert_eq!(lock(&shared.slot).source().bytes, &picture[..]);
-        // One byte of it differs, the last one: a new picture.
+        // One colour of it differs by one, the last pixel's: a new picture.
         let mut changed = picture.clone();
-        *changed.last_mut().unwrap() ^= 1;
+        changed[2 * 3 * 4 - 2] ^= 1;
         arrive(&changed, 2, 3, 8, true);
         assert_eq!(serial(), 2);
         assert_eq!(lock(&shared.slot).source().bytes, &changed[..]);

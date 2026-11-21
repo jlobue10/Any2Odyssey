@@ -32,6 +32,10 @@ pub struct OverlayController {
     raise_logged: Option<Instant>,
     raises_unlogged: u32,
     verify_taskbar_at: Option<Instant>,
+    /// A requested restore that has not been carried out yet. The request
+    /// arrives once (an auto-reset event), possibly before Samsung's output
+    /// window exists.
+    restore_pending: bool,
     configured: bool,
     pub log: Box<dyn Fn(&str)>,
 }
@@ -54,6 +58,7 @@ impl OverlayController {
             raise_logged: None,
             raises_unlogged: 0,
             verify_taskbar_at: None,
+            restore_pending: false,
             configured: false,
             log,
         }
@@ -85,8 +90,14 @@ impl OverlayController {
         found
     }
 
-    /// Called every 100 ms. `restore` forces the output back on top.
+    /// Called every 100 ms. `restore` forces the output back on top. The
+    /// caller reads it from an auto-reset event, so it is true for one tick
+    /// only, and it is kept here until a raise has been carried out: a
+    /// request made while the engine was still starting, before its output
+    /// window existed, was dropped at the early return below.
     pub fn tick(&mut self, restore: bool) -> Result<(), String> {
+        self.restore_pending |= restore;
+        let restore = self.restore_pending;
         if !self.output.is_some_and(win::is_window) {
             self.output = None;
             self.configured = false;
@@ -214,6 +225,7 @@ impl OverlayController {
                 );
             }
             self.last_raise = Some(Instant::now());
+            self.restore_pending = false;
             if restore {
                 (self.log)(&format!(
                     "Restored 3D overlay without activation; foreground HWND {:?}",

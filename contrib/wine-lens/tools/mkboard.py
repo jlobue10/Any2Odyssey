@@ -19,9 +19,12 @@ USB_CLASS = "{36fc9e60-c465-11cf-8056-444553540000}"
 COMPORT = "{86e0d1e0-8089-11d0-9ce4-08003e301f73}"
 HCD = "{3abf6f2d-71c4-462a-8a92-1e6861e6af27}"
 
+# For tests/test-mkboard.py only: a folder that stands in for "/", with the board's entries under its sys.
+ROOT = os.environ.get("A2O_MKBOARD_TEST_ROOT", "")
+
 def usb_device(tty):
-    path = os.path.realpath(os.path.join("/sys/class/tty", os.path.basename(os.path.realpath(tty)), "device"))
-    while path != "/":
+    path = os.path.realpath(os.path.join(ROOT + "/sys/class/tty", os.path.basename(os.path.realpath(tty)), "device"))
+    while path not in ("/", ROOT):
         if os.path.exists(os.path.join(path, "idVendor")): return path
         path = os.path.dirname(path)
     sys.exit(f"{tty} is not a USB serial device")

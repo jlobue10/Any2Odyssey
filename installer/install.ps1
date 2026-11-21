@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$CheckOnly,[switch]$AllowDowngrade,[switch]$ControlsOnly)
+param([switch]$CheckOnly,[switch]$AllowDowngrade,[switch]$ControlsOnly,[switch]$PackageOnly)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'InstallSupport.ps1')
 # Any2Odyssey identity: separate from any installed Any2Odd (different folders, worker, registry key).
@@ -24,6 +24,10 @@ $versionText=(Get-Content -LiteralPath (Join-Path $PSScriptRoot 'VERSION') -Raw)
 if($versionText -notmatch '^\d+\.\d+\.\d+$'){throw 'Invalid package VERSION.'}
 $version=[version]($versionText+'.0')
 if((ConvertTo-Any2OdysseyFourPartVersion (Get-Any2OdysseyPackageVersion -Binary $binary)) -ne $version){throw 'Package VERSION and executable version disagree. Extract a complete release or rebuild it.'}
+# -PackageOnly (scripts/verify-package.ps1): the checks of the package itself, above, and nothing about
+# this PC. With -CheckOnly -ControlsOnly instead, a correct package was reported as failing on a PC that
+# has the full converter or a newer Any2Odyssey installed: those refusals follow below.
+if($PackageOnly){Write-Host "Package check passed: every file the installer copies is present, and VERSION ($versionText) and the executable agree. No changes made.";return}
 $installed=Get-Any2OdysseyInstalledVersion -AppPath $app -Registration $registration -DataPath $data
 $installedVersion=if($installed){$installed.Version}else{$null}
 $action=Get-Any2OdysseyInstallAction -PackageVersion $version -InstalledVersion $installedVersion -AllowDowngrade:$AllowDowngrade
@@ -115,6 +119,8 @@ foreach($folder in $shortcutFolders){$operations+=[pscustomobject]@{Source=$shor
 $registrationExisted=Test-Path -LiteralPath $registration;$oldValues=@{}
 if($registrationExisted){$key=Get-Item -LiteralPath $registration;foreach($name in $key.GetValueNames()){$oldValues[$name]=@{Value=$key.GetValue($name);Kind=$key.GetValueKind($name)}}}
 # Installed apps resolves a bare powershell.exe through the caller's PATH; name the system one.
+# A 32-bit caller is redirected to the 32-bit one all the same; Uninstall.ps1 then starts itself
+# again in the 64-bit one.
 $uninstall='"'+(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')+'" -NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $app 'Uninstall.ps1')+'" -Pause'
 $properties=@{DisplayName='Any2Odyssey';DisplayVersion=$versionText;Publisher='Jonathan LoBue';InstallLocation=$app;DisplayIcon=(Join-Path $app 'Any2Odyssey.ico')+',0';UninstallString=$uninstall;URLInfoAbout='https://github.com/jlobue10/Any2Odyssey'}
 if($ControlsOnly){$properties.DisplayName='Any2Odyssey (controls only)'}

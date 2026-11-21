@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use any2odyssey_core::dibr::DepthMap;
+use any2odyssey_core::dibr::{DepthMap, DibrError};
 use any2odyssey_core::paths;
 use image::RgbaImage;
 use ort::environment::Environment;
@@ -664,6 +664,75 @@ fn gist(message: &str) -> String {
     format!("…{tail}")
 }
 
+/// The model's answer as it gave it: a number for every pixel, larger for
+/// nearer, on a scale of the model's own that is another for every picture.
+///
+/// A still image's map is brought to 0..=1 at once ([`RawDepth::normalized`]),
+/// which is all there is to do with one picture. A live screen's is not:
+/// its maps are steadied against each other, and the range they are
+/// brought to 0..=1 with follows the scene slowly
+/// (`core::live::DepthSmoother`). That needs each map's own range, and a
+/// map that has been brought to 0..=1 has none left: the live screen was
+/// given such maps until 1.0.0, and when the nearest or the farthest point
+/// of the scene changed, everything else changed its depth with it in one
+/// map.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RawDepth {
+    width: u32,
+    height: u32,
+    values: Vec<f32>,
+}
+
+impl RawDepth {
+    /// A map of `width` x `height` numbers, row by row. Refused, with what
+    /// [`DepthMap::normalized`] says of it, when there is none, when the
+    /// numbers are not as many as the size says, or when one of them is
+    /// not a number; and when they lie further apart than a number can say.
+    pub fn new(width: u32, height: u32, values: Vec<f32>) -> Result<RawDepth, String> {
+        if width == 0 || height == 0 {
+            return Err(DibrError::Empty.to_string());
+        }
+        if values.len() != width as usize * height as usize {
+            return Err(DibrError::BadDepthMap.to_string());
+        }
+        let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &v in &values {
+            if !v.is_finite() {
+                return Err(DibrError::NotFinite.to_string());
+            }
+            low = low.min(v);
+            high = high.max(v);
+        }
+        if !(high - low).is_finite() {
+            return Err("The depth map's values are too far apart to tell near from far.".into());
+        }
+        Ok(RawDepth {
+            width,
+            height,
+            values,
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Every number as the model gave it, row by row.
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    /// The map for one picture by itself: 0 its farthest point, 1 its
+    /// nearest.
+    pub fn normalized(self) -> Result<DepthMap, String> {
+        DepthMap::normalized(self.width, self.height, self.values).map_err(|e| e.to_string())
+    }
+}
+
 /// What a depth map is asked for, which decides what becomes of the room
 /// the runtime took for it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -744,13 +813,29 @@ pub struct Estimator {
 /// The one model, shared by still images and live sessions.
 static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
 
-/// Let the model go, with everything the runtime holds for it; the next
-/// map loads it again. A live screen that has ended does this: its model
-/// held 0.9 GB of a GPU's memory at standard detail and 2.8 GB at the
-/// finest for as long as the program stayed open, output or none. Waits
-/// for a map that is being made: not for the UI's thread.
-pub fn unload() {
-    *ESTIMATOR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+/// Let the model go, with everything the runtime holds for it, if
+/// `unused` says so once no map is being made; the next map loads it
+/// again. A live screen that has ended does this: its model held 0.9 GB of
+/// a GPU's memory at standard detail and 2.8 GB at the finest for as long
+/// as the program stayed open, output or none. Waits for a map that is
+/// being made: not for the UI's thread.
+///
+/// Whether the model is unused was decided before the wait and not asked
+/// again after it. A live screen that began in between and was given the
+/// model first had it let go of behind its first map, and loaded it once
+/// more for its second: seconds, where a GPU is started for the first
+/// time.
+pub fn unload_if(unused: impl FnOnce() -> bool) {
+    unload_from(&ESTIMATOR, unused);
+}
+
+fn unload_from<T>(model: &Mutex<Option<T>>, unused: impl FnOnce() -> bool) {
+    let mut slot = model.lock().unwrap_or_else(|e| e.into_inner());
+    // Whoever wants the model from here on waits for this, and loads it
+    // after: nobody's model is taken from under them.
+    if unused() {
+        *slot = None;
+    }
 }
 
 /// Share one model between still images and live sessions. A stopped live
@@ -762,6 +847,20 @@ pub fn estimate_unless_cancelled(
     purpose: Purpose,
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<DepthMap>, String> {
+    estimate_raw_unless_cancelled(image, long_side, purpose, cancelled)?
+        .map(RawDepth::normalized)
+        .transpose()
+}
+
+/// [`estimate_unless_cancelled`] with the model's answer as it gave it,
+/// for a live screen: its maps are brought to 0..=1 by what steadies them
+/// ([`RawDepth`]).
+pub fn estimate_raw_unless_cancelled(
+    image: &RgbaImage,
+    long_side: u32,
+    purpose: Purpose,
+    cancelled: impl Fn() -> bool,
+) -> Result<Option<RawDepth>, String> {
     with_model(
         &ESTIMATOR,
         cancelled,
@@ -770,7 +869,7 @@ pub fn estimate_unless_cancelled(
             verify_installed(&model, origin, MODEL_SHA256)?;
             Estimator::load(&model)
         },
-        |estimator| estimator.estimate(image, long_side, purpose),
+        |estimator| estimator.estimate_raw(image, long_side, purpose),
     )
 }
 
@@ -863,14 +962,15 @@ impl Estimator {
 
     /// Estimate the nearness of every pixel of `image`, which the model is
     /// shown with its long side at about `long_side` pixels (one of
-    /// [`DETAIL`]). The map comes back at that working size; the renderer
-    /// stretches it to the image.
-    pub fn estimate(
+    /// [`DETAIL`]). The map comes back at that working size, in the
+    /// model's own numbers ([`RawDepth`]); the renderer stretches it to the
+    /// image.
+    pub fn estimate_raw(
         &mut self,
         image: &RgbaImage,
         long_side: u32,
         purpose: Purpose,
-    ) -> Result<DepthMap, String> {
+    ) -> Result<RawDepth, String> {
         let (width, height) = image.dimensions();
         if width == 0 || height == 0 {
             return Err("The source contains no image.".into());
@@ -935,7 +1035,7 @@ fn run(
     image: &RgbaImage,
     (w, h): (u32, u32),
     give_back: Option<&str>,
-) -> Result<DepthMap, String> {
+) -> Result<RawDepth, String> {
     let tensor = Tensor::from_array((
         [1usize, 3, h as usize, w as usize],
         planar_input(image, w, h),
@@ -954,15 +1054,22 @@ fn run(
     let (shape, values) = outputs[0]
         .try_extract_tensor::<f32>()
         .map_err(|e| format!("The depth model returned an unexpected result: {e}"))?;
-    // [1, H, W] or [1, 1, H, W]: the last two dimensions are the map.
     let dims: Vec<i64> = shape.iter().copied().collect();
-    let (out_h, out_w) = match dims.as_slice() {
+    answer(&dims, values)
+}
+
+/// The model's output, `values` in the shape `dims`, as a map.
+fn answer(dims: &[i64], values: &[f32]) -> Result<RawDepth, String> {
+    // [1, H, W] or [1, 1, H, W]: the last two dimensions are the map.
+    let (out_h, out_w) = match dims {
         [.., h, w] if *h > 0 && *w > 0 => (*h as u32, *w as u32),
         _ => return Err(format!("The depth model returned shape {dims:?}.")),
     };
     // Depth Anything's output grows with nearness, which is what the
-    // renderer's map means too.
-    DepthMap::normalized(out_w, out_h, values.to_vec()).map_err(|e| e.to_string())
+    // renderer's map means too. The numbers stay as they are: whoever
+    // asked brings them to 0..=1, a still image at once and a live screen
+    // against the maps before ([`RawDepth`]).
+    RawDepth::new(out_w, out_h, values.to_vec())
 }
 
 #[cfg(test)]
@@ -1358,6 +1465,90 @@ mod tests {
         } else {
             assert_eq!(said, RunsOn::Processor { gpu_refused: None });
         }
+    }
+
+    #[test]
+    fn the_models_answer_is_handed_on_with_its_own_numbers() {
+        // What the model said of four pixels, in either shape it uses.
+        let said = [3.5f32, 7.0, 5.25, 40.0];
+        for dims in [&[1i64, 2, 2][..], &[1, 1, 2, 2]] {
+            let raw = answer(dims, &said).unwrap();
+            assert_eq!((raw.width(), raw.height()), (2, 2));
+            // Not brought to 0..=1: a live screen's maps are steadied
+            // against each other with the ranges they came with.
+            assert_eq!(raw.values(), said);
+            // A still image's map is, as it always was.
+            assert_eq!(
+                raw.normalized().unwrap(),
+                DepthMap::normalized(2, 2, said.to_vec()).unwrap()
+            );
+        }
+        let wide = answer(&[1, 1, 4], &said).unwrap();
+        assert_eq!((wide.width(), wide.height()), (4, 1));
+        // Answers that are no map are told as before.
+        assert_eq!(
+            answer(&[1, 0, 4], &[]).unwrap_err(),
+            "The depth model returned shape [1, 0, 4]."
+        );
+        assert_eq!(
+            answer(&[4], &said).unwrap_err(),
+            "The depth model returned shape [4]."
+        );
+        assert_eq!(
+            answer(&[1, 2, 2], &said[..3]).unwrap_err(),
+            DibrError::BadDepthMap.to_string()
+        );
+        assert_eq!(
+            answer(&[1, 2, 2], &[1.0, f32::NAN, 2.0, 3.0]).unwrap_err(),
+            DibrError::NotFinite.to_string()
+        );
+        assert_eq!(
+            RawDepth::new(0, 2, Vec::new()).unwrap_err(),
+            DibrError::Empty.to_string()
+        );
+        // Numbers further apart than a number can say would make a map of
+        // "not a number" whoever brought them to 0..=1.
+        assert!(answer(&[1, 1, 2], &[-f32::MAX, f32::MAX]).is_err());
+    }
+
+    #[test]
+    fn a_model_that_is_wanted_again_is_not_let_go_of_by_whoever_wanted_it_before() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        // Nobody wants it: it goes.
+        let model = Mutex::new(Some(1u32));
+        unload_from(&model, || true);
+        assert_eq!(*model.lock().unwrap(), None);
+        unload_from(&model, || true);
+        assert_eq!(*model.lock().unwrap(), None);
+
+        // A live screen has ended and counted itself out (0 are left); its
+        // letting go waits for the map being made. Meanwhile another has
+        // begun, counted itself in, and is given the model next.
+        let model = Arc::new(Mutex::new(Some(1u32)));
+        let users = Arc::new(AtomicUsize::new(0));
+        let in_use = model.lock().unwrap();
+        let (ended_model, ended_users) = (model.clone(), users.clone());
+        let ended = std::thread::spawn(move || {
+            unload_from(&ended_model, || ended_users.load(Ordering::SeqCst) == 0)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        users.fetch_add(1, Ordering::SeqCst);
+        drop(in_use);
+        ended.join().unwrap();
+        // It was let go of all the same, having been found unused before
+        // the wait, and loaded again for the next map. Asked at the time,
+        // the count says it is wanted.
+        assert_eq!(
+            with_model(
+                &model,
+                || false,
+                || panic!("the model in use was let go of"),
+                |model| Ok(*model)
+            )
+            .unwrap(),
+            Some(1)
+        );
     }
 
     #[test]

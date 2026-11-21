@@ -71,10 +71,24 @@ pub fn is_caps_heading(line: &str) -> bool {
 /// Write the guide to `path`. An error names the file: the system's own
 /// text does not, and "File exists (os error 17)" was all `--export-guide`
 /// said of a path that leads through a file.
+///
+/// The file written is the one the viewer's export would write
+/// (`resolve_export`). The guide was renamed into place over whatever had
+/// the name: a link was replaced by a file instead of what it leads to
+/// being written, and a file the user may not write to was replaced all
+/// the same and could be written to afterwards, both with exit code 0.
+/// Links are followed now, a file that cannot be written to is left as it
+/// is with an error, and one that is replaced keeps its permissions.
 pub fn export(path: &Path) -> std::io::Result<()> {
-    any2odyssey_core::fsutil::write_atomic_document(path, render().as_bytes()).map_err(|e| {
-        std::io::Error::new(e.kind(), format!("Could not write {}: {e}", path.display()))
+    let failed = |kind, e: &dyn std::fmt::Display| {
+        std::io::Error::new(kind, format!("Could not write {}: {e}", path.display()))
+    };
+    let target =
+        crate::ui::resolve_export(path).map_err(|e| failed(std::io::ErrorKind::Other, &e))?;
+    any2odyssey_core::fsutil::write_atomic_document_with(&target, |writer| {
+        std::io::Write::write_all(writer, render().as_bytes())
     })
+    .map_err(|e| failed(e.kind(), &e))
 }
 
 #[cfg(test)]
@@ -120,6 +134,68 @@ mod tests {
         let target = dir.path().join("guide.html");
         export(&target).unwrap();
         assert!(std::fs::read_to_string(target).unwrap().contains("</html>"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_onto_a_link_writes_what_the_link_leads_to() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let served = dir.path().join("served");
+        std::fs::create_dir(&served).unwrap();
+        let file = served.join("guide.html");
+        std::fs::write(&file, b"last version's guide").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = dir.path().join("guide.html");
+        std::os::unix::fs::symlink("served/guide.html", &link).unwrap();
+        export(&link).unwrap();
+        assert!(link.is_symlink(), "the link is still a link");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), render());
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "the file that was replaced keeps its permissions"
+        );
+        // Nothing is left beside either of them.
+        assert_eq!(std::fs::read_dir(&served).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        // A link to a file that is not there yet makes that file.
+        let new = dir.path().join("new.html");
+        std::os::unix::fs::symlink("served/new.html", &new).unwrap();
+        export(&new).unwrap();
+        assert!(new.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(served.join("new.html")).unwrap(),
+            render()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_onto_a_file_that_may_not_be_written_leaves_it_as_it_is() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("guide.html");
+        std::fs::write(&file, b"kept").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // (Whoever may write everything, root, is not kept out.)
+        let kept_out = std::fs::OpenOptions::new().write(true).open(&file).is_err();
+        let exported = export(&file);
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o444,
+            "the file can be written to no more than before"
+        );
+        if kept_out {
+            let error = exported.unwrap_err().to_string();
+            assert!(
+                error.starts_with(&format!("Could not write {}: ", file.display())),
+                "{error}"
+            );
+            assert!(error.contains("cannot be written to"), "{error}");
+            assert_eq!(std::fs::read(&file).unwrap(), b"kept");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]

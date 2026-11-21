@@ -64,6 +64,15 @@ try{
  })
  Assert ($exeMethodCalls.Count -eq 0) "Uninstaller never passes the per-user EXE to a method call (found: $(($exeMethodCalls | ForEach-Object {$_.Extent.Text}) -join '; '))"
  $selfReferences=@($uninstallAst.FindAll({param($node)$node -is [Management.Automation.Language.VariableExpressionAst] -and $node.VariablePath.UserPath -eq 'PSCommandPath'},$true))
- Assert ($selfReferences.Count -eq 0) 'Uninstaller never re-elevates itself'
+ # It names itself in one place only: where a 32-bit PowerShell starts it again in the 64-bit one (1.0.1),
+ # with the rights it has. Anywhere else, or beside RunAs there, would be an elevation of itself.
+ $bitnessSwitch={param($node)$node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -match 'Is64BitProcess'}
+ $elsewhere=@($selfReferences | Where-Object {
+  $node=$_.Parent;$inside=$false
+  while($node){if(& $bitnessSwitch $node){$inside=$true;break};$node=$node.Parent}
+  -not $inside
+ })
+ $elevatingSwitches=@($uninstallAst.FindAll($bitnessSwitch,$true) | Where-Object {$_.Extent.Text -match 'RunAs'})
+ Assert ($elsewhere.Count -eq 0 -and $elevatingSwitches.Count -eq 0) 'Uninstaller never re-elevates itself'
 }finally{Remove-Item -LiteralPath $root -Recurse -Force}
 exit 0
