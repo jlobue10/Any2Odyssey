@@ -314,25 +314,75 @@ class InstallerTests(unittest.TestCase):
         self.assertIsNone(self.setup_ran_with())
 
     def test_stand_in_root_never_reaches_a_command_run_as_root(self):
-        # The variable comes from the environment: what it names must not be handed to sudo.
+        # The variable comes from the environment: what it names must not be handed to sudo, and udevadm
+        # acts on the real system whatever stands in for /. The udev step and its removal run all the
+        # same, on the stand-in's rules folder. (Up to 1.0.0 that folder was the real /etc/udev/rules.d in
+        # a test run too and the step was switched off: this test looked at a file the script never came
+        # near, and its removal half ran only on a machine that has the real rules installed.)
         tools = self.root / "tools"
         tools.mkdir()
-        called = self.root / "sudo-argv"
-        (tools / "sudo").write_text(f'#!/bin/sh\necho "$*" >> "{called}"\n')
-        (tools / "sudo").chmod(0o755)
+        called = self.root / "root-argv"
+        for name in ("sudo", "udevadm"):
+            (tools / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{called}"\n')
+            (tools / name).chmod(0o755)
         self.env["PATH"] = f"{tools}{os.pathsep}{self.env['PATH']}"
+        real = Path("/etc/udev/rules.d/70-any2odyssey-lens.rules")
+        before = (real.read_bytes(), real.stat().st_mtime_ns) if real.exists() else None
         rules = self.system / "etc/udev/rules.d/70-any2odyssey-lens.rules"
         rules.parent.mkdir(parents=True)
-        rules.write_text("# somebody else's file\n")
+        rules.write_text("# the rules of an earlier version\n")
         (self.archive / "wine-lens" / "70-any2odyssey-lens.rules").write_text("# the rules\n")
         prefix = self.root / "prefix"
-        result = self.run_installer("--prefix", str(prefix), "--yes", "--no-model", "--no-odyssey")
+        flags = ["--prefix", str(prefix), "--no-model", "--no-odyssey"]
+        # Nobody answers the question: the file stays as it is.
+        result = self.run_installer(*flags)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("A2O_INSTALL_TEST_ROOT is set", result.stdout)
+        self.assertEqual(rules.read_text(), "# the rules of an earlier version\n")
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(rules.read_text(), "# the rules\n")
+        self.assertEqual(rules.stat().st_mode & 0o777, 0o644)
+        self.assertIn("would run: udevadm control --reload\n", result.stdout)
+        self.assertIn("would run: udevadm trigger --subsystem-match=tty\n", result.stdout)
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("udev rules for the Odyssey 3D\n   already installed\n", result.stdout)
+        # The removal: asked about, and with nobody to answer the rules stay.
+        result = self.run_installer("--prefix", str(prefix), "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(rules.is_file(), "the rules were removed although nobody agreed to it")
         result = self.run_installer("--prefix", str(prefix), "--uninstall", "--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(rules.exists(), "the rules are still there")
+        self.assertIn("would run: udevadm control --reload\n", result.stdout)
+        # Where a distribution's package has the rules, none are put beside them.
+        packaged = self.system / "usr/lib/udev/rules.d/70-any2odyssey-lens.rules"
+        packaged.parent.mkdir(parents=True)
+        packaged.write_text("# the package's rules\n")
+        result = self.run_installer(*flags, "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("installed by your distribution's package", result.stdout)
+        self.assertFalse(rules.exists())
         self.assertFalse(called.exists(), called.read_text() if called.exists() else "")
-        self.assertEqual(rules.read_text(), "# somebody else's file\n")
+        after = (real.read_bytes(), real.stat().st_mtime_ns) if real.exists() else None
+        self.assertEqual(after, before, "the real rules folder was touched")
+
+    def test_a_webcam_that_is_there_is_taken_out_of_power_saving_with_the_rules(self):
+        # The rule acts when the camera appears; for one that is connected already the step sets it now,
+        # and says what a camera that has been in power saving needs. Looked for under the stand-in too.
+        camera = self.system / "sys/bus/usb/devices/1-2"
+        (camera / "power").mkdir(parents=True)
+        (camera / "idVendor").write_text("04e8\n")
+        (camera / "idProduct").write_text("20d7\n")
+        (camera / "power/control").write_text("auto\n")
+        (camera / "power/runtime_status").write_text("suspended\n")
+        (self.system / "etc/udev/rules.d").mkdir(parents=True)
+        (self.archive / "wine-lens" / "70-any2odyssey-lens.rules").write_text("# the rules\n")
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--no-model", "--no-odyssey", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((camera / "power/control").read_text(), "on\n")
+        self.assertIn("the Odyssey's webcam has been in USB power saving", result.stdout)
 
     def test_empty_windows_root_is_rejected(self):
         for root in ["", "/"]:

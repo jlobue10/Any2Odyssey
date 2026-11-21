@@ -40,12 +40,17 @@ umask go-w
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local PREFIX_GIVEN=
 YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
-# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board
-# and for mounted drives (with the mount table and the /sys entries that describe them). It comes from the
-# environment, so nothing it names reaches a command run as root: while it is set no step uses sudo.
+# For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board,
+# for mounted drives (with the mount table and the /sys entries that describe them) and for the udev rules.
+# It comes from the environment, so nothing it names reaches a command run as root: while it is set no step
+# uses sudo, and udevadm, which acts on the real system whatever stands in for /, is named and not run.
 TEST_ROOT=${A2O_INSTALL_TEST_ROOT:-}
 RULES_NAME=70-any2odyssey-lens.rules
-RULES_DIR=/etc/udev/rules.d
+# The rules folder follows the stand-in. It was the real /etc/udev/rules.d in a test run too, with the udev
+# step switched off there: no test could see what that step or its removal does, and the one that looked
+# whether a rules file under the stand-in was left alone passed whatever this script did.
+RULES_DIR=$TEST_ROOT/etc/udev/rules.d
+PACKAGED_RULES_DIR=$TEST_ROOT/usr/lib/udev/rules.d
 # The program in the archive is built for the GNU C library on x86_64: the kernel starts it through this
 # loader, and it needs at least this version of the library (the workflows compare the number with the
 # program they have built).
@@ -53,7 +58,7 @@ LOADER=/lib64/ld-linux-x86-64.so.2
 GLIBC_MIN=2.35
 # The steps that need root go through sudo; a root shell runs them itself (not every system has sudo).
 SUDO=sudo
-[ "$(id -u)" != 0 ] || SUDO=
+if [ "$(id -u)" = 0 ] || [ -n "$TEST_ROOT" ]; then SUDO=; fi
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -132,9 +137,8 @@ canonical() {
 PREFIX=$(canonical "$PREFIX") && [ -n "$PREFIX" ] || { echo "install: could not resolve the --prefix folder" >&2; exit 2; }
 WANT_DEPS=$DEPS # as asked for: a test run still looks which of the packages exist
 if [ -n "$TEST_ROOT" ]; then
-    echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives are looked for under $TEST_ROOT, and no packages or udev rules are installed or removed"
+    echo "note: A2O_INSTALL_TEST_ROOT is set (a test run): drives, the monitor and the udev rules are looked for under $TEST_ROOT, no packages are installed, and nothing is run with sudo or udevadm"
     DEPS=
-    UDEV=
 fi
 
 say() { printf '%s\n' "$*"; }
@@ -153,6 +157,10 @@ ask() {
     case $answer in '' | y | Y | yes | Yes) return 0 ;; *) return 1 ;; esac
 }
 have() { command -v "$1" >/dev/null 2>&1; }
+# udevadm as root, or only shown with --dry-run and in a test run (see TEST_ROOT).
+udev() {
+    if [ -n "$TEST_ROOT" ]; then printf '   would run: udevadm %s\n' "$*"; else run $SUDO udevadm "$@"; fi
+}
 # Not root and no sudo to become it (Debian installed with a root password has none): the steps that need
 # root are named for the user to run as root instead of being tried.
 no_sudo() { [ -n "$SUDO" ] && ! have sudo; }
@@ -303,12 +311,12 @@ if [ -n "$UNINSTALL" ]; then
     else
         say "   the program itself belongs to your distribution's package; remove it with the package manager"
     fi
-    if [ -z "$TEST_ROOT" ] && [ -f "$RULES_DIR/$RULES_NAME" ]; then
+    if [ -f "$RULES_DIR/$RULES_NAME" ]; then
         if no_sudo; then
             say "   the udev rules stay (this system has no sudo); as root: rm -f $RULES_DIR/$RULES_NAME && udevadm control --reload"
         elif ask "Remove the udev rules ($RULES_DIR/$RULES_NAME${SUDO:+, needs sudo})?"; then
             # (a refusal by sudo must not end the removal half-way: the Wine side and the last lines follow)
-            { run $SUDO rm -f "$RULES_DIR/$RULES_NAME" && run $SUDO udevadm control --reload; } ||
+            { run $SUDO rm -f "$RULES_DIR/$RULES_NAME" && udev control --reload; } ||
                 warn "the udev rules could not be removed or reloaded (see the message above)"
         fi
     fi
@@ -661,9 +669,9 @@ find_windows() {
     fi
     WIN=$1
 }
-lens_board() { grep -q -s -i '^354b$' /sys/bus/usb/devices/*/idVendor 2>/dev/null; }
+lens_board() { grep -q -s -i '^354b$' "$TEST_ROOT"/sys/bus/usb/devices/*/idVendor 2>/dev/null; }
 webcam_dir() {
-    for d in /sys/bus/usb/devices/*; do
+    for d in "$TEST_ROOT"/sys/bus/usb/devices/*; do
         [ "$(cat "$d/idVendor" 2>/dev/null):$(cat "$d/idProduct" 2>/dev/null)" = 04e8:20d7 ] && { echo "$d"; return 0; }
     done
     return 1
@@ -829,7 +837,7 @@ RULES=$WINE_LENS/$RULES_NAME
 [ -f "$RULES" ] || RULES=$HERE/wine-lens/$RULES_NAME
 if [ -z "$UDEV" ]; then
     say "   skipped (--no-udev)"
-elif [ -f /usr/lib/udev/rules.d/$RULES_NAME ]; then
+elif [ -f "$PACKAGED_RULES_DIR/$RULES_NAME" ]; then
     say "   installed by your distribution's package"
 elif [ ! -f "$RULES" ]; then
     warn "$RULES_NAME was not found; skipped"
@@ -847,7 +855,7 @@ elif ask "Install $RULES_DIR/$RULES_NAME (lens board for you at the seat, no USB
     if ! run $SUDO install -m644 "$RULES" "$RULES_DIR/$RULES_NAME"; then
         warn "the udev rules were not installed (see the message above); the Odyssey 3D's lens board cannot be used until they are. As root: install -m644 $(quoted "$RULES") $RULES_DIR/$RULES_NAME && udevadm control --reload && udevadm trigger --subsystem-match=tty"
     else
-        { run $SUDO udevadm control --reload && run $SUDO udevadm trigger --subsystem-match=tty; } ||
+        { udev control --reload && udev trigger --subsystem-match=tty; } ||
             warn "the udev rules are installed but could not be put into effect now (see the message above); they are read at the next start of the system"
         # The webcam rule acts when the camera appears; for one that is here already, set it now.
         if CAM=$(webcam_dir); then
