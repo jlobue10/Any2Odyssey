@@ -317,10 +317,11 @@ impl Pace {
     }
 
     /// Whether the next frame of a screen that changes faster than a film
-    /// is about to come at `now`: each of its last three frames came
-    /// within 25 ms of the one before (a game, a video of 60 a second, a
-    /// desktop that is scrolled, a pointer on the move), and the next is
-    /// not yet later than such frames are late by.
+    /// is about to come at `now`: its last three frames came less than 25
+    /// ms after the one before in the mean and none of them 50 ms after
+    /// (a game, a video of 60 a second, a desktop that is scrolled, a
+    /// pointer on the move), and the next is not yet later than such
+    /// frames are late by.
     ///
     /// [`Pace::next_within`] knows of a film's frames only, and such a
     /// screen's next frame is nearer still: it always comes within the
@@ -338,6 +339,12 @@ impl Pace {
     /// from the next frame on, as it was before a map's arrival woke the
     /// loop; a screen that has stopped changing is no longer told so, and
     /// its last frame gets its map.
+    ///
+    /// The mean, not each of the three: a video of 60 a second whose
+    /// frames come a refresh early and a refresh late by turns on a
+    /// screen of 120 Hz has them 8 and 25 ms apart. With each of the
+    /// three asked to be under 25 ms that was no such screen, and 697 of
+    /// its 1041 frames had two pictures (the same rig, a map in 5 ms).
     fn quick(&self, now: Instant) -> bool {
         let mut newest = self.arrived.iter().rev();
         let Some(&last) = newest.next() else {
@@ -349,12 +356,13 @@ impl Pace {
                 return false;
             };
             let gap = later.saturating_duration_since(earlier);
-            if gap >= Duration::from_millis(25) {
+            if gap >= Duration::from_millis(50) {
                 return false;
             }
             (longest, later) = (longest.max(gap), earlier);
         }
-        now <= last + longest + Pace::HOLD * 2
+        last.saturating_duration_since(later) < Duration::from_millis(25) * 3
+            && now <= last + longest + Pace::HOLD * 2
     }
 }
 
@@ -3102,11 +3110,16 @@ mod tests {
         // one of 90, a game between 80 and 140: the next frame is about
         // to come from the moment one has, and for as long after its time
         // as such frames are late by.
+        // And a video of 60, 50 or 48 a second whose frames come a
+        // refresh early and a refresh late by turns on a screen of 120 Hz.
         for gaps in [
             [16_667; 3],
             [16_000, 16_000, 24_000],
             [22_222; 3],
             [7_100, 12_500, 9_000],
+            [8_333, 25_000, 8_333],
+            [25_000, 8_333, 25_000],
+            [16_667, 25_000, 16_667],
         ] {
             let (pace, last) = came(&gaps);
             let longest = Duration::from_micros(*gaps.iter().max().unwrap());
@@ -3122,7 +3135,13 @@ mod tests {
         // A film's frames, a video of 30 a second and a desktop that
         // changes now and then are not such a screen: theirs is the rule
         // of the steady run, or none.
-        for gaps in [[41_700; 3], [33_333; 3], [16_667, 16_667, 300_000]] {
+        for gaps in [
+            [41_700; 3],
+            [33_333; 3],
+            [25_000; 3],
+            [16_667, 16_667, 300_000],
+            [8_333, 8_333, 60_000],
+        ] {
             let (pace, last) = came(&gaps);
             assert!(!pace.quick(last + ms(1)), "{gaps:?}");
         }
