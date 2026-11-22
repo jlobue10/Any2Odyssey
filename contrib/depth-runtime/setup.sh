@@ -43,10 +43,10 @@ echo "depth-runtime: downloading (4 GB unless $wheels has them)..."
     -d "$wheels" -r "$work/wanted.txt" || die "the download failed"
 
 echo "depth-runtime: unpacking..."
-python3 - "$wheels" "$work/new" <<'PYTHON'
-import hashlib, os, re, sys, zipfile
+python3 - "$wheels" "$work/new" "${1:-}" <<'PYTHON'
+import hashlib, os, re, sys, tempfile, zipfile
 
-wheels, out = sys.argv[1], sys.argv[2]
+wheels, out, external = sys.argv[1:]
 wanted = {
     "onnxruntime_gpu-1.32.0-": "09637f3e38a1addc308dec5ef825a36eeb786e9615f45ec76aa29909df5cdd36",
     "tensorrt_cu13_libs-10.16.1.11-": "91142c8ab3c58bed213cf1a563a6eb4e4f0ac529d05b5f909073acece0e3b712",
@@ -62,32 +62,51 @@ for start, sha in wanted.items():
     if len(names) != 1:
         sys.exit(f"depth-runtime: expected one wheel {start}* in {wheels}, found {names}")
     path = os.path.join(wheels, names[0])
-    digest = hashlib.sha256()
-    with open(path, "rb") as file:
-        while block := file.read(1 << 22):
-            digest.update(block)
-    if digest.hexdigest() != sha:
-        sys.exit(f"depth-runtime: {path} is not the file this was written for (SHA-256 differs)")
-    with zipfile.ZipFile(path) as wheel:
-        for member in wheel.infolist():
-            if not keep.match(member.filename):
-                continue
-            target = os.path.join(out, os.path.basename(member.filename))
-            with wheel.open(member) as source, open(target, "wb") as file:
-                while block := source.read(1 << 22):
-                    file.write(block)
-            os.chmod(target, 0o755)
+    # A caller-supplied wheel folder can change independently. Unpack the
+    # exact bytes hashed, keeping a private snapshot only for external wheels.
+    with open(path, "rb") as source:
+        with (tempfile.TemporaryFile(dir=out) if external else source) as verified:
+            digest = hashlib.sha256()
+            while block := source.read(1 << 22):
+                digest.update(block)
+                if external:
+                    verified.write(block)
+            if digest.hexdigest() != sha:
+                sys.exit(f"depth-runtime: {path} is not the file this was written for (SHA-256 differs)")
+            verified.seek(0)
+            with zipfile.ZipFile(verified) as wheel:
+                for member in wheel.infolist():
+                    if not keep.match(member.filename):
+                        continue
+                    target = os.path.join(out, os.path.basename(member.filename))
+                    with wheel.open(member) as member_file, open(target, "wb") as file:
+                        while block := member_file.read(1 << 22):
+                            file.write(block)
+                    os.chmod(target, 0o755)
 runtime = [n for n in os.listdir(out) if re.fullmatch(r"libonnxruntime\.so\.1\.\d+\.\d+", n)]
 if len(runtime) != 1 or not os.path.exists(os.path.join(out, "libnvinfer.so.10")):
     sys.exit("depth-runtime: the wheels did not hold what was expected")
 os.symlink(runtime[0], os.path.join(out, "libonnxruntime.so.1"))
 PYTHON
 
-# The engines TensorRT made with another runtime are of no use to this one.
+# Publish the complete directory in one rename. On an upgrade the old
+# installation moves into the staging directory for the exit trap to clean.
+python3 - "$work/new" "$data/depth-runtime" <<'PYTHON'
+import ctypes, errno, os, sys
+
+new, live = sys.argv[1:]
+try:
+    os.rename(new, live)
+except OSError as error:
+    if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+        raise
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    # Linux AT_FDCWD and RENAME_EXCHANGE, with both paths on the same mount.
+    if rename(-100, os.fsencode(new), -100, os.fsencode(live), 2):
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), live)
+PYTHON
+# Only invalidate the engine cache after the runtime has been installed.
 rm -rf "$data/depth-engines"
-if [ -e "$data/depth-runtime" ]; then
-    mv "$data/depth-runtime" "$work/old"
-fi
-mv "$work/new" "$data/depth-runtime"
 echo "depth-runtime: done, in $data/depth-runtime ($(du -sh "$data/depth-runtime" | cut -f1))."
 echo "Start Any2Odyssey again; a live screen's first half minute at each depth detail is spent making TensorRT's form of the model, once."
