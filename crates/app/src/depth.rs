@@ -1190,6 +1190,44 @@ impl<S: Send + 'static> Fast<S> {
     }
 }
 
+/// How many of TensorRT's forms of the model are being made, or wait
+/// their turn to be, in the whole program.
+static MAKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `make`, to be run when no other such making is under way anywhere in
+/// the program, and counted in [`MAKING`] while it waits for that and
+/// while it runs.
+///
+/// [`Fast`] makes one form at a time, but each model has a `Fast` of its
+/// own, and the model is let go of when the last live screen ends
+/// (`unload_if`) while what is being made for it goes on being made:
+/// TensorRT cannot be stopped. Seen with the real thing: output stopped
+/// while a form was being made and started again made a second one beside
+/// the first, for the same size and into the same file, each with the
+/// GPU's memory of one (6 GB at the finest detail). Here the second waits
+/// for the first, and then finds what the first has kept, which it opens
+/// in a second.
+fn one_at_a_time<S>(
+    make: impl FnOnce() -> Result<S, String> + Send + 'static,
+) -> impl FnOnce() -> Result<S, String> + Send + 'static {
+    use std::sync::atomic::Ordering::SeqCst;
+    static ONE: Mutex<()> = Mutex::new(());
+    // Counted out when the making is over, however it ends.
+    struct Counted;
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            MAKING.fetch_sub(1, SeqCst);
+        }
+    }
+    move || {
+        MAKING.fetch_add(1, SeqCst);
+        let _counted = Counted;
+        // (one that broke while it was its turn is no reason to stop)
+        let _turn = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        make()
+    }
+}
+
 pub struct Estimator {
     session: Session,
     /// The model as TensorRT runs it, for a live screen.
@@ -1501,9 +1539,10 @@ impl Estimator {
         // only where the CUDA provider works, which TensorRT needs too.
         if purpose == Purpose::Live && self.tensorrt && self.runs_on == RunsOn::Gpu {
             let (model, input) = (self.model.clone(), self.input.clone());
-            let fast = self
-                .fast
-                .session_for((w, h), move || open_fast_session(&model, &input, (w, h)));
+            let fast = self.fast.session_for(
+                (w, h),
+                one_at_a_time(move || open_fast_session(&model, &input, (w, h))),
+            );
             if let Some(session) = fast {
                 match run(session, &self.input, image, (w, h), None) {
                     Ok(map) => {
@@ -2022,6 +2061,62 @@ mod tests {
         assert!(fast
             .session_for((1274, 714), || panic!("asked again"))
             .is_none());
+    }
+
+    #[test]
+    fn what_a_stopped_live_screen_left_being_made_is_finished_before_another_is_begun() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::mpsc::{channel, Receiver};
+        use std::sync::Arc;
+        // How many makers are at work, and the most there were at once.
+        let at_work = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+        let maker = |name: &'static str, wait: Receiver<()>| {
+            let at_work = at_work.clone();
+            one_at_a_time(move || {
+                let now = at_work.0.fetch_add(1, SeqCst) + 1;
+                at_work.1.fetch_max(now, SeqCst);
+                wait.recv().unwrap();
+                at_work.0.fetch_sub(1, SeqCst);
+                Ok(name)
+            })
+        };
+        let wait_for = |what: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !what() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        assert_eq!(MAKING.load(SeqCst), 0);
+        // A live screen's model has TensorRT's form of it made. The live
+        // screen is stopped and the model let go of: the making goes on.
+        let (finish_first, wait) = channel();
+        let mut first = Fast::Unasked;
+        assert!(first
+            .session_for((1274, 714), maker("first", wait))
+            .is_none());
+        wait_for(&|| at_work.0.load(SeqCst) == 1);
+        drop(first);
+        // Started again: another model, which asks for the same at once
+        // (and would have it at once, were it made).
+        let (finish_second, wait) = channel();
+        finish_second.send(()).unwrap();
+        let mut second = Fast::Unasked;
+        assert!(second
+            .session_for((1274, 714), maker("second", wait))
+            .is_none());
+        // Both are counted, the one that waits too: the program does not
+        // leave as programs do while either is there.
+        wait_for(&|| MAKING.load(SeqCst) == 2);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(at_work.0.load(SeqCst), 1);
+        assert!(second
+            .session_for((1274, 714), || panic!("asked again"))
+            .is_none());
+        finish_first.send(()).unwrap();
+        assert_eq!(awaited(&mut second, (1274, 714)), Some("second"));
+        assert_eq!(at_work.1.load(SeqCst), 1, "two were made at once");
+        wait_for(&|| MAKING.load(SeqCst) == 0);
     }
 
     #[test]
