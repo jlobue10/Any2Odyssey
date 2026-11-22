@@ -648,9 +648,10 @@ fn cut_tensorrt_library(folders: &[PathBuf]) -> Option<String> {
     libraries.sort();
     libraries.iter().find_map(|library| {
         let (length, needed) = cut_short(library)?;
-        // The file last: the page shows the end of a long message.
+        // What it is and the file last: the page shows the end of a long
+        // message (`gist`).
         Some(format!(
-            "an interrupted copy or download left one of TensorRT's libraries cut short ({length} of {needed} bytes). Copy it again, or run depth-runtime/setup.sh again: {}",
+            "one of TensorRT's libraries is not whole ({length} of {needed} bytes), as an interrupted copy or download leaves it. Copy it again, or run depth-runtime/setup.sh again. It is cut short: {}",
             library.display()
         ))
     })
@@ -2336,16 +2337,20 @@ mod tests {
                 })
                 .unwrap_err();
                 assert!(
-                    refusal.contains("cut short (3000 of 4368 bytes)")
+                    refusal.contains("not whole (3000 of 4368 bytes)")
                         && refusal.ends_with(&library.display().to_string()),
                     "{refusal}"
                 );
-                // The page has the end of it, with the file's name.
+                // The page has the end of it: what is wrong with which
+                // file, however long the folder's name is.
                 let on_the_page = RunsOn::GpuOnly {
                     tensorrt_refused: refusal,
                 }
                 .describe();
-                assert!(on_the_page.contains(name), "{on_the_page}");
+                assert!(
+                    on_the_page.contains(&format!("It is cut short: {}", library.display())),
+                    "{on_the_page}"
+                );
                 std::fs::write(&library, &whole).unwrap();
             }
         }
