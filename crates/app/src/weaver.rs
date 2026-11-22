@@ -658,6 +658,23 @@ impl FrameSink {
             .unwrap_or_else(|e| e.into_inner())
             .draw_bottom_up(width, height, mark, draw)
     }
+
+    /// The same file, for another to draw in.
+    ///
+    /// A drawer's marks are its own: a live screen counts them from one
+    /// at every start. What an earlier drawer left in the places is
+    /// therefore nothing the next one may take for its own work, whatever
+    /// mark it was drawn under, and every place is stale again. Handed on
+    /// as it was, the file of an output that stayed open while its live
+    /// screen was started anew (another input chosen and the live screen
+    /// again) told the second screen that its places were drawn: where
+    /// that screen had another shape, the first one's last pictures
+    /// stayed beside it in every picture, in place of the black.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn for_another(&self) -> FrameSink {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).drawn = [None; PLACES as usize];
+        self.clone()
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -804,7 +821,9 @@ impl Weaver {
     /// The running session's picture, for another thread to write.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn sink(&self) -> Option<FrameSink> {
-        self.session.as_ref().map(|session| session.frames.clone())
+        self.session
+            .as_ref()
+            .map(|session| session.frames.for_another())
     }
 
     /// Take in what the helper has said. True when it has left by itself
@@ -1387,6 +1406,51 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn what_one_drawer_left_in_the_places_is_stale_for_the_next() {
+        let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+            eprintln!("skipped: no /dev/shm to make a frame file in");
+            return;
+        };
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        if sink.0.lock().unwrap().mapped.is_none() {
+            eprintln!("skipped: /dev/shm is not a file system in memory here");
+            return;
+        }
+        let is_stale = |sink: &FrameSink, shade: u8| {
+            let mut stale = None;
+            let drawn = sink.draw_bottom_up(2, 1, 1, |canvas, was_stale| {
+                stale = Some(was_stale);
+                // A drawer that is told the place is its own leaves the
+                // second pixel as it finds it.
+                let pixels = if was_stale { 8 } else { 4 };
+                canvas[..pixels].fill(shade);
+            });
+            assert!(drawn.unwrap());
+            stale.unwrap()
+        };
+        // A live screen draws under its first mark until every place is
+        // its own.
+        assert_eq!(
+            [1, 1, 1, 1].map(|shade| is_stale(&sink, shade)),
+            [true, true, true, false]
+        );
+        // The next live screen on the same output counts its marks from
+        // one as well. Nothing in the places is its work.
+        let next = sink.for_another();
+        assert_eq!(
+            [2, 2, 2, 2].map(|shade| is_stale(&next, shade)),
+            [true, true, true, false]
+        );
+        assert_eq!(next.written().3, [2; 8]);
+        // Handed on as it is, the places pass for the second one's: that
+        // is how the first screen's pixels stayed in its pictures.
+        let same = next.clone();
+        assert!(!is_stale(&same, 3));
+        assert_eq!(same.written().3, [3, 3, 3, 3, 2, 2, 2, 2]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn where_the_places_are_no_memory_nothing_is_drawn_and_the_caller_is_told() {
         let dir = tempfile::tempdir().unwrap();
         let sink = FrameSink::in_folder(dir.path()).unwrap();
@@ -1582,6 +1646,23 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
+        }
+
+        #[test]
+        fn each_one_who_asks_for_the_picture_file_finds_its_places_stale() {
+            let dir = tempfile::tempdir().unwrap();
+            let helper = script(dir.path(), "echo on\ncat >/dev/null");
+            let mut weaver = Weaver::with_helper(Some(helper));
+            start(&mut weaver);
+            assert!(weaver.is_running(), "{:?}", weaver.status());
+            // What a live screen leaves behind: every place drawn under
+            // its mark.
+            let first = weaver.sink().unwrap();
+            first.0.lock().unwrap().drawn = [Some((1, 8)); PLACES as usize];
+            // The next live screen of the same output asks anew.
+            let second = weaver.sink().unwrap();
+            assert_eq!(second.0.lock().unwrap().drawn, [None; PLACES as usize]);
+            weaver.stop();
         }
 
         #[test]

@@ -2,6 +2,90 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 1.0.7 (2026-11-22)
+
+An eleventh audit release: seven pull requests (#196 to #202) from a round that put 1.0.4, 1.0.5 and 1.0.6 on the rigs. Those three were made in one day on the monitor's own Linux PC, from measurements of one film on one screen, and their notes say what they had not seen: another refresh rate, another desktop, a game, a video of 60 pictures a second. This round ran those: a producer of frames at any rate through the program's own capture and render loop, the Wine-side program under real Wine 11.22 and 11.6 with a stand-in for Leia's weaver, TensorRT on an RTX 5090 (in WSL), the set-up script of the depth runtime in root trees of nine distributions, and the published files of the three releases. Linux only, but for the version: nothing Windows runs has changed. **None of it has been seen on the monitor**; `docs/TESTING.md`, "New in 1.0.7", has the checks.
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive), with no 3D picture showing: the program that shows the picture through Leia's weaver and one script of the Odyssey 3D set-up changed, and an update of the program does not replace them in the data folder.
+
+**Linux, live screen: a screen that changes 60 times a second is taken as it comes again.** Since 1.0.4 the depth thread wakes the render loop when a map is done. That turn took no frame but was counted as a picture, so the next frame waited, and the loop then ran on a grid of 15 ms of its own beside the frames. A video or a game of 60 pictures a second was shown later and less evenly than 1.0.3 showed it, some frames twice and some never: at 1080 lines with a map of 3 ms, 16.4 ms after the frame came where 1.0.3 took 5.9, and 116 of 1042 frames twice; of 60 a second on a 120 Hz screen whose frames come a refresh early and late by turns (as a browser's do), 232 of 1040 frames were in no picture at all. Now a turn that takes no frame leaves the pace alone, and no second picture is begun between the frames of a screen whose last three frames came less than 25 ms apart in the mean: every frame is shown once, 4.4 ms after it came in that last case (1.0.3: 6.3), and a game of 40 or 45 a second 5 to 6 ms after where it was 12 to 13. A film is shown as evenly as 1.0.4 to 1.0.6 showed it. Measured with a stand-in for the depth model that takes a chosen time for a map. (#202)
+
+**Linux, the Odyssey 3D output: no picture is left until it is never shown.** 1.0.6's rule for a film's pictures left a picture that turned up early for up to three refreshes, whatever the rate. Where pictures are three or four refreshes apart, the next one arrives within those three and takes the place of the one that was left. Under real Wine, with the rule: 72 of 2000 pictures of a video of 50 a second on a 144 Hz display were never handed on, 5 of 1238 of a game that wanders around 30 a second at 120 Hz; without the rule, none. A picture is now left for one refresh where the pictures are three apart, for two where they are four, and for three as before from five on, so a film of 24 a second at 120 Hz is shown at the very same refreshes as in 1.0.6 (compared turn by turn over ten minutes of eleven rates). After it: 2000 of 2000, 1238 of 1238. (#199)
+
+**Linux, the depth runtime (TensorRT): a library that is cut short no longer ends the program.** A library file that a copy or a download left incomplete ends whatever opens it with "Bus error". #197 keeps the program from opening the two TensorRT libraries it opens itself; run on the real libraries, the program still ended when TensorRT then opened the others by itself (`libnvinfer_plugin`, the builder's resource: at every start of a live screen), and the same with cuDNN or one of CUDA's libraries cut short (at the first depth map). All of them are now looked at first: depth goes on without the part that is damaged (through the CUDA provider, or on the processor), and the line under *Depth detail* ends with "It is cut short:" and the file. A folder named in `ANY2ODYSSEY_TENSORRT_DIR` that holds a cut library is named there, not silently passed over for the installed one. (#197, #201)
+
+### Fixed
+
+Linux, the live screen:
+
+- **A screen of 60 pictures a second**, as above. (#202)
+- **`A2O_LIVE_TIMES` naming a pipe no longer holds up the picture.** With a pipe nobody reads, no picture was made at all and the program could not end the live screen; with a slow reader, 22 pictures a second of 60. The lines are now written by a thread of their own, and where it cannot keep up, lines are left out and counted in a line `x <n>`. (#202)
+- **A second live screen on an output that was left on no longer keeps pixels of the first.** After a live screen, another input and a live screen again with the output left on, the new render loop took what the old one had drawn in the picture file for its own: with a screen of another shape, two thirds of the pixels of each picture still had the first screen's colour. (1.0.4, where the picture began to be made in that file.) (#199)
+
+Linux, a live screen's depth with TensorRT (1.0.5, 1.0.6):
+
+- **Cut-short libraries**, as above. (#197, #201)
+- **Stopping the output while TensorRT makes its form of the model and starting it again no longer makes two at once.** Two were made for the same size into the same file, 31 and 26 seconds; the second start now waits for the first and opens what it made. (#201)
+- **Leaving the program while TensorRT makes its form of the model no longer ends in "Segmentation fault".** TensorRT's thread does not survive what a program runs as it leaves; while one is at work the program now leaves at once. Shown with the tests' own program, which leaves as the real one does, not with the window's Quit. (#201)
+- **A kept form of the model is no longer deleted when TensorRT cannot be opened at all** (a library missing or damaged, another TensorRT in the named folder). It is put aside and put back unless making a new one works. (#201)
+- **The card's memory that the CUDA provider held is given back when TensorRT takes over**: at *Finest* the program held 5.5 GB of the card and holds 1.3; at *Finer* 3.2 and 1.2. (#201)
+- **The program's own memory no longer grows with every stop and start of a live screen.** 1.0 GB after one stop, 4.7 after ten, 10.6 after a hundred, with nothing loaded: memory that the C library kept for threads that were gone. It is given back when the model is let go: 1.9 GB at the most over 60 stops. The card's memory was given back every time before, too. (#201)
+- **TensorRT's libraries are tried from the installed runtime when the folder named in `ANY2ODYSSEY_TENSORRT_DIR` has none that can be opened.** (#197)
+- **A video of 30 pictures a second is taken for one when a frame comes a refresh early.** A film's picture waits for its own depth map where the frames come 25 to 70 ms apart; at 120 Hz a frame of such a video that comes a refresh early comes exactly 25.0 ms after the one before and fell out by a hair half of the time: a fifth of the frames were not waited for, and some drawn twice. The lower bound is 22 ms now: 297 of 300 drawn once with their own map. A proposal of the round, taken as proposed. (#201)
+
+Linux, the Odyssey 3D output and set-up (run `any2odyssey-setup` once to have these):
+
+- **Pictures left and never shown**, as above. (#199)
+- **`A2O_WEAVER_LATENCY_US` and `A2O_WEAVER_LATENCY_FRAMES` tell Leia's weaver only a whole number that was asked for.** Set but empty, or `abc`, told it 0 microseconds; `1e5` told it 1, `25ms` 25, and `A2O_WEAVER_LATENCY_FRAMES=` 0 frames. Anything but a whole number in range (to 200000 microseconds, to 16 frames) now counts as not set, and the first line of `A2O_WEAVER_STATS` says "(not told)" after it. (#199)
+- **The removal of Leia's old log files looks below Leia's folder only.** The pattern was matched against the whole path: with a folder named `Log` anywhere above the Wine prefix, every `.txt` file of more than two weeks in Leia's folder was a log to it. (#199)
+
+Linux, `depth-runtime/setup.sh`:
+
+- **The CUDA libraries are looked for as a program finds them** (#196): the script asked `ldconfig -p`, which a user on Debian does not have on the PATH, took a line that only contained the name, and took a file in `/opt/cuda/lib64` that no program would find there. It now opens the libraries the way the program does, also from `LD_LIBRARY_PATH`, and asks for `libcurand.so.10` as well, which the CUDA provider needs. A library that is cut short, a `python3` without `ctypes` and a Python older than 3.8 are said in one line each. (#196, #200)
+- **Given a folder that already holds the two wheels, it downloads nothing** and needs neither pip, a venv nor the network. (#200)
+- **Room is asked for before anything is fetched** (8 GB in the data folder's file system, 7 with a folder of wheels), and pip's temporary files go to the data folder, not to `/tmp`, which is memory on most desktops and smaller than the larger wheel on some. (#200)
+- **An upgrade works where the file system cannot exchange two folders in one step** (two renames, and it says so), **the hidden staging folder is removed after `PIPE` and `QUIT` too** and by the next run after a kill, a relative `XDG_DATA_HOME` counts as unset as it does for the program, a `depth-runtime` that is a link or a file is said before the download, and root is refused in another user's data folder. (#200)
+- `install.sh --uninstall` says that the runtime stays (2.8 GB) and how to remove it; the README names the script. (#200)
+
+### What held
+
+- **1.0.4's films**: 23.976 to 50 pictures a second on screens of 60, 120 and 144 Hz with a third of the frames early or late: none less even than in 1.0.3, most far more (24 a second at 120 Hz: a spread of 1.1 ms from picture to picture where 1.0.3 had 9.0). A frame that is the same as the one before is told right in 60,000 random pairs of every format, row length and turn; the halving for the depth model equals a reference in whole numbers in every pixel of 64 sizes on 1 to 32 cores.
+- **TensorRT on an RTX 5090 (in WSL)**: `depth-runtime/setup.sh` ran at the first try with CUDA 13 and cuDNN 9 from NVIDIA's wheels in `LD_LIBRARY_PATH`. First form of the model 36 to 52 seconds, 54 MB each, opened again in 0.5 to 1.0 s; a map 2.7 ms for the CUDA provider's 6.8 at *Standard*, 9.3 for 31.2 at *Finest*. *Depth detail* changed six times while one was made: two made in all, never two at once. 200 stops and starts: the card's memory the same after each.
+- **1.0.6's wait of a picture for its own map**: at 23.976, 24 and 25 pictures a second 96 to 98 % of the frames are drawn once with their own map at *Standard* and *Fine*; none left out, none later than the next frame; a map that takes three or ten times as long, a model that fails, a pause: nothing lost, even again within seconds.
+- **The picture made in the file the output reads** (1.0.4), read by the real host under Wine at 1080, 1440 and 2160 lines as fast as it can be written: 5602 of 5603 pictures handed on whole, and the one mixture not taken for shown. The size changed, the writer ended in the middle of a picture, the sequence number past its wrap, the file removed: the host goes on or leaves as it should.
+- **The published files of 1.0.4, 1.0.5 and 1.0.6**: eight each, every `.sha256`, every attestation against its tag, the contents against the tags; `depth-runtime/setup.sh` is in the archive and the Arch package from 1.0.5 on.
+- **#196 against a program's own loader**: the same answer in all 16 cases (libraries in `LD_LIBRARY_PATH` only, in `/opt/cuda/lib64` only, CUDA 12 only, 32-bit ones), under sh, dash, BusyBox sh and bash.
+
+### Corrections to the notes of 1.0.4 to 1.0.6
+
+- 1.0.4, "a desktop, a game and a video of 60 a second are shown as they come": they were not; see above. And a source of 30 or 40 pictures a second that is not a film (a game held at that rate, a video call) is taken for one by both rules, in the program and in the Wine-side program: its pictures are evened like a film's: 7 ms later in the mean by the Wine-side program's rule, and with a quick depth model 14 ms later by the program's wait for the map. Nothing here can tell a game from a film by its timing; this is as it was made, and now said.
+- 1.0.4, "55 of 165": through a desktop a screen of 144, 165 or 240 Hz arrives on a grid of 8 ms, as the same notes say two lines above, and is shown 61 times a second in steps of two and three refreshes mixed, as in 1.0.3. Screens of 90 and 100 Hz are shown 45 and 49 times a second, evenly.
+- 1.0.4, "Windows is unchanged but for the version": true of every file but the program, whose code is 64 bytes shorter from 1.0.4 on (two files that changed are compiled for Windows too).
+- 1.0.5, "meanwhile the maps are made as before": on the rig the CUDA provider's maps all but stand for 14 to 20 seconds while TensorRT makes its form of the model (one map every one to two and a half seconds), once for every size and detail. This may be WSL's doing; it is to be looked at on the monitor's PC.
+- 1.0.5, how far TensorRT's maps differ from the CUDA provider's: over 60 pictures of films and desktops 0.0007 to 0.0011 of the range in the mean (the notes: 0.0004, from eight photographs) and 0.0025 to 0.0035 at 99 of 100 points (under 0.002). Nothing a picture shows.
+- 1.0.6, `docs/TESTING.md`: not "every line" of `A2O_WEAVER_STATS` ends with `latency 25000`; every other line is the one that begins `shown for turns:`.
+
+### Tests and releases
+
+- The rule for a film's pictures in the Wine-side program is cut out of its source and run natively under the sanitizers (`contrib/wine-lens/tests/test-weaver-evenly.py`, in CI and in the release workflow): on 1.0.6's rule ten of its cases fail.
+- New tests for: the picture drawn in its place through every change of lines, screen and sharpening (no test noticed either of 1.0.4's two guards taken out); the cut-short libraries; one form of the model at a time over a stop and a start; a model's failure letting go of a picture that waits; the log removal under a folder named `Log`; the set-up script's corrections, with stand-ins for the wheels (24 of them taken out by hand, each noticed).
+- 1.0.6's wait of a picture for its own map is under no test that notices it taken out; the one test that looks at it is run alone and passes without it. Known.
+- The saved files of 1.0.4, 1.0.5 and 1.0.6 are in the corpus of releases.
+- `url` 2.5.9 for RUSTSEC-2026-0592 (a stack overflow in a function the program does not call), which had turned the dependency check red. (#198)
+
+### Known, not fixed
+
+- **A film is even only while nothing else on the screen changes at every refresh.** With the pointer moving over it (where the desktop draws the pointer into the frames), its pictures are 33 and 50 ms apart by turns, as in 1.0.3.
+- **sway with the wlroots portal** sends 104 to 108 frames a second of a 120 or 144 Hz screen now that 125 are asked for, and 52 to 54 pictures a second are shown where 1.0.3 showed 62 (more evenly than there). KDE Plasma and GNOME were not run in this round.
+- **Where a picture waits for its own map, the holding of a film's early frame (1.0.4) does nothing**: the pictures are written as the frames come, and the evening is left to the Wine-side program.
+- **What the Wine-side program leaves a picture for is never given back**: after turns that ran over, or with a source whose clock runs ahead, a film's pictures can be shown up to three refreshes after they came for as long as the film runs. A film of 24 a second on a 165 Hz display is taken for a whole number of refreshes (it is 6.875) and is 17 ms later for no gain.
+- `ANY2ODYSSEY_TENSORRT_DIR` naming a TensorRT of another major version: it is loaded, the provider cannot use it, and the installed one is not tried. A named folder that is empty or missing is passed over without a word. A folder of `depth-engines` that cannot be written has its form of the model made anew at every start, without a word.
+- `depth-runtime/setup.sh` was not run with a `python3` of conda's in front on the PATH (its loader may find libraries the program's does not). pip prints nothing during the 4 GB download.
+
+### Hardware verification
+
+None. Everything above was run on rigs: stand-ins for the desktop's portal, for Leia's weaver and, for the timings of the live screen, for the depth model; TensorRT and the CUDA provider on a real card through WSL. `docs/TESTING.md`, "New in 1.0.7", lists what is to be seen on the G90XF, first of all: `any2odyssey-setup`, then the film of 1.0.6 again (nothing should differ), then a video of 60 pictures a second.
+
 ## 1.0.6 (2026-11-21)
 
 Linux only, the live screen on the Odyssey 3D output: movement in a film hitched now and then. Measured on the Odyssey's own screen while it showed a film of 24 pictures a second in a browser (KDE Plasma 6.8.3 at 120 Hz, 2160 lines, *Finest*, TensorRT), before and after, from outside and with `A2O_LIVE_TIMES` and `A2O_WEAVER_STATS`.

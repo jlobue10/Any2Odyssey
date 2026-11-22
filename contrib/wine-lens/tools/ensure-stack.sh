@@ -93,8 +93,12 @@ if ! stack_ok; then
     # program has written to for two weeks go, now that Leia's programs are about to be started and none
     # of them has such a file open: the service's, the tracker's, and those of the programs that asked
     # the service for something. Nothing else in those folders is touched.
-    find "$WINEPREFIX/drive_c/ProgramData/Simulated Reality" -path '*/Log/*.txt' -type f -mtime +14 \
-        -exec rm -f -- {} + 2>/dev/null
+    # (find is started inside Leia's folder, so that the pattern is matched against the path below it.
+    # Matched against the whole path, a folder named Log anywhere above the prefix made every .txt file
+    # in Leia's folder a log. A folder that is a link to another place is left alone, as it was.)
+    LEIA="$WINEPREFIX/drive_c/ProgramData/Simulated Reality"
+    [ -L "$LEIA" ] || (cd "$LEIA" 2>/dev/null &&
+        find . -path '*/Log/*.txt' -type f -mtime +14 -exec rm -f -- {} + 2>/dev/null)
     note_logs
     "$T/tools/start-stack.sh" >/dev/null 2>&1 9>&- || {
         # (start-stack.sh leaves its reason there when it has one of its own)

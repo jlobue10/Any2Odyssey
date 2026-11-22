@@ -17,8 +17,10 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+import zipfile
 
 
 LINUX = Path(__file__).resolve().parents[1]
@@ -58,6 +60,31 @@ class InstallerTests(unittest.TestCase):
                         A2O_INSTALL_TEST_LOG=str(self.log),
                         A2O_INSTALL_TEST_SETUP_LOG=str(self.setup_log),
                         A2O_INSTALL_TEST_ROOT=str(self.system))
+
+    @unittest.skipUnless(os.uname().machine == "x86_64" and shutil.which("cc"), "x86_64 runtime and cc required")
+    def test_depth_runtime_finds_libraries_in_the_loader_path(self):
+        data = self.root / "data"
+        data.mkdir(exist_ok=True)
+        lib = self.root / "libraries"
+        lib.mkdir()
+        shared = lib / "stub.so"
+        subprocess.run(["cc", "-x", "c", "-shared", "-fPIC", "-", "-o", str(shared)],
+                       input="void fixture(void) {}\n", text=True, check=True)
+        for name in ["libcudart.so.13", "libcublas.so.13", "libcurand.so.10", "libcudnn.so.9"]:
+            (lib / name).symlink_to(shared)
+        tools = self.root / "runtime-tools"
+        tools.mkdir()
+        (tools / "ldconfig").write_text("#!/bin/sh\nexit 1\n")
+        python = shlex.quote(shutil.which("python3"))
+        (tools / "python3").write_text(
+            '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = venv ]; then echo reached-venv >&2; exit 1; fi\n'
+            f'exec {python} "$@"\n')
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        env = dict(self.env, PATH=f"{tools}:{self.env['PATH']}", LD_LIBRARY_PATH=str(lib))
+        script = LINUX.parents[1] / "contrib/depth-runtime/setup.sh"
+        result = subprocess.run([*SHELL, str(script)], env=env, text=True, capture_output=True, timeout=30)
+        self.assertIn("reached-venv", result.stderr, result.stderr)
 
     def install(self, prefix, *extra):
         return self.run_installer("--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model",
@@ -466,6 +493,21 @@ class InstallerTests(unittest.TestCase):
                 self.assert_removed(prefix)
                 self.assertTrue((home / ".local/bin/any2odyssey").is_file(), "the other installation was removed")
                 shutil.rmtree(home)
+
+    def test_the_removal_says_that_the_runtime_for_tensorrt_stays(self):
+        # 2.8 GB that depth-runtime/setup.sh put into the data folder: the last line named the settings
+        # and the depth model only.
+        prefix = self.root / "prefix"
+        data = Path(self.env["ANY2ODYSSEY_DATA_DIR"])
+        for there in [False, True]:
+            with self.subTest(runtime=there):
+                self.assertEqual(self.install(prefix).returncode, 0)
+                if there:
+                    (data / "depth-runtime").mkdir(parents=True)
+                result = self.run_installer("--uninstall", "--prefix", str(prefix))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(f"rm -r {data}/depth-runtime {data}/depth-engines\n" in result.stdout, there, result.stdout)
+                self.assertEqual((data / "depth-runtime").is_dir(), there)
 
     def test_the_installed_copy_removes_the_installation_it_is_part_of(self):
         # Without --prefix it used to look in ~/.local wherever it was: nothing of its own was removed,
@@ -2182,6 +2224,390 @@ done
                 if not accepted:
                     self.assertIn(f"its C library is {version}", result.stderr)
                     self.assertIn("glibc 2.35 or newer", result.stderr)
+
+
+DEPTH_SETUP = LINUX.parents[1] / "contrib/depth-runtime/setup.sh"
+DEPTH_LIBRARIES = ["libcudart.so.13", "libcublas.so.13", "libcurand.so.10", "libcudnn.so.9"]
+DEPTH_RUNTIME = {
+    "libonnxruntime.so.1", "libonnxruntime.so.1.32.0", "libonnxruntime_providers_shared.so",
+    "libonnxruntime_providers_tensorrt.so", "libnvinfer.so.10", "libnvonnxparser.so.10",
+    "libnvinfer_plugin.so.10", "libnvinfer_builder_resource_sm120.so.10.16.1",
+}
+
+
+def depth_wheels(folder, flavour="good"):
+    """Stand-ins for the two wheels in `folder`, with the names inside that the real ones have."""
+    members = {
+        "onnxruntime_gpu-1.32.0-cp312-cp312-manylinux_2_28_x86_64.whl": [
+            "onnxruntime/__init__.py", "onnxruntime/capi/libonnxruntime.so.1.32.0",
+            "onnxruntime/capi/libonnxruntime_providers_shared.so",
+            "onnxruntime/capi/libonnxruntime_providers_tensorrt.so",
+            "onnxruntime/capi/onnxruntime_pybind11_state.cpython-312-x86_64-linux-gnu.so",
+        ],
+        "tensorrt_cu13_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl": [
+            "tensorrt_libs/__init__.py", "tensorrt_libs/libnvinfer.so.10", "tensorrt_libs/libnvonnxparser.so.10",
+            "tensorrt_libs/libnvinfer_plugin.so.10",
+            "tensorrt_libs/libnvinfer_builder_resource_sm120.so.10.16.1",
+            "tensorrt_libs/libnvinfer_builder_resource_win_sm120.so.10.16.1",
+        ],
+    }
+    for wheel, names in members.items():
+        with zipfile.ZipFile(folder / wheel, "w") as archive:
+            for name in names:
+                archive.writestr(zipfile.ZipInfo(name, (2026, 1, 1, 0, 0, 0)), f"{flavour} {name}\n")
+    return sorted(members)
+
+
+@unittest.skipUnless(os.uname().machine == "x86_64" and shutil.which("cc"), "x86_64 runtime and cc required")
+class DepthRuntimeTests(unittest.TestCase):
+    """contrib/depth-runtime/setup.sh with stand-ins: nothing is downloaded and no real library is opened.
+
+    The script under test is a copy with the SHA-256 of two small stand-in wheels in place of the real
+    ones' (its only difference). The CUDA libraries are empty ones, `python3 -m venv` makes a folder whose
+    pip notes that it was reached (and copies the wheels from a folder when the test names one), and `df`
+    answers with plenty of room unless a test says otherwise.
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="any2odyssey-depth-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.data = self.root / "data"
+        self.wheels = self.root / "wheels"
+        self.notes = self.root / "notes"
+        self.source = self.root / "index"
+        self.libraries = self.root / "libraries"
+        tools = self.root / "tools"
+        for folder in [self.data, self.wheels, self.notes, self.source, self.libraries, tools, self.root / "home"]:
+            folder.mkdir()
+        self.stub = self.libraries / "stub.so"
+        subprocess.run(["cc", "-x", "c", "-shared", "-fPIC", "-", "-o", str(self.stub)],
+                       input="void fixture(void) {}\n", text=True, check=True)
+        for name in DEPTH_LIBRARIES:
+            (self.libraries / name).symlink_to(self.stub)
+        self.names = depth_wheels(self.wheels)
+        depth_wheels(self.source)
+        text = DEPTH_SETUP.read_text()
+        for real, name in [("09637f3e38a1addc308dec5ef825a36eeb786e9615f45ec76aa29909df5cdd36", self.names[0]),
+                           ("91142c8ab3c58bed213cf1a563a6eb4e4f0ac529d05b5f909073acece0e3b712", self.names[1])]:
+            self.assertEqual(text.count(real), 2, "the script names each SHA-256 for pip and for the unpacking")
+            text = text.replace(real, hashlib.sha256((self.wheels / name).read_bytes()).hexdigest())
+        self.script = self.root / "setup.sh"
+        self.script.write_text(text)
+        python = shlex.quote(shutil.which("python3"))
+        (tools / "python3").write_text(f"""#!/bin/sh
+if [ "$1" = -m ] && [ "$2" = venv ]; then
+    mkdir -p "$3/bin"
+    cat > "$3/bin/pip" <<'PIP'
+#!/bin/sh
+echo reached-pip >&2
+printf '%s\\n' "${{TMPDIR:-}}" > "$A2O_DEPTH_TEST_NOTES/pip-tmpdir"
+cat "${{TMPDIR%/tmp}}/pid" > "$A2O_DEPTH_TEST_NOTES/run-pid"
+[ -n "${{A2O_DEPTH_TEST_SOURCE:-}}" ] || exit 1
+while [ $# -gt 0 ]; do [ "$1" != -d ] || target=$2; shift; done
+cp "$A2O_DEPTH_TEST_SOURCE"/*.whl "$target"/
+PIP
+    chmod 755 "$3/bin/pip"
+    exit 0
+fi
+# The step that puts the runtime in place (python3 - NEW LIVE OLD) finds something in its way.
+if [ "$#" = 4 ] && [ "$1" = - ] && [ -e "$A2O_DEPTH_TEST_NOTES/block-publish" ]; then
+    rm -rf "$3"
+    : > "$3"
+fi
+exec {python} "$@"
+""")
+        self.free = tools / "free-kilobytes"
+        self.free.write_text("100000000\n")
+        (tools / "df").write_text(
+            '#!/bin/sh\n: > "$A2O_DEPTH_TEST_NOTES/df-asked"\n'
+            'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
+            f'echo "stand-in 200000000 1 $(cat {shlex.quote(str(self.free))}) 1% /"\n')
+        for tool in ["python3", "df"]:
+            (tools / tool).chmod(0o755)
+        self.env = {key: value for key, value in os.environ.items()
+                    if key not in ("XDG_DATA_HOME", "LD_PRELOAD", "PYTHONPATH", "TMPDIR")}
+        self.env.update(PATH=f"{tools}:{os.environ['PATH']}", HOME=str(self.root / "home"),
+                        ANY2ODYSSEY_DATA_DIR=str(self.data), LD_LIBRARY_PATH=str(self.libraries),
+                        A2O_DEPTH_TEST_NOTES=str(self.notes))
+
+    def run_setup(self, *arguments, **changes):
+        return subprocess.run([*SHELL, str(self.script), *arguments], cwd=self.root, env=dict(self.env, **changes),
+                              text=True, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def staging(self, data=None):
+        return sorted(path.name for path in (data or self.data).glob(".depth-runtime.*"))
+
+    def assert_runtime(self, flavour="good", data=None):
+        runtime = (data or self.data) / "depth-runtime"
+        self.assertEqual({path.name for path in runtime.iterdir()}, DEPTH_RUNTIME)
+        self.assertEqual(os.readlink(runtime / "libonnxruntime.so.1"), "libonnxruntime.so.1.32.0")
+        self.assertEqual((runtime / "libnvinfer.so.10").read_text(), f"{flavour} tensorrt_libs/libnvinfer.so.10\n")
+        self.assertEqual((runtime / "libnvinfer.so.10").stat().st_mode & 0o777, 0o755)
+
+    def test_wheels_whole_in_the_folder_named_need_no_pip_and_no_network(self):
+        result = self.run_setup(str(self.wheels))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("reached-pip", result.stderr)
+        self.assert_runtime()
+        self.assertEqual(self.staging(), [])
+        self.assertEqual(sorted(path.name for path in self.wheels.iterdir()), self.names)
+
+    def test_a_wheel_that_is_missing_or_another_file_is_fetched_and_not_unpacked_as_it_is(self):
+        for case in ["missing", "changed"]:
+            with self.subTest(case=case):
+                folder = self.root / case
+                folder.mkdir()
+                depth_wheels(folder)
+                if case == "missing":
+                    (folder / self.names[1]).unlink()
+                else:
+                    with open(folder / self.names[1], "r+b") as wheel:
+                        wheel.seek(40)
+                        wheel.write(b"X")
+                # pip is reached and cannot help: nothing is installed, nothing is left.
+                result = self.run_setup(str(folder))
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("reached-pip", result.stderr)
+                self.assertIn("the download failed", result.stderr)
+                self.assertFalse((self.data / "depth-runtime").exists())
+                self.assertEqual(self.staging(), [])
+                # pip brings the right file: that one is unpacked.
+                result = self.run_setup(str(folder), A2O_DEPTH_TEST_SOURCE=str(self.source))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_runtime()
+                shutil.rmtree(self.data / "depth-runtime")
+
+    def test_a_download_goes_through_a_folder_of_its_own_and_not_through_tmp(self):
+        result = self.run_setup(A2O_DEPTH_TEST_SOURCE=str(self.source))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("reached-pip", result.stderr)
+        self.assert_runtime()
+        self.assertEqual(self.staging(), [])
+        # pip keeps a wheel of 3.7 GB in TMPDIR while it downloads it; /tmp is memory on most desktops.
+        kept = (self.notes / "pip-tmpdir").read_text().strip()
+        self.assertTrue(kept.startswith(f"{self.data}/.depth-runtime."), kept)
+        # Each run notes its process in its folder, for a later run to tell a folder that was left behind.
+        self.assertTrue((self.notes / "run-pid").read_text().strip().isdigit())
+
+    def test_an_upgrade_takes_the_old_runtimes_place_and_clears_the_engines(self):
+        (self.data / "depth-runtime").mkdir()
+        (self.data / "depth-runtime/old-marker").write_text("old\n")
+        (self.data / "depth-engines/1274x714").mkdir(parents=True)
+        # In one step, where the file system can exchange two folders (ext4, btrfs, xfs, tmpfs, overlayfs):
+        # the installed runtime is never moved away first. Whoever tries (rename, renameat, mv) is refused
+        # here by a library put in front of the C library's; the exchange itself is let through.
+        shim = self.root / "runtime-stays.so"
+        subprocess.run(["cc", "-x", "c", "-shared", "-fPIC", "-", "-o", str(shim), "-ldl"], text=True, check=True, input="""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <string.h>
+static int live(const char *path) {
+    size_t length = strlen(path);
+    return length >= 14 && strcmp(path + length - 14, "/depth-runtime") == 0;
+}
+int rename(const char *from, const char *to) {
+    if (live(from)) { errno = EPERM; return -1; }
+    return ((int (*)(const char *, const char *))dlsym(RTLD_NEXT, "rename"))(from, to);
+}
+int renameat(int a, const char *from, int b, const char *to) {
+    if (live(from)) { errno = EPERM; return -1; }
+    return ((int (*)(int, const char *, int, const char *))dlsym(RTLD_NEXT, "renameat"))(a, from, b, to);
+}
+int renameat2(int a, const char *from, int b, const char *to, unsigned int flags) {
+    if (live(from) && !(flags & 2)) { errno = EPERM; return -1; }
+    return ((int (*)(int, const char *, int, const char *, unsigned int))dlsym(RTLD_NEXT, "renameat2"))(a, from, b, to, flags);
+}
+""")
+        result = self.run_setup(str(self.wheels), LD_PRELOAD=str(shim))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("cannot exchange", result.stdout + result.stderr)
+        self.assert_runtime()
+        self.assertFalse((self.data / "depth-engines").exists())
+        self.assertEqual(self.staging(), [])
+
+    def test_a_file_system_that_cannot_exchange_two_folders_still_gets_the_new_runtime(self):
+        # NFS and other file systems answer EINVAL, a kernel before 3.15 ENOSYS: a library put in front
+        # of the C library's renameat2 answers in their place.
+        for answer in ["EINVAL", "ENOSYS"]:
+            with self.subTest(answer=answer):
+                shim = self.root / f"no-exchange-{answer}.so"
+                subprocess.run(["cc", "-x", "c", "-shared", "-fPIC", "-", "-o", str(shim)], text=True, check=True,
+                               input="#include <errno.h>\nint renameat2(int a, const char *b, int c, const char *d, "
+                                     f"unsigned int e) {{ (void)a; (void)b; (void)c; (void)d; (void)e; errno = {answer}; "
+                                     "return -1; }\n")
+                shutil.rmtree(self.data / "depth-runtime", ignore_errors=True)
+                (self.data / "depth-runtime").mkdir()
+                (self.data / "depth-runtime/old-marker").write_text("old\n")
+                result = self.run_setup(str(self.wheels), LD_PRELOAD=str(shim))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("cannot exchange", result.stdout)
+                self.assert_runtime()
+                self.assertEqual(self.staging(), [])
+
+    def test_the_engines_are_kept_when_the_new_runtime_could_not_be_put_in_place(self):
+        (self.data / "depth-runtime").mkdir()
+        (self.data / "depth-runtime/old-marker").write_text("old\n")
+        (self.data / "depth-engines/1274x714").mkdir(parents=True)
+        (self.notes / "block-publish").touch()
+        result = self.run_setup(str(self.wheels))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is a link or a file", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertTrue((self.data / "depth-engines/1274x714").is_dir())
+        self.assertEqual(self.staging(), [])
+
+    def test_a_runtime_folder_that_is_a_link_is_refused_before_anything_is_fetched(self):
+        (self.root / "elsewhere").mkdir()
+        (self.data / "depth-runtime").symlink_to(self.root / "elsewhere")
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("is a link or a file", result.stderr)
+        self.assertNotIn("reached-pip", result.stderr)
+        self.assertEqual(self.staging(), [])
+
+    def test_what_is_unpacked_is_the_bytes_that_were_checked(self):
+        # The larger wheel is a pipe: whoever opens it first reads the right file, and whoever opens it
+        # again reads another one with the same names inside (a folder that changes under the script).
+        other = self.root / "other"
+        other.mkdir()
+        depth_wheels(other, "changed")
+        good, changed = (self.wheels / self.names[1]).read_bytes(), (other / self.names[1]).read_bytes()
+        pipe = self.wheels / self.names[1]
+        pipe.unlink()
+        os.mkfifo(pipe)
+        done = threading.Event()
+
+        def serve():
+            for content in [good, changed, changed, changed]:
+                try:
+                    with open(pipe, "wb") as writer:
+                        if done.is_set():
+                            return
+                        writer.write(content)
+                except BrokenPipeError:
+                    pass
+                # Until that reader has closed: the next one is to begin a file of its own.
+                while not done.is_set():
+                    try:
+                        os.close(os.open(pipe, os.O_WRONLY | os.O_NONBLOCK))
+                    except OSError:
+                        break
+                    time.sleep(0.005)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            result = self.run_setup(str(self.wheels))
+        finally:
+            done.set()
+            # Let the writer go that waits for a reader.
+            for _ in range(200):
+                if not thread.is_alive():
+                    break
+                os.close(os.open(pipe, os.O_RDONLY | os.O_NONBLOCK))
+                thread.join(timeout=0.05)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("reached-pip", result.stderr)
+        self.assert_runtime("good")
+
+    def test_a_relative_xdg_data_home_counts_as_unset_as_the_program_reads_it(self):
+        home_data = self.root / "home/.local/share/any2odyssey"
+        home_data.mkdir(parents=True)
+        (self.root / "relative/any2odyssey").mkdir(parents=True)
+        env = dict(self.env, XDG_DATA_HOME="relative")
+        del env["ANY2ODYSSEY_DATA_DIR"]
+        result = subprocess.run([*SHELL, str(self.script), str(self.wheels)], cwd=self.root, env=env, text=True,
+                                capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_runtime(data=home_data)
+        self.assertEqual(list((self.root / "relative/any2odyssey").iterdir()), [])
+
+    def test_too_little_room_is_said_before_anything_is_fetched(self):
+        self.run_setup(str(self.wheels))
+        if not (self.notes / "df-asked").exists():
+            self.skipTest("this shell runs a df of its own before the one on the PATH (BusyBox)")
+        shutil.rmtree(self.data / "depth-runtime")
+        for arguments, free, needed in [((), 7 * 1048576, "8 GB"), ((str(self.wheels),), 6 * 1048576, "7 GB")]:
+            with self.subTest(needed=needed):
+                self.free.write_text(f"{free}\n")
+                result = self.run_setup(*arguments)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"needs {needed}", result.stderr)
+                self.assertNotIn("reached-pip", result.stderr)
+                self.assertEqual(list(self.data.iterdir()), [])
+        # An answer of df that is no number is no reason to stop.
+        self.free.write_text("-\n")
+        result = self.run_setup(str(self.wheels))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_what_a_run_that_was_ended_outright_left_is_removed_and_a_running_ones_is_not(self):
+        ended = subprocess.Popen(["true"])
+        ended.wait()
+        for name, process in [(".depth-runtime.ended", ended.pid), (".depth-runtime.running", os.getpid())]:
+            (self.data / name / "wheels").mkdir(parents=True)
+            (self.data / name / "pid").write_text(f"{process}\n")
+        # The script of 1.0.5 and 1.0.6 noted no process: its folder goes when it is days old.
+        for name, days in [(".depth-runtime.unmarked", 0), (".depth-runtime.unmarked-old", 3)]:
+            (self.data / name).mkdir()
+            then = time.time() - days * 86400
+            os.utime(self.data / name, (then, then))
+        result = self.run_setup(str(self.wheels))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.staging(), [".depth-runtime.running", ".depth-runtime.unmarked"])
+
+    def test_a_reader_that_goes_away_leaves_no_staging_folder(self):
+        # `setup.sh | head -n 1`: the script is ended by SIGPIPE at its next line, and dash runs no EXIT
+        # trap for a signal that is not caught.
+        process = subprocess.Popen([*SHELL, str(self.script), str(self.wheels)], cwd=self.root, env=self.env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        process.stdout.close()
+        process.wait(timeout=60)
+        self.assertEqual(self.staging(), [])
+
+    def test_the_library_the_cuda_provider_needs_is_asked_for_too(self):
+        (self.libraries / "libcurand.so.10").unlink()
+        result = self.run_setup(str(self.wheels))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("could not load libcurand.so.10", result.stderr)
+        self.assertEqual(list(self.data.iterdir()), [])
+
+    def test_a_cuda_library_that_is_cut_short_is_named_as_damaged(self):
+        (self.libraries / "libcudnn.so.9").unlink()
+        (self.libraries / "libcudnn.so.9").write_bytes(self.stub.read_bytes()[:4096])
+        result = self.run_setup(str(self.wheels))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The loader ends python3 with SIGBUS over such a file, or refuses it where it notices in time.
+        self.assertTrue("is damaged" in result.stderr or "could not load libcudnn.so.9" in result.stderr, result.stderr)
+        self.assertEqual(list(self.data.iterdir()), [])
+
+    def test_a_python_without_ctypes_is_told_and_not_shown_as_a_traceback(self):
+        # A Python built without libffi (pyenv where its headers are missing), Debian's python3-minimal.
+        (self.root / "modules/ctypes").mkdir(parents=True)
+        (self.root / "modules/ctypes/__init__.py").write_text("raise ModuleNotFoundError(\"No module named '_ctypes'\")\n")
+        result = self.run_setup(str(self.wheels), PYTHONPATH=str(self.root / "modules"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("cannot open libraries", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_python_older_than_3_8_is_told_before_anything_is_fetched(self):
+        # Stand-in for an old python3 (Ubuntu 18.04 and openSUSE Leap 15 have 3.6): this one says it is 3.6.
+        (self.root / "modules").mkdir()
+        (self.root / "modules/sitecustomize.py").write_text("import sys\nsys.version_info = (3, 6, 15, 'final', 0)\n")
+        result = self.run_setup(PYTHONPATH=str(self.root / "modules"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("python3 is 3.6 here", result.stderr)
+        self.assertNotIn("reached-pip", result.stderr)
+        self.assertEqual(list(self.data.iterdir()), [])
+
+    @unittest.skipUnless(os.geteuid() == 0, "needs root: the refusal is for a script run with sudo")
+    def test_as_root_another_users_data_folder_is_refused(self):
+        os.chown(self.data, 65534, 65534)
+        result = self.run_setup(str(self.wheels))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("run it as yourself", result.stderr)
+        self.assertEqual(list(self.data.iterdir()), [])
 
 
 if __name__ == "__main__":

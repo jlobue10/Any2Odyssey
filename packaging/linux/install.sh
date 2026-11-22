@@ -386,6 +386,9 @@ if [ -n "$UNINSTALL" ]; then
     fi
     say ""
     say "Your settings and the depth model stay in $DATA; delete that folder yourself if you want them gone."
+    # (what depth-runtime/setup.sh put there, and the forms of the model that TensorRT made with it)
+    [ ! -d "$DATA/depth-runtime" ] ||
+        say "So does the runtime for TensorRT, 2.8 GB. To remove that alone: rm -r $(quoted "$DATA/depth-runtime") $(quoted "$DATA/depth-engines")"
     exit 0
 fi
 

@@ -78,7 +78,8 @@ static volatile LONG quit;
  * So the turns between the pictures are counted. Where the last 32 came a whole number of turns apart in
  * the mean, three turns at the least (a film or a video whose rate goes into the display's: 24, 30 or 40 a
  * second at 120 Hz), a picture that is found sooner after the last was shown than that is left until its
- * turn, for three turns at the most. After a late picture the ones that follow are then all found "early"
+ * turn, for three turns at the most (one where the pictures are three turns apart and two where they are
+ * four: see the end of evenly_hold). After a late picture the ones that follow are then all found "early"
  * and shown later than they could be: five refreshes each again, with a refresh or two between their
  * arrival and the turn that takes them, which the next late one uses and no picture is shown for longer.
  * Pictures that come at no such rate (25 a second at 120 Hz, a desktop, a game) are shown as they are
@@ -97,7 +98,7 @@ struct evenly {
 /* Whether the picture `sequence`, found at this turn or left at an earlier one, is to wait for the next. */
 static bool evenly_hold(struct evenly *e, LONG sequence)
 {
-    unsigned span, whole, apart, odd = 0;
+    unsigned span, whole, apart, wait, odd = 0;
 
     if (sequence != e->seen) { /* found now: its turn is noted, left or not */
         e->seen = sequence;
@@ -116,8 +117,13 @@ static bool evenly_hold(struct evenly *e, LONG sequence)
         if (gap + 1 < whole || gap > whole + 1) odd++;
     }
     if (odd > 2) return false;
-    /* Sooner than that many turns after the one before: left, for a few turns at the most. */
-    return e->turn - e->shown_at < whole && e->turn - e->found[EVEN_RUN - 1] < EVEN_WAIT;
+    /* Sooner than that many turns after the one before: left, for a few turns at the most, and never into a
+     * turn that may find the next picture. That one comes `whole` turns after this one, give or take one,
+     * and takes its place in the header: a picture still left then was never shown. Left for three turns
+     * whatever the run, that was one picture in 25 of 50 a second at 144 Hz (2.88 turns apart, which pass
+     * for three), and some of a source three turns apart whenever its clock ran ahead of the display's. */
+    wait = whole - 2 < EVEN_WAIT ? whole - 2 : EVEN_WAIT;
+    return e->turn - e->shown_at < whole && e->turn - e->found[EVEN_RUN - 1] < wait;
 }
 
 static void fail(const char *reason)
@@ -191,6 +197,23 @@ static void patch_import(HMODULE module, const char *dll, void *from, void *to)
             VirtualProtect(slot, sizeof *slot, old, &old);
         }
     }
+}
+
+/* A whole number from 0 to `most` in what an environment variable holds, with nothing around it but blanks.
+ * The latency asked for was read with atoi(), which makes 0 of a variable that is empty and of "abc", 1 of
+ * "1e5" and 25 of "25ms": the weaver was then told that, as the time or the frames it was to reckon with. */
+static bool whole_number(const char *text, long most, unsigned long long *number)
+{
+    char *end;
+    long value;
+
+    if (!text) return false;
+    value = strtol(text, &end, 10);
+    if (end == text) return false;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end || value < 0 || value > most) return false;
+    *number = (unsigned long long)value;
+    return true;
 }
 
 int main(int argc, char **argv)
@@ -314,22 +337,23 @@ int main(int argc, char **argv)
      * and A2O_WEAVER_LATENCY_FRAMES=<n> tells it n frames and leaves the time to the weaver (which went on
      * saying 40000 right after it was told 3 frames; whether it ever works the time out there is not
      * known). A2O_WEAVER_STATS begins with the time the weaver reckons with and says it again every
-     * second. */
+     * second. A variable that does not hold a whole number of microseconds up to 200000, or of frames up
+     * to 16, counts as not set, and the statistics say "(not told)" after it; so do they after the frames
+     * where a time was told as well. */
     {
         const char *time = getenv("A2O_WEAVER_LATENCY_US"), *frames = getenv("A2O_WEAVER_LATENCY_FRAMES");
-        int microseconds = time ? atoi(time) : 25000;
-        if (time && (microseconds < 0 || microseconds > 200000)) microseconds = 25000;
-        if (frames && !time && atoi(frames) >= 0 && atoi(frames) <= 16)
-            a2o_weaver_latency_frames(weaver, (unsigned long long)atoi(frames));
-        else
-            a2o_weaver_latency_time(weaver, (unsigned long long)microseconds);
-    }
-    if (stats) {
-        const char *frames = getenv("A2O_WEAVER_LATENCY_FRAMES"), *time = getenv("A2O_WEAVER_LATENCY_US");
-        fprintf(stats, "latency %llu microseconds%s%s%s%s\n", a2o_weaver_latency(weaver),
-                frames ? ", asked for frames: " : "", frames ? frames : "",
-                time ? ", asked for microseconds: " : "", time ? time : "");
-        fflush(stats);
+        unsigned long long microseconds = 25000, count = 0;
+        bool timed = whole_number(time, 200000, &microseconds);
+        bool counted = !timed && whole_number(frames, 16, &count);
+
+        if (counted) a2o_weaver_latency_frames(weaver, count);
+        else a2o_weaver_latency_time(weaver, microseconds);
+        if (stats) {
+            fprintf(stats, "latency %llu microseconds%s%s%s%s%s%s\n", a2o_weaver_latency(weaver),
+                    frames ? ", asked for frames: " : "", frames ? frames : "", frames && !counted ? " (not told)" : "",
+                    time ? ", asked for microseconds: " : "", time ? time : "", time && !timed ? " (not told)" : "");
+            fflush(stats);
+        }
     }
     even = !getenv("A2O_WEAVER_EVEN") || strcmp(getenv("A2O_WEAVER_EVEN"), "0");
     QueryPerformanceFrequency(&qpf);
