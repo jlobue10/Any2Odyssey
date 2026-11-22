@@ -66,7 +66,9 @@ What the installer sets up, if you would rather do it by hand
   ANY2ODYSSEY_DEPTH_MODEL.
   With an NVIDIA GPU, CUDA 13 and cuDNN 9, `depth-runtime/setup.sh` makes a live screen's depth several
   times as fast: it puts an ONNX Runtime with the TensorRT provider, and TensorRT, into your data folder
-  (a 4 GB download from PyPI and pypi.nvidia.com, 2.8 GB kept; needs python3 with venv). No
+  (a 4 GB download from PyPI and pypi.nvidia.com, 2.8 GB kept; needs python3 with venv, and 8 GB free
+  in the data folder's file system while it runs). Given a folder that already holds the two wheels
+  (`depth-runtime/setup.sh <folder>`), it downloads nothing and needs neither pip nor the network. No
   distribution's ONNX Runtime has that provider so far. The CHANGELOG of 1.0.5 has the rest.
 - Open and Save dialogs: zenity or kdialog.
 - A live screen: a desktop with the screen-cast portal (KDE Plasma and GNOME have it).
