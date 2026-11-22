@@ -4,7 +4,7 @@ Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continu
 
 ## Unreleased
 
-Four changes on Linux that come from measuring 1.0.3 while it showed a film on the Odyssey's own screen (KDE Plasma 6.8.3, the screen at 120 Hz, 2160 lines, *Finest*), and two diagnostics. The measurements were taken from outside the running program; **nothing of the changes has been seen on the monitor yet**.
+Four changes on Linux that come from measuring 1.0.3 while it showed a film on the Odyssey's own screen (KDE Plasma 6.8.3, the screen at 120 Hz, 2160 lines, *Finest*), and two diagnostics. They were then run and measured on that screen; what was not is said at the end.
 
 ### Changed
 
@@ -14,6 +14,9 @@ Linux, the live screen:
 - **Of a screen that changes faster than pictures are made, every second or third frame is taken, as it arrives.** Pictures are made 66 times a second at the most. With more frames than that arriving, one always lay waiting when a turn began and was taken as it was, and how long it had waited drifted: of 120 frames a second every ninth picture came one frame after the one before it and the others two. The frames that come too soon after the one taken last are now let pass and the first that does not is taken at once, so the pictures are a whole number of frames apart (60 a second of 120, 55 of 165). Reasoned and tested on a clock of the test's own, not measured with a game.
 - **A frame that is the same as the one before is told before it is copied.** Every frame was copied out of the stream's buffer (3.3 ms for 3840 x 2160) and compared afterwards: under the film, 62 a second were copied for 38 to be thrown away. A frame is now compared where it lies, and copied only when it is another picture.
 - **The picture is made where the output reads it.** It was made in room of the render loop's own and copied into the file the output reads: at 2160 lines 66 MB a picture, 10 to 11 ms of the 23 a turn took. `live::bench::turn_timings` on the same machine, while the film ran: a turn at 2160 lines takes 11.2 ms where it took 22.9 (89 pictures a second possible where 44 were), at 1440 lines 5.8 where 9.3, at 1080 lines 4.0 where 6.1. The program also holds 66 MB less at 2160 lines. Where the file is not in memory the picture is made and written as before.
+
+- **A film's frames are shown evenly.** They do not arrive evenly: with a film of 24 pictures a second in a browser on the Odyssey's own screen, a frame came 38 to 46 ms after the one before 56 to 74 % of the time, and otherwise a refresh early and a refresh late by turns. Where the last eight frames came in a steady run of 15 to 50 a second, a frame that comes early is now held until its time, 9 ms at the most. Measured in the running program over a minute of that film (`A2O_LIVE_TIMES`): 74 % of the frames arrived 38 to 46 ms apart and 88 % were shown so. A desktop, a game and a video of 60 a second are shown as they come.
+- **The depth model sees a frame 22 ms sooner at *Finest*, and is given its next frame as soon as a map is done.** Before the model saw a frame of a large screen, the frame was halved on one processor core through numbers with a fraction: 23.8 ms at *Finest* on a 3840 x 2160 screen (12.3 at *Finer*, 6.1 at *Fine*, 2.5 at *Standard*). The same sums are now made in whole numbers on a few cores: 1.9, 1.3, 0.8 and 0.4 ms, the result the same colour or its neighbour. And a map that was done just after a film's frame had come left the model idle until the next frame: it made 14 maps a second for the film's 24 pictures and makes 23.5. A picture is drawn with the depth of the frame two before it, steadily, where it was one to three; with a finer look at where the 40 ms of a map at *Finest* go, more may be had. Where no frame of a film is about to come (a still screen, a desktop), a map is also drawn with at once and not at the screen's next change or 150 ms later.
 
 Linux, the Odyssey 3D set-up (run `any2odyssey-setup` once after updating; it ends the stack, so not while a picture shows):
 
@@ -27,9 +30,11 @@ Linux, the Odyssey 3D output:
 
 - `A2O_WEAVER_STATS` now begins with the time Leia's weaver reckons with (`latency ... microseconds`) and says it again in each second's line, which also has the mean time of an upload, the shortest turn, and how many turns were half as long again or more (`late turns`; not to be trusted in a second whose shortest turn is far under a refresh). Measured at 2160 lines with a film: 120 weaves a second, an upload of 66 MB takes 4.5 ms in the mean and a turn with one 10 to 14 ms at the longest, so an upload on the weaving thread costs a refresh now and then and no more. `A2O_WEAVER_LATENCY_FRAMES=<n>` tells the weaver n frames instead of a time; right after being told 3 it went on saying 40000 microseconds.
 
+- `A2O_LIVE_TIMES=<file>` in the environment of Any2Odyssey writes a line for every picture and every depth map of a live screen: when the frame arrived, was taken and was in the output's hands, which frame its depth came from, and how long each map took.
+
 ### Hardware verification
 
-Pending: `docs/TESTING.md`, "Since 1.0.3".
+Seen and measured on the G90XF on 2026-11-21 (KDE Plasma 6.8.3, 120 Hz, a film in a browser on the Odyssey's own screen, 2160 lines, *Finest*): the numbers above, and "looking much better" after the depth model's input was made faster. Not seen: anything at another refresh rate, on another desktop, with a game or a video of 60 a second. `docs/TESTING.md`, "Since 1.0.3", has the checks.
 
 ## 1.0.3 (2026-11-21)
 
