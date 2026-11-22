@@ -64,6 +64,62 @@ struct frame_header {
 
 static volatile LONG quit;
 
+/* Showing a film's pictures for as many refreshes each.
+ *
+ * A picture is taken at the turn that finds it, and a turn is a refresh of the display. A film of 24
+ * pictures a second on a display of 120 Hz has five refreshes for each picture, but its pictures do not
+ * reach the frame file five refreshes apart to the millisecond: measured from outside on the Odyssey's own
+ * screen (KDE Plasma 6.8.3, 2160 lines, a minute of a film, 1199 pictures), three of four were written
+ * within 2 ms of the same point of a refresh and the rest up to 6 ms later, in stretches. Whichever point of
+ * the refresh the turn looks at, a late picture misses it and is shown a refresh later, for four refreshes
+ * where the one before had six: 125 to 403 of those 1199 pictures, by where in the refresh the turn falls
+ * (their times put through this rule: 12 to 37), and movement in the film hitches.
+ *
+ * So the turns between the pictures are counted. Where the last 32 came a whole number of turns apart in
+ * the mean, three turns at the least (a film or a video whose rate goes into the display's: 24, 30 or 40 a
+ * second at 120 Hz), a picture that is found sooner after the last was shown than that is left until its
+ * turn, for three turns at the most. After a late picture the ones that follow are then all found "early"
+ * and shown later than they could be: five refreshes each again, with a refresh or two between their
+ * arrival and the turn that takes them, which the next late one uses and no picture is shown for longer.
+ * Pictures that come at no such rate (25 a second at 120 Hz, a desktop, a game) are shown as they are
+ * found, and so are a game's or a desktop's 60 a second, which nothing here is to make later.
+ * A2O_WEAVER_EVEN=0 shows every picture as it is found. */
+#define EVEN_RUN 32
+#define EVEN_WAIT 3
+struct evenly {
+    unsigned turn;             /* this turn's number */
+    unsigned found[EVEN_RUN];  /* the turns the last pictures were found at, the newest last */
+    unsigned count;
+    unsigned shown_at;         /* the turn the last picture was shown at */
+    LONG seen;                 /* the newest sequence found */
+};
+
+/* Whether the picture `sequence`, found at this turn or left at an earlier one, is to wait for the next. */
+static bool evenly_hold(struct evenly *e, LONG sequence)
+{
+    unsigned span, whole, apart, odd = 0;
+
+    if (sequence != e->seen) { /* found now: its turn is noted, left or not */
+        e->seen = sequence;
+        if (e->count == EVEN_RUN) memmove(e->found, e->found + 1, sizeof e->found - sizeof *e->found), e->count--;
+        e->found[e->count++] = e->turn;
+    }
+    if (e->count < EVEN_RUN) return false; /* no run yet */
+    span = e->found[EVEN_RUN - 1] - e->found[0];
+    whole = (span + (EVEN_RUN - 1) / 2) / (EVEN_RUN - 1);
+    /* A whole number of turns, to 0.15 of a turn in the mean. */
+    apart = span > whole * (EVEN_RUN - 1) ? span - whole * (EVEN_RUN - 1) : whole * (EVEN_RUN - 1) - span;
+    if (whole < 3 || apart * 20 > 3 * (EVEN_RUN - 1)) return false;
+    /* And a steady run, not a mean of anything: all but two of them within a turn of it. */
+    for (unsigned i = 1; i < EVEN_RUN; i++) {
+        unsigned gap = e->found[i] - e->found[i - 1];
+        if (gap + 1 < whole || gap > whole + 1) odd++;
+    }
+    if (odd > 2) return false;
+    /* Sooner than that many turns after the one before: left, for a few turns at the most. */
+    return e->turn - e->shown_at < whole && e->turn - e->found[EVEN_RUN - 1] < EVEN_WAIT;
+}
+
 static void fail(const char *reason)
 {
     printf("error: %s\n", reason);
@@ -165,7 +221,9 @@ int main(int argc, char **argv)
     LARGE_INTEGER qpf, last_turn, stats_since, before_upload, after_upload, after_swap;
     BOOL (WINAPI *swap_interval)(int);
     double worst_ms = 0, worst_upload_ms = 0, upload_sum_ms = 0, turn_ms[512];
-    unsigned turns = 0, uploads = 0;
+    unsigned turns = 0, uploads = 0, held = 0, shown_for[8] = { 0 };
+    struct evenly evenly = { 0 };
+    bool even, early;
     bool uploaded;
     HWND window;
     HDC dc;
@@ -273,6 +331,7 @@ int main(int argc, char **argv)
                 time ? ", asked for microseconds: " : "", time ? time : "");
         fflush(stats);
     }
+    even = !getenv("A2O_WEAVER_EVEN") || strcmp(getenv("A2O_WEAVER_EVEN"), "0");
     QueryPerformanceFrequency(&qpf);
     QueryPerformanceCounter(&last_turn);
     stats_since = last_turn;
@@ -289,7 +348,12 @@ int main(int argc, char **argv)
         uploaded = false;
         QueryPerformanceCounter(&before_upload);
         after_upload = before_upload;
-        if (sequence != shown && !(sequence & 1)) {
+        evenly.turn++;
+        early = sequence != shown && !(sequence & 1) && evenly_hold(&evenly, sequence);
+        held += early;
+        if (early && even) {
+            /* left for the next turn (`evenly`) */
+        } else if (sequence != shown && !(sequence & 1)) {
             UINT32 fw = frame->width, fh = frame->height, place = frame->place;
             if (frame->sequence == sequence && fw && fh && fw <= 16384 && fh <= 16384 && place < PLACES &&
                 (ULONGLONG)fw * fh * 4 <= capacity) {
@@ -306,6 +370,11 @@ int main(int argc, char **argv)
                  * this one was being read, what was read may be part of the next: read again next turn. */
                 shown = (ULONG)(frame->sequence - sequence) < 4 ? sequence : shown;
                 uploaded = true;
+                {
+                    unsigned for_turns = evenly.turn - evenly.shown_at;
+                    shown_for[for_turns < ARRAYSIZE(shown_for) ? for_turns : 0]++;
+                    evenly.shown_at = evenly.turn;
+                }
                 QueryPerformanceCounter(&after_upload);
             }
         }
@@ -344,7 +413,14 @@ int main(int argc, char **argv)
                                "shortest turn %.1f ms late turns %u latency %llu\n",
                         turns, uploads, worst_ms, worst_upload_ms, uploads ? upload_sum_ms / uploads : 0.0, shortest, late,
                         a2o_weaver_latency(weaver));
+                /* For how many turns the picture before each new one was shown: a film's are all the same
+                 * number where it is shown evenly. "more" is eight turns and over. */
+                fprintf(stats, "shown for turns: 1 %u, 2 %u, 3 %u, 4 %u, 5 %u, 6 %u, 7 %u, more %u; left for the next turn %u%s\n",
+                        shown_for[1], shown_for[2], shown_for[3], shown_for[4], shown_for[5], shown_for[6], shown_for[7],
+                        shown_for[0], held, even ? "" : " (counted only: A2O_WEAVER_EVEN=0)");
                 fflush(stats);
+                memset(shown_for, 0, sizeof shown_for);
+                held = 0;
                 turns = uploads = 0; worst_ms = worst_upload_ms = upload_sum_ms = 0; stats_since = t;
             }
         }

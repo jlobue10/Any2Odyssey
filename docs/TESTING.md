@@ -144,6 +144,15 @@ The changes made in 0.9.1 to 1.0.3 (audit rounds 11 to 24, the Windows setup pro
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
 
+Since 1.0.5 (a film's pictures shown evenly; measured on the G90XF on 2026-11-21 with a film of 24 pictures a second in a browser on the Odyssey's own screen, KDE Plasma at 120 Hz, 2160 lines, *Finest*, TensorRT; the checks below are what was measured there, to be seen again on other screens, and what was not):
+
+- Linux, the G90XF at 120 Hz, after `any2odyssey-setup`, `env A2O_WEAVER_STATS='Z:\tmp\weaver-stats.txt' A2O_LIVE_TIMES=/tmp/live-times.txt any2odyssey`, such a film on the live screen with TensorRT: of each second's line `shown for turns:` nearly all pictures are under `5` (1321 of 1453 in a minute were, 36 of 60 seconds had nothing else), and the number at the line's end is not 0 in most seconds. Pans and moving things do not hitch.
+- In `/tmp/live-times.txt` of the same run: nearly every `w` line ends in 1 (1385 of 1400 did; the others in 4), a `p` line's last number is its own frame, and there are no more `p` lines than frames but for a few with an `s` line.
+- Not measured: the same started with `A2O_WEAVER_EVEN=0` as well: the line says "counted only", and more pictures are under 4 and 6.
+- Not seen: a desktop that is worked on, and a game or a video of 60 pictures a second, on the live screen: the pointer and the picture are no later than in 1.0.5, every `w` line ends in 4, and the number at the end of `shown for turns:` stays 0. (A source of some 55 pictures a second was watched with the second change: "looks great", and the number stayed 0.)
+- Not seen: a film that is paused: its last frame's depth settles within a second as before, and the film goes on evenly when it is started again.
+- Not seen: without TensorRT (`ANY2ODYSSEY_TENSORRT=0`) at *Finest*: the live screen is as in 1.0.5, and the `w` lines end in 3.
+
 New in 1.0.5 (TensorRT for a live screen's depth; the model alone was timed on an RTX 5090 on 2026-11-21, nothing was shown on the monitor):
 
 - Linux, an NVIDIA GPU, CUDA 13 and cuDNN 9, after `depth-runtime/setup.sh` from the archive or `/usr/share/any2odyssey/depth-runtime/setup.sh` of the Arch package (it ends with "done" and leaves `depth-runtime` in the data folder with `libonnxruntime.so.1` and `libnvinfer.so.10`): a live screen starts as before, and the line under *Depth detail* says a faster form of the model is being made; within a minute it says "a live screen's with TensorRT", and View logs has one line for each of the two. The picture does not stall or go flat while it is made or when it takes over, and the depth looks as it did.

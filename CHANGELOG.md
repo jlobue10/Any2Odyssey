@@ -2,6 +2,20 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+Linux only, the live screen on the Odyssey 3D output: movement in a film hitched now and then. Measured on the Odyssey's own screen while it showed a film of 24 pictures a second in a browser (KDE Plasma 6.8.3 at 120 Hz, 2160 lines, *Finest*, TensorRT), before and after, from outside and with `A2O_LIVE_TIMES` and `A2O_WEAVER_STATS`.
+
+After updating, run `any2odyssey-setup` once with no 3D picture showing: the program that shows the picture through Leia's weaver changed.
+
+### Fixed
+
+- A film's frame is shown once, with its own depth map, where the model answers in half the time from frame to frame or less. Every frame's picture was written 12.6 ms after the frame came, with the map of the frame before, and some frames in every second were then shown a second time, 14 ms later, with their own: 1199 frames made 1366 pictures in one minute, and what moves stood at another depth from picture to picture. A frame's picture now waits for the frame's map: one and a half times what the maps have been taking and 2 ms, and never so long that the picture is not made before the next frame. Measured after: 1385 of 1400 frames waited (13.7 ms in the middle, 19.2 ms at the most) and were drawn once with their own map, 25.8 ms after they came; the other 15 followed a frame that came out of turn. A map takes 15 ms on that screen, two and a half times what the model takes alone, with the GPU also weaving. A screen that shows no film waits only for maps of 4 ms and less, and a slower model changes nothing.
+- The program that shows the picture leaves a film's picture that turns up sooner than the others for its turn. Pictures were written at points of a refresh up to 6 ms apart, in stretches, and whichever point that program looks at, a late one is shown a refresh later: for four refreshes where the one before had six. It applies where the last 32 pictures came a whole number of refreshes apart in the mean, three at the least (24, 30 or 40 pictures a second at 120 Hz), and holds a picture for three refreshes at the most; a desktop, a game and 60 pictures a second are shown as they come. `A2O_WEAVER_EVEN=0` switches it off, and `A2O_WEAVER_STATS` has a second line each second: for how many refreshes the pictures were shown, and how many turns a picture was left for a later one.
+- With both, counted by that program over a minute of the film: 1321 of 1453 pictures were shown for five refreshes, 54 for four and 56 for six, 22 for fewer; 36 of the 60 seconds had nothing but fives. With the second change alone and frames still shown twice it was 1219 of 1602.
+
+The pictures of a film are 13 ms later than they were, all of them. `A2O_LIVE_TIMES` has two more kinds of line: what a frame's picture did about the frame's map, and why a second picture of a frame was made.
+
 ## 1.0.5 (2026-11-21)
 
 Linux only, and only with an NVIDIA GPU: a live screen's depth maps through TensorRT. Windows is unchanged: Samsung's engine makes the depth there, with models and a runtime of its own that Any2Odyssey does not touch.
