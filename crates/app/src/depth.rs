@@ -1089,12 +1089,16 @@ impl<S: Send + 'static> Fast<S> {
                 // requested size changes. Dropping its receiver cannot stop
                 // TensorRT's native build or release its GPU memory.
                 Err(TryRecvError::Empty) => return None,
-                _ if *building != size => *self = Fast::Unasked,
-                Ok(Ok(session)) => *self = Fast::Ready { size, session },
+                // A refusal is TensorRT's, whatever size it was asked
+                // for: it is told and not asked again, as it is for the
+                // size that is wanted. Only what was made for another
+                // size is let go of.
                 Ok(Err(why)) => *self = Fast::Refused(why),
                 Err(TryRecvError::Disconnected) => {
                     *self = Fast::Refused("the thread that made it ended without a word".into());
                 }
+                Ok(Ok(_)) if *building != size => *self = Fast::Unasked,
+                Ok(Ok(session)) => *self = Fast::Ready { size, session },
             }
         }
         match self {
@@ -1891,6 +1895,41 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         panic!("the requested build did not finish");
+    }
+
+    #[test]
+    fn a_refusal_that_comes_after_the_detail_changed_is_kept() {
+        // TensorRT cannot be used at all, and says so only after another
+        // detail was chosen. With whatever was made for another size let
+        // go of, its refusal went too: it was asked again at every change
+        // of the detail, and neither the page nor the log said why the
+        // GPU went on without it.
+        let mut fast: Fast<&str> = Fast::Unasked;
+        let (finish, wait) = std::sync::mpsc::channel::<()>();
+        fast.session_for((518, 294), move || {
+            wait.recv().unwrap();
+            Err("libnvinfer.so.10: cannot open".to_owned())
+        });
+        assert!(fast.session_for((770, 434), || panic!("overlap")).is_none());
+        finish.send(()).unwrap();
+        for _ in 0..2000 {
+            if matches!(fast, Fast::Refused(_)) {
+                break;
+            }
+            assert!(fast
+                .session_for((770, 434), || panic!("asked again"))
+                .is_none());
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            shown(&RunsOn::Gpu, &fast),
+            RunsOn::GpuOnly {
+                tensorrt_refused: "libnvinfer.so.10: cannot open".into()
+            }
+        );
+        assert!(fast
+            .session_for((1274, 714), || panic!("asked again"))
+            .is_none());
     }
 
     #[test]
