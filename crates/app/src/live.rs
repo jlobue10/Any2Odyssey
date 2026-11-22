@@ -75,6 +75,15 @@ fn next_turn(due: Instant, began: Instant) -> Instant {
 ///   depth map made from the frame `depth of` (0: none yet).
 /// - `d <frame> <begun> <done>`: the depth map of frame `frame`, from when
 ///   the depth thread took the frame until the map was there to draw with.
+/// - `w <frame> <from> <until> <how>`: what the picture of a new frame
+///   did about the frame's own map (`Answered`): 1 waited and got it, 2
+///   waited and it did not come in time, 3 did not wait because the maps
+///   have been slow (or none has come), 4 because the screen shows no
+///   film, 5 because the model was not given the frame (it was at work,
+///   or the frame has its map).
+/// - `s <frame> <at> <why>`: a picture of a frame that has had one is
+///   about to be made, 1 to ease its map in a step, 2 for anything else
+///   (a newer map, a control, another output).
 ///
 /// It answers two questions that cannot be answered from outside: how
 /// evenly a film's pictures arrive as against how evenly they leave, and
@@ -198,10 +207,37 @@ impl Pace {
     /// were no more even than the frames. So no such picture is begun
     /// when a frame is about to come; the map is drawn with from that
     /// frame on.
-    /// Whether a steady run's next frame is still to come at `now`: not
-    /// yet later than such frames are late by.
+    /// The longest of the last three times from frame to frame, where all
+    /// three are a film's or a video's (25 to 70 ms): a screen whose
+    /// picture has time to wait for its own depth map (`Answered`).
+    ///
+    /// Not the steady run [`Pace::show_at`] tells: that takes eight frames
+    /// to be told again after one frame that came out of turn, and a
+    /// browser's film has such a frame every few seconds. Measured at the
+    /// output with the run asked for (a film, a minute): the frames that
+    /// were shown twice came eight and nine in a second, then none.
+    fn calm(&self) -> Option<Duration> {
+        let mut newest = self.arrived.iter().rev();
+        let mut later = *newest.next()?;
+        let mut longest = Duration::ZERO;
+        for _ in 0..3 {
+            let earlier = *newest.next()?;
+            let gap = later.saturating_duration_since(earlier);
+            if !(Duration::from_millis(25)..=Duration::from_millis(70)).contains(&gap) {
+                return None;
+            }
+            (longest, later) = (longest.max(gap), earlier);
+        }
+        Some(longest)
+    }
+
+    /// Whether such a screen's next frame is still to come at `now`: not
+    /// yet later than its frames are late by.
     fn awaited(&self, now: Instant) -> bool {
-        self.next.is_some_and(|next| now <= next + Pace::HOLD * 2)
+        match (self.calm(), self.arrived.back()) {
+            (Some(gap), Some(&last)) => now <= last + gap + Pace::HOLD * 2,
+            _ => false,
+        }
     }
 
     fn next_within(&self, now: Instant, time: Duration) -> bool {
@@ -236,13 +272,12 @@ struct Answered {
 }
 
 impl Answered {
-    /// Maps that take longer than this are not waited for.
-    const QUICK: Duration = Duration::from_millis(12);
-    /// And a screen that is no film waits only for maps as quick as this:
-    /// a pointer or a game is not to be later by more.
+    /// A screen that is no film waits only for maps as quick as this: a
+    /// pointer or a game is not to be later by more.
     const AT_ONCE: Duration = Duration::from_millis(4);
-    /// The longest a picture waits.
-    const LONGEST: Duration = Duration::from_millis(20);
+    /// What a picture takes to make after its wait, and a little: that
+    /// much of a film's time from frame to frame is never waited away.
+    const PICTURE: Duration = Duration::from_millis(14);
 
     fn note(&mut self, serial: u64, took: Duration) {
         self.serial = serial;
@@ -250,19 +285,34 @@ impl Answered {
     }
 
     /// How long the picture of a frame the model has just been given is
-    /// worth holding back for the frame's own map: twice what the maps
-    /// have been taking and a little, where that is short. Nothing before
-    /// the model has answered once (its first answer takes seconds), and
-    /// nothing where it is slow: a processor's model, or a GPU's without
-    /// TensorRT at the finer details.
-    fn worth_waiting(&self, film: bool) -> Option<Duration> {
+    /// worth holding back for the frame's own map. `film` is the time
+    /// from frame to frame of a screen that shows a film or a video
+    /// ([`Pace::calm`]).
+    ///
+    /// A film's picture waits where the maps have been taking half that
+    /// time or less: for one and a half times what they took and 2 ms,
+    /// and never so long that the picture would not be made before the
+    /// next frame. Measured on the Odyssey's own screen (`A2O_LIVE_TIMES`,
+    /// 1726 frames of a film of 24 a second, 2160 lines, *Finest*,
+    /// TensorRT): a map took 15.0 ms in the middle, 16.1 ms for nine of
+    /// ten and 19.2 ms at the most, two and a half times what the model
+    /// takes alone, the GPU also weaving the picture; every frame's
+    /// picture was written 12.6 ms after the frame came, with the map of
+    /// the frame before. (A first rule waited only for maps of 12 ms and
+    /// less, and never waited once.)
+    ///
+    /// Any other screen waits only for maps that are there at once.
+    /// Nothing before the model has answered (its first answer takes
+    /// seconds), and nothing where it is slow: a processor's model.
+    fn worth_waiting(&self, film: Option<Duration>) -> Option<Duration> {
         let took = self.took?;
-        let quick = if film {
-            Answered::QUICK
-        } else {
-            Answered::AT_ONCE
-        };
-        (took <= quick).then(|| (took * 2 + Duration::from_millis(2)).min(Answered::LONGEST))
+        match film {
+            Some(gap) => {
+                let longest = gap.checked_sub(Answered::PICTURE)?;
+                (took * 2 <= gap).then(|| (took * 3 / 2 + Duration::from_millis(2)).min(longest))
+            }
+            None => (took <= Answered::AT_ONCE).then(|| took * 2 + Duration::from_millis(2)),
+        }
     }
 }
 
@@ -827,12 +877,17 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             .flatten()
             .map(|arrived| pace.show_at(arrived));
         seen = found.serial;
+        if new_frame && for_model.is_none() && times::wanted() {
+            times::note('w', found.serial, &[Some(Instant::now()), None], Some(5));
+        }
         if let Some(size) = for_model {
             // How long this frame's own map is worth waiting for, by the
             // maps before it (`Answered`).
+            let calm = pace.calm();
             let wait = new_frame
-                .then(|| lock(&shared.answered).worth_waiting(pace.next.is_some()))
+                .then(|| lock(&shared.answered).worth_waiting(calm))
                 .flatten();
+            let from = times::wanted().then(Instant::now);
             lock(&shared.for_model).give(&mut small, size, found.serial, found.detail);
             shared.model_wanted.notify_one();
             if let Some(wait) = wait {
@@ -849,6 +904,15 @@ fn render_loop(frames: &Frames, shared: &Shared) {
                         .0;
                 }
                 own_map = (answered.serial == found.serial).then_some(found.serial);
+            }
+            if new_frame && from.is_some() {
+                let how = match wait {
+                    Some(_) if own_map == Some(found.serial) => 1,
+                    Some(_) => 2,
+                    None if calm.is_some() => 3,
+                    None => 4,
+                };
+                times::note('w', found.serial, &[from, Some(Instant::now())], Some(how));
             }
         }
         if let Some(early) = held.and_then(|at| at.checked_duration_since(Instant::now())) {
@@ -907,6 +971,10 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         if still {
             lock(&shared.stats).still = false;
             still = false;
+        }
+        if !new_frame && times::wanted() {
+            let why = if turn.settle { 1 } else { 2 };
+            times::note('s', found.serial, &[Some(Instant::now())], Some(why));
         }
         let Some(sink) = sink else {
             // Nowhere to show it yet. It is made when there is: the output
@@ -3034,31 +3102,39 @@ mod tests {
     #[test]
     fn a_picture_waits_for_its_frames_own_map_only_where_the_model_is_quick() {
         let ms = Duration::from_millis;
+        let us = Duration::from_micros;
+        let film = Some(us(41_700));
         let mut answered = Answered::default();
         // Before the model has answered once: its first answer takes
         // seconds, and nothing is known of the next.
-        assert_eq!(answered.worth_waiting(true), None);
-        // TensorRT at the finest detail: 6 ms a map. Twice that and a little.
-        answered.note(1, ms(6));
-        assert_eq!(answered.worth_waiting(true), Some(ms(14)));
-        // A desktop or a game is not made later by that much...
-        assert_eq!(answered.worth_waiting(false), None);
-        // ...but by a map that is there almost at once.
+        assert_eq!(answered.worth_waiting(film), None);
+        // As measured at the finest detail with TensorRT: 15 ms a map, 19
+        // at the most. One and a half times that and 2 ms covers it.
+        answered.note(1, ms(15));
+        assert_eq!(answered.worth_waiting(film), Some(us(24_500)));
+        // A video of 30 a second leaves less: its picture is still made
+        // before the next frame.
+        assert_eq!(answered.worth_waiting(Some(us(33_300))), Some(us(19_300)));
+        // 60 a second is no film, and a desktop or a game is not made
+        // later by a map that takes 15 ms...
+        assert_eq!(answered.worth_waiting(None), None);
+        // ...only by one that is there almost at once.
         let mut at_once = Answered::default();
         at_once.note(1, ms(1));
-        assert_eq!(at_once.worth_waiting(false), Some(ms(4)));
-        // The CUDA provider at the finest detail, or a processor: a film's
-        // picture is made as before, with the map there is.
+        assert_eq!(at_once.worth_waiting(None), Some(ms(4)));
+        // The CUDA provider at the finest detail with the GPU also
+        // weaving (40 ms was measured), or a processor: a film's picture
+        // is made as before, with the map there is.
         let mut slow = Answered::default();
-        slow.note(1, ms(27));
-        assert_eq!(slow.worth_waiting(true), None);
+        slow.note(1, ms(40));
+        assert_eq!(slow.worth_waiting(film), None);
         // One slow answer among quick ones (the GPU busy for a moment)
         // does not end the waiting, and several do.
-        answered.note(2, ms(26));
-        assert_eq!(answered.took, Some(ms(11)));
-        assert!(answered.worth_waiting(true).is_some());
-        answered.note(3, ms(26));
-        assert_eq!(answered.worth_waiting(true), None);
+        answered.note(2, ms(35));
+        assert_eq!(answered.took, Some(ms(20)));
+        assert!(answered.worth_waiting(film).is_some());
+        answered.note(3, ms(35));
+        assert_eq!(answered.worth_waiting(film), None);
         assert_eq!(answered.serial, 3);
     }
 
@@ -3124,7 +3200,8 @@ mod tests {
         // beside it on every core, frames are missed and runs end, and
         // anything from 13 to 25 pictures was counted. So it is run alone:
         // `cargo test -p any2odyssey a_films_frame -- --ignored`
-        let written = pictures_of_a_film(36, 20, Duration::from_millis(2));
+        // A map takes 15 ms, as measured on the Odyssey's own screen.
+        let written = pictures_of_a_film(36, 20, Duration::from_millis(15));
         assert!(
             (20..=22).contains(&written),
             "{written} pictures for 20 frames"
@@ -3136,18 +3213,46 @@ mod tests {
         let ms = Duration::from_millis;
         let mut pace = Pace::default();
         let start = Instant::now();
-        // No run yet: nothing is awaited.
+        // Nothing has come: nothing is awaited.
         assert!(!pace.awaited(start));
+        assert_eq!(pace.calm(), None);
+        // A browser's film: now four refreshes, now six, and five.
         let mut arrived = start;
-        for frame in 0..12 {
-            arrived = start + ms(40) * frame;
+        for gap in [42, 33, 50, 42] {
+            assert_eq!(
+                pace.calm(),
+                None,
+                "three times from frame to frame are needed"
+            );
+            arrived += ms(gap);
             pace.show_at(arrived);
         }
+        pace.show_at(arrived + ms(42));
+        arrived += ms(42);
+        assert_eq!(pace.calm(), Some(ms(50)));
         // Between two frames, and for as long after the next was due as
         // such frames are late by; a film that has stopped is not.
         assert!(pace.awaited(arrived + ms(14)));
-        assert!(pace.awaited(arrived + ms(40) + Pace::HOLD));
-        assert!(!pace.awaited(arrived + ms(40) + Pace::HOLD * 2 + ms(1)));
+        assert!(pace.awaited(arrived + ms(50) + Pace::HOLD));
+        assert!(!pace.awaited(arrived + ms(50) + Pace::HOLD * 2 + ms(1)));
+        // One frame out of turn ends the steady run for eight frames; the
+        // waiting only until three have come in turn again.
+        arrived += ms(92);
+        pace.show_at(arrived);
+        assert_eq!(pace.calm(), None);
+        for _ in 0..3 {
+            arrived += ms(42);
+            pace.show_at(arrived);
+        }
+        assert_eq!(pace.calm(), Some(ms(42)));
+        assert!(pace.next.is_none(), "no steady run yet");
+        // A desktop's or a game's 60 a second is never made to wait so.
+        let mut quick = Pace::default();
+        for frame in 0..12 {
+            quick.show_at(start + ms(16) * frame);
+        }
+        assert_eq!(quick.calm(), None);
+        assert!(!quick.awaited(start + ms(16) * 11 + ms(5)));
     }
 
     #[test]

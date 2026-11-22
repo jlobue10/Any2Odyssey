@@ -144,14 +144,14 @@ The changes made in 0.9.1 to 1.0.3 (audit rounds 11 to 24, the Windows setup pro
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
 
-Since 1.0.5 (a film's pictures shown evenly; worked out from the times of 1199 pictures measured from outside on 2026-11-21, neither change seen on the monitor):
+Since 1.0.5 (a film's pictures shown evenly; measured on the G90XF on 2026-11-21 with a film of 24 pictures a second in a browser on the Odyssey's own screen, KDE Plasma at 120 Hz, 2160 lines, *Finest*, TensorRT; the checks below are what was measured there, to be seen again on other screens, and what was not):
 
-- Linux, the G90XF at 120 Hz, after `any2odyssey-setup`, `env A2O_WEAVER_STATS='Z:\tmp\weaver-stats.txt' any2odyssey`, a film of 24 pictures a second on the live screen with TensorRT: of each second's line `shown for turns:` nearly all pictures are under `5` (a few under 4 and 6 in a minute, none under 1, 2 or 3 once the film runs), and `left for the next turn` is not 0. Pans and moving things do not hitch.
-- The same started with `A2O_WEAVER_EVEN=0` as well: the line says "counted only", and the pictures under 4 and 6 are several in every second: that is how it was.
-- The same film, counted from outside (the sequence number at byte 12 of the frame file): 24 pictures a second, none less than 30 ms after the one before.
-- A desktop that is worked on, and a game or a video of 60 pictures a second, on the live screen: the pointer and the picture are no later than in 1.0.5, and `left for the next turn` stays 0.
-- A film that is paused: its last frame's depth settles within a second as before, and the film goes on evenly when it is started again.
-- Without TensorRT (`ANY2ODYSSEY_TENSORRT=0`) at *Finest*: the live screen is as in 1.0.5.
+- Linux, the G90XF at 120 Hz, after `any2odyssey-setup`, `env A2O_WEAVER_STATS='Z:\tmp\weaver-stats.txt' A2O_LIVE_TIMES=/tmp/live-times.txt any2odyssey`, such a film on the live screen with TensorRT: of each second's line `shown for turns:` nearly all pictures are under `5` (1321 of 1453 in a minute were, 36 of 60 seconds had nothing else), and the number at the line's end is not 0 in most seconds. Pans and moving things do not hitch.
+- In `/tmp/live-times.txt` of the same run: nearly every `w` line ends in 1 (1385 of 1400 did; the others in 4), a `p` line's last number is its own frame, and there are no more `p` lines than frames but for a few with an `s` line.
+- Not measured: the same started with `A2O_WEAVER_EVEN=0` as well: the line says "counted only", and more pictures are under 4 and 6.
+- Not seen: a desktop that is worked on, and a game or a video of 60 pictures a second, on the live screen: the pointer and the picture are no later than in 1.0.5, every `w` line ends in 4, and the number at the end of `shown for turns:` stays 0. (A source of some 55 pictures a second was watched with the second change: "looks great", and the number stayed 0.)
+- Not seen: a film that is paused: its last frame's depth settles within a second as before, and the film goes on evenly when it is started again.
+- Not seen: without TensorRT (`ANY2ODYSSEY_TENSORRT=0`) at *Finest*: the live screen is as in 1.0.5, and the `w` lines end in 3.
 
 New in 1.0.5 (TensorRT for a live screen's depth; the model alone was timed on an RTX 5090 on 2026-11-21, nothing was shown on the monitor):
 
