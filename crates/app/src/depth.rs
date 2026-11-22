@@ -1228,6 +1228,33 @@ fn one_at_a_time<S>(
     }
 }
 
+/// End the program here and now, with `code`, if TensorRT is making a form
+/// of the model at this moment; otherwise come back, for the program to
+/// end as programs do.
+///
+/// A program that ends runs what its libraries have left to do at the
+/// end, on the thread that ends it, while its other threads still run.
+/// TensorRT's maker does not survive that: seen with the real thing, a
+/// program that left while a form was being made ended with "Segmentation
+/// fault" inside TensorRT, on the thread that made it. Nothing can stop
+/// the maker and waiting for it takes up to a minute, so the program
+/// ends without those last steps; what it has to put away itself (the
+/// output, the capture, its files) is put away before it gets here.
+pub fn leave_at_once_while_making(code: i32) {
+    if MAKING.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        return;
+    }
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    extern "C" {
+        fn _exit(status: std::ffi::c_int) -> !;
+    }
+    // SAFETY: the C library's `_exit` takes any status and does not
+    // return; nothing of this program runs after it.
+    unsafe { _exit(code) }
+}
+
 pub struct Estimator {
     session: Session,
     /// The model as TensorRT runs it, for a live screen.
@@ -2117,6 +2144,8 @@ mod tests {
         assert_eq!(awaited(&mut second, (1274, 714)), Some("second"));
         assert_eq!(at_work.1.load(SeqCst), 1, "two were made at once");
         wait_for(&|| MAKING.load(SeqCst) == 0);
+        // Nothing being made: the program is not ended here.
+        leave_at_once_while_making(3);
     }
 
     #[test]

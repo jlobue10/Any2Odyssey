@@ -453,6 +453,10 @@ fn main() {
         }
         _ => usage_error(),
     };
+    // (not while TensorRT is at work on another thread: it does not
+    // survive what a program runs as it leaves)
+    #[cfg(not(windows))]
+    depth::leave_at_once_while_making(code);
     std::process::exit(code);
 }
 
