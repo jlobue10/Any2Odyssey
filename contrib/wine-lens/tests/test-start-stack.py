@@ -64,8 +64,10 @@ class StackTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="a2o-start-stack-test-")
         self.addCleanup(self.directory.cleanup)
-        # (as the scripts see it: they resolve their own path)
-        self.root = Path(self.directory.name).resolve()
+        # (as the scripts see it: they resolve their own path.) The installation is in a folder named Log:
+        # what the scripts look for under a folder of that name must be below their own folders, not below
+        # one that happens to be above them.
+        self.root = Path(self.directory.name).resolve() / "Log" / "wine-lens"
         for name in ("tools", "build", "bin", "run", "prefix/drive_c/Program Files/LeiaSR/Platform/bin"):
             (self.root / name).mkdir(parents=True)
         real_sleep = subprocess.run(["sh", "-c", "command -v sleep"], capture_output=True, text=True, check=True)
