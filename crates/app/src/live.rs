@@ -3139,6 +3139,70 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn the_picture_is_whole_after_every_change_of_lines_screen_and_sharpening() {
+        use any2odyssey_core::live::{PixelOrder, Source};
+        // In memory, where the picture is drawn in its place in the file
+        // and what the place held is three pictures old, and on a disk,
+        // where it is made in the loop's own room and written.
+        let memory = tempfile::tempdir_in("/dev/shm");
+        if memory.is_err() {
+            eprintln!("skipped in part: no /dev/shm to make a frame file in");
+        }
+        for dir in memory.into_iter().chain(tempfile::tempdir()) {
+            let sink = FrameSink::in_folder(dir.path()).unwrap();
+            let capture = crate::capture::Fed::start();
+            let shared = Arc::new(Shared::new());
+            *lock(&shared.sink) = (1, Some(sink.clone()));
+            let (frames, state) = (capture.frames(), shared.clone());
+            let worker = std::thread::spawn(move || render_loop(&frames, &state));
+            // Screens of the panel's shape, wider (21:9, 32:9), upright
+            // and 4:3; each change is made twice over and then stays for
+            // three pictures more, so that every place of the file has
+            // held a picture of another size, place or kind before.
+            let screens = [(64u32, 36u32), (84, 36), (36, 64), (128, 36), (40, 30)];
+            let mut turn = 0u32;
+            for step in 0..24u32 {
+                let (sw, sh) = screens[(step / 2 % 5) as usize];
+                let lines = [360, 480, 540][(step / 3 % 3) as usize];
+                let sharpness = [0, 50][(step / 4 % 2) as usize];
+                let swap = step / 5 % 2 == 1;
+                shared.lines.store(lines, Ordering::Relaxed);
+                shared.sharpness.store(sharpness, Ordering::Relaxed);
+                shared.swap.store(swap, Ordering::Relaxed);
+                for _ in 0..if step % 2 == 0 { 1 } else { 4 } {
+                    turn += 1;
+                    // Nothing of it is black, and no two frames are alike.
+                    let screen: Vec<u8> = (0..sw * sh)
+                        .flat_map(|i| [(i % 199) as u8 | 1, (i % 83 + turn) as u8 | 1, 255, 255])
+                        .collect();
+                    capture.feed(sw, sh, &screen);
+                    let placed = layout((sw, sh), lines);
+                    let (view, (_, _, w, h)) = placed;
+                    let mut picture = vec![0u8; w as usize * h as usize * 4];
+                    let source = Source {
+                        bytes: &screen,
+                        width: sw,
+                        height: sh,
+                        stride: sw as usize * 4,
+                        order: PixelOrder::Bgr,
+                    };
+                    assert!(live::shrink_to_rgba(source, &mut picture, w, h));
+                    let look = shared.find(0).0.look;
+                    let wanted = expected_picture(&picture, placed, None, look);
+                    eventually("the picture of the frame", || {
+                        let (_, width, height, bytes) = sink.written();
+                        (width, height) == (view.0 * 2, view.1) && bytes == wanted
+                    });
+                }
+            }
+            shared.stop.store(true, Ordering::Relaxed);
+            drop(capture);
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn a_still_screen_is_shown_once_and_again_only_for_what_changes() {
         use any2odyssey_core::live::{PixelOrder, Source};
         let dir = tempfile::tempdir().unwrap();
