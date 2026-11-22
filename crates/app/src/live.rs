@@ -144,6 +144,8 @@ struct Pace {
     arrived: std::collections::VecDeque<Instant>,
     /// When the last frame was to be shown.
     shown: Option<Instant>,
+    /// When the next frame of a steady run is to arrive.
+    next: Option<Instant>,
 }
 
 impl Pace {
@@ -170,16 +172,37 @@ impl Pace {
                 .map(|(a, b)| b.saturating_duration_since(*a))
         };
         let mut at = arrived;
+        self.next = None;
         if let (Some(shown), true) = (self.shown, self.arrived.len() == Pace::RUN + 1) {
             let mean = gaps().sum::<Duration>() / Pace::RUN as u32;
             let steady = gaps().all(|gap| gap.abs_diff(mean) * 10 <= mean * 3);
             let film = (Duration::from_millis(20)..=Duration::from_millis(70)).contains(&mean);
             if steady && film {
                 at = (shown + mean - Pace::EARLY).clamp(arrived, arrived + Pace::HOLD);
+                self.next = Some(arrived + mean);
             }
         }
         self.shown = Some(at);
         at
+    }
+
+    /// Whether the next frame of a steady run is to arrive within `time`
+    /// of `now`, give or take what such frames are early and late by (it
+    /// has not arrived: the run is told again with every frame that does).
+    ///
+    /// A picture made between two frames, because a depth map has come,
+    /// takes the render loop as long as any other. With one made whenever
+    /// a map came, a film's frame that arrived meanwhile waited for it:
+    /// measured at 2160 lines, a frame was in the output's hands 8 to 22
+    /// ms after it arrived where it had been 9 to 13, and the pictures
+    /// were no more even than the frames. So no such picture is begun
+    /// when a frame is about to come; the map is drawn with from that
+    /// frame on.
+    fn next_within(&self, now: Instant, time: Duration) -> bool {
+        self.next.is_some_and(|next| {
+            let early = next.checked_sub(Pace::HOLD).unwrap_or(next);
+            now + time >= early && now <= next + Pace::HOLD * 2
+        })
     }
 }
 
@@ -655,6 +678,10 @@ const RATE_TIME: Duration = Duration::from_secs(1);
 /// still: longer than a blinking cursor or a clock leaves between frames.
 const STILL_TIME: Duration = Duration::from_secs(2);
 
+/// How long before a film's next frame no picture is begun between two
+/// frames: as long as a picture takes at the most lines, and a little.
+const BETWEEN_FRAMES: Duration = Duration::from_millis(16);
+
 fn render_loop(frames: &Frames, shared: &Shared) {
     let mut seen = 0u64;
     let (mut picture, mut pair, mut canvas, mut small) =
@@ -726,7 +753,8 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         };
         // A frame of a film that came early is held until its time. The
         // model is given it first: its map is no later for the wait.
-        let held = (found.serial != seen)
+        let new_frame = found.serial != seen;
+        let held = new_frame
             .then_some(arrived)
             .flatten()
             .map(|arrived| pace.show_at(arrived));
@@ -737,6 +765,12 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         }
         if let Some(early) = held.and_then(|at| at.checked_duration_since(Instant::now())) {
             std::thread::sleep(early);
+        }
+        // No picture between two frames of a film when the next is about
+        // to come (`Pace::next_within`): what it would have shown is in
+        // that frame's picture.
+        if !new_frame && pace.next_within(Instant::now(), BETWEEN_FRAMES) {
+            continue;
         }
         // The depth map's version as this turn leaves it.
         let mut depth_now = found.depth;
@@ -2428,6 +2462,34 @@ mod tests {
         let (gaps, longest) = paced_gaps(&[41_700; 40]);
         assert!(gaps.iter().all(|gap| *gap == 41_700), "{gaps:?}");
         assert_eq!(longest, 0);
+    }
+
+    #[test]
+    fn no_picture_is_begun_between_two_frames_when_a_films_next_frame_is_about_to_come() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut pace = Pace::default();
+        // Nothing is known of a run yet.
+        assert!(!pace.next_within(start, ms(16)));
+        let mut arrived = start;
+        for _ in 0..Pace::RUN + 2 {
+            arrived += ms(42);
+            pace.show_at(arrived);
+        }
+        // The next frame is to come 42 ms after the last, or up to 9 ms
+        // sooner. Right after a frame there is time for a picture; from 16
+        // ms before the earliest the next may come there is not; and when
+        // the frame has stayed away for a while (the film was paused)
+        // there is again.
+        assert!(!pace.next_within(arrived + ms(2), ms(16)));
+        assert!(!pace.next_within(arrived + ms(15), ms(16)));
+        assert!(pace.next_within(arrived + ms(18), ms(16)));
+        assert!(pace.next_within(arrived + ms(41), ms(16)));
+        assert!(pace.next_within(arrived + ms(55), ms(16)));
+        assert!(!pace.next_within(arrived + ms(70), ms(16)));
+        // A frame that is of no steady run ends it.
+        pace.show_at(arrived + ms(400));
+        assert!(!pace.next_within(arrived + ms(430), ms(16)));
     }
 
     #[test]
