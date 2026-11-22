@@ -85,22 +85,94 @@ fn next_turn(due: Instant, began: Instant) -> Instant {
 ///   about to be made, 1 to ease its map in a step, 2 for anything else
 ///   (a newer map, a control, another output).
 ///
+/// - `x <lines>`: so many lines were left out here, because the file was
+///   not written as fast as they came.
+///
 /// It answers two questions that cannot be answered from outside: how
 /// evenly a film's pictures arrive as against how evenly they leave, and
 /// how many pictures a depth map is behind. Nothing is opened, timed or
 /// written without the variable.
 mod times {
     use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
-    fn file() -> Option<&'static (Instant, Mutex<std::io::BufWriter<std::fs::File>>)> {
-        static FILE: OnceLock<Option<(Instant, Mutex<std::io::BufWriter<std::fs::File>>)>> =
-            OnceLock::new();
+    /// The lines on their way to a file, which a thread of its own opens
+    /// and writes.
+    ///
+    /// The render loop and the depth thread opened and wrote the file
+    /// themselves, a line at a time. With the variable naming a pipe that
+    /// nobody reads, the first of them to ask stood still in the opening,
+    /// holding the screen's newest frame: no picture was ever made, and
+    /// stopping the output waited for the render loop for good. With a
+    /// pipe that is read slowly, the pictures stood still for seconds at
+    /// a time once the pipe was full (audit round 25: up to 7.8 s between
+    /// two pictures of a screen of 60 frames a second, the reader taking
+    /// 20 lines a second). Whoever has a line now only leaves it here,
+    /// and where there is no room for it (the file takes them slower
+    /// than they come) it is counted and left out.
+    pub(super) struct Lines {
+        waiting: SyncSender<String>,
+        /// How many lines have found no room since the last that did.
+        left_out: Mutex<u64>,
+    }
+
+    impl Lines {
+        /// How many lines can wait: a few seconds of them.
+        pub(super) const ROOM: usize = 4096;
+
+        /// The lines of `path`, which is made anew. `None` where the
+        /// thread that writes it cannot be started.
+        pub(super) fn to(path: PathBuf) -> Option<Lines> {
+            let (waiting, lines) = sync_channel::<String>(Lines::ROOM);
+            std::thread::Builder::new()
+                .name("live-times".into())
+                .spawn(move || {
+                    // A file that cannot be made is no file: the lines
+                    // find nobody to take them.
+                    let Ok(file) = std::fs::File::create(path) else {
+                        return;
+                    };
+                    let mut file = std::io::BufWriter::new(file);
+                    while let Ok(line) = lines.recv() {
+                        // Everything that waits, then out with it: a line
+                        // is in the file as soon as it can be.
+                        let mut next = Some(line);
+                        while let Some(line) = next {
+                            let _ = writeln!(file, "{line}");
+                            next = lines.try_recv().ok();
+                        }
+                        let _ = file.flush();
+                    }
+                })
+                .ok()?;
+            Some(Lines {
+                waiting,
+                left_out: Mutex::new(0),
+            })
+        }
+
+        /// Leave `line` to be written. Never waits: a line that finds no
+        /// room is counted, and the count is left before the next line
+        /// that does.
+        pub(super) fn leave(&self, line: String) {
+            let mut left_out = self.left_out.lock().unwrap_or_else(|e| e.into_inner());
+            if *left_out > 0 && self.waiting.try_send(format!("x {left_out}")).is_ok() {
+                *left_out = 0;
+            }
+            if *left_out > 0 || matches!(self.waiting.try_send(line), Err(TrySendError::Full(_))) {
+                *left_out += 1;
+            }
+        }
+    }
+
+    fn file() -> Option<&'static (Instant, Lines)> {
+        static FILE: OnceLock<Option<(Instant, Lines)>> = OnceLock::new();
         FILE.get_or_init(|| {
             let path = std::env::var_os("A2O_LIVE_TIMES")?;
-            let file = std::fs::File::create(path).ok()?;
-            Some((Instant::now(), Mutex::new(std::io::BufWriter::new(file))))
+            Some((Instant::now(), Lines::to(path.into())?))
         })
         .as_ref()
     }
@@ -124,10 +196,7 @@ mod times {
         if let Some(last) = last {
             line.push_str(&format!(" {last}"));
         }
-        if let Ok(mut file) = file.lock() {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-        }
+        file.leave(line);
     }
 }
 
@@ -2971,6 +3040,61 @@ mod tests {
             ));
         }
         canvas
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_line_of_the_times_is_left_and_never_waited_for() {
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().unwrap();
+        // A file: every line, in the order they were left.
+        let path = dir.path().join("times.txt");
+        let lines = times::Lines::to(path.clone()).unwrap();
+        for line in 0..1000 {
+            lines.leave(format!("p {line}"));
+        }
+        let wanted: Vec<String> = (0..1000).map(|line| format!("p {line}")).collect();
+        eventually("the lines are in the file", || {
+            std::fs::read_to_string(&path).is_ok_and(|text| text.lines().eq(wanted.iter()))
+        });
+        // A pipe that nobody reads. The thread that leaves a line there
+        // is not kept (it stood still in the opening of the file, and
+        // with it the render loop and the screen's newest frame); what
+        // finds no room is counted.
+        let pipe = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("skipped in part: no mkfifo to make a pipe with");
+            return;
+        }
+        let lines = times::Lines::to(pipe.clone()).unwrap();
+        let began = Instant::now();
+        for line in 0..times::Lines::ROOM + 500 {
+            lines.leave(format!("p {line}"));
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+        // A reader comes: it gets the lines that found room, and before
+        // the next line that does, how many did not.
+        let (read, first) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut pipe = std::io::BufReader::new(std::fs::File::open(pipe).unwrap()).lines();
+            let mut take = |lines: usize| -> Vec<String> {
+                pipe.by_ref().take(lines).map(Result::unwrap).collect()
+            };
+            read.send(take(times::Lines::ROOM)).unwrap();
+            take(2)
+        });
+        let first = first.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(first.iter().eq((0..times::Lines::ROOM)
+            .map(|line| format!("p {line}"))
+            .collect::<Vec<_>>()
+            .iter()));
+        lines.leave("p last".into());
+        assert_eq!(reader.join().unwrap(), ["x 500", "p last"]);
     }
 
     #[test]
