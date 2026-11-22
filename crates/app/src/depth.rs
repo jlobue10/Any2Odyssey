@@ -1079,25 +1079,28 @@ impl<S: Send + 'static> Fast<S> {
         make: impl FnOnce() -> Result<S, String> + Send + 'static,
     ) -> Option<&mut S> {
         use std::sync::mpsc::{channel, TryRecvError};
-        let made = match self {
-            Fast::Making { size: its, made } if *its == size => Some(made.try_recv()),
-            _ => None,
-        };
-        match made {
-            Some(Ok(Ok(session))) => *self = Fast::Ready { size, session },
-            Some(Ok(Err(why))) => *self = Fast::Refused(why),
-            Some(Err(TryRecvError::Empty)) => return None,
-            Some(Err(TryRecvError::Disconnected)) => {
-                *self = Fast::Refused("the thread that made it ended without a word".into());
+        if let Fast::Making {
+            size: building,
+            made,
+        } = self
+        {
+            match made.try_recv() {
+                // Keep using CUDA until this build finishes, even if the
+                // requested size changes. Dropping its receiver cannot stop
+                // TensorRT's native build or release its GPU memory.
+                Err(TryRecvError::Empty) => return None,
+                _ if *building != size => *self = Fast::Unasked,
+                Ok(Ok(session)) => *self = Fast::Ready { size, session },
+                Ok(Err(why)) => *self = Fast::Refused(why),
+                Err(TryRecvError::Disconnected) => {
+                    *self = Fast::Refused("the thread that made it ended without a word".into());
+                }
             }
-            None => {}
         }
         match self {
             Fast::Refused(_) => return None,
             Fast::Ready { size: its, .. } if *its == size => {}
-            // None yet, or one for another size (another depth detail,
-            // another screen): that one is let go of, and what is still
-            // being made for it is finished for the next time and dropped.
+            // No build is running. Start one for the size requested now.
             _ => {
                 let (send, made) = channel();
                 let begun = std::thread::Builder::new()
@@ -1859,6 +1862,35 @@ mod tests {
         // A processor's model has nothing to do with any of it.
         let on_processor = RunsOn::Processor { gpu_refused: None };
         assert_eq!(shown(&on_processor, &fast), on_processor);
+    }
+
+    #[test]
+    fn changing_detail_waits_for_the_current_engine_build() {
+        let mut fast = Fast::Unasked;
+        let (finish, wait) = std::sync::mpsc::channel::<()>();
+        fast.session_for((518, 294), move || {
+            wait.recv().unwrap();
+            Ok("first")
+        });
+        for size in [(770, 434), (518, 294), (1274, 714)] {
+            assert!(fast.session_for(size, || Ok("overlap")).is_none());
+            assert!(matches!(
+                fast,
+                Fast::Making {
+                    size: (518, 294),
+                    ..
+                }
+            ));
+        }
+        finish.send(()).unwrap();
+        for _ in 0..2000 {
+            if let Some(session) = fast.session_for((1274, 714), || Ok("latest")) {
+                assert_eq!(*session, "latest");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("the requested build did not finish");
     }
 
     #[test]
