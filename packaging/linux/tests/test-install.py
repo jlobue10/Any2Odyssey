@@ -59,6 +59,31 @@ class InstallerTests(unittest.TestCase):
                         A2O_INSTALL_TEST_SETUP_LOG=str(self.setup_log),
                         A2O_INSTALL_TEST_ROOT=str(self.system))
 
+    @unittest.skipUnless(os.uname().machine == "x86_64" and shutil.which("cc"), "x86_64 runtime and cc required")
+    def test_depth_runtime_finds_libraries_in_the_loader_path(self):
+        data = self.root / "data"
+        data.mkdir(exist_ok=True)
+        lib = self.root / "libraries"
+        lib.mkdir()
+        shared = lib / "stub.so"
+        subprocess.run(["cc", "-x", "c", "-shared", "-fPIC", "-", "-o", str(shared)],
+                       input="void fixture(void) {}\n", text=True, check=True)
+        for name in ["libcudart.so.13", "libcublas.so.13", "libcudnn.so.9"]:
+            (lib / name).symlink_to(shared)
+        tools = self.root / "runtime-tools"
+        tools.mkdir()
+        (tools / "ldconfig").write_text("#!/bin/sh\nexit 1\n")
+        python = shlex.quote(shutil.which("python3"))
+        (tools / "python3").write_text(
+            '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = venv ]; then echo reached-venv >&2; exit 1; fi\n'
+            f'exec {python} "$@"\n')
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        env = dict(self.env, PATH=f"{tools}:{self.env['PATH']}", LD_LIBRARY_PATH=str(lib))
+        script = LINUX.parents[1] / "contrib/depth-runtime/setup.sh"
+        result = subprocess.run([*SHELL, str(script)], env=env, text=True, capture_output=True, timeout=30)
+        self.assertIn("reached-venv", result.stderr, result.stderr)
+
     def install(self, prefix, *extra):
         return self.run_installer("--prefix", str(prefix), "--no-deps", "--no-udev", "--no-model",
                                   "--no-odyssey", *extra)

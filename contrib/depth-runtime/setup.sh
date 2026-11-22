@@ -23,10 +23,19 @@ die() { echo "depth-runtime: $*" >&2; exit 1; }
 command -v python3 >/dev/null || die "python3 is needed"
 data=${ANY2ODYSSEY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/any2odyssey}
 [ -d "$data" ] || die "no data folder $data: start Any2Odyssey once first"
-for library in libcudart.so.13 libcublas.so.13 libcudnn.so.9; do
-    ldconfig -p | grep -q "$library" || [ -e "/opt/cuda/lib64/$library" ] ||
-        die "$library is not installed: this runtime needs CUDA 13 and cuDNN 9"
-done
+# Probe the exact SONAME with the loader used by the application. This
+# includes LD_LIBRARY_PATH and does not require ldconfig on the user's PATH.
+python3 - <<'PYTHON'
+import ctypes
+import sys
+
+for library in ("libcudart.so.13", "libcublas.so.13", "libcudnn.so.9"):
+    try:
+        ctypes.CDLL(library)
+    except OSError as error:
+        sys.exit(f"depth-runtime: could not load {library}: {error}. "
+                 "Install CUDA 13 and cuDNN 9 and make their libraries visible to the loader.")
+PYTHON
 
 work=$(mktemp -d "$data/.depth-runtime.XXXXXX")
 trap 'rm -rf "$work"' EXIT
