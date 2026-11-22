@@ -1333,25 +1333,53 @@ fn holds_an_engine(folder: &Path) -> bool {
 }
 
 /// Open `folder`'s form of the model with `open`, which makes it where
-/// there is none. One that was kept and cannot be opened is cleared away
-/// and made anew, once: TensorRT reads only what the same TensorRT wrote,
-/// for the same kind of GPU, and after an update of either the kept one
-/// would otherwise refuse TensorRT for good.
+/// there is none. Where one was kept and `open` fails, it is tried once
+/// more without the kept one: TensorRT reads only what the same TensorRT
+/// wrote, for the same kind of GPU, and after an update of either the kept
+/// one would otherwise refuse TensorRT for good.
+///
+/// The kept one is cleared away only when making it anew works. It used
+/// to be cleared before the second try, whatever had failed, and what
+/// fails is hardly ever the kept one: ONNX Runtime 1.32 makes a form it
+/// cannot read (cut short, empty, another TensorRT's) anew by itself and
+/// says nothing. Seen with the real libraries: with TensorRT's own
+/// library missing or cut short every start of a live screen threw away
+/// the form of the model for the size in use, made in most of a minute,
+/// and could make no other.
 fn open_kept_or_anew<S>(
     folder: &Path,
     mut open: impl FnMut() -> Result<S, String>,
 ) -> Result<S, String> {
+    let made = |folder: &Path| {
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))
+    };
     let kept = holds_an_engine(folder);
-    std::fs::create_dir_all(folder)
-        .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))?;
-    match open() {
-        Err(_) if kept => {
-            let _ = std::fs::remove_dir_all(folder);
-            std::fs::create_dir_all(folder)
-                .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))?;
-            open()
+    made(folder)?;
+    let failed = match open() {
+        Err(failed) if kept => failed,
+        done => return done,
+    };
+    // Aside, beside the folder: "518x294" as "518x294.kept".
+    let mut aside = folder.as_os_str().to_owned();
+    aside.push(".kept");
+    let aside = PathBuf::from(aside);
+    let _ = std::fs::remove_dir_all(&aside);
+    if std::fs::rename(folder, &aside).is_err() {
+        // Nothing can be made where nothing can be moved.
+        return Err(failed);
+    }
+    match made(folder).and_then(|()| open()) {
+        Ok(session) => {
+            let _ = std::fs::remove_dir_all(&aside);
+            Ok(session)
         }
-        done => done,
+        Err(again) => {
+            // Not the kept one's doing: it is there for the next start.
+            let _ = std::fs::remove_dir_all(folder);
+            let _ = std::fs::rename(&aside, folder);
+            Err(again)
+        }
     }
 }
 
@@ -2067,10 +2095,34 @@ mod tests {
         assert_eq!(open_kept_or_anew(&folder, open(2)), Ok(2));
         assert!(!folder.join("old.profile").exists());
         assert!(holds_an_engine(&folder));
-        // And when that fails too, it is not tried a third time.
+        let aside = data.path().join("depth-engines/1274x714.kept");
+        assert!(!aside.exists());
+        // And when that fails too, it is not tried a third time. Then it
+        // was not the kept one that TensorRT could not do with (its own
+        // library is missing, the GPU's memory is taken): the kept one is
+        // there for the next start, as it was.
+        std::fs::write(folder.join("model_fp16_sm120.engine"), b"kept").unwrap();
+        std::fs::write(folder.join("model_fp16_sm120.profile"), b"its profile").unwrap();
         opened.set(0);
         assert!(open_kept_or_anew(&folder, open(9)).is_err());
         assert_eq!(opened.get(), 2);
+        assert_eq!(
+            std::fs::read(folder.join("model_fp16_sm120.engine")).unwrap(),
+            b"kept"
+        );
+        assert!(folder.join("model_fp16_sm120.profile").exists());
+        assert!(!aside.exists());
+        // What an earlier run left aside (it was ended there) is no
+        // obstacle to the next one.
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("left.engine"), b"left").unwrap();
+        opened.set(0);
+        assert_eq!(open_kept_or_anew(&folder, open(2)), Ok(2));
+        assert!(!aside.exists());
+        assert_eq!(
+            std::fs::read(folder.join("model_fp16_sm120.engine")).unwrap(),
+            b"made"
+        );
     }
 
     #[test]
