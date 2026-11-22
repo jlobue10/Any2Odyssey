@@ -142,9 +142,24 @@ Useful evidence to collect while testing: `companion.log` (with `companion.old.l
 
 ## Pending hardware verification
 
-The changes made in 0.9.1 to 1.0.3 (audit rounds 11 to 24, the Windows setup program, and the five pull requests of 1.0.0) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
+The changes made in 0.9.1 to 1.0.7 (audit rounds 11 to 25, the Windows setup program, and the five pull requests of 1.0.0) are covered by the tests above and have not been run with Wine, the camera, the lens, the monitor or a real Wayland desktop. These checks are still to do, on a dual-boot PC with a G90XF; record the results in `CHANGELOG.md`.
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
+
+New in 1.0.7 (audit round 25: 1.0.4 to 1.0.6 on the rigs; nothing of it was seen on the monitor before the release):
+
+- Linux, the G90XF at 120 Hz, `any2odyssey-setup` once (the program that shows the picture is built by it), then the film of 24 pictures a second on the live screen with `env A2O_WEAVER_STATS='Z:\tmp\weaver-stats.txt' A2O_LIVE_TIMES=/tmp/live-times.txt any2odyssey` as under "New in 1.0.6": `shown for turns:` as with 1.0.6 (nearly all under `5`), and the file's first line is `latency 25000 microseconds`. Nothing should differ: this case takes the same path as before.
+- The same with a video or a game of 60 pictures a second: in `/tmp/live-times.txt` the third number of the `p` lines is no longer 15000 apart for stretches (it follows the second, the frame's arrival, by well under a millisecond), there are no `s` lines while the video runs, and the page says 60 pictures a second, not 62 to 67. By eye: even, and no later than in 1.0.3.
+- The same with a video of 30 pictures a second: `shown for turns:` has nearly all under `4`, and nearly every `w` line of `/tmp/live-times.txt` ends in 1, few in 4.
+- The G90XF at 144 or 165 Hz with a video of 50 or 55 pictures a second: the pictures counted under `shown for turns:` in a second are as many as the video has, not fewer.
+- `A2O_WEAVER_LATENCY_US=40000`: the first line says `latency 40000 microseconds, asked for microseconds: 40000`; with `A2O_WEAVER_LATENCY_US=abc`: `latency 25000 microseconds, asked for microseconds: abc (not told)`.
+- Output on with the live screen, then another input (a still image) and the live screen again with the output left on: the picture is as before, with black beside it where the screen has another shape than the panel.
+- Start output after the monitor was in standby (a cold start of the stack): it comes up as before, and log files of Leia's older than two weeks are gone from `wine-lens/prefix/drive_c/ProgramData/Simulated Reality/*/Log` and `.../Applications/*/Log`, newer ones are there.
+- With TensorRT (`depth-runtime`), the first half minute at a depth detail that was not used before, with `A2O_LIVE_TIMES`: how long do the `d` lines take while the form of the model is made? On the rig (WSL) the maps all but stood for 14 to 20 seconds of it; say what the monitor's PC does.
+- Quit pressed during that half minute: the program leaves, and the journal has no "Segmentation fault" of `Any2Odyssey`.
+- `nvidia-smi` with a film running at *Finest* with TensorRT: the program holds about 1.3 GB of the card where 1.0.6 held about 5.5.
+- Output stopped and started twenty times with a live screen: the program's memory (`ps -o rss`) does not grow from start to start.
+- A game held at 30 or 40 pictures a second on the live screen, with `A2O_WEAVER_EVEN=0` and without: is it later to the hand with the rule? (On the rig: 7 ms in the mean.)
 
 New in 1.0.6 (a film's pictures shown evenly; measured on the G90XF on 2026-11-21 with a film of 24 pictures a second in a browser on the Odyssey's own screen, KDE Plasma at 120 Hz, 2160 lines, *Finest*, TensorRT; the checks below are what was measured there, to be seen again on other screens, and what was not):
 
