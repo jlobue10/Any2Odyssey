@@ -195,18 +195,6 @@ impl Pace {
         at
     }
 
-    /// Whether the next frame of a steady run is to arrive within `time`
-    /// of `now`, give or take what such frames are early and late by (it
-    /// has not arrived: the run is told again with every frame that does).
-    ///
-    /// A picture made between two frames, because a depth map has come,
-    /// takes the render loop as long as any other. With one made whenever
-    /// a map came, a film's frame that arrived meanwhile waited for it:
-    /// measured at 2160 lines, a frame was in the output's hands 8 to 22
-    /// ms after it arrived where it had been 9 to 13, and the pictures
-    /// were no more even than the frames. So no such picture is begun
-    /// when a frame is about to come; the map is drawn with from that
-    /// frame on.
     /// The longest of the last three times from frame to frame, where all
     /// three are a film's or a video's (25 to 70 ms): a screen whose
     /// picture has time to wait for its own depth map (`Answered`).
@@ -240,11 +228,64 @@ impl Pace {
         }
     }
 
+    /// Whether the next frame of a steady run is to arrive within `time`
+    /// of `now`, give or take what such frames are early and late by (it
+    /// has not arrived: the run is told again with every frame that does).
+    ///
+    /// A picture made between two frames, because a depth map has come,
+    /// takes the render loop as long as any other. With one made whenever
+    /// a map came, a film's frame that arrived meanwhile waited for it:
+    /// measured at 2160 lines, a frame was in the output's hands 8 to 22
+    /// ms after it arrived where it had been 9 to 13, and the pictures
+    /// were no more even than the frames. So no such picture is begun
+    /// when a frame is about to come; the map is drawn with from that
+    /// frame on.
     fn next_within(&self, now: Instant, time: Duration) -> bool {
         self.next.is_some_and(|next| {
             let early = next.checked_sub(Pace::HOLD).unwrap_or(next);
             now + time >= early && now <= next + Pace::HOLD * 2
         })
+    }
+
+    /// Whether the next frame of a screen that changes faster than a film
+    /// is about to come at `now`: each of its last three frames came
+    /// within 25 ms of the one before (a game, a video of 60 a second, a
+    /// desktop that is scrolled, a pointer on the move), and the next is
+    /// not yet later than such frames are late by.
+    ///
+    /// [`Pace::next_within`] knows of a film's frames only, and such a
+    /// screen's next frame is nearer still: it always comes within the
+    /// time a picture takes. A picture begun between two of its frames,
+    /// because a depth map has come, is a second picture of a frame that
+    /// has one, at another depth, and the frame that arrives meanwhile
+    /// waits for it. Measured without this rule (audit round 25, a screen
+    /// of 60 frames a second, a stand-in model of 15 ms a map, 1080
+    /// lines): 952 of 1041 frames had two pictures, 115 pictures a second
+    /// for 60 frames. On a 3840 x 2160 screen at 2160 lines, a map in 25
+    /// ms: 443 of 1035 frames had two, and a frame's picture was in the
+    /// frame file 13.5 ms after the frame was sent, the times from
+    /// picture to picture spread by 3.8 ms (standard deviation), where
+    /// that is 11.7 ms and 1.8 ms with the rule. The map is drawn with
+    /// from the next frame on, as it was before a map's arrival woke the
+    /// loop; a screen that has stopped changing is no longer told so, and
+    /// its last frame gets its map.
+    fn quick(&self, now: Instant) -> bool {
+        let mut newest = self.arrived.iter().rev();
+        let Some(&last) = newest.next() else {
+            return false;
+        };
+        let (mut later, mut longest) = (last, Duration::ZERO);
+        for _ in 0..3 {
+            let Some(&earlier) = newest.next() else {
+                return false;
+            };
+            let gap = later.saturating_duration_since(earlier);
+            if gap >= Duration::from_millis(25) {
+                return false;
+            }
+            (longest, later) = (longest.max(gap), earlier);
+        }
+        now <= last + longest + Pace::HOLD * 2
     }
 }
 
@@ -829,7 +870,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         if let Some(early) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(early);
         }
-        due = next_turn(due, Instant::now());
+        // When the turn after this one may begin, if this one takes a
+        // frame (below).
+        let paced = next_turn(due, Instant::now());
         // A still screen sends no frames. Its last one is looked at again a
         // few times a second all the same: the depth map of a picture that
         // has just appeared arrives after it, and the controls must take
@@ -867,11 +910,24 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             Some((found, sink, turn, view, place, for_model.flatten()))
         });
         let Some(Some((found, sink, turn, view, (x, y, w, h), for_model))) = taken else {
+            due = paced;
             continue;
         };
+        let new_frame = found.serial != seen;
+        // The pace is that of the frames taken. A turn that finds no new
+        // one (nothing came for 150 ms, or a depth map has come:
+        // `Frames::look_again`) leaves the next turn due when it was. It
+        // was counted like any other, and the frame that came after it
+        // waited out the rest of a `FRAME_TIME`: with a screen of 60
+        // frames a second and a model that answers in 15 ms (audit round
+        // 25), the frame after such a turn was taken 12 ms after it had
+        // arrived, and the six after that 10, 8, 7, 5, 4 and 2 ms after,
+        // the loop then running to its own 15 ms and not to the frames.
+        if new_frame {
+            due = paced;
+        }
         // A frame of a film that came early is held until its time. The
         // model is given it first: its map is no later for the wait.
-        let new_frame = found.serial != seen;
         let held = new_frame
             .then_some(arrived)
             .flatten()
@@ -922,6 +978,11 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // to come (`Pace::next_within`): what it would have shown is in
         // that frame's picture.
         if !new_frame && pace.next_within(Instant::now(), BETWEEN_FRAMES) {
+            continue;
+        }
+        // Nor between two frames of a screen that changes faster than a
+        // film's (`Pace::quick`).
+        if !new_frame && pace.quick(Instant::now()) {
             continue;
         }
         // And none at all between two frames of a film whose picture was
@@ -2894,6 +2955,112 @@ mod tests {
             ));
         }
         canvas
+    }
+
+    #[test]
+    fn no_picture_is_begun_between_two_frames_of_a_screen_that_changes_faster_than_a_film() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let came = |gaps: &[u64]| {
+            let mut pace = Pace::default();
+            let mut arrived = start;
+            pace.show_at(arrived);
+            for gap in gaps {
+                arrived += Duration::from_micros(*gap);
+                pace.show_at(arrived);
+            }
+            (pace, arrived)
+        };
+        // Nothing is known before three frames have followed a first.
+        assert!(!Pace::default().quick(start));
+        assert!(!came(&[16_667, 16_667]).0.quick(start + ms(40)));
+        // 60 a second, every second frame of a screen of 120 Hz and of
+        // one of 90, a game between 80 and 140: the next frame is about
+        // to come from the moment one has, and for as long after its time
+        // as such frames are late by.
+        for gaps in [
+            [16_667; 3],
+            [16_000, 16_000, 24_000],
+            [22_222; 3],
+            [7_100, 12_500, 9_000],
+        ] {
+            let (pace, last) = came(&gaps);
+            let longest = Duration::from_micros(*gaps.iter().max().unwrap());
+            assert!(pace.quick(last), "{gaps:?}");
+            assert!(pace.quick(last + longest + Pace::HOLD), "{gaps:?}");
+            // The screen has stopped changing: its last frame gets the
+            // map that comes for it.
+            assert!(
+                !pace.quick(last + longest + Pace::HOLD * 2 + ms(1)),
+                "{gaps:?}"
+            );
+        }
+        // A film's frames, a video of 30 a second and a desktop that
+        // changes now and then are not such a screen: theirs is the rule
+        // of the steady run, or none.
+        for gaps in [[41_700; 3], [33_333; 3], [16_667, 16_667, 300_000]] {
+            let (pace, last) = came(&gaps);
+            assert!(!pace.quick(last + ms(1)), "{gaps:?}");
+        }
+        // And the first frames after a pause are not yet one.
+        let (pace, last) = came(&[16_667, 16_667, 16_667, 900_000, 16_667, 16_667]);
+        assert!(!pace.quick(last + ms(1)));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "a matter of milliseconds: run alone"]
+    fn a_turn_that_finds_no_new_frame_does_not_keep_the_next_frame_waiting() {
+        // Like the film's test below it is a matter of milliseconds, 12
+        // of them here: with the other tests running beside it on every
+        // core the frames were taken anything from 3 to 22 ms after they
+        // came, whatever the loop did. So it is run alone:
+        // `cargo test -p any2odyssey a_turn_that_finds -- --ignored`
+        // No output: a turn is over as soon as its frame has been given
+        // to the model. The test plays the model.
+        let capture = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        let (frames, state) = (capture.frames(), shared.clone());
+        let worker = std::thread::spawn(move || render_loop(&frames, &state));
+        let waker = capture.frames();
+        // Feed a frame and say how long it took to be taken (the turn
+        // that takes a frame gives it to the model, which is free).
+        let taken_after = |serial: u64| {
+            lock(&shared.for_model).busy = false;
+            let fed = Instant::now();
+            capture.feed(16, 9, &[serial as u8; 16 * 9 * 4]);
+            while lock(&shared.for_model).serial != serial {
+                assert!(fed.elapsed() < Duration::from_secs(10), "never taken");
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            fed.elapsed()
+        };
+        let mut waited = Vec::new();
+        for round in 0..15u64 {
+            // Two frames come one right after the other and are taken
+            // (the second of them is what the next turn is due after);
+            // then a depth map comes (the loop is told to look again, and
+            // finds nothing to do); and 3 ms later the screen's next
+            // frame.
+            std::thread::sleep(Duration::from_millis(40));
+            taken_after(round * 3 + 1);
+            taken_after(round * 3 + 2);
+            waker.look_again();
+            std::thread::sleep(Duration::from_millis(3));
+            waited.push(taken_after(round * 3 + 3));
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        drop(capture);
+        worker.join().unwrap();
+        // It is taken as it comes. With the turn in between counted
+        // against the pace, it was taken a `FRAME_TIME` after that turn
+        // was due: 12 ms after it came.
+        waited.sort();
+        assert!(
+            waited[waited.len() / 2] < Duration::from_millis(6),
+            "{waited:?}"
+        );
     }
 
     #[test]
