@@ -565,17 +565,20 @@ fn tensorrt_libraries(folder: &Path) -> Vec<PathBuf> {
 /// named in `ANY2ODYSSEY_TENSORRT_DIR`, and from the user's own runtime's
 /// folder. The libraries find the rest of TensorRT beside themselves.
 /// Done once, before the first use of the provider and not when the
-/// runtime is started: the library has 660 MB.
-fn preload_tensorrt() {
+/// runtime is started: the library has 660 MB. Fails, for as long as the
+/// program runs, where one of TensorRT's libraries is cut short
+/// ([`cut_tensorrt_library`]).
+fn preload_tensorrt() -> Result<(), String> {
     use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
-    static DONE: std::sync::Once = std::sync::Once::new();
-    DONE.call_once(|| {
-        let folders = std::env::var_os(TENSORRT_FOLDER_ENV)
+    static DONE: OnceLock<Result<(), String>> = OnceLock::new();
+    DONE.get_or_init(|| {
+        let folders: Vec<PathBuf> = std::env::var_os(TENSORRT_FOLDER_ENV)
             .filter(|folder| !folder.is_empty())
             .map(PathBuf::from)
             .into_iter()
-            .chain([paths::data_dir().join(RUNTIME_FOLDER)]);
-        preload_tensorrt_from(folders, |path| {
+            .chain([paths::data_dir().join(RUNTIME_FOLDER)])
+            .collect();
+        preload_tensorrt_from(&folders, |path| {
             // Avoid handing an incomplete ELF file to the native loader.
             if !path.is_file() || cut_short(path).is_some() {
                 return false;
@@ -587,23 +590,70 @@ fn preload_tensorrt() {
             } else {
                 false
             }
-        });
-    });
+        })
+    })
+    .clone()
 }
 
 fn preload_tensorrt_from(
-    folders: impl IntoIterator<Item = PathBuf>,
+    folders: &[PathBuf],
     mut open: impl FnMut(&Path) -> bool,
-) {
+) -> Result<(), String> {
+    // Before anything of TensorRT is opened: what is opened here brings
+    // the rest of it in later, by itself.
+    if let Some(refusal) = cut_tensorrt_library(folders) {
+        return Err(refusal);
+    }
     for folder in folders {
         let mut loaded = false;
-        for path in tensorrt_libraries(&folder) {
+        for path in tensorrt_libraries(folder) {
             loaded |= open(&path);
         }
         if loaded {
             break;
         }
     }
+    Ok(())
+}
+
+/// What to say instead of using TensorRT, when one of its libraries in
+/// `folders` is cut short ([`cut_short`]).
+///
+/// Only the two libraries the runtime's provider is linked against are
+/// opened here. TensorRT opens the others by itself: its plugins with the
+/// first session, and the part of its builder that is made for the GPU
+/// (`libnvinfer_builder_resource_*`) when it makes its form of the model
+/// for a size it has none for. Seen with the real libraries: with either
+/// of those cut short the whole program ended with "Bus error" inside the
+/// loader, the plugins' at the start of every live screen. And with one
+/// of the two cut short beside the other whole, the provider said "cannot
+/// open shared object file: No such file or directory" of a file that is
+/// there. So every library of TensorRT's in the folders it may be taken
+/// from is looked at first, and with one of them cut short TensorRT is
+/// left alone and the file is named.
+fn cut_tensorrt_library(folders: &[PathBuf]) -> Option<String> {
+    let mut libraries: Vec<PathBuf> = folders
+        .iter()
+        .flat_map(|folder| std::fs::read_dir(folder).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    (name.starts_with("libnvinfer") || name.starts_with("libnvonnxparser"))
+                        && name.contains(".so")
+                })
+        })
+        .collect();
+    libraries.sort();
+    libraries.iter().find_map(|library| {
+        let (length, needed) = cut_short(library)?;
+        // The file last: the page shows the end of a long message.
+        Some(format!(
+            "an interrupted copy or download left one of TensorRT's libraries cut short ({length} of {needed} bytes). Copy it again, or run depth-runtime/setup.sh again: {}",
+            library.display()
+        ))
+    })
 }
 
 /// How many bytes the library file `path` has, and how many its own headers
@@ -1311,7 +1361,7 @@ fn open_kept_or_anew<S>(
 /// and is as fast as it gets. What TensorRT would not take of the model
 /// (nothing, so far) is the CUDA provider's.
 fn open_fast_session(model: &Path, input: &str, size: (u32, u32)) -> Result<Session, String> {
-    preload_tensorrt();
+    preload_tensorrt()?;
     let folder = engines_folder(&paths::data_dir(), size);
     let timings = paths::data_dir().join(ENGINES_FOLDER);
     let shape = format!("{input}:1x3x{}x{}", size.1, size.0);
@@ -2035,16 +2085,84 @@ mod tests {
         }
         for working in &folders {
             let mut tried = Vec::new();
-            preload_tensorrt_from(folders.clone(), |path| {
+            let preloaded = preload_tensorrt_from(&folders, |path| {
                 tried.push(path.to_owned());
                 path.starts_with(working)
             });
+            assert_eq!(preloaded, Ok(()));
             let mut expected = tensorrt_libraries(&folders[0]);
             if working == &folders[1] {
                 expected.extend(tensorrt_libraries(working));
             }
             assert_eq!(tried, expected);
         }
+    }
+
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn tensorrt_is_left_alone_where_one_of_its_libraries_is_cut_short() {
+        let data = tempfile::tempdir().unwrap();
+        let folders = [data.path().join("named"), data.path().join("installed")];
+        let whole = library(true);
+        // As the set-up leaves the folder: the two the provider is linked
+        // against, and what TensorRT opens by itself.
+        let names = [
+            "libnvinfer.so.10",
+            "libnvonnxparser.so.10",
+            "libnvinfer_plugin.so.10",
+            "libnvinfer_builder_resource_sm120.so.10.16.1",
+        ];
+        for folder in &folders {
+            std::fs::create_dir(folder).unwrap();
+            for name in names {
+                std::fs::write(folder.join(name), &whole).unwrap();
+            }
+            // Not TensorRT's, and looked at where it is loaded.
+            std::fs::write(folder.join("libonnxruntime.so.1.32.0"), &whole[..3000]).unwrap();
+        }
+        assert_eq!(cut_tensorrt_library(&folders), None);
+        let mut opened = 0;
+        assert_eq!(
+            preload_tensorrt_from(&folders, |_| {
+                opened += 1;
+                true
+            }),
+            Ok(())
+        );
+        assert_eq!(opened, 2);
+        // Each of them cut short, in the folder that is named and in the
+        // installed one: nothing of TensorRT is opened, not the whole ones
+        // of the other folder either, and the file is named at the end.
+        for folder in &folders {
+            for name in names {
+                let library = folder.join(name);
+                std::fs::write(&library, &whole[..3000]).unwrap();
+                let refusal = preload_tensorrt_from(&folders, |path| {
+                    panic!(
+                        "opened {} beside a library that is cut short",
+                        path.display()
+                    )
+                })
+                .unwrap_err();
+                assert!(
+                    refusal.contains("cut short (3000 of 4368 bytes)")
+                        && refusal.ends_with(&library.display().to_string()),
+                    "{refusal}"
+                );
+                // The page has the end of it, with the file's name.
+                let on_the_page = RunsOn::GpuOnly {
+                    tensorrt_refused: refusal,
+                }
+                .describe();
+                assert!(on_the_page.contains(name), "{on_the_page}");
+                std::fs::write(&library, &whole).unwrap();
+            }
+        }
+        // A folder that is not there holds nothing that is cut short.
+        assert_eq!(
+            cut_tensorrt_library(&[data.path().join("missing"), folders[1].clone()]),
+            None
+        );
     }
 
     #[test]
