@@ -208,8 +208,17 @@ impl Pace {
     /// when a frame is about to come; the map is drawn with from that
     /// frame on.
     /// The longest of the last three times from frame to frame, where all
-    /// three are a film's or a video's (25 to 70 ms): a screen whose
+    /// three are a film's or a video's (22 to 70 ms): a screen whose
     /// picture has time to wait for its own depth map (`Answered`).
+    ///
+    /// The shortest was 25 ms, which is three refreshes of a screen of
+    /// 120 Hz to the microsecond: what a video of 30 a second has between
+    /// two frames when the second comes a refresh early, as a browser's do
+    /// by turns. Such a frame was measured now a hair under and now a hair
+    /// over. Fed that way (a 3840 x 2160 screen, 300 frames, TensorRT), 56
+    /// to 76 of the frames counted as no video's and were drawn with the
+    /// map of the frame before, 14 to 25 of them twice. 22 ms lies between
+    /// that and what 48 or 50 a second have (16.7 and 25 ms by turns).
     ///
     /// Not the steady run [`Pace::show_at`] tells: that takes eight frames
     /// to be told again after one frame that came out of turn, and a
@@ -223,7 +232,7 @@ impl Pace {
         for _ in 0..3 {
             let earlier = *newest.next()?;
             let gap = later.saturating_duration_since(earlier);
-            if !(Duration::from_millis(25)..=Duration::from_millis(70)).contains(&gap) {
+            if !(Duration::from_millis(22)..=Duration::from_millis(70)).contains(&gap) {
                 return None;
             }
             (longest, later) = (longest.max(gap), earlier);
@@ -1501,6 +1510,10 @@ mod tests {
         // The frame can be given to the model again, and the picture made
         // with the old depth is known to be out of date.
         assert!(!lock(&shared.for_model).busy);
+        // And a picture that is held back for this frame's own map is
+        // told that the model has answered, though with none: it is not
+        // held for the whole of its wait.
+        assert_eq!(lock(&shared.answered).serial, 7);
         let mut state = lock(&shared.depth);
         assert!(state.version > 3 && state.latest.is_none() && !state.settled);
         let depth = &mut state.smoother;
@@ -3253,6 +3266,26 @@ mod tests {
         }
         assert_eq!(quick.calm(), None);
         assert!(!quick.awaited(start + ms(16) * 11 + ms(5)));
+        // A video of 30 a second on a screen of 120 Hz, a refresh early
+        // and late by turns: three refreshes and five, the three a hair
+        // short as often as not. It is a video's all the same.
+        let us = Duration::from_micros;
+        let mut video = Pace::default();
+        let mut arrived = start;
+        for gap in [33_333, 24_930, 41_740, 24_960, 41_700] {
+            arrived += us(gap);
+            video.show_at(arrived);
+        }
+        assert_eq!(video.calm(), Some(us(41_740)));
+        // 48 a second there comes two refreshes and three by turns, and
+        // is none.
+        let mut faster = Pace::default();
+        let mut arrived = start;
+        for gap in [16_667, 25_000, 16_667, 25_000, 16_667] {
+            arrived += us(gap);
+            faster.show_at(arrived);
+        }
+        assert_eq!(faster.calm(), None);
     }
 
     #[test]

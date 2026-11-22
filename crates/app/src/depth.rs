@@ -565,17 +565,20 @@ fn tensorrt_libraries(folder: &Path) -> Vec<PathBuf> {
 /// named in `ANY2ODYSSEY_TENSORRT_DIR`, and from the user's own runtime's
 /// folder. The libraries find the rest of TensorRT beside themselves.
 /// Done once, before the first use of the provider and not when the
-/// runtime is started: the library has 660 MB.
-fn preload_tensorrt() {
+/// runtime is started: the library has 660 MB. Fails, for as long as the
+/// program runs, where one of TensorRT's libraries is cut short
+/// ([`cut_tensorrt_library`]).
+fn preload_tensorrt() -> Result<(), String> {
     use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
-    static DONE: std::sync::Once = std::sync::Once::new();
-    DONE.call_once(|| {
-        let folders = std::env::var_os(TENSORRT_FOLDER_ENV)
+    static DONE: OnceLock<Result<(), String>> = OnceLock::new();
+    DONE.get_or_init(|| {
+        let folders: Vec<PathBuf> = std::env::var_os(TENSORRT_FOLDER_ENV)
             .filter(|folder| !folder.is_empty())
             .map(PathBuf::from)
             .into_iter()
-            .chain([paths::data_dir().join(RUNTIME_FOLDER)]);
-        preload_tensorrt_from(folders, |path| {
+            .chain([paths::data_dir().join(RUNTIME_FOLDER)])
+            .collect();
+        preload_tensorrt_from(&folders, |path| {
             // Avoid handing an incomplete ELF file to the native loader.
             if !path.is_file() || cut_short(path).is_some() {
                 return false;
@@ -587,23 +590,71 @@ fn preload_tensorrt() {
             } else {
                 false
             }
-        });
-    });
+        })
+    })
+    .clone()
 }
 
 fn preload_tensorrt_from(
-    folders: impl IntoIterator<Item = PathBuf>,
+    folders: &[PathBuf],
     mut open: impl FnMut(&Path) -> bool,
-) {
+) -> Result<(), String> {
+    // Before anything of TensorRT is opened: what is opened here brings
+    // the rest of it in later, by itself.
+    if let Some(refusal) = cut_tensorrt_library(folders) {
+        return Err(refusal);
+    }
     for folder in folders {
         let mut loaded = false;
-        for path in tensorrt_libraries(&folder) {
+        for path in tensorrt_libraries(folder) {
             loaded |= open(&path);
         }
         if loaded {
             break;
         }
     }
+    Ok(())
+}
+
+/// What to say instead of using TensorRT, when one of its libraries in
+/// `folders` is cut short ([`cut_short`]).
+///
+/// Only the two libraries the runtime's provider is linked against are
+/// opened here. TensorRT opens the others by itself: its plugins with the
+/// first session, and the part of its builder that is made for the GPU
+/// (`libnvinfer_builder_resource_*`) when it makes its form of the model
+/// for a size it has none for. Seen with the real libraries: with either
+/// of those cut short the whole program ended with "Bus error" inside the
+/// loader, the plugins' at the start of every live screen. And with one
+/// of the two cut short beside the other whole, the provider said "cannot
+/// open shared object file: No such file or directory" of a file that is
+/// there. So every library of TensorRT's in the folders it may be taken
+/// from is looked at first, and with one of them cut short TensorRT is
+/// left alone and the file is named.
+fn cut_tensorrt_library(folders: &[PathBuf]) -> Option<String> {
+    let mut libraries: Vec<PathBuf> = folders
+        .iter()
+        .flat_map(|folder| std::fs::read_dir(folder).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    (name.starts_with("libnvinfer") || name.starts_with("libnvonnxparser"))
+                        && name.contains(".so")
+                })
+        })
+        .collect();
+    libraries.sort();
+    libraries.iter().find_map(|library| {
+        let (length, needed) = cut_short(library)?;
+        // What it is and the file last: the page shows the end of a long
+        // message (`gist`).
+        Some(format!(
+            "one of TensorRT's libraries is not whole ({length} of {needed} bytes), as an interrupted copy or download leaves it. Copy it again, or run depth-runtime/setup.sh again. It is cut short: {}",
+            library.display()
+        ))
+    })
 }
 
 /// How many bytes the library file `path` has, and how many its own headers
@@ -742,6 +793,63 @@ fn unloadable(library: &Path, folders: &[PathBuf]) -> Option<String> {
     })
 }
 
+/// What to say instead of asking for the GPU, when a library of CUDA's or
+/// of cuDNN's that the system's loader would take is cut short
+/// ([`cut_short`]): of each such name the first file in `folders`, as the
+/// loader has it.
+///
+/// cuDNN is opened here by its name ([`preload_cudnn`]) and the others by
+/// the runtime's CUDA provider, wherever the loader finds them. Seen with
+/// the real libraries: with `libcudnn.so.9`, `libcublas.so.13`,
+/// `libcudart.so.13` or `libcurand.so.10` cut short in a folder of
+/// `LD_LIBRARY_PATH` the whole program ended with "Bus error" at the first
+/// depth map, where the processor would have done.
+fn cut_gpu_library(folders: &[PathBuf]) -> Option<String> {
+    const OF_THE_GPU: [&str; 5] = [
+        "libcudnn",
+        "libcublas",
+        "libcudart",
+        "libcurand",
+        "libcufft",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for folder in folders {
+        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                name.to_str().is_some_and(|name| {
+                    OF_THE_GPU.iter().any(|start| name.starts_with(start)) && name.contains(".so")
+                })
+            })
+            .collect();
+        names.sort();
+        for name in names {
+            let library = folder.join(&name);
+            // One of that name in a folder before this one is the loader's.
+            if !seen.insert(name) {
+                continue;
+            }
+            if let Some((length, needed)) = cut_short(&library) {
+                return Some(format!(
+                    "one of the GPU's libraries is not whole ({length} of {needed} bytes), as an interrupted copy or download leaves it. Install or copy it again. It is cut short: {}",
+                    library.display()
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// [`cut_gpu_library`] for the folders of this run, looked at once.
+fn gpu_library_cut_short() -> Option<String> {
+    static CUT: OnceLock<Option<String>> = OnceLock::new();
+    CUT.get_or_init(|| cut_gpu_library(&loader_folders()))
+        .clone()
+}
+
 /// Load the runtime library once per process. The outcome is remembered: a
 /// library that could not be loaded will not appear while the program runs.
 fn runtime() -> Result<&'static Environment, String> {
@@ -752,7 +860,11 @@ fn runtime() -> Result<&'static Environment, String> {
             if let Some(refusal) = unloadable(&library, &loader_folders()) {
                 return Err(refusal);
             }
-            preload_cudnn();
+            // (not a cuDNN that is cut short: the model is then run on
+            // the processor, `Estimator::load`)
+            if gpu_library_cut_short().is_none() {
+                preload_cudnn();
+            }
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
                     "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.{} or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora and openSUSE: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
@@ -1140,6 +1252,71 @@ impl<S: Send + 'static> Fast<S> {
     }
 }
 
+/// How many of TensorRT's forms of the model are being made, or wait
+/// their turn to be, in the whole program.
+static MAKING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `make`, to be run when no other such making is under way anywhere in
+/// the program, and counted in [`MAKING`] while it waits for that and
+/// while it runs.
+///
+/// [`Fast`] makes one form at a time, but each model has a `Fast` of its
+/// own, and the model is let go of when the last live screen ends
+/// (`unload_if`) while what is being made for it goes on being made:
+/// TensorRT cannot be stopped. Seen with the real thing: output stopped
+/// while a form was being made and started again made a second one beside
+/// the first, for the same size and into the same file, each with the
+/// GPU's memory of one (6 GB at the finest detail). Here the second waits
+/// for the first, and then finds what the first has kept, which it opens
+/// in a second.
+fn one_at_a_time<S>(
+    make: impl FnOnce() -> Result<S, String> + Send + 'static,
+) -> impl FnOnce() -> Result<S, String> + Send + 'static {
+    use std::sync::atomic::Ordering::SeqCst;
+    static ONE: Mutex<()> = Mutex::new(());
+    // Counted out when the making is over, however it ends.
+    struct Counted;
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            MAKING.fetch_sub(1, SeqCst);
+        }
+    }
+    move || {
+        MAKING.fetch_add(1, SeqCst);
+        let _counted = Counted;
+        // (one that broke while it was its turn is no reason to stop)
+        let _turn = ONE.lock().unwrap_or_else(|e| e.into_inner());
+        make()
+    }
+}
+
+/// End the program here and now, with `code`, if TensorRT is making a form
+/// of the model at this moment; otherwise come back, for the program to
+/// end as programs do.
+///
+/// A program that ends runs what its libraries have left to do at the
+/// end, on the thread that ends it, while its other threads still run.
+/// TensorRT's maker does not survive that: seen with the real thing, a
+/// program that left while a form was being made ended with "Segmentation
+/// fault" inside TensorRT, on the thread that made it. Nothing can stop
+/// the maker and waiting for it takes up to a minute, so the program
+/// ends without those last steps; what it has to put away itself (the
+/// output, the capture, its files) is put away before it gets here.
+pub fn leave_at_once_while_making(code: i32) {
+    if MAKING.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        return;
+    }
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    extern "C" {
+        fn _exit(status: std::ffi::c_int) -> !;
+    }
+    // SAFETY: the C library's `_exit` takes any status and does not
+    // return; nothing of this program runs after it.
+    unsafe { _exit(code) }
+}
+
 pub struct Estimator {
     session: Session,
     /// The model as TensorRT runs it, for a live screen.
@@ -1174,15 +1351,49 @@ static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
 /// more for its second: seconds, where a GPU is started for the first
 /// time.
 pub fn unload_if(unused: impl FnOnce() -> bool) {
-    unload_from(&ESTIMATOR, unused);
+    if unload_from(&ESTIMATOR, unused) {
+        return_freed_memory();
+    }
 }
 
-fn unload_from<T>(model: &Mutex<Option<T>>, unused: impl FnOnce() -> bool) {
+/// Whether a model was let go of.
+fn unload_from<T>(model: &Mutex<Option<T>>, unused: impl FnOnce() -> bool) -> bool {
     let mut slot = model.lock().unwrap_or_else(|e| e.into_inner());
     // Whoever wants the model from here on waits for this, and loads it
     // after: nobody's model is taken from under them.
     if unused() {
-        *slot = None;
+        slot.take().is_some()
+    } else {
+        false
+    }
+}
+
+/// Have the C library give back to the system what the model's sessions
+/// took of the processor's memory and have freed.
+///
+/// The sessions are opened and let go of on threads that come and go with
+/// each live screen, and glibc keeps what a thread has freed in a store of
+/// that thread's kind, for the next thread: up to eight such stores for
+/// every processor core, each with what the largest session left in it.
+/// Measured with TensorRT's session (an RTX 5090, 32 cores, a live screen
+/// started and stopped once a second, each time with the model loaded and
+/// let go of): the program's own memory was 1.0 GB after the first stop,
+/// 4.7 GB after ten, 9.1 GB after forty and 10 GB after sixty, with
+/// nothing loaded; with the CUDA provider alone 0.9 GB became 1.8 GB.
+/// Asked here, each time the model has been let go of, glibc gives it
+/// back: 1.9 GB at the most over sixty such stops, 1.1 GB with the CUDA
+/// provider alone.
+fn return_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        // SAFETY: glibc's own call, with nothing of ours in its hands; it
+        // takes the allocator's locks as `free` does.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
@@ -1283,25 +1494,53 @@ fn holds_an_engine(folder: &Path) -> bool {
 }
 
 /// Open `folder`'s form of the model with `open`, which makes it where
-/// there is none. One that was kept and cannot be opened is cleared away
-/// and made anew, once: TensorRT reads only what the same TensorRT wrote,
-/// for the same kind of GPU, and after an update of either the kept one
-/// would otherwise refuse TensorRT for good.
+/// there is none. Where one was kept and `open` fails, it is tried once
+/// more without the kept one: TensorRT reads only what the same TensorRT
+/// wrote, for the same kind of GPU, and after an update of either the kept
+/// one would otherwise refuse TensorRT for good.
+///
+/// The kept one is cleared away only when making it anew works. It used
+/// to be cleared before the second try, whatever had failed, and what
+/// fails is hardly ever the kept one: ONNX Runtime 1.32 makes a form it
+/// cannot read (cut short, empty, another TensorRT's) anew by itself and
+/// says nothing. Seen with the real libraries: with TensorRT's own
+/// library missing or cut short every start of a live screen threw away
+/// the form of the model for the size in use, made in most of a minute,
+/// and could make no other.
 fn open_kept_or_anew<S>(
     folder: &Path,
     mut open: impl FnMut() -> Result<S, String>,
 ) -> Result<S, String> {
+    let made = |folder: &Path| {
+        std::fs::create_dir_all(folder)
+            .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))
+    };
     let kept = holds_an_engine(folder);
-    std::fs::create_dir_all(folder)
-        .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))?;
-    match open() {
-        Err(_) if kept => {
-            let _ = std::fs::remove_dir_all(folder);
-            std::fs::create_dir_all(folder)
-                .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))?;
-            open()
+    made(folder)?;
+    let failed = match open() {
+        Err(failed) if kept => failed,
+        done => return done,
+    };
+    // Aside, beside the folder: "518x294" as "518x294.kept".
+    let mut aside = folder.as_os_str().to_owned();
+    aside.push(".kept");
+    let aside = PathBuf::from(aside);
+    let _ = std::fs::remove_dir_all(&aside);
+    if std::fs::rename(folder, &aside).is_err() {
+        // Nothing can be made where nothing can be moved.
+        return Err(failed);
+    }
+    match made(folder).and_then(|()| open()) {
+        Ok(session) => {
+            let _ = std::fs::remove_dir_all(&aside);
+            Ok(session)
         }
-        done => done,
+        Err(again) => {
+            // Not the kept one's doing: it is there for the next start.
+            let _ = std::fs::remove_dir_all(folder);
+            let _ = std::fs::rename(&aside, folder);
+            Err(again)
+        }
     }
 }
 
@@ -1311,7 +1550,7 @@ fn open_kept_or_anew<S>(
 /// and is as fast as it gets. What TensorRT would not take of the model
 /// (nothing, so far) is the CUDA provider's.
 fn open_fast_session(model: &Path, input: &str, size: (u32, u32)) -> Result<Session, String> {
-    preload_tensorrt();
+    preload_tensorrt()?;
     let folder = engines_folder(&paths::data_dir(), size);
     let timings = paths::data_dir().join(ENGINES_FOLDER);
     let shape = format!("{input}:1x3x{}x{}", size.1, size.0);
@@ -1379,8 +1618,15 @@ impl Estimator {
     pub fn load(model: &Path) -> Result<Estimator, String> {
         // A runtime that is missing is not a GPU that refused.
         runtime()?;
-        let (session, runs_on) = load_with(has_gpu_provider(), |gpu| open_session(model, gpu))
-            .map_err(|e| format!("Could not load the depth model {}: {e}", model.display()))?;
+        let (session, runs_on) = load_with(has_gpu_provider(), |gpu| {
+            // The GPU is not asked for over a library that would end the
+            // program as it is opened.
+            match gpu_library_cut_short().filter(|_| gpu) {
+                Some(refusal) => Err(refusal),
+                None => open_session(model, gpu),
+            }
+        })
+        .map_err(|e| format!("Could not load the depth model {}: {e}", model.display()))?;
         let input = session
             .inputs()
             .first()
@@ -1423,12 +1669,28 @@ impl Estimator {
         // only where the CUDA provider works, which TensorRT needs too.
         if purpose == Purpose::Live && self.tensorrt && self.runs_on == RunsOn::Gpu {
             let (model, input) = (self.model.clone(), self.input.clone());
-            let fast = self
-                .fast
-                .session_for((w, h), move || open_fast_session(&model, &input, (w, h)));
+            let fast = self.fast.session_for(
+                (w, h),
+                one_at_a_time(move || open_fast_session(&model, &input, (w, h))),
+            );
             if let Some(session) = fast {
                 match run(session, &self.input, image, (w, h), None) {
                     Ok(map) => {
+                        // The CUDA provider's session made the maps until
+                        // this one and keeps the room of its last (below),
+                        // which nothing uses from here on: measured on an
+                        // RTX 5090 with a 3840 x 2160 screen, 5.5 GB of
+                        // the GPU's memory were held at the finest detail
+                        // with TensorRT at work, more than without it
+                        // (5.0 GB), and 3.2 GB at the next finest. One
+                        // more run of that session, asked to give the
+                        // room back, lets go of it; once, for a picture of
+                        // the size it has the room for.
+                        if self.gives_back && self.last_pixels == u64::from(w) * u64::from(h) {
+                            let _ =
+                                run(&mut self.session, &self.input, image, (w, h), Some("gpu:0"));
+                        }
+                        self.last_pixels = 0;
                         self.tell();
                         return Ok(map);
                     }
@@ -1695,6 +1957,61 @@ mod tests {
         assert!(loader_folders().contains(&PathBuf::from("/usr/lib")));
     }
 
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn the_gpu_is_not_asked_for_over_a_library_of_its_own_that_is_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        let folders = [dir.path().join("missing"), first.clone(), second.clone()];
+        let whole = library(true);
+        for folder in [&first, &second] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        // As NVIDIA's own folders hold them, cuDNN beside CUDA's or apart.
+        for name in ["libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13"] {
+            std::fs::write(first.join(name), &whole).unwrap();
+        }
+        for name in ["libcudnn.so.9", "libcudnn_cnn.so.9", "libcurand.so.10"] {
+            std::fs::write(second.join(name), &whole).unwrap();
+        }
+        // Not the GPU's, and none of this function's business.
+        std::fs::write(first.join("libonnxruntime.so"), &whole[..3000]).unwrap();
+        std::fs::write(second.join("libcudnn.txt"), &whole[..3000]).unwrap();
+        assert_eq!(cut_gpu_library(&folders), None);
+        assert_eq!(cut_gpu_library(&[]), None);
+        // Each of them cut short, where the loader would take it.
+        for (folder, name) in [
+            (&first, "libcudart.so.13"),
+            (&first, "libcublasLt.so.13"),
+            (&second, "libcudnn.so.9"),
+            (&second, "libcurand.so.10"),
+        ] {
+            let library = folder.join(name);
+            std::fs::write(&library, &whole[..3000]).unwrap();
+            let refusal = cut_gpu_library(&folders).unwrap();
+            assert!(
+                refusal.contains("not whole (3000 of 4368 bytes)")
+                    && refusal.ends_with(&format!("It is cut short: {}", library.display())),
+                "{refusal}"
+            );
+            // On the page: the processor, and why.
+            let line = RunsOn::Processor {
+                gpu_refused: Some(refusal),
+            }
+            .describe();
+            assert!(
+                line.contains("on the processor") && line.contains(name),
+                "{line}"
+            );
+            std::fs::write(&library, &whole).unwrap();
+        }
+        // One that is cut short behind a whole one of its name is never
+        // opened: the loader takes the first it finds.
+        std::fs::write(second.join("libcudart.so.13"), &whole[..3000]).unwrap();
+        assert_eq!(cut_gpu_library(&folders), None);
+        assert!(cut_gpu_library(&[second, first]).is_some());
+    }
+
     #[test]
     fn the_binding_accepts_the_runtimes_distributions_package() {
         // Built for the runtime interface of 1.22 the program refused the
@@ -1947,6 +2264,64 @@ mod tests {
     }
 
     #[test]
+    fn what_a_stopped_live_screen_left_being_made_is_finished_before_another_is_begun() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        use std::sync::mpsc::{channel, Receiver};
+        use std::sync::Arc;
+        // How many makers are at work, and the most there were at once.
+        let at_work = Arc::new((AtomicUsize::new(0), AtomicUsize::new(0)));
+        let maker = |name: &'static str, wait: Receiver<()>| {
+            let at_work = at_work.clone();
+            one_at_a_time(move || {
+                let now = at_work.0.fetch_add(1, SeqCst) + 1;
+                at_work.1.fetch_max(now, SeqCst);
+                wait.recv().unwrap();
+                at_work.0.fetch_sub(1, SeqCst);
+                Ok(name)
+            })
+        };
+        let wait_for = |what: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !what() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        assert_eq!(MAKING.load(SeqCst), 0);
+        // A live screen's model has TensorRT's form of it made. The live
+        // screen is stopped and the model let go of: the making goes on.
+        let (finish_first, wait) = channel();
+        let mut first = Fast::Unasked;
+        assert!(first
+            .session_for((1274, 714), maker("first", wait))
+            .is_none());
+        wait_for(&|| at_work.0.load(SeqCst) == 1);
+        drop(first);
+        // Started again: another model, which asks for the same at once
+        // (and would have it at once, were it made).
+        let (finish_second, wait) = channel();
+        finish_second.send(()).unwrap();
+        let mut second = Fast::Unasked;
+        assert!(second
+            .session_for((1274, 714), maker("second", wait))
+            .is_none());
+        // Both are counted, the one that waits too: the program does not
+        // leave as programs do while either is there.
+        wait_for(&|| MAKING.load(SeqCst) == 2);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(at_work.0.load(SeqCst), 1);
+        assert!(second
+            .session_for((1274, 714), || panic!("asked again"))
+            .is_none());
+        finish_first.send(()).unwrap();
+        assert_eq!(awaited(&mut second, (1274, 714)), Some("second"));
+        assert_eq!(at_work.1.load(SeqCst), 1, "two were made at once");
+        wait_for(&|| MAKING.load(SeqCst) == 0);
+        // Nothing being made: the program is not ended here.
+        leave_at_once_while_making(3);
+    }
+
+    #[test]
     fn a_tensorrt_that_refuses_is_told_of_and_not_asked_again() {
         let mut fast = Fast::Unasked;
         let made = fast.session_for((518, 294), || {
@@ -2017,10 +2392,34 @@ mod tests {
         assert_eq!(open_kept_or_anew(&folder, open(2)), Ok(2));
         assert!(!folder.join("old.profile").exists());
         assert!(holds_an_engine(&folder));
-        // And when that fails too, it is not tried a third time.
+        let aside = data.path().join("depth-engines/1274x714.kept");
+        assert!(!aside.exists());
+        // And when that fails too, it is not tried a third time. Then it
+        // was not the kept one that TensorRT could not do with (its own
+        // library is missing, the GPU's memory is taken): the kept one is
+        // there for the next start, as it was.
+        std::fs::write(folder.join("model_fp16_sm120.engine"), b"kept").unwrap();
+        std::fs::write(folder.join("model_fp16_sm120.profile"), b"its profile").unwrap();
         opened.set(0);
         assert!(open_kept_or_anew(&folder, open(9)).is_err());
         assert_eq!(opened.get(), 2);
+        assert_eq!(
+            std::fs::read(folder.join("model_fp16_sm120.engine")).unwrap(),
+            b"kept"
+        );
+        assert!(folder.join("model_fp16_sm120.profile").exists());
+        assert!(!aside.exists());
+        // What an earlier run left aside (it was ended there) is no
+        // obstacle to the next one.
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("left.engine"), b"left").unwrap();
+        opened.set(0);
+        assert_eq!(open_kept_or_anew(&folder, open(2)), Ok(2));
+        assert!(!aside.exists());
+        assert_eq!(
+            std::fs::read(folder.join("model_fp16_sm120.engine")).unwrap(),
+            b"made"
+        );
     }
 
     #[test]
@@ -2035,16 +2434,88 @@ mod tests {
         }
         for working in &folders {
             let mut tried = Vec::new();
-            preload_tensorrt_from(folders.clone(), |path| {
+            let preloaded = preload_tensorrt_from(&folders, |path| {
                 tried.push(path.to_owned());
                 path.starts_with(working)
             });
+            assert_eq!(preloaded, Ok(()));
             let mut expected = tensorrt_libraries(&folders[0]);
             if working == &folders[1] {
                 expected.extend(tensorrt_libraries(working));
             }
             assert_eq!(tried, expected);
         }
+    }
+
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn tensorrt_is_left_alone_where_one_of_its_libraries_is_cut_short() {
+        let data = tempfile::tempdir().unwrap();
+        let folders = [data.path().join("named"), data.path().join("installed")];
+        let whole = library(true);
+        // As the set-up leaves the folder: the two the provider is linked
+        // against, and what TensorRT opens by itself.
+        let names = [
+            "libnvinfer.so.10",
+            "libnvonnxparser.so.10",
+            "libnvinfer_plugin.so.10",
+            "libnvinfer_builder_resource_sm120.so.10.16.1",
+        ];
+        for folder in &folders {
+            std::fs::create_dir(folder).unwrap();
+            for name in names {
+                std::fs::write(folder.join(name), &whole).unwrap();
+            }
+            // Not TensorRT's, and looked at where it is loaded.
+            std::fs::write(folder.join("libonnxruntime.so.1.32.0"), &whole[..3000]).unwrap();
+        }
+        assert_eq!(cut_tensorrt_library(&folders), None);
+        let mut opened = 0;
+        assert_eq!(
+            preload_tensorrt_from(&folders, |_| {
+                opened += 1;
+                true
+            }),
+            Ok(())
+        );
+        assert_eq!(opened, 2);
+        // Each of them cut short, in the folder that is named and in the
+        // installed one: nothing of TensorRT is opened, not the whole ones
+        // of the other folder either, and the file is named at the end.
+        for folder in &folders {
+            for name in names {
+                let library = folder.join(name);
+                std::fs::write(&library, &whole[..3000]).unwrap();
+                let refusal = preload_tensorrt_from(&folders, |path| {
+                    panic!(
+                        "opened {} beside a library that is cut short",
+                        path.display()
+                    )
+                })
+                .unwrap_err();
+                assert!(
+                    refusal.contains("not whole (3000 of 4368 bytes)")
+                        && refusal.ends_with(&library.display().to_string()),
+                    "{refusal}"
+                );
+                // The page has the end of it: what is wrong with which
+                // file, however long the folder's name is.
+                let on_the_page = RunsOn::GpuOnly {
+                    tensorrt_refused: refusal,
+                }
+                .describe();
+                assert!(
+                    on_the_page.contains(&format!("It is cut short: {}", library.display())),
+                    "{on_the_page}"
+                );
+                std::fs::write(&library, &whole).unwrap();
+            }
+        }
+        // A folder that is not there holds nothing that is cut short.
+        assert_eq!(
+            cut_tensorrt_library(&[data.path().join("missing"), folders[1].clone()]),
+            None
+        );
     }
 
     #[test]
@@ -2296,10 +2767,14 @@ mod tests {
         use std::sync::Arc;
         // Nobody wants it: it goes.
         let model = Mutex::new(Some(1u32));
-        unload_from(&model, || true);
+        assert!(unload_from(&model, || true));
         assert_eq!(*model.lock().unwrap(), None);
-        unload_from(&model, || true);
+        // (and only then is there anything to give back to the system)
+        assert!(!unload_from(&model, || true));
         assert_eq!(*model.lock().unwrap(), None);
+        let wanted = Mutex::new(Some(1u32));
+        assert!(!unload_from(&wanted, || false));
+        assert_eq!(*wanted.lock().unwrap(), Some(1));
 
         // A live screen has ended and counted itself out (0 are left); its
         // letting go waits for the map being made. Meanwhile another has
