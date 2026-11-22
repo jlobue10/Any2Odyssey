@@ -575,21 +575,35 @@ fn preload_tensorrt() {
             .map(PathBuf::from)
             .into_iter()
             .chain([paths::data_dir().join(RUNTIME_FOLDER)]);
-        for folder in folders {
-            let libraries = tensorrt_libraries(&folder);
-            for library in &libraries {
-                // SAFETY: as for cuDNN: a library made to be loaded by
-                // programs, whose opening runs its own initializers only.
-                if let Ok(library) = unsafe { Library::open(Some(library), RTLD_NOW | RTLD_GLOBAL) }
-                {
-                    std::mem::forget(library);
-                }
+        preload_tensorrt_from(folders, |path| {
+            // Avoid handing an incomplete ELF file to the native loader.
+            if !path.is_file() || cut_short(path).is_some() {
+                return false;
             }
-            if !libraries.is_empty() {
-                return;
+            // SAFETY: as for cuDNN, these are the configured provider libraries.
+            if let Ok(library) = unsafe { Library::open(Some(path), RTLD_NOW | RTLD_GLOBAL) } {
+                std::mem::forget(library);
+                true
+            } else {
+                false
             }
-        }
+        });
     });
+}
+
+fn preload_tensorrt_from(
+    folders: impl IntoIterator<Item = PathBuf>,
+    mut open: impl FnMut(&Path) -> bool,
+) {
+    for folder in folders {
+        let mut loaded = false;
+        for path in tensorrt_libraries(&folder) {
+            loaded |= open(&path);
+        }
+        if loaded {
+            break;
+        }
+    }
 }
 
 /// How many bytes the library file `path` has, and how many its own headers
@@ -2007,6 +2021,30 @@ mod tests {
         opened.set(0);
         assert!(open_kept_or_anew(&folder, open(9)).is_err());
         assert_eq!(opened.get(), 2);
+    }
+
+    #[test]
+    fn an_unusable_override_allows_the_installed_tensorrt_folder_to_be_tried() {
+        let data = tempfile::tempdir().unwrap();
+        let folders = [data.path().join("override"), data.path().join("installed")];
+        for folder in &folders {
+            std::fs::create_dir(folder).unwrap();
+            for name in ["libnvinfer.so.10", "libnvonnxparser.so.10"] {
+                std::fs::write(folder.join(name), []).unwrap();
+            }
+        }
+        for working in &folders {
+            let mut tried = Vec::new();
+            preload_tensorrt_from(folders.clone(), |path| {
+                tried.push(path.to_owned());
+                path.starts_with(working)
+            });
+            let mut expected = tensorrt_libraries(&folders[0]);
+            if working == &folders[1] {
+                expected.extend(tensorrt_libraries(working));
+            }
+            assert_eq!(tried, expected);
+        }
     }
 
     #[test]
