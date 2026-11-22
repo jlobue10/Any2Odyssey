@@ -839,6 +839,22 @@ const STILL_TIME: Duration = Duration::from_secs(2);
 /// frames: as long as a picture takes at the most lines, and a little.
 const BETWEEN_FRAMES: Duration = Duration::from_millis(16);
 
+/// A mark for the pictures of one size and place that a render loop draws
+/// where the output reads them (`FrameSink::draw_bottom_up`): another for
+/// every such size and place of every loop of this program, and never 0.
+///
+/// Each loop counted its own from 1. An output outlives a live screen
+/// where the input is changed to a still picture and back while it shows,
+/// and its file's places then still hold the first loop's pictures under
+/// the marks the second begins with: a second screen of another shape at
+/// the same lines (another screen chosen in between) found them under its
+/// own mark and size, made nothing black, and was drawn with the first
+/// screen's picture left standing beside it.
+fn next_mark() -> u64 {
+    static MARKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    MARKS.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 fn render_loop(frames: &Frames, shared: &Shared) {
     let mut seen = 0u64;
     let (mut picture, mut pair, mut canvas, mut small) =
@@ -1069,7 +1085,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         let placed = (view, x, y, w, h);
         if blank != Some(placed) {
             blank = Some(placed);
-            mark += 1;
+            mark = next_mark();
         }
         let black = |canvas: &mut [u8]| {
             canvas.fill(0);
@@ -3061,6 +3077,65 @@ mod tests {
             waited[waited.len() / 2] < Duration::from_millis(6),
             "{waited:?}"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_second_live_screen_on_the_same_output_leaves_nothing_of_the_first() {
+        // The output stays while a live screen ends and another begins
+        // (the input changed to a still picture and back), and its file's
+        // places still hold the first one's pictures. In memory, where
+        // the picture is drawn in its place (`FrameSink::draw_bottom_up`).
+        let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
+            eprintln!("skipped: no /dev/shm to make a frame file in");
+            return;
+        };
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        // A live screen of `screen` pixels, all of one shade, for four
+        // pictures: one more than the file has places.
+        let shown = |screen: (u32, u32), shade: u8| {
+            let capture = crate::capture::Fed::start();
+            let shared = Arc::new(Shared::new());
+            shared.lines.store(360, Ordering::Relaxed);
+            *lock(&shared.sink) = (1, Some(sink.clone()));
+            let (frames, state) = (capture.frames(), shared.clone());
+            let worker = std::thread::spawn(move || render_loop(&frames, &state));
+            let before = sink.written().0;
+            let mut pictures = Vec::new();
+            for frame in 0..4u8 {
+                let bytes = [shade, shade, shade.wrapping_add(frame), 255]
+                    .repeat((screen.0 * screen.1) as usize);
+                capture.feed(screen.0, screen.1, &bytes);
+                let wanted = before + 1 + u32::from(frame);
+                eventually("a picture", || sink.written().0 == wanted);
+                pictures.push(sink.written());
+            }
+            shared.stop.store(true, Ordering::Relaxed);
+            drop(capture);
+            worker.join().unwrap();
+            pictures
+        };
+        // A screen of the panel's own shape fills both views.
+        shown((64, 36), 200);
+        // An upright one leaves room at both sides of each view, and that
+        // room is black in every picture, whichever place it was drawn in.
+        let (view, (x, _, w, _)) = layout((36, 64), 360);
+        assert!(x > 0 && x + w < view.0, "room at the sides: {x} {w}");
+        for (index, (_, width, height, bytes)) in shown((36, 64), 90).into_iter().enumerate() {
+            assert_eq!((width, height), (view.0 * 2, view.1));
+            for row in bytes.chunks_exact(width as usize * 4) {
+                for (column, pixel) in row.as_chunks::<4>().0.iter().enumerate() {
+                    let in_view = column as u32 % view.0;
+                    if in_view < x || in_view >= x + w {
+                        assert_eq!(
+                            pixel,
+                            &[0, 0, 0, 255],
+                            "picture {index}, column {column}: left over from the screen before"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
