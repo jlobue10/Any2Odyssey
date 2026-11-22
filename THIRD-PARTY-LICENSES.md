@@ -61,7 +61,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `flate2` | 1.1.11 | MIT OR Apache-2.0 |
 | `foldhash` | 0.1.5 | Zlib |
 | `foldhash` | 0.2.0 | Zlib |
-| `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 |
+| `form_urlencoded` | 1.2.3 | MIT OR Apache-2.0 |
 | `generic-array` | 0.14.7 | MIT |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 |
 | `global-hotkey` | 0.7.0 | Apache-2.0 OR MIT |
@@ -145,7 +145,7 @@ cargo tree -p any2odyssey --target x86_64-pc-windows-msvc -e normal --prefix non
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 |
 | `unicode-ident` | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 |
-| `url` | 2.5.8 | MIT OR Apache-2.0 |
+| `url` | 2.5.9 | MIT OR Apache-2.0 |
 | `utf8_iter` | 1.1.0 | Apache-2.0 OR MIT |
 | `utf_types` | 1.0.0 | Apache-2.0 OR MIT |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 |
@@ -246,7 +246,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `flate2` 1.1.11 | MIT | `Copyright (c) 2014-2026 Alex Crichton` |
 | `foldhash` 0.1.5 | Zlib | `Copyright (c) 2024 Orson Peters` |
 | `foldhash` 0.2.0 | Zlib | `Copyright (c) 2024 Orson Peters` |
-| `form_urlencoded` 1.2.2 | MIT | `Copyright (c) 2013-2016 The rust-url developers` |
+| `form_urlencoded` 1.2.3 | MIT | `Copyright (c) 2013-2016 The rust-url developers` |
 | `generic-array` 0.14.7 | MIT | `Copyright (c) 2015 Bartłomiej Kamiński` |
 | `getrandom` 0.4.3 | MIT | `Copyright (c) 2018-2026 The rust-random Project Developers`; `Copyright (c) 2014 The Rust Project Developers` |
 | `global-hotkey` 0.7.0 | MIT | `Copyright (c) 2022-2022 Tauri Programme within The Commons Conservancy` |
@@ -330,7 +330,7 @@ The notices are the copyright lines of the license and copyright files in each c
 | `typenum` 1.20.1 | MIT | `Copyright 2014 Paho Lurie-Gregg` |
 | `unicode-ident` 1.0.27 | MIT and Unicode-3.0 | `Copyright © 1991-2023 Unicode, Inc.` |
 | `unicode-segmentation` 1.13.3 | MIT | `Copyright (c) 2015 The Rust Project Developers` |
-| `url` 2.5.8 | MIT | `Copyright (c) 2013-2025 The rust-url developers` |
+| `url` 2.5.9 | MIT | `Copyright (c) 2013-2025 The rust-url developers` |
 | `utf8_iter` 1.1.0 | MIT | `Copyright Mozilla Foundation` |
 | `utf_types` 1.0.0 | MIT | `Copyright Mozilla Foundation` |
 | `web-time` 1.1.0 | MIT | `Copyright 2023 dAxpeDDa` |
