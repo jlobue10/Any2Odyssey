@@ -50,7 +50,9 @@ eframe = { version = "0.33", default-features = false, features = ["wayland", "x
 # newer. Not api-22: with it the binding also sets an automatic choice of
 # provider on every session, over which Microsoft's own build of 1.22.0 ends
 # the whole program (an assertion on an empty device list).
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-17", "cuda"] }
+# "tensorrt" only lets the program ask a runtime for its TensorRT provider;
+# a runtime without one (every distribution's, so far) is used as before.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-17", "cuda", "tensorrt"] }
 # Opens cuDNN ahead of ONNX Runtime's CUDA provider (see depth.rs).
 libloading = "0.8"
 

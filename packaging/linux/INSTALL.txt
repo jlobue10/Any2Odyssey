@@ -64,6 +64,10 @@ What the installer sets up, if you would rather do it by hand
   The model in your data folder is checked against a fixed SHA-256, at the download and again before the
   program loads it; to use another model, give its path in the environment variable
   ANY2ODYSSEY_DEPTH_MODEL.
+  With an NVIDIA GPU, CUDA 13 and cuDNN 9, `depth-runtime/setup.sh` makes a live screen's depth several
+  times as fast: it puts an ONNX Runtime with the TensorRT provider, and TensorRT, into your data folder
+  (a 4 GB download from PyPI and pypi.nvidia.com, 2.8 GB kept; needs python3 with venv). No
+  distribution's ONNX Runtime has that provider so far. The CHANGELOG of 1.0.5 has the rest.
 - Open and Save dialogs: zenity or kdialog.
 - A live screen: a desktop with the screen-cast portal (KDE Plasma and GNOME have it).
 - The Odyssey 3D's lens, eye tracker and weaver: these are Leia's, and they come from a Windows

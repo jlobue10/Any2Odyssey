@@ -2976,13 +2976,23 @@ mod bench {
                 let first = Instant::now();
                 map = Some(estimate());
                 let first = first.elapsed();
+                // Where TensorRT makes its form of the model for this
+                // size, the maps are timed once it has taken over.
+                let making = Instant::now();
+                while crate::depth::runs_on() == Some(crate::depth::RunsOn::Preparing)
+                    && making.elapsed() < Duration::from_secs(180)
+                {
+                    estimate();
+                }
+                let making = making.elapsed();
                 let start = Instant::now();
                 for _ in 0..20 {
                     estimate();
                 }
                 println!(
-                    "{sw}x{sh} depth {name} ({mw}x{mh}): first {first:?}, then {:?} each",
-                    start.elapsed() / 20
+                    "{sw}x{sh} depth {name} ({mw}x{mh}): first {first:?}, then {:?} each ({}; waited {making:.1?} for it)",
+                    start.elapsed() / 20,
+                    crate::depth::runs_on().map_or_else(String::new, |on| on.for_log()),
                 );
             }
             let map = map.unwrap();

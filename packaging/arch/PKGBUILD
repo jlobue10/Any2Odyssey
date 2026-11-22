@@ -10,7 +10,7 @@
 # with /usr/share/any2odyssey/wine-lens/setup.sh. Samsung's conversion engine
 # exists only on Windows; see docs/PLATFORMS.md.
 pkgname=any2odyssey
-pkgver=1.0.4
+pkgver=1.0.5
 pkgrel=1
 pkgdesc="Stereo viewer and Odyssey 3D output for images and a live screen (Linux edition of Any2Odyssey)"
 arch=('x86_64' 'aarch64')
@@ -22,6 +22,9 @@ makedepends=('cargo' 'clang')
 optdepends=('onnxruntime-cpu: AI depth (2D to 3D) on the CPU'
             'onnxruntime-cuda: AI depth on an NVIDIA GPU'
             'curl: any2odyssey --install-depth-model'
+            'python: TensorRT for a live screen (/usr/share/any2odyssey/depth-runtime/setup.sh)'
+            'cuda: TensorRT for a live screen'
+            'cudnn: TensorRT for a live screen'
             'zenity: Open and Save dialogs'
             'kdialog: Open and Save dialogs on KDE Plasma'
             'wayland: run in a Wayland session'
@@ -114,6 +117,8 @@ package() {
   find "$pkgdir/usr/share/any2odyssey/wine-lens" -name __pycache__ -type d -prune -exec rm -rf {} +
   chmod -R u=rwX,go=rX "$pkgdir/usr/share/any2odyssey/wine-lens"
   install -Dm644 "$repo/contrib/LICENSE-MIT" "$pkgdir/usr/share/licenses/any2odyssey/LICENSE-MIT"
+  # The set-up of an ONNX Runtime with TensorRT in the user's data folder (MIT), for the user to run.
+  install -Dm755 "$repo/contrib/depth-runtime/setup.sh" "$pkgdir/usr/share/any2odyssey/depth-runtime/setup.sh"
   # The udev rules for the Odyssey 3D (lens board for the user at the seat, no USB power saving for its
   # webcam); pacman's udev hook reloads the rules.
   install -Dm644 "$repo/contrib/wine-lens/70-any2odyssey-lens.rules" "$pkgdir/usr/lib/udev/rules.d/70-any2odyssey-lens.rules"

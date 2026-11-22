@@ -22,6 +22,20 @@ pub const MODEL_ENV: &str = "ANY2ODYSSEY_DEPTH_MODEL";
 /// Environment override for the runtime library, as the binding itself reads.
 const RUNTIME_ENV: &str = "ORT_DYLIB_PATH";
 const RUNTIME_LIBRARY: &str = "libonnxruntime.so";
+/// A runtime of the user's own in the data folder, used before the
+/// system's when it is there: `libonnxruntime.so.1` with its provider
+/// libraries, and TensorRT's beside them where it has that provider. No
+/// distribution packages a runtime with the TensorRT provider so far.
+const RUNTIME_FOLDER: &str = "depth-runtime";
+const RUNTIME_IN_FOLDER: &str = "libonnxruntime.so.1";
+/// Environment: the folder TensorRT's libraries (`libnvinfer.so.*`) are in,
+/// where the system's loader would not find them by itself.
+pub const TENSORRT_FOLDER_ENV: &str = "ANY2ODYSSEY_TENSORRT_DIR";
+/// Environment: `0` leaves TensorRT unused where it could be used.
+pub const TENSORRT_ENV: &str = "ANY2ODYSSEY_TENSORRT";
+/// Where the forms TensorRT makes of the model are kept, in the data
+/// folder: a folder for each size of picture.
+const ENGINES_FOLDER: &str = "depth-engines";
 
 /// Where `--install-depth-model` gets the model: the ONNX export of Depth
 /// Anything V2 Small (Apache-2.0) published by the ONNX community on Hugging
@@ -505,6 +519,79 @@ fn preload_cudnn() {
     }
 }
 
+/// The runtime library to load: the one named in `ORT_DYLIB_PATH`, else the
+/// user's own in the data folder ([`RUNTIME_FOLDER`]) when there is one,
+/// else the system's.
+fn runtime_library(named: Option<std::ffi::OsString>, data: &Path) -> PathBuf {
+    if let Some(named) = named.filter(|p| !p.is_empty()) {
+        return PathBuf::from(named);
+    }
+    let own = data.join(RUNTIME_FOLDER).join(RUNTIME_IN_FOLDER);
+    if own.is_file() {
+        own
+    } else {
+        PathBuf::from(RUNTIME_LIBRARY)
+    }
+}
+
+/// TensorRT's libraries in `folder` that the runtime's TensorRT provider
+/// is linked against, by name: the library itself before the one that
+/// reads models for it and needs it.
+fn tensorrt_libraries(folder: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|name| {
+                    ["libnvinfer.so.", "libnvonnxparser.so."]
+                        .iter()
+                        .any(|start| {
+                            name.strip_prefix(start)
+                                .is_some_and(|major| major.parse::<u32>().is_ok())
+                        })
+                })
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Make TensorRT's functions available to the runtime's TensorRT provider
+/// where TensorRT is not installed for the whole system: from the folder
+/// named in `ANY2ODYSSEY_TENSORRT_DIR`, and from the user's own runtime's
+/// folder. The libraries find the rest of TensorRT beside themselves.
+/// Done once, before the first use of the provider and not when the
+/// runtime is started: the library has 660 MB.
+fn preload_tensorrt() {
+    use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
+    static DONE: std::sync::Once = std::sync::Once::new();
+    DONE.call_once(|| {
+        let folders = std::env::var_os(TENSORRT_FOLDER_ENV)
+            .filter(|folder| !folder.is_empty())
+            .map(PathBuf::from)
+            .into_iter()
+            .chain([paths::data_dir().join(RUNTIME_FOLDER)]);
+        for folder in folders {
+            let libraries = tensorrt_libraries(&folder);
+            for library in &libraries {
+                // SAFETY: as for cuDNN: a library made to be loaded by
+                // programs, whose opening runs its own initializers only.
+                if let Ok(library) = unsafe { Library::open(Some(library), RTLD_NOW | RTLD_GLOBAL) }
+                {
+                    std::mem::forget(library);
+                }
+            }
+            if !libraries.is_empty() {
+                return;
+            }
+        }
+    });
+}
+
 /// How many bytes the library file `path` has, and how many its own headers
 /// say it has, when the second is the larger: a file that was cut short (a
 /// copy or a download that was interrupted). `None` for a whole file, and
@@ -647,10 +734,7 @@ fn runtime() -> Result<&'static Environment, String> {
     static LOADED: OnceLock<Result<Environment, String>> = OnceLock::new();
     LOADED
         .get_or_init(|| {
-            let library = std::env::var_os(RUNTIME_ENV)
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(RUNTIME_LIBRARY));
+            let library = runtime_library(std::env::var_os(RUNTIME_ENV), &paths::data_dir());
             if let Some(refusal) = unloadable(&library, &loader_folders()) {
                 return Err(refusal);
             }
@@ -686,6 +770,17 @@ fn model_threads() -> usize {
 pub enum RunsOn {
     /// On an NVIDIA GPU, through the runtime's CUDA provider.
     Gpu,
+    /// On an NVIDIA GPU through the CUDA provider, while TensorRT makes
+    /// its form of the model for a live screen's size ([`Fast`]).
+    Preparing,
+    /// On an NVIDIA GPU: a live screen's maps through the runtime's
+    /// TensorRT provider, in half precision, a still image's as [`Gpu`].
+    ///
+    /// [`Gpu`]: RunsOn::Gpu
+    TensorRt,
+    /// On an NVIDIA GPU through the CUDA provider, because TensorRT, which
+    /// the runtime has the provider for, could not be used.
+    GpuOnly { tensorrt_refused: String },
     /// On the processor. `gpu_refused` is what the runtime said when the
     /// GPU could not be used although the installed runtime is one with
     /// the CUDA provider: it was installed for the GPU, and the model is
@@ -698,6 +793,12 @@ impl RunsOn {
     pub fn describe(&self) -> String {
         match self {
             RunsOn::Gpu => "Depth is computed on the NVIDIA GPU.".into(),
+            RunsOn::Preparing => "Depth is computed on the NVIDIA GPU. A faster form of the model is being made for this screen's size with TensorRT, once: it takes over in about half a minute.".into(),
+            RunsOn::TensorRt => "Depth is computed on the NVIDIA GPU, a live screen's with TensorRT.".into(),
+            RunsOn::GpuOnly { tensorrt_refused } => format!(
+                "Depth is computed on the NVIDIA GPU, without TensorRT, which could not be used ({}). View logs has the whole message; TensorRT is tried again when the program is started again.",
+                gist(tensorrt_refused)
+            ),
             RunsOn::Processor { gpu_refused: None } => "Depth is computed on the processor.".into(),
             RunsOn::Processor {
                 gpu_refused: Some(why),
@@ -712,6 +813,11 @@ impl RunsOn {
     pub fn for_log(&self) -> String {
         match self {
             RunsOn::Gpu => "Depth model: runs on the NVIDIA GPU (ONNX Runtime's CUDA provider).".into(),
+            RunsOn::Preparing => "Depth model: runs on the NVIDIA GPU (ONNX Runtime's CUDA provider) while TensorRT makes its form of the model for this size of picture.".into(),
+            RunsOn::TensorRt => "Depth model: a live screen's maps run on the NVIDIA GPU through ONNX Runtime's TensorRT provider, in half precision.".into(),
+            RunsOn::GpuOnly { tensorrt_refused } => format!(
+                "Depth model: runs on the NVIDIA GPU (ONNX Runtime's CUDA provider), because TensorRT could not be used. ONNX Runtime's TensorRT provider said: {tensorrt_refused}"
+            ),
             RunsOn::Processor { gpu_refused: None } => {
                 "Depth model: runs on the processor (the installed ONNX Runtime has no CUDA provider).".into()
             }
@@ -935,8 +1041,93 @@ fn run_or_fall_back<S, R>(
     run(session, runs_on)
 }
 
+/// The model as TensorRT runs it, for a live screen: made for one size of
+/// picture, in half precision, several times as fast as the CUDA provider
+/// runs the model as it is (on an RTX 5090 a 3840 x 2160 screen's map at
+/// the finest detail in 4 ms for 27, at the standard one in 0.8 ms for 3).
+///
+/// Making it takes TensorRT from ten seconds to half a minute, for every
+/// size once: it is kept in the data folder and opened from there in a
+/// fifth of a second. So it is made on a thread of its own while the maps
+/// go on being made as before, and takes over when it is there. A still
+/// image is never run this way: each has a size of its own, and waits for
+/// nothing that half a minute could save.
+enum Fast<S> {
+    /// Not asked for yet.
+    Unasked,
+    /// Being made for pictures of `size` (width, height).
+    Making {
+        size: (u32, u32),
+        made: std::sync::mpsc::Receiver<Result<S, String>>,
+    },
+    Ready {
+        size: (u32, u32),
+        session: S,
+    },
+    /// TensorRT could not make it, or could not run it, and said this. It
+    /// is not asked again while the program runs.
+    Refused(String),
+}
+
+impl<S: Send + 'static> Fast<S> {
+    /// The session for pictures of `size`, when it is there. When none is
+    /// there and none is being made for that size, `make` begins to make
+    /// one on a thread of its own; a later call finds it.
+    fn session_for(
+        &mut self,
+        size: (u32, u32),
+        make: impl FnOnce() -> Result<S, String> + Send + 'static,
+    ) -> Option<&mut S> {
+        use std::sync::mpsc::{channel, TryRecvError};
+        let made = match self {
+            Fast::Making { size: its, made } if *its == size => Some(made.try_recv()),
+            _ => None,
+        };
+        match made {
+            Some(Ok(Ok(session))) => *self = Fast::Ready { size, session },
+            Some(Ok(Err(why))) => *self = Fast::Refused(why),
+            Some(Err(TryRecvError::Empty)) => return None,
+            Some(Err(TryRecvError::Disconnected)) => {
+                *self = Fast::Refused("the thread that made it ended without a word".into());
+            }
+            None => {}
+        }
+        match self {
+            Fast::Refused(_) => return None,
+            Fast::Ready { size: its, .. } if *its == size => {}
+            // None yet, or one for another size (another depth detail,
+            // another screen): that one is let go of, and what is still
+            // being made for it is finished for the next time and dropped.
+            _ => {
+                let (send, made) = channel();
+                let begun = std::thread::Builder::new()
+                    .name("depth-tensorrt".into())
+                    .spawn(move || {
+                        let _ = send.send(make());
+                    });
+                *self = match begun {
+                    Ok(_) => Fast::Making { size, made },
+                    Err(e) => Fast::Refused(format!("no thread could be started to make it: {e}")),
+                };
+                return None;
+            }
+        }
+        match self {
+            Fast::Ready { session, .. } => Some(session),
+            _ => None,
+        }
+    }
+}
+
 pub struct Estimator {
     session: Session,
+    /// The model as TensorRT runs it, for a live screen.
+    fast: Fast<Session>,
+    /// Whether that may be asked for: the runtime has the TensorRT
+    /// provider, and `ANY2ODYSSEY_TENSORRT` does not say no.
+    tensorrt: bool,
+    /// What was last told of where the model runs.
+    told: RunsOn,
     input: String,
     model: PathBuf,
     runs_on: RunsOn,
@@ -1044,9 +1235,101 @@ fn has_gpu_provider() -> bool {
     ort::ep::CUDA::is_available().unwrap_or(false)
 }
 
+/// Whether the installed runtime was built with the TensorRT provider, and
+/// the user has not said to leave it (`ANY2ODYSSEY_TENSORRT=0`).
+fn may_use_tensorrt(said: Option<std::ffi::OsString>, provider: impl FnOnce() -> bool) -> bool {
+    said.is_none_or(|said| said != "0") && provider()
+}
+
+fn has_tensorrt_provider() -> bool {
+    use ort::ep::ExecutionProvider as _;
+    ort::ep::TensorRT::is_available().unwrap_or(false)
+}
+
+/// The folder TensorRT's form of the model for pictures of `width` x
+/// `height` is kept in.
+fn engines_folder(data: &Path, (width, height): (u32, u32)) -> PathBuf {
+    data.join(ENGINES_FOLDER).join(format!("{width}x{height}"))
+}
+
+/// Whether `folder` holds a form of the model TensorRT made earlier.
+fn holds_an_engine(folder: &Path) -> bool {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().extension().is_some_and(|e| e == "engine"))
+}
+
+/// Open `folder`'s form of the model with `open`, which makes it where
+/// there is none. One that was kept and cannot be opened is cleared away
+/// and made anew, once: TensorRT reads only what the same TensorRT wrote,
+/// for the same kind of GPU, and after an update of either the kept one
+/// would otherwise refuse TensorRT for good.
+fn open_kept_or_anew<S>(
+    folder: &Path,
+    mut open: impl FnMut() -> Result<S, String>,
+) -> Result<S, String> {
+    let kept = holds_an_engine(folder);
+    std::fs::create_dir_all(folder)
+        .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))?;
+    match open() {
+        Err(_) if kept => {
+            let _ = std::fs::remove_dir_all(folder);
+            std::fs::create_dir_all(folder)
+                .map_err(|e| format!("the folder {} could not be made: {e}", folder.display()))?;
+            open()
+        }
+        done => done,
+    }
+}
+
+/// A session that runs the model through the TensorRT provider, in half
+/// precision, for pictures of `size` (width, height) only: made for one
+/// size TensorRT's form of the model is made when the session is opened
+/// and is as fast as it gets. What TensorRT would not take of the model
+/// (nothing, so far) is the CUDA provider's.
+fn open_fast_session(model: &Path, input: &str, size: (u32, u32)) -> Result<Session, String> {
+    preload_tensorrt();
+    let folder = engines_folder(&paths::data_dir(), size);
+    let timings = paths::data_dir().join(ENGINES_FOLDER);
+    let shape = format!("{input}:1x3x{}x{}", size.1, size.0);
+    open_kept_or_anew(&folder, || {
+        let tensorrt = ort::ep::TensorRT::default()
+            .with_fp16(true)
+            .with_engine_cache(true)
+            .with_engine_cache_path(folder.display())
+            .with_timing_cache(true)
+            // What TensorRT learned of this GPU while it made one size
+            // shortens the making of the next: kept for all of them.
+            .with_timing_cache_path(timings.display())
+            .with_profile_min_shapes(&shape)
+            .with_profile_opt_shapes(&shape)
+            .with_profile_max_shapes(&shape)
+            .build()
+            .error_on_failure();
+        open_session_with(model, &[tensorrt, ort::ep::CUDA::default().build()])
+    })
+}
+
 /// A session for the model, on the GPU through the CUDA provider if `gpu`,
 /// where every failure of the provider is an error.
 fn open_session(model: &Path, gpu: bool) -> Result<Session, String> {
+    if gpu {
+        open_session_with(
+            model,
+            &[ort::ep::CUDA::default().build().error_on_failure()],
+        )
+    } else {
+        open_session_with(model, &[])
+    }
+}
+
+/// A session for the model with `providers`, the first before the next.
+fn open_session_with(
+    model: &Path,
+    providers: &[ort::ep::ExecutionProviderDispatch],
+) -> Result<Session, String> {
     let said = |e: &dyn std::fmt::Display| without_trace(&e.to_string()).to_owned();
     // On the processor the model is given a few cores, not all of them:
     // it runs beside whatever shows its result (a live screen's
@@ -1059,9 +1342,9 @@ fn open_session(model: &Path, gpu: bool) -> Result<Session, String> {
         // Idle model threads sleep instead of spinning on their cores.
         .with_intra_op_spinning(false)
         .map_err(|e| said(&e))?;
-    if gpu {
+    if !providers.is_empty() {
         builder = builder
-            .with_execution_providers([ort::ep::CUDA::default().build().error_on_failure()])
+            .with_execution_providers(providers)
             .map_err(|e| said(&e))?;
     }
     builder.commit_from_file(model).map_err(|e| said(&e))
@@ -1088,6 +1371,9 @@ impl Estimator {
         note_runs_on(&runs_on);
         Ok(Estimator {
             session,
+            fast: Fast::Unasked,
+            tensorrt: may_use_tensorrt(std::env::var_os(TENSORRT_ENV), has_tensorrt_provider),
+            told: runs_on.clone(),
             input,
             model: model.to_owned(),
             runs_on,
@@ -1112,6 +1398,24 @@ impl Estimator {
             return Err("The source contains no image.".into());
         }
         let (w, h) = model_size(width, height, long_side);
+        // A live screen's map is TensorRT's where it can be ([`Fast`]):
+        // only where the CUDA provider works, which TensorRT needs too.
+        if purpose == Purpose::Live && self.tensorrt && self.runs_on == RunsOn::Gpu {
+            let (model, input) = (self.model.clone(), self.input.clone());
+            let fast = self
+                .fast
+                .session_for((w, h), move || open_fast_session(&model, &input, (w, h)));
+            if let Some(session) = fast {
+                match run(session, &self.input, image, (w, h), None) {
+                    Ok(map) => {
+                        self.tell();
+                        return Ok(map);
+                    }
+                    // The map is made as it was before there was TensorRT.
+                    Err(why) => self.fast = Fast::Refused(why),
+                }
+            }
+        }
         // The runtime keeps the room of the largest picture it has worked
         // on, for the next one: on a GPU 0.9 GB of the card's memory at
         // standard detail, 2.8 GB at the finest and 6.9 GB after one square
@@ -1126,7 +1430,6 @@ impl Estimator {
         self.last_pixels = pixels;
         let input = self.input.clone();
         let model = self.model.clone();
-        let was = self.runs_on.clone();
         let not_taken = std::cell::Cell::new(false);
         let map = run_or_fall_back(
             &mut self.session,
@@ -1134,8 +1437,8 @@ impl Estimator {
             |session, runs_on| {
                 // The room is the GPU's where the model runs there.
                 let room = give_back.then_some(match runs_on {
-                    RunsOn::Gpu => "gpu:0",
                     RunsOn::Processor { .. } => "cpu:0",
+                    _ => "gpu:0",
                 });
                 match run(session, &input, image, (w, h), room) {
                     // A runtime built without that kind of room refuses the
@@ -1155,10 +1458,30 @@ impl Estimator {
         if not_taken.get() {
             self.gives_back = false;
         }
-        if self.runs_on != was {
-            note_runs_on(&self.runs_on);
-        }
+        self.tell();
         map
+    }
+
+    /// Tell where the model runs when that is no longer what was told.
+    fn tell(&mut self) {
+        let now = shown(&self.runs_on, &self.fast);
+        if now != self.told {
+            note_runs_on(&now);
+            self.told = now;
+        }
+    }
+}
+
+/// What is told of a model that runs at `runs_on` with TensorRT's form of
+/// it as far as `fast`.
+fn shown<S>(runs_on: &RunsOn, fast: &Fast<S>) -> RunsOn {
+    match (runs_on, fast) {
+        (RunsOn::Gpu, Fast::Making { .. }) => RunsOn::Preparing,
+        (RunsOn::Gpu, Fast::Ready { .. }) => RunsOn::TensorRt,
+        (RunsOn::Gpu, Fast::Refused(why)) => RunsOn::GpuOnly {
+            tensorrt_refused: why.clone(),
+        },
+        _ => runs_on.clone(),
     }
 }
 
@@ -1488,6 +1811,178 @@ mod tests {
             Ok(7)
         );
         assert_eq!((session, runs.get(), reopened.get()), ("gpu", 1, 2));
+    }
+
+    /// Ask `fast` for `size` until it answers otherwise than "not yet".
+    fn awaited(fast: &mut Fast<&'static str>, size: (u32, u32)) -> Option<&'static str> {
+        for _ in 0..2000 {
+            let never = || -> Result<&'static str, String> { panic!("made a second time") };
+            if let Some(session) = fast.session_for(size, never) {
+                return Some(*session);
+            }
+            if matches!(fast, Fast::Refused(_)) {
+                return None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("nothing was made");
+    }
+
+    #[test]
+    fn tensorrts_form_of_the_model_is_made_aside_and_takes_over_when_it_is_there() {
+        use std::sync::mpsc::channel;
+        let mut fast = Fast::Unasked;
+        assert_eq!(shown(&RunsOn::Gpu, &fast), RunsOn::Gpu);
+        // Asked for: nothing yet, and the maps go on as before while it
+        // is made, for as long as that takes.
+        let (finish, finished) = channel::<()>();
+        let made = fast.session_for((1274, 714), move || {
+            finished.recv().unwrap();
+            Ok("for 1274 x 714")
+        });
+        assert!(made.is_none());
+        assert_eq!(shown(&RunsOn::Gpu, &fast), RunsOn::Preparing);
+        for _ in 0..3 {
+            let again = fast.session_for((1274, 714), || panic!("made a second time"));
+            assert!(again.is_none());
+        }
+        // Made: it is the one for that size from then on.
+        finish.send(()).unwrap();
+        assert_eq!(awaited(&mut fast, (1274, 714)), Some("for 1274 x 714"));
+        assert_eq!(awaited(&mut fast, (1274, 714)), Some("for 1274 x 714"));
+        assert_eq!(shown(&RunsOn::Gpu, &fast), RunsOn::TensorRt);
+        // Another depth detail: that size's is made, and nothing made for
+        // another size is run meanwhile.
+        let other = fast.session_for((518, 294), || Ok("for 518 x 294"));
+        assert!(other.is_none());
+        assert_eq!(awaited(&mut fast, (518, 294)), Some("for 518 x 294"));
+        // A processor's model has nothing to do with any of it.
+        let on_processor = RunsOn::Processor { gpu_refused: None };
+        assert_eq!(shown(&on_processor, &fast), on_processor);
+    }
+
+    #[test]
+    fn a_tensorrt_that_refuses_is_told_of_and_not_asked_again() {
+        let mut fast = Fast::Unasked;
+        let made = fast.session_for((518, 294), || {
+            Err("libnvinfer.so.10: cannot open".to_owned())
+        });
+        assert!(made.is_none());
+        assert_eq!(awaited(&mut fast, (518, 294)), None);
+        assert_eq!(
+            shown(&RunsOn::Gpu, &fast),
+            RunsOn::GpuOnly {
+                tensorrt_refused: "libnvinfer.so.10: cannot open".into()
+            }
+        );
+        // Not for this size and not for another.
+        for size in [(518, 294), (770, 434)] {
+            assert!(fast
+                .session_for(size, || -> Result<&str, String> { panic!("asked again") })
+                .is_none());
+        }
+        let said = shown(&RunsOn::Gpu, &fast);
+        assert!(said.describe().contains("libnvinfer.so.10: cannot open"));
+        assert!(said.for_log().contains("TensorRT provider said"));
+        // What it is made by ends without a word: that is a refusal too.
+        let mut fast: Fast<&str> = Fast::Unasked;
+        assert!(fast
+            .session_for((518, 294), || panic!("the maker broke"))
+            .is_none());
+        assert_eq!(awaited(&mut fast, (518, 294)), None);
+    }
+
+    #[test]
+    fn a_kept_form_of_the_model_that_cannot_be_opened_is_made_anew_once() {
+        use std::cell::Cell;
+        let data = tempfile::tempdir().unwrap();
+        let folder = engines_folder(data.path(), (1274, 714));
+        assert!(folder.ends_with("depth-engines/1274x714"));
+        let opened = Cell::new(0);
+        let open = |works_from: u32| {
+            let (opened, folder) = (&opened, &folder);
+            move || {
+                opened.set(opened.get() + 1);
+                assert!(
+                    folder.is_dir(),
+                    "the folder is there before TensorRT writes"
+                );
+                if opened.get() >= works_from {
+                    std::fs::write(folder.join("model_fp16_sm120.engine"), b"made").unwrap();
+                    Ok(opened.get())
+                } else {
+                    Err("the engine was made by another TensorRT".to_owned())
+                }
+            }
+        };
+        // Nothing kept: what TensorRT says of making it is the answer.
+        assert_eq!(
+            open_kept_or_anew(&folder, open(9)),
+            Err("the engine was made by another TensorRT".to_owned())
+        );
+        assert_eq!(opened.take(), 1);
+        assert_eq!(open_kept_or_anew(&folder, open(1)), Ok(1));
+        assert!(holds_an_engine(&folder));
+        // Kept and opened: once.
+        opened.set(0);
+        assert_eq!(open_kept_or_anew(&folder, open(1)), Ok(1));
+        // Kept by another TensorRT: cleared away, and made anew.
+        std::fs::write(folder.join("old.profile"), b"old").unwrap();
+        opened.set(0);
+        assert_eq!(open_kept_or_anew(&folder, open(2)), Ok(2));
+        assert!(!folder.join("old.profile").exists());
+        assert!(holds_an_engine(&folder));
+        // And when that fails too, it is not tried a third time.
+        opened.set(0);
+        assert!(open_kept_or_anew(&folder, open(9)).is_err());
+        assert_eq!(opened.get(), 2);
+    }
+
+    #[test]
+    fn a_runtime_of_the_users_own_is_used_before_the_systems_and_after_a_named_one() {
+        let data = tempfile::tempdir().unwrap();
+        let system = PathBuf::from(RUNTIME_LIBRARY);
+        assert_eq!(runtime_library(None, data.path()), system);
+        assert_eq!(runtime_library(Some("".into()), data.path()), system);
+        let folder = data.path().join(RUNTIME_FOLDER);
+        std::fs::create_dir(&folder).unwrap();
+        // TensorRT's libraries alone are no runtime.
+        for name in [
+            "libnvonnxparser.so.10",
+            "libnvinfer.so.10",
+            "libnvinfer.so.10.16.1",
+            "libnvinfer_plugin.so.10",
+            "libnvinfer_builder_resource_sm120.so.10.16.1",
+        ] {
+            std::fs::write(folder.join(name), b"").unwrap();
+        }
+        assert_eq!(runtime_library(None, data.path()), system);
+        std::fs::write(folder.join(RUNTIME_IN_FOLDER), b"").unwrap();
+        assert_eq!(
+            runtime_library(None, data.path()),
+            folder.join(RUNTIME_IN_FOLDER)
+        );
+        assert_eq!(
+            runtime_library(Some("/opt/ort/libonnxruntime.so".into()), data.path()),
+            PathBuf::from("/opt/ort/libonnxruntime.so")
+        );
+        // The two the provider is linked against, the library first.
+        assert_eq!(
+            tensorrt_libraries(&folder),
+            [
+                folder.join("libnvinfer.so.10"),
+                folder.join("libnvonnxparser.so.10")
+            ]
+        );
+        assert!(tensorrt_libraries(&data.path().join("none")).is_empty());
+    }
+
+    #[test]
+    fn tensorrt_is_asked_for_where_the_runtime_has_it_unless_the_user_says_no() {
+        assert!(may_use_tensorrt(None, || true));
+        assert!(may_use_tensorrt(Some("1".into()), || true));
+        assert!(!may_use_tensorrt(None, || false));
+        assert!(!may_use_tensorrt(Some("0".into()), || panic!("asked")));
     }
 
     #[test]

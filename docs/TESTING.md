@@ -144,6 +144,18 @@ The changes made in 0.9.1 to 1.0.3 (audit rounds 11 to 24, the Windows setup pro
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
 
+New in 1.0.5 (TensorRT for a live screen's depth; the model alone was timed on an RTX 5090 on 2026-11-21, nothing was shown on the monitor):
+
+- Linux, an NVIDIA GPU, CUDA 13 and cuDNN 9, after `depth-runtime/setup.sh` from the archive or `/usr/share/any2odyssey/depth-runtime/setup.sh` of the Arch package (it ends with "done" and leaves `depth-runtime` in the data folder with `libonnxruntime.so.1` and `libnvinfer.so.10`): a live screen starts as before, and the line under *Depth detail* says a faster form of the model is being made; within a minute it says "a live screen's with TensorRT", and View logs has one line for each of the two. The picture does not stall or go flat while it is made or when it takes over, and the depth looks as it did.
+- The same, stopped and started again, and with the program closed in between: the TensorRT line is there within a second of the first picture, and `depth-engines` in the data folder has one folder for each depth detail that was used, with an `.engine` file of some 55 MB.
+- The same with a film at *Finest* and `env A2O_LIVE_TIMES=/tmp/live-times.txt any2odyssey`: the `d` lines are as many a second as the film has pictures (23.5 a second were measured without TensorRT, at 40 ms a map), their two times under 10 ms apart, and a `p` line's last number is its own frame or the one before, no longer two before.
+- Changing *Depth detail* while a live screen runs, several times quickly: the picture goes on, each detail is made once, and the last one chosen is the one that takes over.
+- A still image with 2D → 3D while that runtime is installed: the map is made as before, and `depth-engines` gets no folder for it.
+- `env ANY2ODYSSEY_TENSORRT=0 any2odyssey`: the line says "Depth is computed on the NVIDIA GPU." and stays.
+- With `depth-runtime/libnvinfer.so.10` renamed: a live screen works, the line says the NVIDIA GPU without TensorRT and why, and View logs has what the TensorRT provider said. Renamed back, the next start uses TensorRT again.
+- With an `.engine` file in `depth-engines` overwritten by a few bytes of anything: that size is made anew at the next live screen, and TensorRT is used.
+- Without `depth-runtime` (the distribution's ONNX Runtime): everything as in 1.0.4, and no `depth-engines` folder appears.
+
 New in 1.0.4 (measured on the G90XF on 2026-11-21 with a film in a browser on the Odyssey's own screen, KDE Plasma at 120 Hz, 2160 lines, *Finest*; the checks below are what was not seen, and the same again on other screens and desktops):
 
 - Linux, live screen, the Odyssey's own screen on KDE Plasma, a film of 24 pictures a second: pans are as even as on the screen without 3D. Measured from outside while it runs, the pictures reach the output 41.7 ms apart, give or take a few, and no longer 32 and 48 (the sequence number at byte 12 of `$XDG_RUNTIME_DIR/any2odyssey-weaver-*.frames` rises by 2 for every picture; 1.0.3 gave 597 gaps of 32.1 ms and 841 of 48.4 in a minute). A video of 60 a second: 16.7 ms apart, without a gap of 32 twice a second.

@@ -42,6 +42,9 @@ rm -rf "$STAGE/wine-lens/tests"
 # tree (CI runs it before this script); that is no part of the archive.
 find "$STAGE/wine-lens" -name __pycache__ -type d -prune -exec rm -rf {} +
 install -m644 contrib/LICENSE-MIT "$STAGE/wine-lens/LICENSE-MIT"
+# The set-up of an ONNX Runtime with TensorRT in the data folder (MIT as well), for the user to run.
+install -Dm755 contrib/depth-runtime/setup.sh "$STAGE/depth-runtime/setup.sh"
+install -m644 contrib/LICENSE-MIT "$STAGE/depth-runtime/LICENSE-MIT"
 sh scripts/check-doc-links.sh "$STAGE"
 
 # The same archive from the same files: fixed order, owner and times.
