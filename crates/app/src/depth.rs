@@ -793,6 +793,63 @@ fn unloadable(library: &Path, folders: &[PathBuf]) -> Option<String> {
     })
 }
 
+/// What to say instead of asking for the GPU, when a library of CUDA's or
+/// of cuDNN's that the system's loader would take is cut short
+/// ([`cut_short`]): of each such name the first file in `folders`, as the
+/// loader has it.
+///
+/// cuDNN is opened here by its name ([`preload_cudnn`]) and the others by
+/// the runtime's CUDA provider, wherever the loader finds them. Seen with
+/// the real libraries: with `libcudnn.so.9`, `libcublas.so.13`,
+/// `libcudart.so.13` or `libcurand.so.10` cut short in a folder of
+/// `LD_LIBRARY_PATH` the whole program ended with "Bus error" at the first
+/// depth map, where the processor would have done.
+fn cut_gpu_library(folders: &[PathBuf]) -> Option<String> {
+    const OF_THE_GPU: [&str; 5] = [
+        "libcudnn",
+        "libcublas",
+        "libcudart",
+        "libcurand",
+        "libcufft",
+    ];
+    let mut seen = std::collections::HashSet::new();
+    for folder in folders {
+        let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                name.to_str().is_some_and(|name| {
+                    OF_THE_GPU.iter().any(|start| name.starts_with(start)) && name.contains(".so")
+                })
+            })
+            .collect();
+        names.sort();
+        for name in names {
+            let library = folder.join(&name);
+            // One of that name in a folder before this one is the loader's.
+            if !seen.insert(name) {
+                continue;
+            }
+            if let Some((length, needed)) = cut_short(&library) {
+                return Some(format!(
+                    "one of the GPU's libraries is not whole ({length} of {needed} bytes), as an interrupted copy or download leaves it. Install or copy it again. It is cut short: {}",
+                    library.display()
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// [`cut_gpu_library`] for the folders of this run, looked at once.
+fn gpu_library_cut_short() -> Option<String> {
+    static CUT: OnceLock<Option<String>> = OnceLock::new();
+    CUT.get_or_init(|| cut_gpu_library(&loader_folders()))
+        .clone()
+}
+
 /// Load the runtime library once per process. The outcome is remembered: a
 /// library that could not be loaded will not appear while the program runs.
 fn runtime() -> Result<&'static Environment, String> {
@@ -803,7 +860,11 @@ fn runtime() -> Result<&'static Environment, String> {
             if let Some(refusal) = unloadable(&library, &loader_folders()) {
                 return Err(refusal);
             }
-            preload_cudnn();
+            // (not a cuDNN that is cut short: the model is then run on
+            // the processor, `Estimator::load`)
+            if gpu_library_cut_short().is_none() {
+                preload_cudnn();
+            }
             let builder = ort::init_from(&library).map_err(|e| {
                 format!(
                     "ONNX Runtime could not be loaded ({}): {e}. It has to be version 1.{} or newer. Install your distribution's package (Arch: onnxruntime-cpu or onnxruntime-cuda; Debian and Ubuntu: libonnxruntime-dev; Fedora and openSUSE: onnxruntime-devel), or name a newer library with ORT_DYLIB_PATH.",
@@ -1557,8 +1618,15 @@ impl Estimator {
     pub fn load(model: &Path) -> Result<Estimator, String> {
         // A runtime that is missing is not a GPU that refused.
         runtime()?;
-        let (session, runs_on) = load_with(has_gpu_provider(), |gpu| open_session(model, gpu))
-            .map_err(|e| format!("Could not load the depth model {}: {e}", model.display()))?;
+        let (session, runs_on) = load_with(has_gpu_provider(), |gpu| {
+            // The GPU is not asked for over a library that would end the
+            // program as it is opened.
+            match gpu_library_cut_short().filter(|_| gpu) {
+                Some(refusal) => Err(refusal),
+                None => open_session(model, gpu),
+            }
+        })
+        .map_err(|e| format!("Could not load the depth model {}: {e}", model.display()))?;
         let input = session
             .inputs()
             .first()
@@ -1887,6 +1955,61 @@ mod tests {
         // The loader's own folders are absolute, whatever the variable holds.
         assert!(loader_folders().iter().all(|folder| folder.is_absolute()));
         assert!(loader_folders().contains(&PathBuf::from("/usr/lib")));
+    }
+
+    #[cfg(all(target_pointer_width = "64", target_endian = "little"))]
+    #[test]
+    fn the_gpu_is_not_asked_for_over_a_library_of_its_own_that_is_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        let folders = [dir.path().join("missing"), first.clone(), second.clone()];
+        let whole = library(true);
+        for folder in [&first, &second] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        // As NVIDIA's own folders hold them, cuDNN beside CUDA's or apart.
+        for name in ["libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13"] {
+            std::fs::write(first.join(name), &whole).unwrap();
+        }
+        for name in ["libcudnn.so.9", "libcudnn_cnn.so.9", "libcurand.so.10"] {
+            std::fs::write(second.join(name), &whole).unwrap();
+        }
+        // Not the GPU's, and none of this function's business.
+        std::fs::write(first.join("libonnxruntime.so"), &whole[..3000]).unwrap();
+        std::fs::write(second.join("libcudnn.txt"), &whole[..3000]).unwrap();
+        assert_eq!(cut_gpu_library(&folders), None);
+        assert_eq!(cut_gpu_library(&[]), None);
+        // Each of them cut short, where the loader would take it.
+        for (folder, name) in [
+            (&first, "libcudart.so.13"),
+            (&first, "libcublasLt.so.13"),
+            (&second, "libcudnn.so.9"),
+            (&second, "libcurand.so.10"),
+        ] {
+            let library = folder.join(name);
+            std::fs::write(&library, &whole[..3000]).unwrap();
+            let refusal = cut_gpu_library(&folders).unwrap();
+            assert!(
+                refusal.contains("not whole (3000 of 4368 bytes)")
+                    && refusal.ends_with(&format!("It is cut short: {}", library.display())),
+                "{refusal}"
+            );
+            // On the page: the processor, and why.
+            let line = RunsOn::Processor {
+                gpu_refused: Some(refusal),
+            }
+            .describe();
+            assert!(
+                line.contains("on the processor") && line.contains(name),
+                "{line}"
+            );
+            std::fs::write(&library, &whole).unwrap();
+        }
+        // One that is cut short behind a whole one of its name is never
+        // opened: the loader takes the first it finds.
+        std::fs::write(second.join("libcudart.so.13"), &whole[..3000]).unwrap();
+        assert_eq!(cut_gpu_library(&folders), None);
+        assert!(cut_gpu_library(&[second, first]).is_some());
     }
 
     #[test]
