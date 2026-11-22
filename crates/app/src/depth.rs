@@ -1573,6 +1573,21 @@ impl Estimator {
             if let Some(session) = fast {
                 match run(session, &self.input, image, (w, h), None) {
                     Ok(map) => {
+                        // The CUDA provider's session made the maps until
+                        // this one and keeps the room of its last (below),
+                        // which nothing uses from here on: measured on an
+                        // RTX 5090 with a 3840 x 2160 screen, 5.5 GB of
+                        // the GPU's memory were held at the finest detail
+                        // with TensorRT at work, more than without it
+                        // (5.0 GB), and 3.2 GB at the next finest. One
+                        // more run of that session, asked to give the
+                        // room back, lets go of it; once, for a picture of
+                        // the size it has the room for.
+                        if self.gives_back && self.last_pixels == u64::from(w) * u64::from(h) {
+                            let _ =
+                                run(&mut self.session, &self.input, image, (w, h), Some("gpu:0"));
+                        }
+                        self.last_pixels = 0;
                         self.tell();
                         return Ok(map);
                     }
