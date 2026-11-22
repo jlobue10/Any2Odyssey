@@ -199,6 +199,23 @@ static void patch_import(HMODULE module, const char *dll, void *from, void *to)
     }
 }
 
+/* A whole number from 0 to `most` in what an environment variable holds, with nothing around it but blanks.
+ * The latency asked for was read with atoi(), which makes 0 of a variable that is empty and of "abc", 1 of
+ * "1e5" and 25 of "25ms": the weaver was then told that, as the time or the frames it was to reckon with. */
+static bool whole_number(const char *text, long most, unsigned long long *number)
+{
+    char *end;
+    long value;
+
+    if (!text) return false;
+    value = strtol(text, &end, 10);
+    if (end == text) return false;
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end || value < 0 || value > most) return false;
+    *number = (unsigned long long)value;
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     static const char *const sr_modules[] = { "SimulatedRealityDisplays.dll", "SimulatedRealityOpenGL.dll",
@@ -320,22 +337,23 @@ int main(int argc, char **argv)
      * and A2O_WEAVER_LATENCY_FRAMES=<n> tells it n frames and leaves the time to the weaver (which went on
      * saying 40000 right after it was told 3 frames; whether it ever works the time out there is not
      * known). A2O_WEAVER_STATS begins with the time the weaver reckons with and says it again every
-     * second. */
+     * second. A variable that does not hold a whole number of microseconds up to 200000, or of frames up
+     * to 16, counts as not set, and the statistics say "(not told)" after it; so do they after the frames
+     * where a time was told as well. */
     {
         const char *time = getenv("A2O_WEAVER_LATENCY_US"), *frames = getenv("A2O_WEAVER_LATENCY_FRAMES");
-        int microseconds = time ? atoi(time) : 25000;
-        if (time && (microseconds < 0 || microseconds > 200000)) microseconds = 25000;
-        if (frames && !time && atoi(frames) >= 0 && atoi(frames) <= 16)
-            a2o_weaver_latency_frames(weaver, (unsigned long long)atoi(frames));
-        else
-            a2o_weaver_latency_time(weaver, (unsigned long long)microseconds);
-    }
-    if (stats) {
-        const char *frames = getenv("A2O_WEAVER_LATENCY_FRAMES"), *time = getenv("A2O_WEAVER_LATENCY_US");
-        fprintf(stats, "latency %llu microseconds%s%s%s%s\n", a2o_weaver_latency(weaver),
-                frames ? ", asked for frames: " : "", frames ? frames : "",
-                time ? ", asked for microseconds: " : "", time ? time : "");
-        fflush(stats);
+        unsigned long long microseconds = 25000, count = 0;
+        bool timed = whole_number(time, 200000, &microseconds);
+        bool counted = !timed && whole_number(frames, 16, &count);
+
+        if (counted) a2o_weaver_latency_frames(weaver, count);
+        else a2o_weaver_latency_time(weaver, microseconds);
+        if (stats) {
+            fprintf(stats, "latency %llu microseconds%s%s%s%s%s%s\n", a2o_weaver_latency(weaver),
+                    frames ? ", asked for frames: " : "", frames ? frames : "", frames && !counted ? " (not told)" : "",
+                    time ? ", asked for microseconds: " : "", time ? time : "", time && !timed ? " (not told)" : "");
+            fflush(stats);
+        }
     }
     even = !getenv("A2O_WEAVER_EVEN") || strcmp(getenv("A2O_WEAVER_EVEN"), "0");
     QueryPerformanceFrequency(&qpf);

@@ -10,6 +10,9 @@ What is checked: a film whose pictures come a whole number of refreshes apart, s
 for as many refreshes each; no picture is left until the next one has taken its place (it would never be
 shown); pictures that come at no such rate are shown at the turn that finds them; the first pictures, a
 pause and the turn counter's wrap.
+
+The same way, at the end: which values of A2O_WEAVER_LATENCY_US and A2O_WEAVER_LATENCY_FRAMES the host takes
+for a number (`whole_number`).
 """
 import math
 import random
@@ -269,6 +272,64 @@ class EvenlyTests(unittest.TestCase):
     def test_the_turn_counter_may_wrap(self):
         written = self.film(24, 120, 60)
         self.assertEqual(self.shown(written, 120, start=2**32 - 3000).taken, self.shown(written, 120).taken)
+
+
+READER = r"""
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "number.h"
+/* arguments: the most, then texts; output: for each text the number read, or "no" */
+int main(int argc, char **argv)
+{
+    for (int i = 2; i < argc; i++) {
+        unsigned long long number = 77;
+        if (whole_number(argv[i], atol(argv[1]), &number)) printf("%llu\n", number);
+        else printf("no\n");
+    }
+    return 0;
+}
+"""
+
+
+class LatencyTests(unittest.TestCase):
+    """How the host reads A2O_WEAVER_LATENCY_US and A2O_WEAVER_LATENCY_FRAMES (`whole_number`, cut out of the
+    source file like the rule above): what is not a whole number in range is not told to Leia's weaver as
+    if it were one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.built = tempfile.TemporaryDirectory(prefix="a2o-weaver-latency-test-")
+        cls.addClassCleanup(cls.built.cleanup)
+        folder = Path(cls.built.name)
+        lines = SOURCE.read_text(encoding="utf-8").split("\n")
+        head = next(i for i, line in enumerate(lines) if line.startswith("static bool whole_number("))
+        end = next(i for i in range(head, len(lines)) if lines[i] == "}")
+        (folder / "number.h").write_text("\n".join(lines[head:end + 1]) + "\n")
+        (folder / "reader.c").write_text(READER)
+        cls.program = str(folder / "reader")
+        subprocess.run(["cc", "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined",
+                        "-o", cls.program, str(folder / "reader.c")], check=True)
+
+    def read(self, most, *texts):
+        result = subprocess.run([self.program, str(most), *texts], capture_output=True, text=True, timeout=60,
+                                env={"ASAN_OPTIONS": "detect_leaks=0"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.split()
+
+    def test_a_whole_number_in_range_is_read(self):
+        self.assertEqual(self.read(200000, "25000", "40000", "0", "200000", " 25000", "25000 ", "+300", "007"),
+                         ["25000", "40000", "0", "200000", "25000", "25000", "300", "7"])
+        self.assertEqual(self.read(16, "3", "0", "16"), ["3", "0", "16"])
+
+    def test_anything_else_counts_as_not_set(self):
+        # atoi() made 0 of the first three, 1 of "1e5", 25 of the next three and 25000 of "25000abc"; out of
+        # range has always meant the weaver's 25 ms; the long ones wrapped round to whatever they came to.
+        for text in ("", " ", "abc", "1e5", "25ms", "25.5", "25,000", "25000abc", "0x100", "-1", "-0.5", "200001",
+                     "99999999999999999999", "4294992296", "-4294942296", "18446744073709576616"):
+            with self.subTest(text):
+                self.assertEqual(self.read(200000, text), ["no"])
+        self.assertEqual(self.read(16, "17", "-1", "", "abc", "2.5", "4294967299"), ["no"] * 6)
 
 
 if __name__ == "__main__":
