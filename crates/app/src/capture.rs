@@ -1578,6 +1578,8 @@ impl Fed {
         (slot.width, slot.height, slot.stride) = (width, height, width as usize * 4);
         slot.bgr = true;
         slot.serial += 1;
+        // As the stream's thread notes it for a frame of the desktop's.
+        slot.arrived = Some(Instant::now());
         drop(slot);
         *lock(&self.0.unread) = (0, "");
         *lock(&self.0.state) = CaptureState::Running { width, height };

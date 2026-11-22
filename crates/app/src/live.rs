@@ -198,11 +198,71 @@ impl Pace {
     /// were no more even than the frames. So no such picture is begun
     /// when a frame is about to come; the map is drawn with from that
     /// frame on.
+    /// Whether a steady run's next frame is still to come at `now`: not
+    /// yet later than such frames are late by.
+    fn awaited(&self, now: Instant) -> bool {
+        self.next.is_some_and(|next| now <= next + Pace::HOLD * 2)
+    }
+
     fn next_within(&self, now: Instant, time: Duration) -> bool {
         self.next.is_some_and(|next| {
             let early = next.checked_sub(Pace::HOLD).unwrap_or(next);
             now + time >= early && now <= next + Pace::HOLD * 2
         })
+    }
+}
+
+/// What the model last answered, and how long its answers take: what a
+/// frame's picture can wait for ([`Answered::worth_waiting`]).
+///
+/// A frame's picture was made as soon as the frame was there, with the
+/// depth map of the frame before, or of the one before that; when the
+/// frame's own map came, a second picture of the same frame was made with
+/// it, unless the next frame was about to come. Measured from outside on
+/// the Odyssey's own screen with a film of 24 pictures a second (2160
+/// lines, *Finest*, TensorRT, 50 seconds): 1199 frames made 1366 pictures,
+/// one to nine frames in every second shown twice, 14 ms apart, with two
+/// depth maps, and the others once with a map now of their own frame and
+/// now of the one before. What moves in the film stands at another depth
+/// from picture to picture, and its edges with it. Since the model answers
+/// in a few milliseconds (`depth::Fast`), a frame's picture waits for the
+/// frame's own map and is made once.
+#[derive(Default)]
+struct Answered {
+    /// The frame the model answered last, with a map or without.
+    serial: u64,
+    /// How long its answers have been taking, the last ones counting most.
+    took: Option<Duration>,
+}
+
+impl Answered {
+    /// Maps that take longer than this are not waited for.
+    const QUICK: Duration = Duration::from_millis(12);
+    /// And a screen that is no film waits only for maps as quick as this:
+    /// a pointer or a game is not to be later by more.
+    const AT_ONCE: Duration = Duration::from_millis(4);
+    /// The longest a picture waits.
+    const LONGEST: Duration = Duration::from_millis(20);
+
+    fn note(&mut self, serial: u64, took: Duration) {
+        self.serial = serial;
+        self.took = Some(self.took.map_or(took, |before| (before * 3 + took) / 4));
+    }
+
+    /// How long the picture of a frame the model has just been given is
+    /// worth holding back for the frame's own map: twice what the maps
+    /// have been taking and a little, where that is short. Nothing before
+    /// the model has answered once (its first answer takes seconds), and
+    /// nothing where it is slow: a processor's model, or a GPU's without
+    /// TensorRT at the finer details.
+    fn worth_waiting(&self, film: bool) -> Option<Duration> {
+        let took = self.took?;
+        let quick = if film {
+            Answered::QUICK
+        } else {
+            Answered::AT_ONCE
+        };
+        (took <= quick).then(|| (took * 2 + Duration::from_millis(2)).min(Answered::LONGEST))
     }
 }
 
@@ -469,6 +529,10 @@ struct Shared {
     for_model: Mutex<ForModel>,
     model_wanted: Condvar,
     depth: Mutex<DepthState>,
+    /// Which frame the model answered last, for a picture that waits for
+    /// its frame's own map.
+    answered: Mutex<Answered>,
+    map_answered: Condvar,
     stats: Mutex<Stats>,
     /// The screen's frames, for the depth thread to say that a map is
     /// there ([`Frames::look_again`]); none where nothing waits for them.
@@ -490,6 +554,8 @@ impl Shared {
             for_model: Mutex::new(ForModel::default()),
             model_wanted: Condvar::new(),
             depth: Mutex::new(DepthState::default()),
+            answered: Mutex::new(Answered::default()),
+            map_answered: Condvar::new(),
             stats: Mutex::new(Stats::default()),
             frames: Mutex::new(None),
         }
@@ -702,6 +768,8 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     // When the frame taken last arrived.
     let mut arrived = None;
     let mut pace = Pace::default();
+    // The frame whose picture waited for the frame's own map, and got it.
+    let mut own_map = None;
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // A little more than sixty pictures a second at most: a faster
         // screen (the Odyssey runs at 165) would double the work for depth
@@ -760,8 +828,28 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             .map(|arrived| pace.show_at(arrived));
         seen = found.serial;
         if let Some(size) = for_model {
+            // How long this frame's own map is worth waiting for, by the
+            // maps before it (`Answered`).
+            let wait = new_frame
+                .then(|| lock(&shared.answered).worth_waiting(pace.next.is_some()))
+                .flatten();
             lock(&shared.for_model).give(&mut small, size, found.serial, found.detail);
             shared.model_wanted.notify_one();
+            if let Some(wait) = wait {
+                let until = Instant::now() + wait;
+                let mut answered = lock(&shared.answered);
+                while answered.serial != found.serial && !shared.stop.load(Ordering::Relaxed) {
+                    let Some(left) = until.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    answered = shared
+                        .map_answered
+                        .wait_timeout(answered, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
+                }
+                own_map = (answered.serial == found.serial).then_some(found.serial);
+            }
         }
         if let Some(early) = held.and_then(|at| at.checked_duration_since(Instant::now())) {
             std::thread::sleep(early);
@@ -770,6 +858,14 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // to come (`Pace::next_within`): what it would have shown is in
         // that frame's picture.
         if !new_frame && pace.next_within(Instant::now(), BETWEEN_FRAMES) {
+            continue;
+        }
+        // And none at all between two frames of a film whose picture was
+        // made with its own map (`Answered`): there is nothing newer to
+        // show it with, and easing that map in further would be a second
+        // picture of the frame at another depth. A film that has stopped
+        // is no longer awaited, and its last frame is eased in.
+        if !new_frame && own_map == Some(found.serial) && pace.awaited(Instant::now()) {
             continue;
         }
         // The depth map's version as this turn leaves it.
@@ -1125,6 +1221,13 @@ fn depth_loop_with(
         // processor, and Fine, Finer and Finest were one and the same on a
         // 3840 x 2160 screen.
         let begun = times::wanted().then(Instant::now);
+        let asked = Instant::now();
+        // Whoever holds a picture back for this frame's map is told that
+        // the model has answered, with a map or without.
+        let answer = |serial: u64| {
+            lock(&shared.answered).note(serial, asked.elapsed());
+            shared.map_answered.notify_all();
+        };
         let estimated = match RgbaImage::from_raw(width, height, std::mem::take(&mut pixels)) {
             Some(frame) => {
                 let mut estimated = estimate(&frame, detail);
@@ -1168,6 +1271,7 @@ fn depth_loop_with(
                 // there to be seen: the render thread would otherwise send
                 // the same frame once more.
                 lock(&shared.for_model).busy = false;
+                answer(serial);
                 // The render loop is told, and does not wait for the
                 // screen's next frame to draw with this map and to give
                 // the model its next frame. It did wait. A film's frame
@@ -1199,6 +1303,7 @@ fn depth_loop_with(
                 // inference is failing. Recovery starts a fresh smoother too.
                 lock(&shared.depth).forget();
                 lock(&shared.for_model).busy = false;
+                answer(serial);
                 {
                     let mut stats = lock(&shared.stats);
                     stats.depth_rate = 0.0;
@@ -2924,6 +3029,125 @@ mod tests {
                 .map(|(_, _, map)| (map.width(), map.height()));
             assert_eq!(answer, Some(model), "{what}: the size the model saw");
         }
+    }
+
+    #[test]
+    fn a_picture_waits_for_its_frames_own_map_only_where_the_model_is_quick() {
+        let ms = Duration::from_millis;
+        let mut answered = Answered::default();
+        // Before the model has answered once: its first answer takes
+        // seconds, and nothing is known of the next.
+        assert_eq!(answered.worth_waiting(true), None);
+        // TensorRT at the finest detail: 6 ms a map. Twice that and a little.
+        answered.note(1, ms(6));
+        assert_eq!(answered.worth_waiting(true), Some(ms(14)));
+        // A desktop or a game is not made later by that much...
+        assert_eq!(answered.worth_waiting(false), None);
+        // ...but by a map that is there almost at once.
+        let mut at_once = Answered::default();
+        at_once.note(1, ms(1));
+        assert_eq!(at_once.worth_waiting(false), Some(ms(4)));
+        // The CUDA provider at the finest detail, or a processor: a film's
+        // picture is made as before, with the map there is.
+        let mut slow = Answered::default();
+        slow.note(1, ms(27));
+        assert_eq!(slow.worth_waiting(true), None);
+        // One slow answer among quick ones (the GPU busy for a moment)
+        // does not end the waiting, and several do.
+        answered.note(2, ms(26));
+        assert_eq!(answered.took, Some(ms(11)));
+        assert!(answered.worth_waiting(true).is_some());
+        answered.note(3, ms(26));
+        assert_eq!(answered.worth_waiting(true), None);
+        assert_eq!(answered.serial, 3);
+    }
+
+    /// Feed a film of `frames` frames, 40 ms apart, to the render loop and
+    /// to a model that takes `model` for a map, and say how many pictures
+    /// were written for the last `counted` of them.
+    #[cfg(target_os = "linux")]
+    fn pictures_of_a_film(frames: u32, counted: u32, model: Duration) -> u32 {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = FrameSink::in_folder(dir.path()).unwrap();
+        let capture = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(720, Ordering::Relaxed);
+        *lock(&shared.sink) = (1, Some(sink.clone()));
+        *lock(&shared.frames) = Some(capture.frames());
+        let (source, state) = (capture.frames(), shared.clone());
+        let render = std::thread::spawn(move || render_loop(&source, &state));
+        let state = shared.clone();
+        let depth = std::thread::spawn(move || {
+            depth_loop_with(&state, |frame, detail| {
+                std::thread::sleep(model);
+                let (w, h) = crate::depth::model_size(frame.width(), frame.height(), detail);
+                // Another map for every frame, as a film's are.
+                let near = f32::from(frame.get_pixel(0, 0).0[0]);
+                let values = (0..w * h).map(|i| (i % w) as f32 + near).collect();
+                Ok(RawDepth::new(w, h, values).ok())
+            })
+        });
+        let began = Instant::now();
+        let mut before = 0;
+        for frame in 0..frames {
+            if let Some(early) = (Duration::from_millis(40) * frame).checked_sub(began.elapsed()) {
+                std::thread::sleep(early);
+            }
+            if frame == frames - counted {
+                before = sink.written().0;
+            }
+            let screen: Vec<u8> = (0..320 * 180)
+                .flat_map(|i| [frame as u8, (i % 251) as u8, (i % 7) as u8, 255])
+                .collect();
+            capture.feed(320, 180, &screen);
+        }
+        // What the last frame is still shown with, before a film that has
+        // stopped is eased in.
+        std::thread::sleep(Duration::from_millis(35));
+        let written = sink.written().0 - before;
+        shared.stop.store(true, Ordering::Relaxed);
+        shared.model_wanted.notify_all();
+        render.join().unwrap();
+        depth.join().unwrap();
+        written
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "a matter of milliseconds: run alone"]
+    fn a_films_frame_is_shown_once_with_its_own_map_where_the_model_is_quick() {
+        // Twenty frames once the run is told for a film and the model for
+        // quick. Each made a second picture, with its map eased in a step
+        // further or with the map that came after the first, some 14 ms
+        // after its first: a frame at two depths, and forty pictures here.
+        // It is a matter of milliseconds: with the other tests running
+        // beside it on every core, frames are missed and runs end, and
+        // anything from 13 to 25 pictures was counted. So it is run alone:
+        // `cargo test -p any2odyssey a_films_frame -- --ignored`
+        let written = pictures_of_a_film(36, 20, Duration::from_millis(2));
+        assert!(
+            (20..=22).contains(&written),
+            "{written} pictures for 20 frames"
+        );
+    }
+
+    #[test]
+    fn a_film_is_awaited_until_its_next_frame_is_overdue() {
+        let ms = Duration::from_millis;
+        let mut pace = Pace::default();
+        let start = Instant::now();
+        // No run yet: nothing is awaited.
+        assert!(!pace.awaited(start));
+        let mut arrived = start;
+        for frame in 0..12 {
+            arrived = start + ms(40) * frame;
+            pace.show_at(arrived);
+        }
+        // Between two frames, and for as long after the next was due as
+        // such frames are late by; a film that has stopped is not.
+        assert!(pace.awaited(arrived + ms(14)));
+        assert!(pace.awaited(arrived + ms(40) + Pace::HOLD));
+        assert!(!pace.awaited(arrived + ms(40) + Pace::HOLD * 2 + ms(1)));
     }
 
     #[test]

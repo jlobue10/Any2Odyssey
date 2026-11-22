@@ -144,6 +144,15 @@ The changes made in 0.9.1 to 1.0.3 (audit rounds 11 to 24, the Windows setup pro
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
 
+Since 1.0.5 (a film's pictures shown evenly; worked out from the times of 1199 pictures measured from outside on 2026-11-21, neither change seen on the monitor):
+
+- Linux, the G90XF at 120 Hz, after `any2odyssey-setup`, `env A2O_WEAVER_STATS='Z:\tmp\weaver-stats.txt' any2odyssey`, a film of 24 pictures a second on the live screen with TensorRT: of each second's line `shown for turns:` nearly all pictures are under `5` (a few under 4 and 6 in a minute, none under 1, 2 or 3 once the film runs), and `left for the next turn` is not 0. Pans and moving things do not hitch.
+- The same started with `A2O_WEAVER_EVEN=0` as well: the line says "counted only", and the pictures under 4 and 6 are several in every second: that is how it was.
+- The same film, counted from outside (the sequence number at byte 12 of the frame file): 24 pictures a second, none less than 30 ms after the one before.
+- A desktop that is worked on, and a game or a video of 60 pictures a second, on the live screen: the pointer and the picture are no later than in 1.0.5, and `left for the next turn` stays 0.
+- A film that is paused: its last frame's depth settles within a second as before, and the film goes on evenly when it is started again.
+- Without TensorRT (`ANY2ODYSSEY_TENSORRT=0`) at *Finest*: the live screen is as in 1.0.5.
+
 New in 1.0.5 (TensorRT for a live screen's depth; the model alone was timed on an RTX 5090 on 2026-11-21, nothing was shown on the monitor):
 
 - Linux, an NVIDIA GPU, CUDA 13 and cuDNN 9, after `depth-runtime/setup.sh` from the archive or `/usr/share/any2odyssey/depth-runtime/setup.sh` of the Arch package (it ends with "done" and leaves `depth-runtime` in the data folder with `libonnxruntime.so.1` and `libnvinfer.so.10`): a live screen starts as before, and the line under *Depth detail* says a faster form of the model is being made; within a minute it says "a live screen's with TensorRT", and View logs has one line for each of the two. The picture does not stall or go flat while it is made or when it takes over, and the depth looks as it did.
