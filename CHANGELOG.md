@@ -2,9 +2,11 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## Unreleased
+## 1.0.4 (2026-11-21)
 
-Four changes on Linux that come from measuring 1.0.3 while it showed a film on the Odyssey's own screen (KDE Plasma 6.8.3, the screen at 120 Hz, 2160 lines, *Finest*), and two diagnostics. They were then run and measured on that screen; what was not is said at the end.
+Linux only: the live screen and the Odyssey 3D output, from measuring 1.0.3 while it showed a film on the Odyssey's own screen (KDE Plasma 6.8.3, the screen at 120 Hz, 2160 lines, *Finest*), and some diagnostics. Windows is unchanged but for the version.
+
+After updating, run `any2odyssey-setup` once (or `install.sh` from the archive), with no 3D picture showing: the program that shows the picture through Leia's weaver and one script of the Odyssey 3D set-up changed, and an update of the program does not replace them in the data folder. They were then run and measured on that screen; what was not is said at the end.
 
 ### Changed
 
@@ -34,7 +36,7 @@ Linux, the Odyssey 3D output:
 
 ### Hardware verification
 
-Seen and measured on the G90XF on 2026-11-21 (KDE Plasma 6.8.3, 120 Hz, a film in a browser on the Odyssey's own screen, 2160 lines, *Finest*): the numbers above, and "looking much better" after the depth model's input was made faster. Not seen: anything at another refresh rate, on another desktop, with a game or a video of 60 a second. `docs/TESTING.md`, "Since 1.0.3", has the checks.
+Seen and measured on the G90XF on 2026-11-21 (KDE Plasma 6.8.3, 120 Hz, a film in a browser on the Odyssey's own screen, 2160 lines, *Finest*): the numbers above, and "looking much better" after the depth model's input was made faster. Not seen: anything at another refresh rate, on another desktop, with a game or a video of 60 a second. `docs/TESTING.md`, "New in 1.0.4", has the checks.
 
 ## 1.0.3 (2026-11-21)
 
