@@ -78,7 +78,8 @@ static volatile LONG quit;
  * So the turns between the pictures are counted. Where the last 32 came a whole number of turns apart in
  * the mean, three turns at the least (a film or a video whose rate goes into the display's: 24, 30 or 40 a
  * second at 120 Hz), a picture that is found sooner after the last was shown than that is left until its
- * turn, for three turns at the most. After a late picture the ones that follow are then all found "early"
+ * turn, for three turns at the most (one where the pictures are three turns apart and two where they are
+ * four: see the end of evenly_hold). After a late picture the ones that follow are then all found "early"
  * and shown later than they could be: five refreshes each again, with a refresh or two between their
  * arrival and the turn that takes them, which the next late one uses and no picture is shown for longer.
  * Pictures that come at no such rate (25 a second at 120 Hz, a desktop, a game) are shown as they are
@@ -97,7 +98,7 @@ struct evenly {
 /* Whether the picture `sequence`, found at this turn or left at an earlier one, is to wait for the next. */
 static bool evenly_hold(struct evenly *e, LONG sequence)
 {
-    unsigned span, whole, apart, odd = 0;
+    unsigned span, whole, apart, wait, odd = 0;
 
     if (sequence != e->seen) { /* found now: its turn is noted, left or not */
         e->seen = sequence;
@@ -116,8 +117,13 @@ static bool evenly_hold(struct evenly *e, LONG sequence)
         if (gap + 1 < whole || gap > whole + 1) odd++;
     }
     if (odd > 2) return false;
-    /* Sooner than that many turns after the one before: left, for a few turns at the most. */
-    return e->turn - e->shown_at < whole && e->turn - e->found[EVEN_RUN - 1] < EVEN_WAIT;
+    /* Sooner than that many turns after the one before: left, for a few turns at the most, and never into a
+     * turn that may find the next picture. That one comes `whole` turns after this one, give or take one,
+     * and takes its place in the header: a picture still left then was never shown. Left for three turns
+     * whatever the run, that was one picture in 25 of 50 a second at 144 Hz (2.88 turns apart, which pass
+     * for three), and some of a source three turns apart whenever its clock ran ahead of the display's. */
+    wait = whole - 2 < EVEN_WAIT ? whole - 2 : EVEN_WAIT;
+    return e->turn - e->shown_at < whole && e->turn - e->found[EVEN_RUN - 1] < wait;
 }
 
 static void fail(const char *reason)
