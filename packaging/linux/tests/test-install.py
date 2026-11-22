@@ -494,6 +494,21 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue((home / ".local/bin/any2odyssey").is_file(), "the other installation was removed")
                 shutil.rmtree(home)
 
+    def test_the_removal_says_that_the_runtime_for_tensorrt_stays(self):
+        # 2.8 GB that depth-runtime/setup.sh put into the data folder: the last line named the settings
+        # and the depth model only.
+        prefix = self.root / "prefix"
+        data = Path(self.env["ANY2ODYSSEY_DATA_DIR"])
+        for there in [False, True]:
+            with self.subTest(runtime=there):
+                self.assertEqual(self.install(prefix).returncode, 0)
+                if there:
+                    (data / "depth-runtime").mkdir(parents=True)
+                result = self.run_installer("--uninstall", "--prefix", str(prefix))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(f"rm -r {data}/depth-runtime {data}/depth-engines\n" in result.stdout, there, result.stdout)
+                self.assertEqual((data / "depth-runtime").is_dir(), there)
+
     def test_the_installed_copy_removes_the_installation_it_is_part_of(self):
         # Without --prefix it used to look in ~/.local wherever it was: nothing of its own was removed,
         # and an installation there was.
