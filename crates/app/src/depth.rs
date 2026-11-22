@@ -1290,15 +1290,49 @@ static ESTIMATOR: Mutex<Option<Estimator>> = Mutex::new(None);
 /// more for its second: seconds, where a GPU is started for the first
 /// time.
 pub fn unload_if(unused: impl FnOnce() -> bool) {
-    unload_from(&ESTIMATOR, unused);
+    if unload_from(&ESTIMATOR, unused) {
+        return_freed_memory();
+    }
 }
 
-fn unload_from<T>(model: &Mutex<Option<T>>, unused: impl FnOnce() -> bool) {
+/// Whether a model was let go of.
+fn unload_from<T>(model: &Mutex<Option<T>>, unused: impl FnOnce() -> bool) -> bool {
     let mut slot = model.lock().unwrap_or_else(|e| e.into_inner());
     // Whoever wants the model from here on waits for this, and loads it
     // after: nobody's model is taken from under them.
     if unused() {
-        *slot = None;
+        slot.take().is_some()
+    } else {
+        false
+    }
+}
+
+/// Have the C library give back to the system what the model's sessions
+/// took of the processor's memory and have freed.
+///
+/// The sessions are opened and let go of on threads that come and go with
+/// each live screen, and glibc keeps what a thread has freed in a store of
+/// that thread's kind, for the next thread: up to eight such stores for
+/// every processor core, each with what the largest session left in it.
+/// Measured with TensorRT's session (an RTX 5090, 32 cores, a live screen
+/// started and stopped once a second, each time with the model loaded and
+/// let go of): the program's own memory was 1.0 GB after the first stop,
+/// 4.7 GB after ten, 9.1 GB after forty and 10 GB after sixty, with
+/// nothing loaded; with the CUDA provider alone 0.9 GB became 1.8 GB.
+/// Asked here, each time the model has been let go of, glibc gives it
+/// back: 1.9 GB at the most over sixty such stops, 1.1 GB with the CUDA
+/// provider alone.
+fn return_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> std::ffi::c_int;
+        }
+        // SAFETY: glibc's own call, with nothing of ours in its hands; it
+        // takes the allocator's locks as `free` does.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
@@ -2610,10 +2644,14 @@ mod tests {
         use std::sync::Arc;
         // Nobody wants it: it goes.
         let model = Mutex::new(Some(1u32));
-        unload_from(&model, || true);
+        assert!(unload_from(&model, || true));
         assert_eq!(*model.lock().unwrap(), None);
-        unload_from(&model, || true);
+        // (and only then is there anything to give back to the system)
+        assert!(!unload_from(&model, || true));
         assert_eq!(*model.lock().unwrap(), None);
+        let wanted = Mutex::new(Some(1u32));
+        assert!(!unload_from(&wanted, || false));
+        assert_eq!(*wanted.lock().unwrap(), Some(1));
 
         // A live screen has ended and counted itself out (0 are left); its
         // letting go waits for the map being made. Meanwhile another has
