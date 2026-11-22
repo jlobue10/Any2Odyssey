@@ -1501,6 +1501,10 @@ mod tests {
         // The frame can be given to the model again, and the picture made
         // with the old depth is known to be out of date.
         assert!(!lock(&shared.for_model).busy);
+        // And a picture that is held back for this frame's own map is
+        // told that the model has answered, though with none: it is not
+        // held for the whole of its wait.
+        assert_eq!(lock(&shared.answered).serial, 7);
         let mut state = lock(&shared.depth);
         assert!(state.version > 3 && state.latest.is_none() && !state.settled);
         let depth = &mut state.smoother;
