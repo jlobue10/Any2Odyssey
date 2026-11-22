@@ -2,6 +2,17 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## 1.0.5 (2026-11-21)
+
+Linux only, and only with an NVIDIA GPU: a live screen's depth maps through TensorRT. Windows is unchanged: Samsung's engine makes the depth there, with models and a runtime of its own that Any2Odyssey does not touch.
+
+### Added
+
+- A live screen's depth maps are made by TensorRT, in half precision, where the ONNX Runtime the program loads has the TensorRT provider. Measured on an RTX 5090 with the program's own timing test (`live::bench`), a 3840 x 2160 screen, each map with its preparation: 1.2 ms for 2.9 at *Standard*, 2.2 for 5.7 at *Fine*, 3.7 for 13.5 at *Finer* and 6.2 for 27 at *Finest*. The maps differ from the CUDA provider's by 0.0004 of the range from far to near on average, and by less than 0.002 at 99 of 100 points (eight photographs at the four details). TensorRT makes a form of the model for each size of picture, which takes it from ten seconds to most of a minute, once: meanwhile the maps are made as before, the page says under *Depth detail* that it is being made, and it is kept in the data folder (`depth-engines`, some 55 MB a size) and opened from there in a fifth of a second. One that an update of TensorRT or another GPU has made unreadable is made anew. A still image's map is made as before. `ANY2ODYSSEY_TENSORRT=0` leaves TensorRT unused; where it cannot be used the page and the log say why, and the CUDA provider goes on.
+- No distribution packages an ONNX Runtime with that provider so far. `depth-runtime/setup.sh` (in the archive beside `install.sh`; in the Arch package `/usr/share/any2odyssey/depth-runtime/setup.sh`; in the source `contrib/depth-runtime`) puts Microsoft's (1.32.0) and NVIDIA's TensorRT (10.16.1) into the data folder (`depth-runtime`, 2.8 GB of a 4 GB download, each file checked against a fixed SHA-256; it needs CUDA 13 and cuDNN 9 on the system), where the program uses a runtime before the system's. A runtime named in `ORT_DYLIB_PATH` comes before both, and `ANY2ODYSSEY_TENSORRT_DIR` names the folder of TensorRT's libraries for one that does not find them.
+
+Not run on the monitor: the numbers are of the model alone, on a machine that showed nothing. What a live screen gains (how old the depth is that a picture is drawn with) is still to measure there with `A2O_LIVE_TIMES`.
+
 ## 1.0.4 (2026-11-21)
 
 Linux only: the live screen and the Odyssey 3D output, from measuring 1.0.3 while it showed a film on the Odyssey's own screen (KDE Plasma 6.8.3, the screen at 120 Hz, 2160 lines, *Finest*), and some diagnostics. Windows is unchanged but for the version.
