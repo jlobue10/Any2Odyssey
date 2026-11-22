@@ -85,22 +85,94 @@ fn next_turn(due: Instant, began: Instant) -> Instant {
 ///   about to be made, 1 to ease its map in a step, 2 for anything else
 ///   (a newer map, a control, another output).
 ///
+/// - `x <lines>`: so many lines were left out here, because the file was
+///   not written as fast as they came.
+///
 /// It answers two questions that cannot be answered from outside: how
 /// evenly a film's pictures arrive as against how evenly they leave, and
 /// how many pictures a depth map is behind. Nothing is opened, timed or
 /// written without the variable.
 mod times {
     use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
-    fn file() -> Option<&'static (Instant, Mutex<std::io::BufWriter<std::fs::File>>)> {
-        static FILE: OnceLock<Option<(Instant, Mutex<std::io::BufWriter<std::fs::File>>)>> =
-            OnceLock::new();
+    /// The lines on their way to a file, which a thread of its own opens
+    /// and writes.
+    ///
+    /// The render loop and the depth thread opened and wrote the file
+    /// themselves, a line at a time. With the variable naming a pipe that
+    /// nobody reads, the first of them to ask stood still in the opening,
+    /// holding the screen's newest frame: no picture was ever made, and
+    /// stopping the output waited for the render loop for good. With a
+    /// pipe that is read slowly, the pictures stood still for seconds at
+    /// a time once the pipe was full (audit round 25: up to 7.8 s between
+    /// two pictures of a screen of 60 frames a second, the reader taking
+    /// 20 lines a second). Whoever has a line now only leaves it here,
+    /// and where there is no room for it (the file takes them slower
+    /// than they come) it is counted and left out.
+    pub(super) struct Lines {
+        waiting: SyncSender<String>,
+        /// How many lines have found no room since the last that did.
+        left_out: Mutex<u64>,
+    }
+
+    impl Lines {
+        /// How many lines can wait: a few seconds of them.
+        pub(super) const ROOM: usize = 4096;
+
+        /// The lines of `path`, which is made anew. `None` where the
+        /// thread that writes it cannot be started.
+        pub(super) fn to(path: PathBuf) -> Option<Lines> {
+            let (waiting, lines) = sync_channel::<String>(Lines::ROOM);
+            std::thread::Builder::new()
+                .name("live-times".into())
+                .spawn(move || {
+                    // A file that cannot be made is no file: the lines
+                    // find nobody to take them.
+                    let Ok(file) = std::fs::File::create(path) else {
+                        return;
+                    };
+                    let mut file = std::io::BufWriter::new(file);
+                    while let Ok(line) = lines.recv() {
+                        // Everything that waits, then out with it: a line
+                        // is in the file as soon as it can be.
+                        let mut next = Some(line);
+                        while let Some(line) = next {
+                            let _ = writeln!(file, "{line}");
+                            next = lines.try_recv().ok();
+                        }
+                        let _ = file.flush();
+                    }
+                })
+                .ok()?;
+            Some(Lines {
+                waiting,
+                left_out: Mutex::new(0),
+            })
+        }
+
+        /// Leave `line` to be written. Never waits: a line that finds no
+        /// room is counted, and the count is left before the next line
+        /// that does.
+        pub(super) fn leave(&self, line: String) {
+            let mut left_out = self.left_out.lock().unwrap_or_else(|e| e.into_inner());
+            if *left_out > 0 && self.waiting.try_send(format!("x {left_out}")).is_ok() {
+                *left_out = 0;
+            }
+            if *left_out > 0 || matches!(self.waiting.try_send(line), Err(TrySendError::Full(_))) {
+                *left_out += 1;
+            }
+        }
+    }
+
+    fn file() -> Option<&'static (Instant, Lines)> {
+        static FILE: OnceLock<Option<(Instant, Lines)>> = OnceLock::new();
         FILE.get_or_init(|| {
             let path = std::env::var_os("A2O_LIVE_TIMES")?;
-            let file = std::fs::File::create(path).ok()?;
-            Some((Instant::now(), Mutex::new(std::io::BufWriter::new(file))))
+            Some((Instant::now(), Lines::to(path.into())?))
         })
         .as_ref()
     }
@@ -124,10 +196,7 @@ mod times {
         if let Some(last) = last {
             line.push_str(&format!(" {last}"));
         }
-        if let Ok(mut file) = file.lock() {
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
-        }
+        file.leave(line);
     }
 }
 
@@ -195,18 +264,6 @@ impl Pace {
         at
     }
 
-    /// Whether the next frame of a steady run is to arrive within `time`
-    /// of `now`, give or take what such frames are early and late by (it
-    /// has not arrived: the run is told again with every frame that does).
-    ///
-    /// A picture made between two frames, because a depth map has come,
-    /// takes the render loop as long as any other. With one made whenever
-    /// a map came, a film's frame that arrived meanwhile waited for it:
-    /// measured at 2160 lines, a frame was in the output's hands 8 to 22
-    /// ms after it arrived where it had been 9 to 13, and the pictures
-    /// were no more even than the frames. So no such picture is begun
-    /// when a frame is about to come; the map is drawn with from that
-    /// frame on.
     /// The longest of the last three times from frame to frame, where all
     /// three are a film's or a video's (22 to 70 ms): a screen whose
     /// picture has time to wait for its own depth map (`Answered`).
@@ -249,11 +306,72 @@ impl Pace {
         }
     }
 
+    /// Whether the next frame of a steady run is to arrive within `time`
+    /// of `now`, give or take what such frames are early and late by (it
+    /// has not arrived: the run is told again with every frame that does).
+    ///
+    /// A picture made between two frames, because a depth map has come,
+    /// takes the render loop as long as any other. With one made whenever
+    /// a map came, a film's frame that arrived meanwhile waited for it:
+    /// measured at 2160 lines, a frame was in the output's hands 8 to 22
+    /// ms after it arrived where it had been 9 to 13, and the pictures
+    /// were no more even than the frames. So no such picture is begun
+    /// when a frame is about to come; the map is drawn with from that
+    /// frame on.
     fn next_within(&self, now: Instant, time: Duration) -> bool {
         self.next.is_some_and(|next| {
             let early = next.checked_sub(Pace::HOLD).unwrap_or(next);
             now + time >= early && now <= next + Pace::HOLD * 2
         })
+    }
+
+    /// Whether the next frame of a screen that changes faster than a film
+    /// is about to come at `now`: its last three frames came less than 25
+    /// ms after the one before in the mean and none of them 50 ms after
+    /// (a game, a video of 60 a second, a desktop that is scrolled, a
+    /// pointer on the move), and the next is not yet later than such
+    /// frames are late by.
+    ///
+    /// [`Pace::next_within`] knows of a film's frames only, and such a
+    /// screen's next frame is nearer still: it always comes within the
+    /// time a picture takes. A picture begun between two of its frames,
+    /// because a depth map has come, is a second picture of a frame that
+    /// has one, at another depth, and the frame that arrives meanwhile
+    /// waits for it. Measured without this rule (audit round 25, a screen
+    /// of 60 frames a second, a stand-in model of 15 ms a map, 1080
+    /// lines): 952 of 1041 frames had two pictures, 115 pictures a second
+    /// for 60 frames. On a 3840 x 2160 screen at 2160 lines, a map in 25
+    /// ms: 443 of 1035 frames had two, and a frame's picture was in the
+    /// frame file 13.5 ms after the frame was sent, the times from
+    /// picture to picture spread by 3.8 ms (standard deviation), where
+    /// that is 11.7 ms and 1.8 ms with the rule. The map is drawn with
+    /// from the next frame on, as it was before a map's arrival woke the
+    /// loop; a screen that has stopped changing is no longer told so, and
+    /// its last frame gets its map.
+    ///
+    /// The mean, not each of the three: a video of 60 a second whose
+    /// frames come a refresh early and a refresh late by turns on a
+    /// screen of 120 Hz has them 8 and 25 ms apart. With each of the
+    /// three asked to be under 25 ms that was no such screen, and 697 of
+    /// its 1041 frames had two pictures (the same rig, a map in 5 ms).
+    fn quick(&self, now: Instant) -> bool {
+        let mut newest = self.arrived.iter().rev();
+        let Some(&last) = newest.next() else {
+            return false;
+        };
+        let (mut later, mut longest) = (last, Duration::ZERO);
+        for _ in 0..3 {
+            let Some(&earlier) = newest.next() else {
+                return false;
+            };
+            let gap = later.saturating_duration_since(earlier);
+            if gap >= Duration::from_millis(50) {
+                return false;
+            }
+            (longest, later) = (longest.max(gap), earlier);
+        }
+        last.saturating_duration_since(later) < Duration::from_millis(25) * 3
+            && now <= last + longest + Pace::HOLD * 2
     }
 }
 
@@ -838,7 +956,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         if let Some(early) = due.checked_duration_since(Instant::now()) {
             std::thread::sleep(early);
         }
-        due = next_turn(due, Instant::now());
+        // When the turn after this one may begin, if this one takes a
+        // frame (below).
+        let paced = next_turn(due, Instant::now());
         // A still screen sends no frames. Its last one is looked at again a
         // few times a second all the same: the depth map of a picture that
         // has just appeared arrives after it, and the controls must take
@@ -876,11 +996,24 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             Some((found, sink, turn, view, place, for_model.flatten()))
         });
         let Some(Some((found, sink, turn, view, (x, y, w, h), for_model))) = taken else {
+            due = paced;
             continue;
         };
+        let new_frame = found.serial != seen;
+        // The pace is that of the frames taken. A turn that finds no new
+        // one (nothing came for 150 ms, or a depth map has come:
+        // `Frames::look_again`) leaves the next turn due when it was. It
+        // was counted like any other, and the frame that came after it
+        // waited out the rest of a `FRAME_TIME`: with a screen of 60
+        // frames a second and a model that answers in 15 ms (audit round
+        // 25), the frame after such a turn was taken 12 ms after it had
+        // arrived, and the six after that 10, 8, 7, 5, 4 and 2 ms after,
+        // the loop then running to its own 15 ms and not to the frames.
+        if new_frame {
+            due = paced;
+        }
         // A frame of a film that came early is held until its time. The
         // model is given it first: its map is no later for the wait.
-        let new_frame = found.serial != seen;
         let held = new_frame
             .then_some(arrived)
             .flatten()
@@ -931,6 +1064,11 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // to come (`Pace::next_within`): what it would have shown is in
         // that frame's picture.
         if !new_frame && pace.next_within(Instant::now(), BETWEEN_FRAMES) {
+            continue;
+        }
+        // Nor between two frames of a screen that changes faster than a
+        // film's (`Pace::quick`).
+        if !new_frame && pace.quick(Instant::now()) {
             continue;
         }
         // And none at all between two frames of a film whose picture was
@@ -2907,6 +3045,242 @@ mod tests {
             ));
         }
         canvas
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_line_of_the_times_is_left_and_never_waited_for() {
+        use std::io::BufRead;
+        let dir = tempfile::tempdir().unwrap();
+        // A file: every line, in the order they were left.
+        let path = dir.path().join("times.txt");
+        let lines = times::Lines::to(path.clone()).unwrap();
+        for line in 0..1000 {
+            lines.leave(format!("p {line}"));
+        }
+        let wanted: Vec<String> = (0..1000).map(|line| format!("p {line}")).collect();
+        eventually("the lines are in the file", || {
+            std::fs::read_to_string(&path).is_ok_and(|text| text.lines().eq(wanted.iter()))
+        });
+        // A pipe that nobody reads. The thread that leaves a line there
+        // is not kept (it stood still in the opening of the file, and
+        // with it the render loop and the screen's newest frame); what
+        // finds no room is counted.
+        let pipe = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&pipe).status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("skipped in part: no mkfifo to make a pipe with");
+            return;
+        }
+        let lines = times::Lines::to(pipe.clone()).unwrap();
+        let began = Instant::now();
+        for line in 0..times::Lines::ROOM + 500 {
+            lines.leave(format!("p {line}"));
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+        // A reader comes: it gets the lines that found room, and before
+        // the next line that does, how many did not.
+        let (read, first) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut pipe = std::io::BufReader::new(std::fs::File::open(pipe).unwrap()).lines();
+            let mut take = |lines: usize| -> Vec<String> {
+                pipe.by_ref().take(lines).map(Result::unwrap).collect()
+            };
+            read.send(take(times::Lines::ROOM)).unwrap();
+            take(2)
+        });
+        let first = first.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(first.iter().eq((0..times::Lines::ROOM)
+            .map(|line| format!("p {line}"))
+            .collect::<Vec<_>>()
+            .iter()));
+        lines.leave("p last".into());
+        assert_eq!(reader.join().unwrap(), ["x 500", "p last"]);
+    }
+
+    #[test]
+    fn no_picture_is_begun_between_two_frames_of_a_screen_that_changes_faster_than_a_film() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let came = |gaps: &[u64]| {
+            let mut pace = Pace::default();
+            let mut arrived = start;
+            pace.show_at(arrived);
+            for gap in gaps {
+                arrived += Duration::from_micros(*gap);
+                pace.show_at(arrived);
+            }
+            (pace, arrived)
+        };
+        // Nothing is known before three frames have followed a first.
+        assert!(!Pace::default().quick(start));
+        assert!(!came(&[16_667, 16_667]).0.quick(start + ms(40)));
+        // 60 a second, every second frame of a screen of 120 Hz and of
+        // one of 90, a game between 80 and 140: the next frame is about
+        // to come from the moment one has, and for as long after its time
+        // as such frames are late by.
+        // And a video of 60, 50 or 48 a second whose frames come a
+        // refresh early and a refresh late by turns on a screen of 120 Hz.
+        for gaps in [
+            [16_667; 3],
+            [16_000, 16_000, 24_000],
+            [22_222; 3],
+            [7_100, 12_500, 9_000],
+            [8_333, 25_000, 8_333],
+            [25_000, 8_333, 25_000],
+            [16_667, 25_000, 16_667],
+        ] {
+            let (pace, last) = came(&gaps);
+            let longest = Duration::from_micros(*gaps.iter().max().unwrap());
+            assert!(pace.quick(last), "{gaps:?}");
+            assert!(pace.quick(last + longest + Pace::HOLD), "{gaps:?}");
+            // The screen has stopped changing: its last frame gets the
+            // map that comes for it.
+            assert!(
+                !pace.quick(last + longest + Pace::HOLD * 2 + ms(1)),
+                "{gaps:?}"
+            );
+        }
+        // A film's frames, a video of 30 a second and a desktop that
+        // changes now and then are not such a screen: theirs is the rule
+        // of the steady run, or none.
+        for gaps in [
+            [41_700; 3],
+            [33_333; 3],
+            [25_000; 3],
+            [16_667, 16_667, 300_000],
+            [8_333, 8_333, 60_000],
+        ] {
+            let (pace, last) = came(&gaps);
+            assert!(!pace.quick(last + ms(1)), "{gaps:?}");
+        }
+        // And the first frames after a pause are not yet one.
+        let (pace, last) = came(&[16_667, 16_667, 16_667, 900_000, 16_667, 16_667]);
+        assert!(!pace.quick(last + ms(1)));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "a matter of milliseconds: run alone"]
+    fn a_turn_that_finds_no_new_frame_does_not_keep_the_next_frame_waiting() {
+        // Like the film's test below it is a matter of milliseconds, 12
+        // of them here: with the other tests running beside it on every
+        // core the frames were taken anything from 3 to 22 ms after they
+        // came, whatever the loop did. So it is run alone:
+        // `cargo test -p any2odyssey a_turn_that_finds -- --ignored`
+        // No output: a turn is over as soon as its frame has been given
+        // to the model. The test plays the model.
+        let capture = crate::capture::Fed::start();
+        let shared = Arc::new(Shared::new());
+        shared.lines.store(360, Ordering::Relaxed);
+        let (frames, state) = (capture.frames(), shared.clone());
+        let worker = std::thread::spawn(move || render_loop(&frames, &state));
+        let waker = capture.frames();
+        // Feed a frame and say how long it took to be taken (the turn
+        // that takes a frame gives it to the model, which is free).
+        let taken_after = |serial: u64| {
+            lock(&shared.for_model).busy = false;
+            let fed = Instant::now();
+            capture.feed(16, 9, &[serial as u8; 16 * 9 * 4]);
+            while lock(&shared.for_model).serial != serial {
+                assert!(fed.elapsed() < Duration::from_secs(10), "never taken");
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            fed.elapsed()
+        };
+        let mut waited = Vec::new();
+        for round in 0..15u64 {
+            // Two frames come one right after the other and are taken
+            // (the second of them is what the next turn is due after);
+            // then a depth map comes (the loop is told to look again, and
+            // finds nothing to do); and 3 ms later the screen's next
+            // frame.
+            std::thread::sleep(Duration::from_millis(40));
+            taken_after(round * 3 + 1);
+            taken_after(round * 3 + 2);
+            waker.look_again();
+            std::thread::sleep(Duration::from_millis(3));
+            waited.push(taken_after(round * 3 + 3));
+        }
+        shared.stop.store(true, Ordering::Relaxed);
+        drop(capture);
+        worker.join().unwrap();
+        // It is taken as it comes. With the turn in between counted
+        // against the pace, it was taken a `FRAME_TIME` after that turn
+        // was due: 12 ms after it came.
+        waited.sort();
+        assert!(
+            waited[waited.len() / 2] < Duration::from_millis(6),
+            "{waited:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_picture_is_whole_after_every_change_of_lines_screen_and_sharpening() {
+        use any2odyssey_core::live::{PixelOrder, Source};
+        // In memory, where the picture is drawn in its place in the file
+        // and what the place held is three pictures old, and on a disk,
+        // where it is made in the loop's own room and written.
+        let memory = tempfile::tempdir_in("/dev/shm");
+        if memory.is_err() {
+            eprintln!("skipped in part: no /dev/shm to make a frame file in");
+        }
+        for dir in memory.into_iter().chain(tempfile::tempdir()) {
+            let sink = FrameSink::in_folder(dir.path()).unwrap();
+            let capture = crate::capture::Fed::start();
+            let shared = Arc::new(Shared::new());
+            *lock(&shared.sink) = (1, Some(sink.clone()));
+            let (frames, state) = (capture.frames(), shared.clone());
+            let worker = std::thread::spawn(move || render_loop(&frames, &state));
+            // Screens of the panel's shape, wider (21:9, 32:9), upright
+            // and 4:3; each change is made twice over and then stays for
+            // three pictures more, so that every place of the file has
+            // held a picture of another size, place or kind before.
+            let screens = [(64u32, 36u32), (84, 36), (36, 64), (128, 36), (40, 30)];
+            let mut turn = 0u32;
+            for step in 0..24u32 {
+                let (sw, sh) = screens[(step / 2 % 5) as usize];
+                let lines = [360, 480, 540][(step / 3 % 3) as usize];
+                let sharpness = [0, 50][(step / 4 % 2) as usize];
+                let swap = step / 5 % 2 == 1;
+                shared.lines.store(lines, Ordering::Relaxed);
+                shared.sharpness.store(sharpness, Ordering::Relaxed);
+                shared.swap.store(swap, Ordering::Relaxed);
+                for _ in 0..if step % 2 == 0 { 1 } else { 4 } {
+                    turn += 1;
+                    // Nothing of it is black, and no two frames are alike.
+                    let screen: Vec<u8> = (0..sw * sh)
+                        .flat_map(|i| [(i % 199) as u8 | 1, (i % 83 + turn) as u8 | 1, 255, 255])
+                        .collect();
+                    capture.feed(sw, sh, &screen);
+                    let placed = layout((sw, sh), lines);
+                    let (view, (_, _, w, h)) = placed;
+                    let mut picture = vec![0u8; w as usize * h as usize * 4];
+                    let source = Source {
+                        bytes: &screen,
+                        width: sw,
+                        height: sh,
+                        stride: sw as usize * 4,
+                        order: PixelOrder::Bgr,
+                    };
+                    assert!(live::shrink_to_rgba(source, &mut picture, w, h));
+                    let look = shared.find(0).0.look;
+                    let wanted = expected_picture(&picture, placed, None, look);
+                    eventually("the picture of the frame", || {
+                        let (_, width, height, bytes) = sink.written();
+                        (width, height) == (view.0 * 2, view.1) && bytes == wanted
+                    });
+                }
+            }
+            shared.stop.store(true, Ordering::Relaxed);
+            drop(capture);
+            worker.join().unwrap();
+        }
     }
 
     #[test]
