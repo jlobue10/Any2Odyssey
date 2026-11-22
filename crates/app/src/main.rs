@@ -380,7 +380,7 @@ fn main() {
     // the Linux build's home page.
     #[cfg(not(windows))]
     if let Some(image) = image {
-        std::process::exit(open_image(&image, logger));
+        leave(open_image(&image, logger));
     }
     let code = match args.as_slice() {
         [flag, event, parent, source, snapshot] if flag == "--worker" => {
@@ -453,11 +453,16 @@ fn main() {
         }
         _ => usage_error(),
     };
-    // (not while TensorRT is at work on another thread: it does not
-    // survive what a program runs as it leaves)
+    leave(code);
+}
+
+/// End the program with `code`, where its window has been open.
+fn leave(code: i32) -> ! {
+    // (not as programs do while TensorRT is at work on another thread: it
+    // does not survive what a program runs as it leaves)
     #[cfg(not(windows))]
     depth::leave_at_once_while_making(code);
-    std::process::exit(code);
+    std::process::exit(code)
 }
 
 /// The log of an isolated preview (`--screenshot`): one file in a new folder
