@@ -479,6 +479,33 @@ class EnsureStackTests(StackTests):
         (self.root / "bin/sleep").chmod(0o755)
         self.environment["PATH"] = f"{self.root}/bin{os.pathsep}{os.environ['PATH']}"
 
+    def test_a_start_removes_the_logs_leias_programs_left_more_than_two_weeks_ago(self):
+        leia = self.root / "prefix/drive_c/ProgramData/Simulated Reality"
+        day = 24 * 60 * 60
+        files = {}
+        for folder, name, days in (("Server/Log", "old service.txt", 20), ("Server/Log", "new service.txt", 3),
+                                   ("Eye Tracker/Log", "old tracker.txt", 15.5), ("Eye Tracker/Log", "new tracker.txt", 13),
+                                   ("Applications/a program.exe/Log", "old program.txt", 400),
+                                   # Not a log: another kind of file, and a file that is in no log folder.
+                                   ("Eye Tracker/Log", "old.bin", 20), ("Devices/a serial", "old settings.txt", 20),
+                                   ("Eye Tracker/Recordings", "old recording.txt", 20)):
+            path = leia / folder / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("a line\n")
+            os.utime(path, (time.time() - days * day,) * 2)
+            files[name] = path
+        left = lambda: sorted(name for name, path in files.items() if path.exists())
+        # A request that finds the stack running starts nothing and removes nothing.
+        self.stays("wineserver")
+        self.assertEqual(self.starts(), 0)
+        self.assertEqual(len(left()), len(files))
+        # A start does, before Leia's programs are there to write.
+        (self.root / "stack.started").unlink()
+        self.assertEqual(self.starts(), 1)
+        self.assertEqual(left(), ["new service.txt", "new tracker.txt", "old recording.txt", "old settings.txt", "old.bin"])
+        # The log the service writes into, which says that the board answered, is among those that stay.
+        self.assertTrue((leia / "Server/Log/service.txt").exists())
+
     def test_a_start_that_did_not_end_well_is_not_taken_for_the_one_before_it(self):
         # The stack had been started once, and the note of that start stayed while it was started again. A
         # restart that failed left Leia's programs and Wine's server up, with a board the service never got,

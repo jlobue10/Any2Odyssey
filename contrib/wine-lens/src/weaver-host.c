@@ -43,6 +43,9 @@ void a2o_weaver_input(void *w, unsigned texture, int width, int height, unsigned
 void a2o_weaver_weave(void *w);
 void a2o_weaver_eyes(void *w, float *left, float *right);
 void a2o_weaver_destroy(void *w);
+unsigned long long a2o_weaver_latency(void *w);
+void a2o_weaver_latency_frames(void *w, unsigned long long frames);
+void a2o_weaver_latency_time(void *w, unsigned long long microseconds);
 
 #define GL_RGBA8 0x8058
 #define GL_CLAMP_TO_EDGE 0x812F
@@ -161,7 +164,7 @@ int main(int argc, char **argv)
     FILE *stats;
     LARGE_INTEGER qpf, last_turn, stats_since, before_upload, after_upload, after_swap;
     BOOL (WINAPI *swap_interval)(int);
-    double worst_ms = 0, worst_upload_ms = 0;
+    double worst_ms = 0, worst_upload_ms = 0, upload_sum_ms = 0, turn_ms[512];
     unsigned turns = 0, uploads = 0;
     bool uploaded;
     HWND window;
@@ -242,6 +245,34 @@ int main(int argc, char **argv)
     CloseHandle(CreateThread(NULL, 0, watch_input, NULL, 0, NULL));
 
     stats = getenv("A2O_WEAVER_STATS") ? fopen(getenv("A2O_WEAVER_STATS"), "w") : NULL;
+    /* How long a picture takes from weave() until it is seen. Leia's weaver places the views for where the
+     * eyes will be by then, and has to be told that time; untold, it reckons with one of its own choosing,
+     * which on the Odyssey at 120 Hz under Wine 11.22 is 40000 microseconds. Under Wine a picture goes
+     * through Xwayland and the desktop's compositor on its way, which Leia did not count on. Looked at on
+     * that screen while the head moved from side to side (KDE Plasma 6.8.3, a live screen at 2160 lines):
+     * 60000, 40000, 32000, 25000 and 17000 microseconds were told apart by eye, 25000 was the best of them,
+     * "still not perfect", and 17000 "maybe too fast". So the weaver is told 25000, three refreshes of that
+     * screen. It is one screen's number, found by eye: A2O_WEAVER_LATENCY_US=<n> tells the weaver another,
+     * and A2O_WEAVER_LATENCY_FRAMES=<n> tells it n frames and leaves the time to the weaver (which went on
+     * saying 40000 right after it was told 3 frames; whether it ever works the time out there is not
+     * known). A2O_WEAVER_STATS begins with the time the weaver reckons with and says it again every
+     * second. */
+    {
+        const char *time = getenv("A2O_WEAVER_LATENCY_US"), *frames = getenv("A2O_WEAVER_LATENCY_FRAMES");
+        int microseconds = time ? atoi(time) : 25000;
+        if (time && (microseconds < 0 || microseconds > 200000)) microseconds = 25000;
+        if (frames && !time && atoi(frames) >= 0 && atoi(frames) <= 16)
+            a2o_weaver_latency_frames(weaver, (unsigned long long)atoi(frames));
+        else
+            a2o_weaver_latency_time(weaver, (unsigned long long)microseconds);
+    }
+    if (stats) {
+        const char *frames = getenv("A2O_WEAVER_LATENCY_FRAMES"), *time = getenv("A2O_WEAVER_LATENCY_US");
+        fprintf(stats, "latency %llu microseconds%s%s%s%s\n", a2o_weaver_latency(weaver),
+                frames ? ", asked for frames: " : "", frames ? frames : "",
+                time ? ", asked for microseconds: " : "", time ? time : "");
+        fflush(stats);
+    }
     QueryPerformanceFrequency(&qpf);
     QueryPerformanceCounter(&last_turn);
     stats_since = last_turn;
@@ -298,12 +329,23 @@ int main(int argc, char **argv)
             last_turn = t;
             if (ms > worst_ms) worst_ms = ms;
             if (upload_ms > worst_upload_ms) worst_upload_ms = upload_ms;
+            if (turns < ARRAYSIZE(turn_ms)) turn_ms[turns] = ms;
             turns++;
-            if (uploaded) uploads++;
+            if (uploaded) uploads++, upload_sum_ms += upload_ms;
             if (t.QuadPart - stats_since.QuadPart >= qpf.QuadPart) {
-                fprintf(stats, "weaves %u pictures %u longest turn %.1f ms longest upload %.1f ms\n", turns, uploads, worst_ms, worst_upload_ms);
+                /* A turn is one refresh of the display long when nothing holds it up. The shortest of the
+                 * second stands for that, and the turns half as long again or more are counted: each of
+                 * them is a refresh at which the picture did not follow the eyes. */
+                double shortest = worst_ms;
+                unsigned late = 0, kept = turns < ARRAYSIZE(turn_ms) ? turns : ARRAYSIZE(turn_ms);
+                for (unsigned i = 0; i < kept; i++) if (turn_ms[i] < shortest) shortest = turn_ms[i];
+                for (unsigned i = 0; i < kept; i++) if (turn_ms[i] >= shortest * 1.5) late++;
+                fprintf(stats, "weaves %u pictures %u longest turn %.1f ms longest upload %.1f ms mean upload %.1f ms "
+                               "shortest turn %.1f ms late turns %u latency %llu\n",
+                        turns, uploads, worst_ms, worst_upload_ms, uploads ? upload_sum_ms / uploads : 0.0, shortest, late,
+                        a2o_weaver_latency(weaver));
                 fflush(stats);
-                turns = uploads = 0; worst_ms = worst_upload_ms = 0; stats_since = t;
+                turns = uploads = 0; worst_ms = worst_upload_ms = upload_sum_ms = 0; stats_since = t;
             }
         }
         if (tex_w && !announced) {

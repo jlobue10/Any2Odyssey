@@ -48,9 +48,43 @@ pub struct Slot {
     stride: usize,
     bgr: bool,
     bytes: Vec<u8>,
+    /// When the frame took the slot, and how long after the one before it
+    /// (`None` for the first, and for a frame nothing is known about).
+    arrived: Option<Instant>,
+    spacing: Option<Duration>,
+}
+
+/// For a reader that takes a frame every `pace` at the most, of a stream
+/// whose newest frame came `spacing` after the one before it: how long
+/// after the arrival of the frame taken last the next one to take arrives
+/// at the earliest, and how long after it the wait for such a frame is
+/// given up. `None` where the frames come no faster than they are taken,
+/// and each is taken as it arrives.
+///
+/// A desktop is asked for up to [`MOST_A_SECOND`] frames a second, more
+/// than are shown. Of a screen that changes faster than pictures are made,
+/// a frame is always waiting when a turn begins; taken as it is, it has
+/// waited for a time that drifts from turn to turn, until one frame more
+/// or one fewer lies between two pictures than between the others: of 120
+/// frames a second and a turn every 15 ms, every ninth picture came one
+/// frame after the one before it where the others came two after. So the
+/// frames that come too soon after the one taken last are let pass, and
+/// the first that does not is taken as it arrives: the pictures are the
+/// same number of frames apart, every second frame of 120 a second and
+/// every third of 165. Where no such frame comes (the screen stood still)
+/// the newest there is is taken, late by `spacing` once.
+pub(crate) fn fresh_from(pace: Duration, spacing: Duration) -> Option<(Duration, Duration)> {
+    /// What a frame may be early or late by.
+    const LOOSE: Duration = Duration::from_millis(2);
+    (spacing < pace).then(|| (pace.saturating_sub(LOOSE), pace + spacing))
 }
 
 impl Slot {
+    /// When this frame arrived, where that is known.
+    pub fn arrived(&self) -> Option<Instant> {
+        self.arrived
+    }
+
     pub fn source(&self) -> Source<'_> {
         Source {
             bytes: &self.bytes,
@@ -77,6 +111,9 @@ struct Shared {
     /// How many buffers have come since the last one that held a picture,
     /// and why the newest of them held none.
     unread: Mutex<(u32, &'static str)>,
+    /// The reader has been asked to look at the newest frame again
+    /// without waiting for another ([`Frames::look_again`]).
+    look_again: AtomicBool,
 }
 
 impl Shared {
@@ -89,6 +126,7 @@ impl Shared {
             stop: AtomicBool::new(false),
             paused: Mutex::new(None),
             unread: Mutex::new((0, "")),
+            look_again: AtomicBool::new(false),
         }
     }
 
@@ -145,6 +183,11 @@ impl Shared {
             slot.stride = stride;
             slot.bgr = bgr;
             slot.serial += 1;
+            let now = Instant::now();
+            slot.spacing = slot
+                .arrived
+                .map(|before| now.saturating_duration_since(before));
+            slot.arrived = Some(now);
             slot.serial == 1
         };
         self.arrived.notify_all();
@@ -153,6 +196,51 @@ impl Shared {
         if first || *state != running {
             *state = running;
         }
+    }
+
+    /// Whether `frame`, still in the stream's buffer, is the picture the
+    /// slot holds already; it then counts as arrived and nothing more is
+    /// to do with it.
+    ///
+    /// Every frame used to be copied out of its buffer first and compared
+    /// with the slot's afterwards. A desktop that draws the screen again
+    /// sends the same picture again, and KDE Plasma draws the Odyssey's
+    /// own screen at every refresh while the 3D picture lies on it: under
+    /// a film of 24 pictures a second, 62 frames a second came, each
+    /// 3840 x 2160, and every one was copied (3.3 ms) for 38 to be thrown
+    /// away. Only a frame that lies as the slot keeps them is looked at
+    /// here: upright, a byte a colour. The others are compared when they
+    /// have been written out ([`Shared::frame_arrived`]).
+    fn holds(&self, frame: &Lying<'_>) -> bool {
+        let Packing::Bytes { bgr } = frame.packing else {
+            return false;
+        };
+        let (row, rows) = (frame.width as usize * 4, frame.height as usize);
+        if frame.turned != Turned::Upright || row == 0 || frame.stride < row {
+            return false;
+        }
+        let same = {
+            let slot = lock(&self.slot);
+            slot.serial != 0
+                && (slot.width, slot.height, slot.stride, slot.bgr)
+                    == (frame.width, frame.height, row, bgr)
+                && slot.bytes.len() == row * rows
+                && if frame.stride == row {
+                    same_colours(&slot.bytes, frame.rows)
+                } else {
+                    let mut lying = frame.rows.chunks(frame.stride);
+                    slot.bytes.chunks_exact(row).all(|kept| {
+                        lying
+                            .next()
+                            .and_then(|lying| lying.get(..row))
+                            .is_some_and(|lying| same_colours(kept, lying))
+                    })
+                }
+        };
+        if same {
+            *lock(&self.unread) = (0, "");
+        }
+        same
     }
 
     /// A buffer has come that holds no picture, because of `why`.
@@ -316,21 +404,64 @@ impl Frames {
     /// may have its own reasons to look at a still screen again. `None`
     /// before the first frame. A frame that arrives while `read` runs is
     /// copied meanwhile and takes the slot when `read` has finished.
+    #[cfg(test)]
     pub fn with_newest<T>(
         &self,
         seen: u64,
         timeout: Duration,
         read: impl FnOnce(&Slot) -> T,
     ) -> Option<T> {
-        let slot = lock(&self.0.slot);
+        self.with_fresh(seen, None, Duration::ZERO, timeout, read)
+    }
+
+    /// [`Frames::with_newest`] for a reader that takes a frame every `pace`
+    /// at the most and took its last one, which arrived at `taken`, from a
+    /// stream that may send them faster: the frames that come too soon
+    /// after that one are let pass first ([`fresh_from`]).
+    pub fn with_fresh<T>(
+        &self,
+        seen: u64,
+        taken: Option<Instant>,
+        pace: Duration,
+        timeout: Duration,
+        read: impl FnOnce(&Slot) -> T,
+    ) -> Option<T> {
+        let stopped = || self.0.stop.load(Ordering::Relaxed);
+        let mut slot = lock(&self.0.slot);
+        let fresh = slot.spacing.and_then(|spacing| fresh_from(pace, spacing));
+        if let (Some(taken), Some((from, until))) = (taken, fresh) {
+            let left = (taken + until).saturating_duration_since(Instant::now());
+            slot = self
+                .0
+                .arrived
+                .wait_timeout_while(slot, left.min(timeout), |slot| {
+                    slot.arrived.is_none_or(|arrived| arrived < taken + from) && !stopped()
+                })
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
         let (slot, _) = self
             .0
             .arrived
             .wait_timeout_while(slot, timeout, |slot| {
-                slot.serial == seen && !self.0.stop.load(Ordering::Relaxed)
+                slot.serial == seen
+                    && !stopped()
+                    && !self.0.look_again.swap(false, Ordering::Relaxed)
             })
             .unwrap_or_else(|e| e.into_inner());
         (slot.serial != 0).then(|| read(&slot))
+    }
+
+    /// End the wait of a reader that is waiting for a frame newer than
+    /// the one it has ([`Frames::with_fresh`]), or its next such wait if
+    /// it is not waiting now: something other than the screen has changed
+    /// what its picture should be.
+    pub fn look_again(&self) {
+        // Under the slot's lock: a reader that has just found nothing new
+        // is then either not yet at its question or already waiting.
+        let _slot = lock(&self.0.slot);
+        self.0.look_again.store(true, Ordering::Relaxed);
+        self.0.arrived.notify_all();
     }
 
     pub fn ended(&self) -> bool {
@@ -1026,16 +1157,33 @@ pub(crate) fn fitted(buffer: &mut Vec<u8>, wanted: usize) {
     }
 }
 
-/// The most pictures a second a desktop is asked to send. Sixty are
-/// wanted, which is as many as are rendered, and a little more is asked
-/// for: a desktop may leave out a picture that comes a moment sooner after
-/// the last one than the limit allows.
+/// The most pictures a second a desktop is asked to send: a little more
+/// than a screen of 120 Hz draws, because a desktop may leave out a
+/// picture that comes a moment sooner after the last one than the limit
+/// allows.
 ///
-/// Measured on a screen of 120 Hz that changed at every refresh. GNOME
-/// (mutter 51.1) sent 48 a second when asked for 60, and 60 when asked for
-/// 61, 65, 72 or 90; KDE Plasma (KWin 6.8.2) sent what it was asked for,
-/// 60, 61, 65, 72 or 90.
-pub(crate) const MOST_A_SECOND: u32 = 62;
+/// It was 62, a little more than the sixty-odd that are rendered. Measured
+/// on a screen of 120 Hz that changed at every refresh, GNOME (mutter 51.1)
+/// sent 48 a second when asked for 60, and 60 when asked for 61, 65, 72 or
+/// 90; KDE Plasma (KWin 6.8.2) sent what it was asked for, 60, 61, 65, 72
+/// or 90.
+///
+/// But a limit is also a grid. KDE Plasma draws the Odyssey's own screen
+/// at every refresh while the 3D picture lies on it, so its cast runs at
+/// the limit all the time, a frame every 1/62 s, and what the screen shows
+/// is seen at those moments only. Measured with 1.0.3 on the Odyssey at
+/// 120 Hz, a film of 24 pictures a second playing on it: the pictures
+/// reached the output 32.1 and 48.4 ms apart (two and three of those
+/// frames, 597 and 841 times in a minute) where the film's are 41.7 ms
+/// apart, each of them on the screen for five refreshes. A video of 60
+/// a second lost or doubled a picture twice a second the same way. With
+/// the limit above the screen's rate a frame comes for every refresh, and
+/// a picture is seen when it is drawn. The frames that are the same as the
+/// one before are told while they are still in the stream's buffer
+/// ([`Shared::holds`]), and of a screen that changes faster than pictures
+/// are made every second or third frame is taken ([`fresh_from`]).
+/// A screen of more than 120 Hz is still seen on a grid of 8 ms.
+pub(crate) const MOST_A_SECOND: u32 = 125;
 
 /// The stream that is asked for: raw video in one of the pixel formats that
 /// are read here, at whatever rate it states for itself and with
@@ -1096,12 +1244,9 @@ fn wanted_format() -> spa::pod::Object {
                 denom: 1
             }
         ),
-        // Sixty a second is as many as are rendered. A desktop that sends
-        // a picture when the screen has changed says how many a second
-        // that may be at the most, and is asked to keep to a little more
-        // than that (`MOST_A_SECOND`): of a faster screen (the Odyssey
-        // runs at 165) every picture was copied and more than half of
-        // them never looked at.
+        // A desktop that sends a picture when the screen has changed says
+        // how many a second that may be at the most, and is asked to keep
+        // to `MOST_A_SECOND`.
         spa::pod::property!(
             spa::param::format::FormatProperties::VideoMaxFramerate,
             Choice,
@@ -1288,6 +1433,9 @@ fn stream(
                 packing,
                 turned,
             };
+            if data.shared.holds(&lying) {
+                return;
+            }
             let taken = lying.taken(&mut data.spare, &mut data.narrowed);
             let Some((width, height, bgr)) = taken else {
                 data.shared.no_picture(TOO_SMALL);
@@ -1512,8 +1660,10 @@ mod tests {
         // What a desktop is to send at the most. It names its own limit as
         // a range from 1 to the screen's rate, and the two are cut to one.
         // Not 60: asked for exactly that, GNOME sent 48 a second.
-        assert_eq!(range(Key::VideoMaxFramerate), (62, 1, 62));
-        assert_eq!(MOST_A_SECOND, 62);
+        // Not 62 either: a film of 24 pictures a second was then seen on a
+        // grid of 1/62 s (`MOST_A_SECOND`).
+        assert_eq!(range(Key::VideoMaxFramerate), (125, 1, 125));
+        assert_eq!(MOST_A_SECOND, 125);
         // The stream's own rate: 0 is "as the screen changes", and a fixed
         // rate of 144 or 240 was refused while 60 was the most here.
         let (_, least, most) = range(Key::VideoFramerate);
@@ -1608,6 +1758,165 @@ mod tests {
         frame[3] ^= 1;
         padded.frame_arrived(&mut frame, width - 1, height, row, true);
         assert_eq!(lock(&padded.slot).serial, 2);
+    }
+
+    #[test]
+    fn a_frame_the_slot_holds_already_is_told_in_the_streams_buffer() {
+        let (width, height) = (5u32, 3u32);
+        let row = width as usize * 4;
+        let picture: Vec<u8> = (0..row * height as usize).map(|i| (i * 7) as u8).collect();
+        fn lying(rows: &[u8], stride: usize, packing: Packing, turned: Turned) -> Lying<'_> {
+            Lying {
+                rows,
+                width: 5,
+                height: 3,
+                stride,
+                packing,
+                turned,
+            }
+        }
+        let bgr = Packing::Bytes { bgr: true };
+        let shared = Shared::new();
+        // Nothing is held before the first frame.
+        assert!(!shared.holds(&lying(&picture, row, bgr, Turned::Upright)));
+        shared.frame_arrived(&mut picture.clone(), width, height, row, true);
+        shared.no_picture(NOT_A_PICTURE);
+        // The same picture again, and it counts as a frame that arrived.
+        assert!(shared.holds(&lying(&picture, row, bgr, Turned::Upright)));
+        assert_eq!(*lock(&shared.unread), (0, ""));
+        // With other leftovers in the bytes that hold no colour, and with
+        // something between its rows.
+        let mut leftovers = picture.clone();
+        let mut padded = Vec::new();
+        for (index, line) in picture.chunks(row).enumerate() {
+            padded.extend_from_slice(line);
+            if index + 1 < height as usize {
+                padded.extend_from_slice(&[index as u8 + 9; 8]);
+            }
+        }
+        for pixel in leftovers.as_chunks_mut::<4>().0 {
+            pixel[3] ^= 255;
+        }
+        assert!(shared.holds(&lying(&leftovers, row, bgr, Turned::Upright)));
+        assert!(shared.holds(&lying(&padded, row + 8, bgr, Turned::Upright)));
+        // One colour of the last pixel is another: a new picture, in
+        // either lie.
+        for (rows, stride) in [(&picture, row), (&padded, row + 8)] {
+            let mut other = rows.clone();
+            let last = other.len() - 2;
+            other[last] ^= 1;
+            assert!(!shared.holds(&lying(&other, stride, bgr, Turned::Upright)));
+        }
+        // Not the same: the colours the other way round, a picture that
+        // is turned, one of another shape, one of ten bits a colour.
+        let rgb = Packing::Bytes { bgr: false };
+        assert!(!shared.holds(&lying(&picture, row, rgb, Turned::Upright)));
+        let tens = Packing::Tens { red_high: true };
+        assert!(!shared.holds(&lying(&picture, row, tens, Turned::Upright)));
+        assert!(!shared.holds(&lying(&picture, row, bgr, Turned::Half)));
+        let wider = Lying {
+            width: width + 1,
+            ..lying(&picture, row, bgr, Turned::Upright)
+        };
+        assert!(!shared.holds(&wider));
+        // Nothing of all this made a new frame.
+        assert_eq!(lock(&shared.slot).serial, 1);
+    }
+
+    #[test]
+    fn frames_that_come_too_soon_after_the_one_taken_last_are_let_pass() {
+        let shared = Arc::new(Shared::new());
+        let frames = Frames(shared.clone());
+        let arrive = |shade: u8| shared.frame_arrived(&mut vec![shade; 16], 2, 2, 8, true);
+        let pace = Duration::from_millis(400);
+        let patience = Duration::from_secs(5);
+        arrive(1);
+        // The first frame: nothing is known of how fast they come.
+        let taken = frames.with_fresh(0, None, pace, patience, |slot| {
+            (slot.serial, slot.arrived())
+        });
+        let (serial, first) = taken.unwrap();
+        assert_eq!(serial, 1);
+        std::thread::sleep(Duration::from_millis(200));
+        arrive(2);
+        // A second one 200 ms later lies waiting, and the reader takes one
+        // every 400 ms: it is let pass, and the one that comes 500 ms after
+        // the first is taken as it arrives.
+        let sender = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                shared.frame_arrived(&mut vec![3; 16], 2, 2, 8, true);
+            })
+        };
+        let began = Instant::now();
+        let taken = frames.with_fresh(1, first, pace, patience, |slot| slot.serial);
+        assert_eq!(taken, Some(3));
+        assert!(
+            began.elapsed() >= Duration::from_millis(200),
+            "{:?}",
+            began.elapsed()
+        );
+        sender.join().unwrap();
+        // None comes after that one: the wait is given up, the newest
+        // there is is taken, and it is not waited for a second time.
+        let third = lock(&shared.slot).arrived;
+        let began = Instant::now();
+        assert_eq!(
+            frames.with_fresh(2, third, pace, patience, |slot| slot.serial),
+            Some(3)
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            began.elapsed()
+        );
+        // A reader that says no pace takes what is there at once.
+        let began = Instant::now();
+        assert_eq!(frames.with_newest(2, patience, |slot| slot.serial), Some(3));
+        assert!(began.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn a_reader_asked_to_look_again_does_not_wait_for_another_frame() {
+        let shared = Arc::new(Shared::new());
+        let frames = Frames(shared.clone());
+        shared.frame_arrived(&mut vec![1; 16], 2, 2, 8, true);
+        let patience = Duration::from_secs(20);
+        // Asked while it waits: the wait ends, with the frame it has.
+        let asker = {
+            let frames = frames.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                frames.look_again();
+            })
+        };
+        let began = Instant::now();
+        assert_eq!(frames.with_newest(1, patience, |slot| slot.serial), Some(1));
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+        asker.join().unwrap();
+        // Asked before it waits: its next wait is over at once, and only
+        // that one.
+        frames.look_again();
+        let began = Instant::now();
+        assert_eq!(frames.with_newest(1, patience, |slot| slot.serial), Some(1));
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+        let began = Instant::now();
+        let short = Duration::from_millis(150);
+        assert_eq!(frames.with_newest(1, short, |slot| slot.serial), Some(1));
+        assert!(
+            began.elapsed() >= Duration::from_millis(100),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     #[test]

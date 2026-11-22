@@ -32,16 +32,17 @@ use crate::weaver::{self, FrameSink};
 /// The time from one picture to the next that is kept to over any stretch
 /// of pictures ([`next_turn`]): 66 a second at the most.
 ///
-/// It has to be shorter than the time a desktop leaves between the frames
-/// it sends, or the frames come faster than they are taken: each then waits
-/// longer than the one before, until one is left out and the wait begins
-/// again from nothing. A desktop is asked for `capture::MOST_A_SECOND` (62)
-/// frames at the most, and KDE Plasma spaces its frames by whole
-/// milliseconds, 16 for 62 a second, which is 62.5; 62 to 64 a second were
-/// counted arriving there. With 16 ms here the frames of a screen that
-/// sent 62.5 or 64 a second were 13 ms old in the middle when their
-/// pictures reached the output, where those of a screen of 60 were 5, and
-/// 24 to 69 of them were left out in 40 seconds.
+/// It has to be shorter than the time between the frames of what is
+/// commonly shown, 60 a second, or the frames come faster than they are
+/// taken: each then waits longer than the one before, until one is left
+/// out and the wait begins again from nothing. A desktop was asked for 62
+/// frames at the most for a long time, and KDE Plasma spaced them by 16
+/// ms; with 16 ms here the frames of such a screen were 13 ms old in the
+/// middle when their pictures reached the output, where those of a screen
+/// of 60 were 5, and 24 to 69 of them were left out in 40 seconds. A
+/// desktop is asked for more now (`capture::MOST_A_SECOND`), and of a
+/// screen that does change faster than this every second or third frame
+/// is taken, as it arrives (`capture::fresh_from`).
 const FRAME_TIME: Duration = Duration::from_micros(15_000);
 
 /// When the turn of the render loop may begin that follows one which was
@@ -62,6 +63,147 @@ const FRAME_TIME: Duration = Duration::from_micros(15_000);
 fn next_turn(due: Instant, began: Instant) -> Instant {
     let forgiven = began.checked_sub(FRAME_TIME).unwrap_or(began);
     due.max(forgiven) + FRAME_TIME
+}
+
+/// A diagnostic: with `A2O_LIVE_TIMES=<file>` in the environment, a line
+/// is written there for every picture and every depth map of a live
+/// screen, their times in microseconds since the first of them:
+///
+/// - `p <frame> <arrived> <taken> <written> <depth of>`: the picture of
+///   the screen's frame `frame`, which arrived then, was taken by the
+///   render loop then and was in the output's hands then, drawn with a
+///   depth map made from the frame `depth of` (0: none yet).
+/// - `d <frame> <begun> <done>`: the depth map of frame `frame`, from when
+///   the depth thread took the frame until the map was there to draw with.
+///
+/// It answers two questions that cannot be answered from outside: how
+/// evenly a film's pictures arrive as against how evenly they leave, and
+/// how many pictures a depth map is behind. Nothing is opened, timed or
+/// written without the variable.
+mod times {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    fn file() -> Option<&'static (Instant, Mutex<std::io::BufWriter<std::fs::File>>)> {
+        static FILE: OnceLock<Option<(Instant, Mutex<std::io::BufWriter<std::fs::File>>)>> =
+            OnceLock::new();
+        FILE.get_or_init(|| {
+            let path = std::env::var_os("A2O_LIVE_TIMES")?;
+            let file = std::fs::File::create(path).ok()?;
+            Some((Instant::now(), Mutex::new(std::io::BufWriter::new(file))))
+        })
+        .as_ref()
+    }
+
+    /// Whether the times are asked for.
+    pub fn wanted() -> bool {
+        file().is_some()
+    }
+
+    /// Write a line that begins with `kind` and the frame's number,
+    /// followed by `times` as microseconds (0 for a time that is none).
+    pub fn note(kind: char, frame: u64, times: &[Option<Instant>], last: Option<u64>) {
+        let Some((start, file)) = file() else {
+            return;
+        };
+        let mut line = format!("{kind} {frame}");
+        for time in times {
+            let micros = time.map_or(0, |time| time.saturating_duration_since(*start).as_micros());
+            line.push_str(&format!(" {micros}"));
+        }
+        if let Some(last) = last {
+            line.push_str(&format!(" {last}"));
+        }
+        if let Ok(mut file) = file.lock() {
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+    }
+}
+
+/// Evens out the times at which the pictures of a film are shown.
+///
+/// A film's frames do not reach a screen cast as evenly as the film has
+/// them. Measured on the Odyssey's own screen at 120 Hz with a film of 24
+/// pictures a second in a browser (`A2O_LIVE_TIMES`, 2700 frames): 56 %
+/// of the frames came 38 to 46 ms after the one before, and the others in
+/// stretches of 31 to 33 and 50 ms by turns, the browser being a refresh
+/// early and a refresh late. They were shown as they came. Here a frame
+/// that comes sooner after the last than the frames have been coming is
+/// held until its time, 9 ms at the most: over the same 2700 arrivals 91 %
+/// are then 38 to 46 ms apart, each held for 3 ms in the mean.
+///
+/// Only a steady run of frames is evened out: the last eight all within
+/// three tenths of their mean, and that mean between 20 and 70 ms (a film
+/// or a video of 15 to 50 pictures a second). A desktop, a game and a
+/// video of 60 a second are shown as they come.
+#[derive(Default)]
+struct Pace {
+    /// When the last frames arrived, the newest last.
+    arrived: std::collections::VecDeque<Instant>,
+    /// When the last frame was to be shown.
+    shown: Option<Instant>,
+    /// When the next frame of a steady run is to arrive.
+    next: Option<Instant>,
+}
+
+impl Pace {
+    /// The gaps a run is told by.
+    const RUN: usize = 8;
+    /// The longest a frame is held.
+    const HOLD: Duration = Duration::from_millis(9);
+    /// What the time from frame to frame is taken to be shorter than it
+    /// was found: the frames are shown a little sooner one after the
+    /// other until one is shown as it comes, so nothing builds up.
+    const EARLY: Duration = Duration::from_micros(500);
+
+    /// When to show the frame that arrived at `arrived`: then, or later.
+    fn show_at(&mut self, arrived: Instant) -> Instant {
+        self.arrived.push_back(arrived);
+        if self.arrived.len() > Pace::RUN + 1 {
+            self.arrived.pop_front();
+        }
+        let gaps = || {
+            let times = self.arrived.iter();
+            times
+                .clone()
+                .zip(times.skip(1))
+                .map(|(a, b)| b.saturating_duration_since(*a))
+        };
+        let mut at = arrived;
+        self.next = None;
+        if let (Some(shown), true) = (self.shown, self.arrived.len() == Pace::RUN + 1) {
+            let mean = gaps().sum::<Duration>() / Pace::RUN as u32;
+            let steady = gaps().all(|gap| gap.abs_diff(mean) * 10 <= mean * 3);
+            let film = (Duration::from_millis(20)..=Duration::from_millis(70)).contains(&mean);
+            if steady && film {
+                at = (shown + mean - Pace::EARLY).clamp(arrived, arrived + Pace::HOLD);
+                self.next = Some(arrived + mean);
+            }
+        }
+        self.shown = Some(at);
+        at
+    }
+
+    /// Whether the next frame of a steady run is to arrive within `time`
+    /// of `now`, give or take what such frames are early and late by (it
+    /// has not arrived: the run is told again with every frame that does).
+    ///
+    /// A picture made between two frames, because a depth map has come,
+    /// takes the render loop as long as any other. With one made whenever
+    /// a map came, a film's frame that arrived meanwhile waited for it:
+    /// measured at 2160 lines, a frame was in the output's hands 8 to 22
+    /// ms after it arrived where it had been 9 to 13, and the pictures
+    /// were no more even than the frames. So no such picture is begun
+    /// when a frame is about to come; the map is drawn with from that
+    /// frame on.
+    fn next_within(&self, now: Instant, time: Duration) -> bool {
+        self.next.is_some_and(|next| {
+            let early = next.checked_sub(Pace::HOLD).unwrap_or(next);
+            now + time >= early && now <= next + Pace::HOLD * 2
+        })
+    }
 }
 
 /// What the user can change while the picture runs.
@@ -328,6 +470,9 @@ struct Shared {
     model_wanted: Condvar,
     depth: Mutex<DepthState>,
     stats: Mutex<Stats>,
+    /// The screen's frames, for the depth thread to say that a map is
+    /// there ([`Frames::look_again`]); none where nothing waits for them.
+    frames: Mutex<Option<Frames>>,
 }
 
 impl Shared {
@@ -346,6 +491,7 @@ impl Shared {
             model_wanted: Condvar::new(),
             depth: Mutex::new(DepthState::default()),
             stats: Mutex::new(Stats::default()),
+            frames: Mutex::new(None),
         }
     }
 
@@ -413,6 +559,7 @@ impl Live {
         };
         live.set(controls);
         let (frames, shared) = (live.capture.frames(), live.shared.clone());
+        *lock(&shared.frames) = Some(frames.clone());
         let render = std::thread::Builder::new()
             .name("live-render".into())
             .spawn(move || render_loop(&frames, &shared));
@@ -531,12 +678,20 @@ const RATE_TIME: Duration = Duration::from_secs(1);
 /// still: longer than a blinking cursor or a clock leaves between frames.
 const STILL_TIME: Duration = Duration::from_secs(2);
 
+/// How long before a film's next frame no picture is begun between two
+/// frames: as long as a picture takes at the most lines, and a little.
+const BETWEEN_FRAMES: Duration = Duration::from_millis(16);
+
 fn render_loop(frames: &Frames, shared: &Shared) {
     let mut seen = 0u64;
     let (mut picture, mut pair, mut canvas, mut small) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut shown: Option<Shown> = None;
+    // The place and size the picture was last made for, the mark of
+    // that (0 is nobody's), and the mark the room here was made black
+    // under.
     let mut blank = None;
+    let (mut mark, mut canvas_mark) = (0u64, 0u64);
     let (mut counted, mut since) = (0u32, Instant::now());
     let mut failing = false;
     // Since when there has been no picture to make, and whether the page
@@ -544,6 +699,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let (mut resting, mut still) = (None::<Instant>, false);
     // When the next turn may begin.
     let mut due = Instant::now();
+    // When the frame taken last arrived.
+    let mut arrived = None;
+    let mut pace = Pace::default();
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // A little more than sixty pictures a second at most: a faster
         // screen (the Odyssey runs at 165) would double the work for depth
@@ -559,7 +717,11 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         // has just appeared arrives after it, and the controls must take
         // effect without waiting for the screen to change. Most of those
         // turns find nothing to do (`plan`).
-        let taken = frames.with_newest(seen, Duration::from_millis(150), |slot| {
+        let patience = Duration::from_millis(150);
+        let mut taken_at = None;
+        let taken = frames.with_fresh(seen, arrived, FRAME_TIME, patience, |slot| {
+            arrived = slot.arrived();
+            taken_at = times::wanted().then(Instant::now);
             let (found, sink) = shared.find(slot.serial);
             let turn = plan(shown.as_ref(), &found);
             let (view, place) = layout((slot.width, slot.height), found.look.lines);
@@ -589,10 +751,26 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         let Some(Some((found, sink, turn, view, (x, y, w, h), for_model))) = taken else {
             continue;
         };
+        // A frame of a film that came early is held until its time. The
+        // model is given it first: its map is no later for the wait.
+        let new_frame = found.serial != seen;
+        let held = new_frame
+            .then_some(arrived)
+            .flatten()
+            .map(|arrived| pace.show_at(arrived));
         seen = found.serial;
         if let Some(size) = for_model {
             lock(&shared.for_model).give(&mut small, size, found.serial, found.detail);
             shared.model_wanted.notify_one();
+        }
+        if let Some(early) = held.and_then(|at| at.checked_duration_since(Instant::now())) {
+            std::thread::sleep(early);
+        }
+        // No picture between two frames of a film when the next is about
+        // to come (`Pace::next_within`): what it would have shown is in
+        // that frame's picture.
+        if !new_frame && pace.next_within(Instant::now(), BETWEEN_FRAMES) {
+            continue;
         }
         // The depth map's version as this turn leaves it.
         let mut depth_now = found.depth;
@@ -661,16 +839,19 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         };
         // Black wherever the screen's shape leaves room: made afresh when
         // the picture's size or place changes, or old pixels would stay.
+        // The mark is another for each such change, and whatever holds a
+        // picture made under another mark is made black first.
         let placed = (view, x, y, w, h);
-        if canvas.len() != place.bytes() || blank != Some(placed) {
+        if blank != Some(placed) {
             blank = Some(placed);
-            fitted(&mut canvas, place.bytes());
-            canvas.clear();
-            canvas.resize(place.bytes(), 0);
+            mark += 1;
+        }
+        let black = |canvas: &mut [u8]| {
+            canvas.fill(0);
             for alpha in canvas.as_chunks_mut::<4>().0 {
                 alpha[3] = 255;
             }
-        }
+        };
         // Without sharpening the views are rendered where they go. With
         // it they are rendered side by side first, and sharpened from
         // there into their places.
@@ -680,26 +861,67 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         } else if pair.capacity() > 0 {
             pair = Vec::new();
         }
-        let depth_shown = {
-            let depth = lock(&shared.depth);
-            let (dw, dh) = depth.smoother.size();
-            let map = (!depth.smoother.values().is_empty()).then(|| Depth {
-                values: depth.smoother.values(),
-                width: dw,
-                height: dh,
-            });
+        let mut depth_shown = 0;
+        let mut depth_of = 0;
+        let mut render = |canvas: &mut [u8]| {
+            depth_shown = {
+                let depth = lock(&shared.depth);
+                depth_of = depth.latest.as_ref().map_or(0, |latest| latest.0);
+                let (dw, dh) = depth.smoother.size();
+                let map = (!depth.smoother.values().is_empty()).then(|| Depth {
+                    values: depth.smoother.values(),
+                    width: dw,
+                    height: dh,
+                });
+                if look.sharpness > 0 {
+                    live::render_pair(&picture, w, h, map, params, &mut pair);
+                } else {
+                    live::render_placed(&picture, w, h, map, params, place, canvas);
+                }
+                depth.version
+            };
             if look.sharpness > 0 {
-                live::render_pair(&picture, w, h, map, params, &mut pair);
-            } else {
-                live::render_placed(&picture, w, h, map, params, place, &mut canvas);
+                let amount = look.sharpness as f32 / 100.0;
+                live::place_pair(&pair, w, h, amount, place, canvas);
             }
-            depth.version
         };
-        if look.sharpness > 0 {
-            let amount = look.sharpness as f32 / 100.0;
-            live::place_pair(&pair, w, h, amount, place, &mut canvas);
+        // The picture is made where the output reads it. Only where that
+        // is no memory to draw in is it made here and handed over.
+        let drawn = sink.draw_bottom_up(view.0 * 2, view.1, mark, |canvas, stale| {
+            if stale {
+                black(canvas);
+            }
+            render(canvas);
+        });
+        let written = match drawn {
+            Ok(true) => {
+                if canvas.capacity() > 0 {
+                    (canvas, canvas_mark) = (Vec::new(), 0);
+                }
+                Ok(())
+            }
+            Ok(false) => {
+                if canvas.len() != place.bytes() || canvas_mark != mark {
+                    canvas_mark = mark;
+                    fitted(&mut canvas, place.bytes());
+                    canvas.clear();
+                    canvas.resize(place.bytes(), 0);
+                    black(&mut canvas);
+                }
+                render(&mut canvas);
+                sink.show_bottom_up(view.0 * 2, view.1, &canvas)
+            }
+            Err(e) => Err(e),
+        };
+        if times::wanted() {
+            let written = Some(Instant::now());
+            times::note(
+                'p',
+                found.serial,
+                &[arrived, taken_at, written],
+                Some(depth_of),
+            );
         }
-        let written = sink.show_bottom_up(view.0 * 2, view.1, &canvas);
         // A picture that could not be written is made again next turn.
         shown = written.is_ok().then_some(Shown {
             serial: found.serial,
@@ -902,6 +1124,7 @@ fn depth_loop_with(
         // at twice the chosen detail, in four to five times the time on a
         // processor, and Fine, Finer and Finest were one and the same on a
         // 3840 x 2160 screen.
+        let begun = times::wanted().then(Instant::now);
         let estimated = match RgbaImage::from_raw(width, height, std::mem::take(&mut pixels)) {
             Some(frame) => {
                 let mut estimated = estimate(&frame, detail);
@@ -938,10 +1161,27 @@ fn depth_loop_with(
                         depth.latest = Some((serial, detail, map));
                     }
                 }
+                if begun.is_some() {
+                    times::note('d', serial, &[begun, Some(Instant::now())], None);
+                }
                 // Free for the next frame only now that the answer is
                 // there to be seen: the render thread would otherwise send
                 // the same frame once more.
                 lock(&shared.for_model).busy = false;
+                // The render loop is told, and does not wait for the
+                // screen's next frame to draw with this map and to give
+                // the model its next frame. It did wait. A film's frame
+                // comes every 41.7 ms, and a map that takes longer than
+                // that (48 ms at *Finest* on the Odyssey's own screen,
+                // with the card also weaving) was there 6 ms after a frame
+                // had come and gone unasked: the model then stood idle for
+                // 35 ms until the next, and made 14 maps a second where it
+                // can make 20. And a map that takes less was drawn with
+                // from the next frame on, one frame late, where it is now
+                // drawn with while its own frame is still on the screen.
+                if let Some(frames) = lock(&shared.frames).as_ref() {
+                    frames.look_again();
+                }
                 counted += 1;
                 let elapsed = since.elapsed();
                 if elapsed >= RATE_TIME || failing {
@@ -2065,10 +2305,18 @@ mod tests {
         let (mut now, mut due) = (start, start);
         let mut seen = None;
         let mut taken = Vec::new();
+        let fresh = crate::capture::fresh_from(FRAME_TIME, micros(every));
         for turn in 0..turns {
             // The loop sleeps until the turn is due...
             now = now.max(due);
             due = next_turn(due, now);
+            // ...lets the frames pass that come too soon after the one it
+            // took last, where they come faster than turns
+            // (`Frames::with_fresh`; a frame always comes in time here)...
+            if let (Some(seen), Some((from, _))) = (seen, fresh) {
+                let from = (micros(seen * every) + from).as_micros() as u64;
+                now = now.max(start + micros(from.div_ceil(every) * every));
+            }
             // ...and waits for a frame it has not seen.
             let newest = (now - start).as_micros() as u64 / every;
             let frame = if seen == Some(newest) {
@@ -2138,25 +2386,155 @@ mod tests {
             assert!(count <= most + 2, "{count} pictures from {from:?}");
             from += Duration::from_millis(100);
         }
-        // Never two turns closer than a turn's own work, and after the one
-        // that makes up for a late turn the pace is `FRAME_TIME` again.
-        let gaps: Vec<Duration> = taken.windows(2).map(|w| w[1].0 - w[0].0).collect();
-        let short = gaps.iter().filter(|gap| **gap < FRAME_TIME).count();
-        // (The turn that is forgiven comes after 5 ms, and the one after it
-        // 10 ms later: back on the pace of the turns before the late one.)
-        assert_eq!(short, 4, "{gaps:?}");
+        // Every third frame is taken, as it arrives: 55 pictures a second,
+        // each as far from the one before as the others. Taken as they
+        // lay waiting, they were two and three frames apart in turns.
+        for (index, pair) in taken.windows(2).enumerate() {
+            let late = [100, 200].contains(&index);
+            assert!(late || pair[1].1 - pair[0].1 == 3, "turn {index}: {pair:?}");
+            assert!(
+                late || pair[1].2 == Duration::ZERO,
+                "turn {index}: {pair:?}"
+            );
+        }
         // Frames are left out, never taken twice or out of order.
         assert!(taken.windows(2).all(|w| w[1].1 > w[0].1));
     }
 
     #[test]
-    fn the_loop_is_faster_than_the_frames_a_desktop_is_asked_for() {
-        // KDE Plasma spaces the frames it sends by whole milliseconds.
-        let desktop = Duration::from_millis(1000 / u64::from(crate::capture::MOST_A_SECOND));
-        assert!(
-            FRAME_TIME + Duration::from_micros(500) <= desktop,
-            "{FRAME_TIME:?} against {desktop:?}"
-        );
+    fn of_a_screen_that_changes_at_every_refresh_every_second_frame_is_taken() {
+        // What a desktop sends of a screen of 120 Hz now that it is asked
+        // for more than 62 a second, with the frames a little early and a
+        // little late by turns. With a frame taken as it lay waiting when
+        // a turn was due, every ninth picture was one frame after the one
+        // before it and the others two.
+        for every in [8_333, 8_342, 8_000] {
+            let taken = paced(every, 5_000, 300, &[(50, 30_000)]);
+            for (index, pair) in taken.windows(2).enumerate() {
+                let late = index == 50;
+                assert!(
+                    late || pair[1].1 - pair[0].1 == 2,
+                    "{every}, {index}: {pair:?}"
+                );
+                assert!(
+                    late || pair[1].2 == Duration::ZERO,
+                    "{every}, {index}: {pair:?}"
+                );
+            }
+        }
+    }
+
+    /// The times `Pace` shows frames at that arrive `gaps` microseconds
+    /// after one another, as the gaps between them and how long the
+    /// longest was held, in microseconds.
+    fn paced_gaps(gaps: &[u64]) -> (Vec<u64>, u64) {
+        let start = Instant::now();
+        let mut pace = Pace::default();
+        let (mut arrived, mut shown, mut longest) = (start, Vec::new(), 0);
+        for gap in std::iter::once(&0).chain(gaps) {
+            arrived += Duration::from_micros(*gap);
+            let at = pace.show_at(arrived);
+            assert!(at >= arrived, "a frame cannot be shown before it is there");
+            longest = longest.max((at - arrived).as_micros() as u64);
+            shown.push(at);
+        }
+        let gaps = shown.windows(2).map(|w| (w[1] - w[0]).as_micros() as u64);
+        (gaps.collect(), longest)
+    }
+
+    #[test]
+    fn a_film_whose_frames_come_early_and_late_by_turns_is_shown_evenly() {
+        // 24 pictures a second on a screen of 120 Hz, the browser a
+        // refresh early and a refresh late by turns: four refreshes, then
+        // six.
+        let uneven: Vec<u64> = (0..60)
+            .map(|i| if i % 2 == 0 { 33_360 } else { 50_040 })
+            .collect();
+        let (gaps, longest) = paced_gaps(&uneven);
+        // Once a run of them has been seen, each is shown a film's frame
+        // after the one before, give or take a millisecond.
+        for (index, gap) in gaps.iter().enumerate().skip(Pace::RUN + 2) {
+            assert!((40_500..=42_900).contains(gap), "frame {index}: {gap}");
+        }
+        // The early ones are held for a refresh, no frame for longer.
+        assert!((7_000..=9_000).contains(&longest), "{longest}");
+        // A film that comes evenly is shown as it comes.
+        let (gaps, longest) = paced_gaps(&[41_700; 40]);
+        assert!(gaps.iter().all(|gap| *gap == 41_700), "{gaps:?}");
+        assert_eq!(longest, 0);
+    }
+
+    #[test]
+    fn no_picture_is_begun_between_two_frames_when_a_films_next_frame_is_about_to_come() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut pace = Pace::default();
+        // Nothing is known of a run yet.
+        assert!(!pace.next_within(start, ms(16)));
+        let mut arrived = start;
+        for _ in 0..Pace::RUN + 2 {
+            arrived += ms(42);
+            pace.show_at(arrived);
+        }
+        // The next frame is to come 42 ms after the last, or up to 9 ms
+        // sooner. Right after a frame there is time for a picture; from 16
+        // ms before the earliest the next may come there is not; and when
+        // the frame has stayed away for a while (the film was paused)
+        // there is again.
+        assert!(!pace.next_within(arrived + ms(2), ms(16)));
+        assert!(!pace.next_within(arrived + ms(15), ms(16)));
+        assert!(pace.next_within(arrived + ms(18), ms(16)));
+        assert!(pace.next_within(arrived + ms(41), ms(16)));
+        assert!(pace.next_within(arrived + ms(55), ms(16)));
+        assert!(!pace.next_within(arrived + ms(70), ms(16)));
+        // A frame that is of no steady run ends it.
+        pace.show_at(arrived + ms(400));
+        assert!(!pace.next_within(arrived + ms(430), ms(16)));
+    }
+
+    #[test]
+    fn what_is_no_steady_run_of_a_films_frames_is_shown_as_it_comes() {
+        // A video of 60 a second, a screen that changes at every refresh,
+        // a desktop that changes now and then, and a film that has just
+        // begun or just been paused.
+        let desktop = [
+            5_000, 300_000, 16_000, 16_000, 900_000, 41_000, 42_000, 8_000, 41_000,
+        ];
+        let begun = [41_700; 7];
+        let paused: Vec<u64> = [41_700; 12]
+            .into_iter()
+            .chain([2_000_000, 20_000])
+            .collect();
+        for gaps in [&[16_667; 40][..], &[8_333; 40], &desktop, &begun] {
+            let (shown, longest) = paced_gaps(gaps);
+            assert_eq!((shown.as_slice(), longest), (gaps, 0));
+        }
+        let (shown, longest) = paced_gaps(&paused);
+        assert_eq!((shown, longest), (paused, 0));
+        // An uneven run that does not hold: nothing is held for longer
+        // than the limit, and what is held is caught up with.
+        let rough: Vec<u64> = (0..80).map(|i| 30_000 + (i * 7919 % 23) * 1_000).collect();
+        let (shown, longest) = paced_gaps(&rough);
+        assert!(longest <= Pace::HOLD.as_micros() as u64);
+        let (came, went): (u64, u64) = (rough.iter().sum(), shown.iter().sum());
+        assert!(went >= came && went - came <= Pace::HOLD.as_micros() as u64);
+    }
+
+    #[test]
+    fn frames_that_come_no_faster_than_pictures_are_made_are_each_taken() {
+        // 60 a second and the 62 to 64 of a desktop that keeps to an older
+        // limit: nothing is let pass.
+        for every in [16_667, 16_129, 15_625] {
+            let spacing = Duration::from_micros(every);
+            assert_eq!(crate::capture::fresh_from(FRAME_TIME, spacing), None);
+        }
+        // A screen of 120 Hz: the frame 8.3 ms after the one taken last is
+        // let pass, the one 16.7 ms after it is taken, and when nothing
+        // has come 23.3 ms after it the wait is over.
+        let (from, until) =
+            crate::capture::fresh_from(FRAME_TIME, Duration::from_micros(8_333)).unwrap();
+        assert!(Duration::from_micros(8_333) < from && from < Duration::from_micros(16_000));
+        assert_eq!(until, FRAME_TIME + Duration::from_micros(8_333));
     }
 
     #[test]
@@ -2706,8 +3084,13 @@ mod bench {
         }
         .unwrap();
         let sink = FrameSink::in_folder(dir.path()).unwrap();
-        for lines in [1080, 1440, 2160] {
-            for sharpness in [0, 50] {
+        // `copied`: as it was done before, the picture made here and
+        // copied into the file.
+        for (lines, sharpness, copied) in [1080, 1440, 2160]
+            .into_iter()
+            .flat_map(|lines| [(0, false), (50, false), (0, true)].map(|(s, c)| (lines, s, c)))
+        {
+            {
                 let (view, (x, y, w, h)) = layout((sw, sh), lines);
                 let place = Placement {
                     view,
@@ -2732,18 +3115,31 @@ mod bench {
                     let t0 = Instant::now();
                     live::shrink_to_rgba(source, &mut picture, w, h);
                     let t1 = Instant::now();
-                    if sharpness > 0 {
-                        live::render_pair(&picture, w, h, depth, params, &mut pair);
-                    } else {
-                        live::render_placed(&picture, w, h, depth, params, place, &mut canvas);
+                    let (mut t2, mut t3) = (t1, t1);
+                    // As the render loop does it: the picture is made in
+                    // its place in the file, and only where that cannot be
+                    // is it made here and handed over.
+                    let mut make = |canvas: &mut [u8]| {
+                        if sharpness > 0 {
+                            live::render_pair(&picture, w, h, depth, params, &mut pair);
+                        } else {
+                            live::render_placed(&picture, w, h, depth, params, place, canvas);
+                        }
+                        t2 = Instant::now();
+                        if sharpness > 0 {
+                            let amount = sharpness as f32 / 100.0;
+                            live::place_pair(&pair, w, h, amount, place, canvas);
+                        }
+                        t3 = Instant::now();
+                    };
+                    let direct = !copied
+                        && sink
+                            .draw_bottom_up(view.0 * 2, view.1, 1, |canvas, _| make(canvas))
+                            .unwrap();
+                    if !direct {
+                        make(&mut canvas);
+                        sink.show_bottom_up(view.0 * 2, view.1, &canvas).unwrap();
                     }
-                    let t2 = Instant::now();
-                    if sharpness > 0 {
-                        let amount = sharpness as f32 / 100.0;
-                        live::place_pair(&pair, w, h, amount, place, &mut canvas);
-                    }
-                    let t3 = Instant::now();
-                    sink.show_bottom_up(view.0 * 2, view.1, &canvas).unwrap();
                     let t4 = Instant::now();
                     // The first turns make the buffers and the file's pages.
                     if frame >= 5 {
@@ -2756,7 +3152,8 @@ mod bench {
                 }
                 let turn = median(&mut turn);
                 println!(
-                    "{lines} lines, sharpness {sharpness}: scale {:.2} ms, render {:.2}, sharpen {:.2}, hand over {:.2}; a turn {turn:.2} ms ({:.0} a second)",
+                    "{lines} lines, sharpness {sharpness}{}: scale {:.2} ms, render {:.2}, sharpen {:.2}, hand over {:.2}; a turn {turn:.2} ms ({:.0} a second)",
+                    if copied { ", copied" } else { "" },
                     median(&mut scale),
                     median(&mut render),
                     median(&mut sharpen),
