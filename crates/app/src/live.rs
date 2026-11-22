@@ -122,6 +122,67 @@ mod times {
     }
 }
 
+/// Evens out the times at which the pictures of a film are shown.
+///
+/// A film's frames do not reach a screen cast as evenly as the film has
+/// them. Measured on the Odyssey's own screen at 120 Hz with a film of 24
+/// pictures a second in a browser (`A2O_LIVE_TIMES`, 2700 frames): 56 %
+/// of the frames came 38 to 46 ms after the one before, and the others in
+/// stretches of 31 to 33 and 50 ms by turns, the browser being a refresh
+/// early and a refresh late. They were shown as they came. Here a frame
+/// that comes sooner after the last than the frames have been coming is
+/// held until its time, 9 ms at the most: over the same 2700 arrivals 91 %
+/// are then 38 to 46 ms apart, each held for 3 ms in the mean.
+///
+/// Only a steady run of frames is evened out: the last eight all within
+/// three tenths of their mean, and that mean between 20 and 70 ms (a film
+/// or a video of 15 to 50 pictures a second). A desktop, a game and a
+/// video of 60 a second are shown as they come.
+#[derive(Default)]
+struct Pace {
+    /// When the last frames arrived, the newest last.
+    arrived: std::collections::VecDeque<Instant>,
+    /// When the last frame was to be shown.
+    shown: Option<Instant>,
+}
+
+impl Pace {
+    /// The gaps a run is told by.
+    const RUN: usize = 8;
+    /// The longest a frame is held.
+    const HOLD: Duration = Duration::from_millis(9);
+    /// What the time from frame to frame is taken to be shorter than it
+    /// was found: the frames are shown a little sooner one after the
+    /// other until one is shown as it comes, so nothing builds up.
+    const EARLY: Duration = Duration::from_micros(500);
+
+    /// When to show the frame that arrived at `arrived`: then, or later.
+    fn show_at(&mut self, arrived: Instant) -> Instant {
+        self.arrived.push_back(arrived);
+        if self.arrived.len() > Pace::RUN + 1 {
+            self.arrived.pop_front();
+        }
+        let gaps = || {
+            let times = self.arrived.iter();
+            times
+                .clone()
+                .zip(times.skip(1))
+                .map(|(a, b)| b.saturating_duration_since(*a))
+        };
+        let mut at = arrived;
+        if let (Some(shown), true) = (self.shown, self.arrived.len() == Pace::RUN + 1) {
+            let mean = gaps().sum::<Duration>() / Pace::RUN as u32;
+            let steady = gaps().all(|gap| gap.abs_diff(mean) * 10 <= mean * 3);
+            let film = (Duration::from_millis(20)..=Duration::from_millis(70)).contains(&mean);
+            if steady && film {
+                at = (shown + mean - Pace::EARLY).clamp(arrived, arrived + Pace::HOLD);
+            }
+        }
+        self.shown = Some(at);
+        at
+    }
+}
+
 /// What the user can change while the picture runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Controls {
@@ -386,6 +447,9 @@ struct Shared {
     model_wanted: Condvar,
     depth: Mutex<DepthState>,
     stats: Mutex<Stats>,
+    /// The screen's frames, for the depth thread to say that a map is
+    /// there ([`Frames::look_again`]); none where nothing waits for them.
+    frames: Mutex<Option<Frames>>,
 }
 
 impl Shared {
@@ -404,6 +468,7 @@ impl Shared {
             model_wanted: Condvar::new(),
             depth: Mutex::new(DepthState::default()),
             stats: Mutex::new(Stats::default()),
+            frames: Mutex::new(None),
         }
     }
 
@@ -471,6 +536,7 @@ impl Live {
         };
         live.set(controls);
         let (frames, shared) = (live.capture.frames(), live.shared.clone());
+        *lock(&shared.frames) = Some(frames.clone());
         let render = std::thread::Builder::new()
             .name("live-render".into())
             .spawn(move || render_loop(&frames, &shared));
@@ -608,6 +674,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let mut due = Instant::now();
     // When the frame taken last arrived.
     let mut arrived = None;
+    let mut pace = Pace::default();
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // A little more than sixty pictures a second at most: a faster
         // screen (the Odyssey runs at 165) would double the work for depth
@@ -657,10 +724,19 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         let Some(Some((found, sink, turn, view, (x, y, w, h), for_model))) = taken else {
             continue;
         };
+        // A frame of a film that came early is held until its time. The
+        // model is given it first: its map is no later for the wait.
+        let held = (found.serial != seen)
+            .then_some(arrived)
+            .flatten()
+            .map(|arrived| pace.show_at(arrived));
         seen = found.serial;
         if let Some(size) = for_model {
             lock(&shared.for_model).give(&mut small, size, found.serial, found.detail);
             shared.model_wanted.notify_one();
+        }
+        if let Some(early) = held.and_then(|at| at.checked_duration_since(Instant::now())) {
+            std::thread::sleep(early);
         }
         // The depth map's version as this turn leaves it.
         let mut depth_now = found.depth;
@@ -1058,6 +1134,20 @@ fn depth_loop_with(
                 // there to be seen: the render thread would otherwise send
                 // the same frame once more.
                 lock(&shared.for_model).busy = false;
+                // The render loop is told, and does not wait for the
+                // screen's next frame to draw with this map and to give
+                // the model its next frame. It did wait. A film's frame
+                // comes every 41.7 ms, and a map that takes longer than
+                // that (48 ms at *Finest* on the Odyssey's own screen,
+                // with the card also weaving) was there 6 ms after a frame
+                // had come and gone unasked: the model then stood idle for
+                // 35 ms until the next, and made 14 maps a second where it
+                // can make 20. And a map that takes less was drawn with
+                // from the next frame on, one frame late, where it is now
+                // drawn with while its own frame is still on the screen.
+                if let Some(frames) = lock(&shared.frames).as_ref() {
+                    frames.look_again();
+                }
                 counted += 1;
                 let elapsed = since.elapsed();
                 if elapsed >= RATE_TIME || failing {
@@ -2298,6 +2388,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The times `Pace` shows frames at that arrive `gaps` microseconds
+    /// after one another, as the gaps between them and how long the
+    /// longest was held, in microseconds.
+    fn paced_gaps(gaps: &[u64]) -> (Vec<u64>, u64) {
+        let start = Instant::now();
+        let mut pace = Pace::default();
+        let (mut arrived, mut shown, mut longest) = (start, Vec::new(), 0);
+        for gap in std::iter::once(&0).chain(gaps) {
+            arrived += Duration::from_micros(*gap);
+            let at = pace.show_at(arrived);
+            assert!(at >= arrived, "a frame cannot be shown before it is there");
+            longest = longest.max((at - arrived).as_micros() as u64);
+            shown.push(at);
+        }
+        let gaps = shown.windows(2).map(|w| (w[1] - w[0]).as_micros() as u64);
+        (gaps.collect(), longest)
+    }
+
+    #[test]
+    fn a_film_whose_frames_come_early_and_late_by_turns_is_shown_evenly() {
+        // 24 pictures a second on a screen of 120 Hz, the browser a
+        // refresh early and a refresh late by turns: four refreshes, then
+        // six.
+        let uneven: Vec<u64> = (0..60)
+            .map(|i| if i % 2 == 0 { 33_360 } else { 50_040 })
+            .collect();
+        let (gaps, longest) = paced_gaps(&uneven);
+        // Once a run of them has been seen, each is shown a film's frame
+        // after the one before, give or take a millisecond.
+        for (index, gap) in gaps.iter().enumerate().skip(Pace::RUN + 2) {
+            assert!((40_500..=42_900).contains(gap), "frame {index}: {gap}");
+        }
+        // The early ones are held for a refresh, no frame for longer.
+        assert!((7_000..=9_000).contains(&longest), "{longest}");
+        // A film that comes evenly is shown as it comes.
+        let (gaps, longest) = paced_gaps(&[41_700; 40]);
+        assert!(gaps.iter().all(|gap| *gap == 41_700), "{gaps:?}");
+        assert_eq!(longest, 0);
+    }
+
+    #[test]
+    fn what_is_no_steady_run_of_a_films_frames_is_shown_as_it_comes() {
+        // A video of 60 a second, a screen that changes at every refresh,
+        // a desktop that changes now and then, and a film that has just
+        // begun or just been paused.
+        let desktop = [
+            5_000, 300_000, 16_000, 16_000, 900_000, 41_000, 42_000, 8_000, 41_000,
+        ];
+        let begun = [41_700; 7];
+        let paused: Vec<u64> = [41_700; 12]
+            .into_iter()
+            .chain([2_000_000, 20_000])
+            .collect();
+        for gaps in [&[16_667; 40][..], &[8_333; 40], &desktop, &begun] {
+            let (shown, longest) = paced_gaps(gaps);
+            assert_eq!((shown.as_slice(), longest), (gaps, 0));
+        }
+        let (shown, longest) = paced_gaps(&paused);
+        assert_eq!((shown, longest), (paused, 0));
+        // An uneven run that does not hold: nothing is held for longer
+        // than the limit, and what is held is caught up with.
+        let rough: Vec<u64> = (0..80).map(|i| 30_000 + (i * 7919 % 23) * 1_000).collect();
+        let (shown, longest) = paced_gaps(&rough);
+        assert!(longest <= Pace::HOLD.as_micros() as u64);
+        let (came, went): (u64, u64) = (rough.iter().sum(), shown.iter().sum());
+        assert!(went >= came && went - came <= Pace::HOLD.as_micros() as u64);
     }
 
     #[test]

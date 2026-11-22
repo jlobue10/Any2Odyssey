@@ -111,6 +111,9 @@ struct Shared {
     /// How many buffers have come since the last one that held a picture,
     /// and why the newest of them held none.
     unread: Mutex<(u32, &'static str)>,
+    /// The reader has been asked to look at the newest frame again
+    /// without waiting for another ([`Frames::look_again`]).
+    look_again: AtomicBool,
 }
 
 impl Shared {
@@ -123,6 +126,7 @@ impl Shared {
             stop: AtomicBool::new(false),
             paused: Mutex::new(None),
             unread: Mutex::new((0, "")),
+            look_again: AtomicBool::new(false),
         }
     }
 
@@ -439,9 +443,25 @@ impl Frames {
         let (slot, _) = self
             .0
             .arrived
-            .wait_timeout_while(slot, timeout, |slot| slot.serial == seen && !stopped())
+            .wait_timeout_while(slot, timeout, |slot| {
+                slot.serial == seen
+                    && !stopped()
+                    && !self.0.look_again.swap(false, Ordering::Relaxed)
+            })
             .unwrap_or_else(|e| e.into_inner());
         (slot.serial != 0).then(|| read(&slot))
+    }
+
+    /// End the wait of a reader that is waiting for a frame newer than
+    /// the one it has ([`Frames::with_fresh`]), or its next such wait if
+    /// it is not waiting now: something other than the screen has changed
+    /// what its picture should be.
+    pub fn look_again(&self) {
+        // Under the slot's lock: a reader that has just found nothing new
+        // is then either not yet at its question or already waiting.
+        let _slot = lock(&self.0.slot);
+        self.0.look_again.store(true, Ordering::Relaxed);
+        self.0.arrived.notify_all();
     }
 
     pub fn ended(&self) -> bool {
@@ -1855,6 +1875,48 @@ mod tests {
         let began = Instant::now();
         assert_eq!(frames.with_newest(2, patience, |slot| slot.serial), Some(3));
         assert!(began.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn a_reader_asked_to_look_again_does_not_wait_for_another_frame() {
+        let shared = Arc::new(Shared::new());
+        let frames = Frames(shared.clone());
+        shared.frame_arrived(&mut vec![1; 16], 2, 2, 8, true);
+        let patience = Duration::from_secs(20);
+        // Asked while it waits: the wait ends, with the frame it has.
+        let asker = {
+            let frames = frames.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                frames.look_again();
+            })
+        };
+        let began = Instant::now();
+        assert_eq!(frames.with_newest(1, patience, |slot| slot.serial), Some(1));
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+        asker.join().unwrap();
+        // Asked before it waits: its next wait is over at once, and only
+        // that one.
+        frames.look_again();
+        let began = Instant::now();
+        assert_eq!(frames.with_newest(1, patience, |slot| slot.serial), Some(1));
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
+        let began = Instant::now();
+        let short = Duration::from_millis(150);
+        assert_eq!(frames.with_newest(1, short, |slot| slot.serial), Some(1));
+        assert!(
+            began.elapsed() >= Duration::from_millis(100),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     #[test]
