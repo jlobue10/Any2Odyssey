@@ -37,6 +37,7 @@ struct Saved {
     lines: Option<i32>,
     depth_detail: Option<u32>,
     pointer: Option<bool>,
+    global_shortcuts: Option<bool>,
 }
 
 const INPUTS: [(Input, &str); 4] = [
@@ -100,6 +101,7 @@ impl Saved {
             lines: number("Lines"),
             depth_detail: number("DepthDetail").and_then(|v| u32::try_from(v).ok()),
             pointer: yes_or_no("Pointer"),
+            global_shortcuts: yes_or_no("GlobalShortcuts"),
         }
     }
 
@@ -116,6 +118,7 @@ impl Saved {
             lines: Some(options.lines),
             depth_detail: Some(options.detail),
             pointer: Some(options.pointer),
+            global_shortcuts: Some(options.shortcuts),
         }
     }
 
@@ -149,6 +152,7 @@ impl Saved {
                 .filter(|detail| DEPTH_DETAIL.iter().any(|(known, _)| known == detail))
                 .unwrap_or(default.detail),
             pointer: self.pointer.unwrap_or(default.pointer),
+            shortcuts: self.global_shortcuts.unwrap_or(default.shortcuts),
         }
     }
 }
@@ -252,6 +256,7 @@ mod tests {
             lines: 2160,
             detail: 1022,
             pointer: false,
+            shortcuts: true,
         }
     }
 
@@ -300,6 +305,25 @@ mod tests {
                 ..Options::default()
             }
         );
+    }
+
+    #[test]
+    fn global_shortcuts_are_off_until_chosen_and_the_choice_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        // A file from before there were any.
+        std::fs::write(&path, r#"{"Input":"Ai","Depth":120}"#).unwrap();
+        assert!(!read(&path).shortcuts);
+        std::fs::write(&path, r#"{"GlobalShortcuts":true}"#).unwrap();
+        assert!(read(&path).shortcuts);
+        OptionsFile::load(path.clone()).0.store(Options::default());
+        assert!(!read(&path).shortcuts);
+        let on = Options {
+            shortcuts: true,
+            ..Options::default()
+        };
+        OptionsFile::load(path.clone()).0.store(on);
+        assert_eq!(read(&path), on);
     }
 
     #[test]

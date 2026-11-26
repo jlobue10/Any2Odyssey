@@ -474,7 +474,7 @@ impl Frames {
 /// The client keeps its connection to the desktop between uses, and the
 /// connection belongs to the runtime it was made on: a runtime per capture
 /// leaves the second capture waiting on a connection nobody serves.
-fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+pub(crate) fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
     static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
         std::sync::OnceLock::new();
     RUNTIME
