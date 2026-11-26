@@ -179,7 +179,15 @@ pub struct Options {
     /// screen shown elsewhere; on the Odyssey's own screen the real pointer
     /// is there already.
     pub pointer: bool,
+    /// Linux only: ask the desktop for global shortcuts (`shortcuts`), so
+    /// that the output and its depth answer to keys while another window
+    /// has the keyboard. Off until chosen: the desktop may ask about them.
+    pub shortcuts: bool,
 }
+
+/// How far one press of a depth or pop-out shortcut moves its slider.
+#[cfg(target_os = "linux")]
+const SHORTCUT_STEP: i32 = 5;
 
 impl Default for Options {
     fn default() -> Options {
@@ -197,6 +205,7 @@ impl Default for Options {
             detail: DEPTH_DETAIL[0].0,
             edges: defaults.edges,
             pointer: true,
+            shortcuts: false,
         }
     }
 }
@@ -774,6 +783,16 @@ pub struct ViewerState {
     /// Where the depth model runs, as the page says it under *Depth
     /// detail*; nothing until the model has been loaded.
     depth_line: Option<String>,
+    /// The desktop's global shortcuts while they are chosen, and what they
+    /// last said, for the log.
+    #[cfg(target_os = "linux")]
+    shortcuts: Option<crate::shortcuts::Shortcuts>,
+    #[cfg(target_os = "linux")]
+    shortcuts_said: Option<String>,
+    /// Whether the desktop may be asked for them: not by tests and
+    /// previews, which start nothing.
+    #[cfg(target_os = "linux")]
+    asks_desktop: bool,
 }
 
 impl Default for ViewerState {
@@ -809,6 +828,12 @@ impl Default for ViewerState {
             // In memory only: tests and previews write nothing.
             options_file: super::options_file::OptionsFile::default(),
             depth_line: None,
+            #[cfg(target_os = "linux")]
+            shortcuts: None,
+            #[cfg(target_os = "linux")]
+            shortcuts_said: None,
+            #[cfg(target_os = "linux")]
+            asks_desktop: false,
         }
     }
 }
@@ -851,6 +876,8 @@ impl ViewerState {
             lens: LensState::load(any2odyssey_core::paths::lens_file()),
             lens_switch: LensSwitch::new(),
             weaver: Weaver::new(),
+            #[cfg(target_os = "linux")]
+            asks_desktop: true,
             ..ViewerState::default()
         }
     }
@@ -883,6 +910,60 @@ impl ViewerState {
         if let Some(wait) = self.options_file.save_when_settled(self.options, now) {
             ctx.request_repaint_after(wait);
         }
+    }
+
+    /// Keep the desktop's global shortcuts as the choice says, and do what
+    /// was pressed since the last frame. Call at every frame, like
+    /// [`ViewerState::keep_choices`]: they are for when the page is not in
+    /// front.
+    #[cfg(target_os = "linux")]
+    pub fn poll_shortcuts(&mut self, ctx: &egui::Context) {
+        use crate::shortcuts::{Event, Shortcuts};
+        if !self.options.shortcuts {
+            self.shortcuts = None;
+            return;
+        }
+        if self.shortcuts.is_none() {
+            if !self.asks_desktop {
+                return;
+            }
+            let wake = Wake(ctx.clone());
+            self.shortcuts = Some(Shortcuts::start(move || wake.0.request_repaint()));
+        }
+        while let Some(event) = self.shortcuts.as_ref().and_then(Shortcuts::take) {
+            match event {
+                Event::Pressed(action) => self.shortcut(action),
+                Event::Bound(line) => self.shortcuts_said = Some(line),
+                Event::Failed(line) => {
+                    // Not asked for again at every frame: the box is
+                    // cleared, and ticking it asks once more.
+                    self.options.shortcuts = false;
+                    self.shortcuts = None;
+                    self.status.clone_from(&line);
+                    self.shortcuts_said = Some(line);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Do what a global shortcut asks.
+    #[cfg(target_os = "linux")]
+    fn shortcut(&mut self, action: crate::shortcuts::Action) {
+        use crate::shortcuts::Action;
+        let before = self.options;
+        let moved = |position: i32, by: i32, spec: any2odyssey_core::slider::SliderSpec| {
+            (position + by).clamp(spec.min, spec.max)
+        };
+        let o = &mut self.options;
+        match action {
+            Action::Output => return self.toggle_output(),
+            Action::DepthDown => o.depth_pos = moved(o.depth_pos, -SHORTCUT_STEP, DEPTH),
+            Action::DepthUp => o.depth_pos = moved(o.depth_pos, SHORTCUT_STEP, DEPTH),
+            Action::PopoutDown => o.pop_pos = moved(o.pop_pos, -SHORTCUT_STEP, POPOUT),
+            Action::PopoutUp => o.pop_pos = moved(o.pop_pos, SHORTCUT_STEP, POPOUT),
+        }
+        self.options_edited(before);
     }
 
     /// The calibration pattern is a picture of its own: it needs no image.
@@ -1644,6 +1725,10 @@ impl ViewerState {
                 self.depth_line = Some(line);
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Some(line) = self.shortcuts_said.take() {
+            core.log(&line);
+        }
         banner(ui, wordmark, p);
         ui.add_space(4.0);
         section(ui, "STEREO VIEWER", p, |ui| {
@@ -1875,6 +1960,9 @@ impl ViewerState {
                         .wrap(),
                     );
                 }
+                #[cfg(target_os = "linux")]
+                ui.checkbox(&mut state.options.shortcuts, "Global shortcuts")
+                    .on_hover_text("Asks the desktop for shortcuts that work while another window has the keyboard: Ctrl+Shift+1 starts and stops the output, 3 and 4 change depth, 5 and 6 pop-out. The desktop may ask you to confirm them, and they are changed in its own shortcut settings. Needs a desktop whose portal has global shortcuts (KDE Plasma 6).");
                 ui.add_space(4.0);
                 if gold_button(ui, "Save preview PNG…", false, p).clicked() {
                     if state.document.result().is_none() {
@@ -2197,6 +2285,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn global_shortcuts_move_the_sliders_by_steps_within_their_ranges_and_toggle_the_output() {
+        use crate::shortcuts::{Action, Event, Shortcuts};
+        let ctx = egui::Context::default();
+        let (shortcuts, press) = Shortcuts::for_test();
+        let mut state = ViewerState {
+            shortcuts: Some(shortcuts),
+            ..ViewerState::default()
+        };
+        state.options.shortcuts = true;
+        state.options.input = Input::Ai;
+        let (depth, pop) = (state.options.depth_pos, state.options.pop_pos);
+        for action in [Action::DepthUp, Action::DepthUp, Action::PopoutDown] {
+            press.send(Event::Pressed(action)).unwrap();
+        }
+        state.poll_shortcuts(&ctx);
+        assert_eq!(state.options.depth_pos, depth + 2 * SHORTCUT_STEP);
+        assert_eq!(state.options.pop_pos, pop - SHORTCUT_STEP);
+        // Held down, a key ends at the end of its slider.
+        for _ in 0..100 {
+            press.send(Event::Pressed(Action::DepthDown)).unwrap();
+            press.send(Event::Pressed(Action::PopoutUp)).unwrap();
+        }
+        state.poll_shortcuts(&ctx);
+        assert_eq!(
+            (state.options.depth_pos, state.options.pop_pos),
+            (DEPTH.min, POPOUT.max)
+        );
+        // The output key is the Start output button: with no image it says
+        // so, and with the calibration pattern it opens and closes.
+        press.send(Event::Pressed(Action::Output)).unwrap();
+        state.poll_shortcuts(&ctx);
+        assert!(!state.output_open);
+        assert_eq!(state.status, NO_IMAGE);
+        state.options.input = Input::Pair;
+        state.options.output = Output::Lens;
+        state.lens.pattern = true;
+        for open in [true, false] {
+            press.send(Event::Pressed(Action::Output)).unwrap();
+            state.poll_shortcuts(&ctx);
+            assert_eq!(state.output_open, open);
+        }
+        // What the desktop bound goes to the log, not over the status.
+        press
+            .send(Event::Bound("Global shortcuts: bound.".into()))
+            .unwrap();
+        state.poll_shortcuts(&ctx);
+        assert_eq!(
+            state.shortcuts_said.as_deref(),
+            Some("Global shortcuts: bound.")
+        );
+        assert_eq!(state.status, OUTPUT_OFF);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refused_shortcuts_clear_the_choice_and_nothing_is_asked_of_the_desktop_unbidden() {
+        use crate::shortcuts::{Event, Shortcuts};
+        let ctx = egui::Context::default();
+        // Tests and previews ask the desktop for nothing, whatever is chosen.
+        let mut state = ViewerState::default();
+        state.options.shortcuts = true;
+        state.poll_shortcuts(&ctx);
+        assert!(state.shortcuts.is_none() && state.options.shortcuts);
+        // A desktop that refuses is asked once, and the page says why.
+        let (shortcuts, events) = Shortcuts::for_test();
+        state.shortcuts = Some(shortcuts);
+        events
+            .send(Event::Failed("Global shortcuts: none.".into()))
+            .unwrap();
+        state.poll_shortcuts(&ctx);
+        assert!(state.shortcuts.is_none() && !state.options.shortcuts);
+        assert_eq!(state.status, "Global shortcuts: none.");
+        // Unticking ends them.
+        let (shortcuts, _events) = Shortcuts::for_test();
+        state.shortcuts = Some(shortcuts);
+        state.poll_shortcuts(&ctx);
+        assert!(state.shortcuts.is_none());
     }
 
     #[cfg(not(windows))]

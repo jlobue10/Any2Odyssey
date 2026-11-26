@@ -61,7 +61,7 @@ libloading = "0.8"
 # the PipeWire stream it hands out. Linux only; needs the PipeWire headers
 # and clang (bindgen) to build.
 [target.'cfg(target_os = "linux")'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast", "global_shortcuts"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
 pipewire = "0.10"
 

@@ -913,6 +913,10 @@ impl eframe::App for App {
         // last change: its page is not drawn while the controls are hidden,
         // minimized or on another page.
         self.viewer.keep_choices(ctx, Instant::now());
+        // Global shortcuts are taken here for the same reason: they are for
+        // when the page is not in front.
+        #[cfg(target_os = "linux")]
+        self.viewer.poll_shortcuts(ctx);
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
         if self.hidden || minimized {

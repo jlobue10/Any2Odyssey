@@ -38,6 +38,7 @@ struct Saved {
     depth_detail: Option<u32>,
     fine_edges: Option<bool>,
     pointer: Option<bool>,
+    global_shortcuts: Option<bool>,
 }
 
 const INPUTS: [(Input, &str); 4] = [
@@ -102,6 +103,7 @@ impl Saved {
             depth_detail: number("DepthDetail").and_then(|v| u32::try_from(v).ok()),
             fine_edges: yes_or_no("FineEdges"),
             pointer: yes_or_no("Pointer"),
+            global_shortcuts: yes_or_no("GlobalShortcuts"),
         }
     }
 
@@ -119,6 +121,7 @@ impl Saved {
             depth_detail: Some(options.detail),
             fine_edges: Some(options.edges),
             pointer: Some(options.pointer),
+            global_shortcuts: Some(options.shortcuts),
         }
     }
 
@@ -153,6 +156,7 @@ impl Saved {
                 .unwrap_or(default.detail),
             edges: self.fine_edges.unwrap_or(default.edges),
             pointer: self.pointer.unwrap_or(default.pointer),
+            shortcuts: self.global_shortcuts.unwrap_or(default.shortcuts),
         }
     }
 }
@@ -257,6 +261,7 @@ mod tests {
             detail: 1022,
             edges: false,
             pointer: false,
+            shortcuts: true,
         }
     }
 
@@ -293,6 +298,10 @@ mod tests {
         assert!(read(&path).edges);
         OptionsFile::load(path.clone()).0.store(off);
         assert_eq!(read(&path), off);
+        // Global shortcuts are off until they are chosen.
+        assert!(!read(&path).shortcuts);
+        std::fs::write(&path, r#"{"GlobalShortcuts":true}"#).unwrap();
+        assert!(read(&path).shortcuts);
     }
 
     #[cfg(target_os = "linux")]

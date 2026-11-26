@@ -14,6 +14,8 @@ mod lens_switch;
 #[cfg(target_os = "linux")]
 mod live;
 mod platform;
+#[cfg(target_os = "linux")]
+mod shortcuts;
 #[cfg(windows)]
 mod tray;
 mod ui;
