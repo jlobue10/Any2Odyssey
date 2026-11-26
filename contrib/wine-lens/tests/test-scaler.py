@@ -3,6 +3,7 @@
 """The scaler's switch against a stand-in for sysfs, and any2odyssey-weaver's use of it: no monitor, Wine or root."""
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,8 @@ import time
 import unittest
 
 HERE = Path(__file__).resolve().parents[1]
+# The USB device the monitor's scaler is (read from one monitor).
+SCALER_USB = "1603:452a"
 
 
 class ScalerTests(unittest.TestCase):
@@ -28,36 +31,56 @@ class ScalerTests(unittest.TestCase):
         self.tree = tempfile.TemporaryDirectory()
         self.addCleanup(self.tree.cleanup)
         self.root = Path(self.tree.name)
-        (self.root / "sys").mkdir()
+        (self.root / "sys/class/scsi_generic").mkdir(parents=True)
         (self.root / "dev").mkdir()
 
-    def device(self, name, vendor):
-        (self.root / "sys" / name / "device").mkdir(parents=True)
-        (self.root / "sys" / name / "device/vendor").write_text(vendor + "\n")
+    def device(self, name, vendor, usb=SCALER_USB, port="1-4.1"):
+        """A SCSI device as sysfs has one: the name under class/scsi_generic is a link to a folder deep under
+        devices, whose `device` is a link to the SCSI device three folders up. On USB (`usb` is its id), that
+        is under the USB device's folder, which has the two numbers, under a hub's, which has its own."""
+        number = name[2:]
+        if usb:
+            hub = self.root / "sys/devices/pci0000:00/0000:00:14.0/usb1/1-4"
+            hub.mkdir(parents=True, exist_ok=True)
+            (hub / "idVendor").write_text("05e3\n")
+            (hub / "idProduct").write_text("0608\n")
+            (hub / port).mkdir(exist_ok=True)
+            (hub / port / "idVendor").write_text(usb.split(":")[0] + "\n")
+            (hub / port / "idProduct").write_text(usb.split(":")[1] + "\n")
+            host = hub / port / f"{port}:1.0" / f"host{number}"
+        else:
+            host = self.root / "sys/devices/pci0000:00/0000:00:17.0/ata1" / f"host{number}"
+        scsi = host / f"target{number}:0:0" / f"{number}:0:0:0"
+        (scsi / "scsi_generic" / name).mkdir(parents=True)
+        (scsi / "vendor").write_text(vendor + "\n")
+        (scsi / "scsi_generic" / name / "device").symlink_to("../../../" + scsi.name)
+        (self.root / "sys/class/scsi_generic" / name).symlink_to(
+            os.path.relpath(scsi / "scsi_generic" / name, self.root / "sys/class/scsi_generic"))
         (self.root / "dev" / name).touch()
 
     def run_scaler(self, *arguments):
-        environment = dict(os.environ, ANY2ODYSSEY_SCALER_SYSFS=str(self.root / "sys"),
+        environment = dict(os.environ, ANY2ODYSSEY_SCALER_SYSFS=str(self.root / "sys/class/scsi_generic"),
                            ANY2ODYSSEY_SCALER_DEV=str(self.root / "dev"))
         return subprocess.run([self.binary, *arguments], env=environment, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True, timeout=10)
 
     def test_the_command_is_the_one_odysseyvk_sends_and_goes_to_the_scaler_alone(self):
-        self.device("sg0", "ATA     ")
+        self.device("sg0", "ATA     ", usb=None)
         self.device("sg3", "GCREADER")
-        self.device("sg1", "gcreader")  # found whatever the case, and the first by name is taken
+        self.device("sg1", "gcreader", port="1-4.3")  # found whatever the case, and the first by name is taken
         on = self.run_scaler("on", "--dry")
         self.assertEqual(on.returncode, 0, on.stdout)
         self.assertEqual(on.stdout.splitlines(), [
             str(self.root / "dev/sg1"),
+            "usb: 1603:452a",
             "command: E9 61 00 00 00 00 00 00 02 00 00 00 00 00 00 00",
             "data (512 bytes): 01 00 00 00 D2 00 00 00 ...",
         ])
         off = self.run_scaler("off", "--dry")
-        self.assertEqual(off.stdout.splitlines()[2], "data (512 bytes): 00 00 00 00 D2 00 00 00 ...")
+        self.assertEqual(off.stdout.splitlines()[3], "data (512 bytes): 00 00 00 00 D2 00 00 00 ...")
 
     def test_without_the_monitor_it_says_so_and_sends_nothing(self):
-        self.device("sg0", "ATA     ")
+        self.device("sg0", "ATA     ", usb=None)
         for arguments in (("on",), ("off",), ("on", "--dry")):
             done = self.run_scaler(*arguments)
             self.assertEqual(done.returncode, 1)
@@ -65,6 +88,50 @@ class ScalerTests(unittest.TestCase):
         # No folder of SCSI devices at all (a kernel without the sg driver).
         shutil.rmtree(self.root / "sys")
         self.assertEqual(self.run_scaler("on").returncode, 1)
+
+    def test_a_device_of_the_name_that_is_another_usb_device_gets_nothing_and_is_named(self):
+        # Another maker's card reader that calls itself the same: what E9 means to it is not known.
+        self.device("sg2", "GCREADER", usb="05e3:0749")
+        for arguments in (("on",), ("off",), ("on", "--dry")):
+            done = self.run_scaler(*arguments)
+            self.assertEqual(done.returncode, 1, done.stdout)
+            lines = done.stdout.splitlines()
+            self.assertEqual(len(lines), 1, done.stdout)
+            self.assertTrue(lines[0].startswith("error: a device of the vendor GCREADER is not the scaler"), lines)
+            self.assertIn("sg2 is USB 05e3:0749", lines[0])
+            self.assertIn("known here is USB 1603:452a (read from one monitor); nothing was sent", lines[0])
+            self.assertIn("please report that number", lines[0])
+        # Only one of the two numbers is the scaler's: still another device.
+        self.device("sg4", "GCREADER", usb="1603:0001", port="1-4.2")
+        self.device("sg5", "GCREADER", usb="0001:452a", port="1-4.3")
+        done = self.run_scaler("on")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("sg2 is USB 05e3:0749", done.stdout)
+
+    def test_a_device_of_the_name_that_is_not_on_usb_gets_nothing(self):
+        self.device("sg6", "GCREADER", usb=None)
+        done = self.run_scaler("on")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertEqual(len(done.stdout.splitlines()), 1, done.stdout)
+        self.assertIn("sg6 is not a USB device", done.stdout)
+        self.assertIn("nothing was sent", done.stdout)
+        # Nor one whose USB device says something that is no id (more than four digits): the hub above
+        # it has an id, and that is the hub's, not this device's.
+        self.device("sg7", "GCREADER", usb="1603:452a", port="1-4.2")
+        (self.root / "sys/devices/pci0000:00/0000:00:14.0/usb1/1-4/1-4.2/idProduct").write_text("452a0\n")
+        (self.root / "sys/class/scsi_generic/sg6").unlink()
+        done = self.run_scaler("on")
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn("sg7 is not a USB device", done.stdout)
+
+    def test_the_scaler_is_taken_among_others_of_its_name_and_the_first_of_two(self):
+        self.device("sg1", "GCREADER", usb="05e3:0749", port="1-4.3")
+        self.device("sg5", "GCREADER", port="1-4.2")
+        self.device("sg3", "GCREADER", port="1-4.1")
+        self.assertEqual(self.run_scaler("on", "--dry").stdout.splitlines()[0], str(self.root / "dev/sg3"))
+        # The numbers in capitals, as sysfs does not write them, are the same numbers.
+        (self.root / "sys/devices/pci0000:00/0000:00:14.0/usb1/1-4/1-4.1/idProduct").write_text("452A\n")
+        self.assertEqual(self.run_scaler("off", "--dry").stdout.splitlines()[0], str(self.root / "dev/sg3"))
 
     def test_a_device_that_does_not_take_the_command_is_an_error_in_one_line(self):
         self.device("sg2", "GCREADER")  # a plain file: it can be opened and takes no SCSI command
@@ -80,6 +147,54 @@ class ScalerTests(unittest.TestCase):
         for arguments in ((), ("ON",), ("on", "off"), ("--dry",), ("on", "--dry", "x"), ("1",)):
             done = self.run_scaler(*arguments)
             self.assertEqual((done.returncode, done.stdout), (2, ""), arguments)
+
+
+class RuleTests(unittest.TestCase):
+    """The udev rule opens the device any2odyssey-scaler sends to, and no other."""
+
+    def setUp(self):
+        text = (HERE / "71-any2odyssey-scaler.rules").read_text()
+        self.rules = [line for line in text.splitlines() if line and not line.startswith("#")]
+
+    def test_the_rule_asks_for_the_usb_id_the_program_asks_for(self):
+        source = (HERE / "src/scaler.c").read_text()
+        self.assertEqual(re.findall(r'#define USB_ID "([0-9a-f]{4}:[0-9a-f]{4})"', source), [SCALER_USB])
+        vendor, product = SCALER_USB.split(":")
+        usb = [line for line in self.rules if "idVendor" in line]
+        self.assertEqual(len(usb), 1, self.rules)
+        self.assertIn(f'ATTRS{{idVendor}}=="{vendor}"', usb[0])
+        self.assertIn(f'ATTRS{{idProduct}}=="{product}"', usb[0])
+
+    def test_no_line_asks_two_devices_above_for_what_only_one_of_them_has(self):
+        # udev wants every ATTRS and SUBSYSTEMS of a line to be true of the same device above: the USB id
+        # and the SCSI vendor name in one line match nothing, and the rule would open nothing.
+        for line in self.rules:
+            self.assertFalse("ATTRS{vendor}" in line and "ATTRS{idVendor}" in line, line)
+            self.assertEqual(len(re.findall(r"SUBSYSTEMS==", line)), 1, line)
+            self.assertTrue(line.startswith('SUBSYSTEM=="scsi_generic", '), line)
+
+    def test_the_tag_is_given_only_to_a_device_with_the_id_and_the_name(self):
+        noted = [line for line in self.rules if line.endswith(', ENV{.A2O_SCALER_USB}="1"')]
+        tagged = [line for line in self.rules if "uaccess" in line]
+        self.assertEqual((len(noted), len(tagged), len(self.rules)), (1, 1, 2), self.rules)
+        self.assertLess(self.rules.index(noted[0]), self.rules.index(tagged[0]))
+        self.assertIn('ENV{.A2O_SCALER_USB}=="1"', tagged[0])
+        self.assertIn('ATTRS{vendor}=="GCREADER*"', tagged[0])
+        self.assertTrue(tagged[0].endswith(', TAG+="uaccess"'), tagged[0])
+        # Nothing but the tag: no mode for everybody, no group, no program run.
+        for line in self.rules:
+            self.assertIsNone(re.search(r"MODE|GROUP|OWNER|RUN|PROGRAM|IMPORT", line), line)
+
+    def test_udev_reads_the_rule_without_a_complaint(self):
+        # (udevadm verify came with systemd 254; it reads the file and touches no device)
+        if not shutil.which("udevadm"):
+            self.skipTest("no udevadm")
+        if subprocess.run(["udevadm", "verify", "--help"], capture_output=True).returncode != 0:
+            self.skipTest("this udevadm has no verify")
+        done = subprocess.run(["udevadm", "verify", "--resolve-names=never", "--no-summary",
+                               str(HERE / "71-any2odyssey-scaler.rules")], capture_output=True, text=True)
+        # (what it says about the file's permissions in a checkout is not about the rule)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
 
 class WeaverScalerTests(unittest.TestCase):
