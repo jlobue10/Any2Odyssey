@@ -278,21 +278,22 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_before_fine_edges_has_them_on_and_the_choice_is_kept_after() {
+    fn fine_edges_are_off_until_chosen_and_the_choice_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("viewer-settings.json");
+        // A file from before there were any.
         std::fs::write(&path, r#"{"Input":"Ai","Depth":120}"#).unwrap();
-        assert!(read(&path).edges);
-        std::fs::write(&path, r#"{"Input":"Ai","FineEdges":false}"#).unwrap();
         assert!(!read(&path).edges);
-        let off = Options {
-            edges: false,
+        std::fs::write(&path, r#"{"Input":"Ai","FineEdges":true}"#).unwrap();
+        assert!(read(&path).edges);
+        OptionsFile::load(path.clone()).0.store(Options::default());
+        assert!(!read(&path).edges);
+        let on = Options {
+            edges: true,
             ..Options::default()
         };
-        OptionsFile::load(path.clone()).0.store(Options::default());
-        assert!(read(&path).edges);
-        OptionsFile::load(path.clone()).0.store(off);
-        assert_eq!(read(&path), off);
+        OptionsFile::load(path.clone()).0.store(on);
+        assert_eq!(read(&path), on);
     }
 
     #[cfg(target_os = "linux")]

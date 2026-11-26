@@ -1781,7 +1781,7 @@ impl ViewerState {
                     })
                     .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
                     ui.checkbox(&mut state.options.edges, "Fine edges")
-                        .on_hover_text("Puts the edge of each object in the depth map where the picture has it, so an object does not take a strip of background along. Switch it off to compare with the map as the model gives it.");
+                        .on_hover_text("Experimental. Puts the edge of each object in the depth map where the picture has it, so an object does not take a strip of background along. Each row of the picture finds the edge by itself, so an edge can come out ragged, and it can flicker a little more on a live screen. Off, the map is used as the model gives it.");
                     // Whether that GPU is used: a runtime that could not
                     // start its GPU part falls back to the processor, and
                     // nothing else on the page tells the two apart.
@@ -3733,7 +3733,8 @@ mod tests {
         assert!(!same(base, with(|o| o.half_width = false)));
         assert!(same(base, with(|o| o.depth_pos = 150)));
         assert!(same(base, with(|o| o.pop_pos = -40)));
-        assert!(same(base, with(|o| o.edges = false)));
+        assert!(!base.edges);
+        assert!(same(base, with(|o| o.edges = true)));
         // With AI depth fine edges count, as long as there is depth to show.
         let ai = |edges, depth_pos| {
             let mut options = Options {

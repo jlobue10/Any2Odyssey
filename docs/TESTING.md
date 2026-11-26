@@ -148,7 +148,7 @@ Some of the Windows checks below end with a note *Seen in a window*. In audit ro
 
 Unreleased (nothing of it has been seen on the monitor):
 
-- Linux, G90XF, a live screen and a still image with AI depth through the Odyssey 3D output: with **Fine edges** on and off, look at the edge of a near object against a far background (a person in front of a wall, a window over the desktop) and move the head. Expected with it on: no strip of background that moves with the object, and no doubled edge; nothing changed in flat areas and on floors. Note what thin things (hair, railings, text) and edges without a difference in colour do.
+- Linux, G90XF, a still image and a live screen with AI depth through the Odyssey 3D output: tick **Fine edges** (off unless chosen) and compare with it off at the edge of a near object against a far background (a person in front of a wall, a film), moving the head. Hoped for with it on: no strip of background that moves with the object, and no doubled edge; nothing changed in flat areas, on floors and on a desktop of windows. Known from the rigs, to judge by eye: an edge can come out ragged where object and background are alike in colour, a thin thing (hair, a railing, a rope) can be cut into pieces with streaks beside it, and on a live screen the edges of things that stand still can flicker a little more. Say whether it is worth having on, and whether a film at **Lines** 2160 still keeps its pace with it (rendering takes about half as long again there).
 
 New in 1.0.7 (audit round 25: 1.0.4 to 1.0.6 on the rigs; nothing of it was seen on the monitor before the release):
 

@@ -4,9 +4,9 @@
 //! half its disparity, nearer pixels winning where two land on the same
 //! place, and the gaps a foreground object leaves behind filled from the
 //! background beside it. The result is a full-width side-by-side pair that
-//! [`crate::stereo`] turns into anaglyph or leaves as it is. A depth map
-//! smaller than the image has the edges of its objects put where the image
-//! has them first (`edges`), unless that is switched off.
+//! [`crate::stereo`] turns into anaglyph or leaves as it is. Where that is
+//! chosen, a depth map smaller than the image has the edges of its objects
+//! put where the image has them first (`edges`).
 //!
 //! No model runs here: the depth map comes from whoever estimated it.
 
@@ -157,7 +157,9 @@ pub struct Params {
     /// an object to the background, the slope is replaced by a step where
     /// the picture's colour changes, so that neither eye's view carries a
     /// strip of background along with the object. Off, the map is used as
-    /// it is stretched.
+    /// it is stretched. Off unless chosen: each row finds its step by
+    /// itself, and where the picture's colours say little the edge comes
+    /// out ragged (`edges`).
     pub edges: bool,
 }
 
@@ -166,7 +168,7 @@ impl Default for Params {
         Params {
             strength: 0.9,
             popout: 0.0,
-            edges: true,
+            edges: false,
         }
     }
 }
@@ -766,8 +768,12 @@ mod tests {
     #[test]
     fn fine_edges_make_the_same_picture_on_any_number_of_threads() {
         let (image, map) = modelled_scene();
-        let params = Params::default();
-        assert!(params.edges);
+        // Off unless chosen.
+        assert!(!Params::default().edges);
+        let params = Params {
+            edges: true,
+            ..Params::default()
+        };
         let one = synthesize_on(&image, &map, params, 1).unwrap();
         for threads in [2, 5, 12] {
             assert!(synthesize_on(&image, &map, params, threads).unwrap() == one);

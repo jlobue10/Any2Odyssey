@@ -16,6 +16,18 @@
 //! wall seen at an angle) stay as they are. It works along rows because
 //! that is the direction the views are shifted in.
 //!
+//! Each row is treated by itself, and that is the method's weak side. Run
+//! over the model's maps of real film, the step lies within a pixel of the
+//! picture's strongest change of colour in about four slopes of five, and
+//! moves from one row to the next no more than the picture's own edge
+//! does; but where the colours of object and background say little (a
+//! blurred background, a pattern on the object) neighbouring rows put it
+//! some pixels apart, and the edge comes out ragged, as streaks where the
+//! gap behind the object is filled. On a live screen the step also comes
+//! and goes a little more from picture to picture than the slope it
+//! replaces. So fine edges are off unless chosen
+//! ([`crate::dibr::Params::edges`]).
+//!
 //! The method follows the "cantos finos" pass of odysseyvk-linux
 //! (the-cave-dweller, MIT), which does the same in its weaving shader from
 //! the map's sixteen nearest points; here it is done in one dimension on
@@ -26,6 +38,13 @@
 /// shift. Below this a step would move the picture by less than the slope
 /// smears it, and the slope may as well be the scene's own.
 const MIN_SHIFT: f32 = 2.0;
+/// How many times [`MIN_SHIFT`] the points have to be apart for the slope
+/// to become a step altogether. Between the two it becomes one by a part
+/// that grows with the distance: the model's numbers move a little from
+/// one picture to the next and from one row to the next, and an edge that
+/// lies at the threshold would otherwise be a slope in one and a step in
+/// the other, which shows as a flicker and as a torn edge.
+const WHOLE: f32 = 2.0;
 /// The longest slope taken for an edge, in points of the depth map. The
 /// model's edges are two or three points wide; anything longer is a real
 /// slope of the scene.
@@ -44,6 +63,8 @@ const MIN_CONTRAST: u32 = 24;
 struct Slope {
     start: usize,
     end: usize,
+    /// How much of a step it becomes, 0.0 (none) to 1.0.
+    part: f32,
 }
 
 /// Working room for [`refine_row`], kept between rows.
@@ -123,14 +144,19 @@ pub(crate) fn refine_row(
             x += 1;
         }
         if steepest >= steep && x - start <= longest {
-            work.slopes.push(Slope { start, end: x });
+            let part = ((steepest / steep - 1.0) / (WHOLE - 1.0)).clamp(0.0, 1.0);
+            work.slopes.push(Slope {
+                start,
+                end: x,
+                part,
+            });
         }
     }
 
     let margin = cell.ceil() as usize;
     let sample = margin.clamp(2, 8);
     for index in 0..work.slopes.len() {
-        let Slope { start, end } = work.slopes[index];
+        let Slope { start, end, part } = work.slopes[index];
         // Nothing of the neighbouring edges is searched or sampled.
         let floor = match index.checked_sub(1) {
             Some(before) => work.slopes[before].end + 1,
@@ -175,22 +201,33 @@ pub(crate) fn refine_row(
             }
             _ => middle,
         };
+        // The whole step where the points are far enough apart, and else
+        // that part of the way from the slope to it.
+        let put = |near: &mut f32, side: f32| {
+            if part >= 1.0 {
+                *near = side;
+            } else {
+                *near += (side - *near) * part;
+            }
+        };
         for (at, near) in nearness[first..=last].iter_mut().enumerate() {
             let at = first + at;
             if at < cut {
                 if at >= start {
-                    *near = before;
+                    put(near, before);
                 }
             } else if at <= end {
-                *near = after;
+                put(near, after);
             }
         }
         // A cut outside the slope: what lies between it and the slope
         // changes sides.
         if cut < start {
-            nearness[cut..start].fill(after);
+            nearness[cut..start].iter_mut().for_each(|n| put(n, after));
         } else if cut > end + 1 {
-            nearness[end + 1..cut].fill(before);
+            nearness[end + 1..cut]
+                .iter_mut()
+                .for_each(|n| put(n, before));
         }
     }
 }
@@ -299,6 +336,44 @@ mod tests {
             let mut nearness = slope.clone();
             refine_row(&pixels, &mut nearness, scale, cell, &mut Work::default());
             assert_eq!(nearness, slope, "scale {scale}, cell {cell}");
+        }
+    }
+
+    #[test]
+    fn a_slope_just_over_the_threshold_becomes_a_step_by_a_part_only() {
+        let (pixels, slope) = row(200, 97, 4, 1);
+        // The largest change made to the row, as a share of the height of
+        // its edge, when that edge moves each eye's picture by `shift`.
+        let moved = |shift: f32| {
+            let depth = shift * 2.0 / 60.0;
+            let mut nearness: Vec<f32> = slope.iter().map(|n| n * depth).collect();
+            let before = nearness.clone();
+            refine_row(&pixels, &mut nearness, 60.0, 4.0, &mut Work::default());
+            let most = nearness
+                .iter()
+                .zip(&before)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            most / depth
+        };
+        // Under the threshold nothing, from twice the threshold the whole
+        // step, however much deeper the edge is.
+        assert_eq!(moved(MIN_SHIFT * 0.98), 0.0);
+        let whole = moved(MIN_SHIFT * WHOLE * 1.01);
+        assert!(whole > 0.3, "{whole}");
+        assert!((moved(MIN_SHIFT * WHOLE * 4.0) - whole).abs() < 1e-3);
+        // Between them a part that grows evenly: no depth at which a
+        // little more of it changes the row by a jump.
+        assert!((moved(MIN_SHIFT * 1.5) - whole * 0.5).abs() < 0.02);
+        let mut last = moved(MIN_SHIFT * 1.001);
+        assert!(last < whole * 0.02, "{last}");
+        for step in 1..=21 {
+            let now = moved(MIN_SHIFT * (1.0 + step as f32 * 0.05));
+            assert!(
+                now >= last - 1e-4 && now - last < whole * 0.07,
+                "{step}: {last} {now}"
+            );
+            last = now;
         }
     }
 
