@@ -252,6 +252,11 @@ rm -f "$B/any2odyssey-noxon"
 if command -v cc >/dev/null; then
     cc -O2 -o "$B/any2odyssey-noxon" "$S/noxon.c" || rm -f "$B/any2odyssey-noxon"
 fi
+# The scaler's switch (experimental; any2odyssey-weaver runs it only when asked to, see docs/LENS-SWITCH.md).
+rm -f "$B/any2odyssey-scaler"
+if command -v cc >/dev/null; then
+    cc -O2 -o "$B/any2odyssey-scaler" "$S/scaler.c" || rm -f "$B/any2odyssey-scaler"
+fi
 WEAVER=
 rm -f "$B/any2odyssey-weaver.exe"
 if ! command -v clang++ >/dev/null; then
