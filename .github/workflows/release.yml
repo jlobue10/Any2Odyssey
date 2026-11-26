@@ -291,6 +291,8 @@ jobs:
         run: python3 contrib/wine-lens/tests/test-weaver-watcher.py
       - name: Weaver host picture pacing tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-weaver-evenly.py
+      - name: Scaler switch tests (no hardware)
+        run: python3 contrib/wine-lens/tests/test-scaler.py
       - name: Eye tracking stop tests (no hardware)
         run: python3 contrib/wine-lens/tests/test-tracking-stop.py
       - name: Lens stack start tests (no hardware)
@@ -350,6 +352,9 @@ jobs:
           sh -n check/wine-lens/setup.sh
           test -x check/wine-lens/setup.sh -a -x check/wine-lens/any2odyssey-weaver -a -x check/wine-lens/tools/tracking.sh
           test -s check/THIRD-PARTY-LICENSES-LINUX.md -a -s check/wine-lens/LICENSE-MIT
+          # The scaler's switch (experimental, only with install.sh --scaler): its source for setup.sh to
+          # build, and the udev rule the installer's step 6 copies.
+          test -s check/wine-lens/src/scaler.c -a -s check/wine-lens/71-any2odyssey-scaler.rules
           # Nothing the test steps above left in the tree (Python's compiled copy of tools/mkedid.py).
           test -z "$(find check -name __pycache__ -o -name '*.pyc')"
           # Nor the tests of the Wine setup, which are for a checkout.
@@ -430,6 +435,9 @@ jobs:
           test -x /usr/share/any2odyssey/wine-lens/setup.sh
           test -s /usr/share/licenses/any2odyssey/THIRD-PARTY-LICENSES-LINUX.md
           test -s /usr/lib/udev/rules.d/70-any2odyssey-lens.rules
+          # The scaler's rule is not among the package's rules: only any2odyssey-setup --scaler installs it.
+          test -s /usr/share/any2odyssey/wine-lens/71-any2odyssey-scaler.rules -a -s /usr/share/any2odyssey/wine-lens/src/scaler.c
+          test ! -e /usr/lib/udev/rules.d/71-any2odyssey-scaler.rules
           test -z "$(find /usr/share/any2odyssey -name __pycache__ -o -name '*.pyc')"
           test ! -e /usr/share/any2odyssey/wine-lens/tests
           # The documents are read from the package file: the container's pacman.conf has NoExtract for
