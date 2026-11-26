@@ -4,11 +4,16 @@ Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continu
 
 ## Unreleased
 
-Global shortcuts for the Linux viewer, with the keys of the Odyssey 3D Hub as [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT) uses them. **Not run on the monitor's own desktop yet**: `docs/TESTING.md` has the check.
+Global shortcuts for the Linux viewer, with the keys of the Odyssey 3D Hub as [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT) uses them. **Not run on the monitor's own desktop, and no key has been pressed yet**: they were run in a headless KDE Plasma 6.8.2 session (xdg-desktop-portal 1.22.1), each shortcut set off through KDE's shortcut service. `docs/TESTING.md` has what is left to see.
 
 ### Added
 
 - **Linux: global shortcuts.** **Global shortcuts** on the viewer's page (off until chosen; `GlobalShortcuts` in `viewer-settings.json`) asks the desktop's `GlobalShortcuts` portal for five shortcuts that work while another window has the keyboard: start or stop the output, less and more depth, less and more pop-out (five hundredths a press). The keys asked for are the Odyssey 3D Hub's, as in odysseyvk: Ctrl+Shift+1, 3 and 4, 5 and 6. The desktop decides: it may ask you to confirm them, and they are changed in its own shortcut settings (KDE Plasma 6: System Settings → Shortcuts). A desktop whose portal has none, or a declined dialog, clears the box and says why on the status line.
+  - The desktop gives shortcuts only to a program it can name, and it names by itself only one started from its menu: started from a terminal, a script or another program, Any2Odyssey was refused by Plasma 6.8 ("An app id is required"). It now tells the portal who it is (`any2odyssey`, the name of its desktop file, through the portal's registry of programs outside a sandbox) on a connection of the shortcuts' own, since only the first call on a connection can. This needs `any2odyssey.desktop` installed, which `install.sh` and the package do; without it the status line says so.
+  - Clearing the box closes the desktop's session, and so does every other end of the shortcuts. As first written the session stayed open for as long as the program ran: Plasma kept the five key combinations from every other program, and after the box was ticked again there were two sessions and every press counted twice (depth moved by ten hundredths).
+  - A portal that leaves the bus (an update of its package, a crash) clears the box with a line; ticking it asks the new one.
+  - Seen in the headless session, started as from a terminal and as from the menu: the desktop's dialog with the five shortcuts once and not at a later tick, the keys asked for bound, presses taken with the window minimized (depth, pop-out, and the output window opened and closed), the session closed and the shortcuts inactive in KDE's service after the box is cleared, one press one step after it is ticked again, none left after the program quits.
+  - Known, not fixed: when only KDE's own part of the portal (`xdg-desktop-portal-kde`) is restarted, nothing tells the program; the box stays ticked and the shortcuts do nothing until it is cleared and ticked again.
 
 ## 1.0.7 (2026-11-22)
 
