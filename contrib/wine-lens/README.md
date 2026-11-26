@@ -24,6 +24,9 @@ sleep 60 | ~/.local/share/any2odyssey/any2odyssey-lens-helper     # lens on unti
   Media Foundation camera stand-in (`a2ocam.c`), the native camera bridge (`camera-bridge.c`), the weaver host
   (`weaver-host.c`, `srweaver.cpp`) and what lets the tracker pause (`udp-errors.c`, `connreset.c`).
 - `tools/`: describe the board and the monitors to Wine, start the service, keep the serial port binary-clean.
+- `src/scaler.c`, `71-any2odyssey-scaler.rules`: experimental and off unless asked for, the switch of the
+  scaler's 3D mode (`docs/LENS-SWITCH.md`, "The scaler's 3D mode"). The one part here that sends the monitor a
+  command of its own, and not to the lens board.
 - `70-any2odyssey-lens.rules`: the lens board for the person at the seat, and USB power saving off for the
   webcam (it stops sending pictures once it has been suspended, until the monitor is power-cycled).
 
