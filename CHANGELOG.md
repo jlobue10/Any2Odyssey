@@ -2,6 +2,14 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+One thing taken from [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT), a native Linux player for the same monitor. **It has not been seen on the monitor**: `docs/TESTING.md` has the check.
+
+### Added
+
+- **Linux, AI depth: fine edges.** A depth model's map is far smaller than the picture, and stretched over it the edge of an object is a slope two or three of the map's points wide, centred only roughly on the object. Rendered as it is, the slope carries a strip of background along with the object in one eye and eats into the object in the other. Each such slope in a row is now replaced by a step, put where the picture's colour changes from the one side's to the other's; flat areas, gentle slopes and maps of the picture's own size are left as they are. For images and for a live screen; **Fine edges** on the viewer's page switches it off (`FineEdges` in `viewer-settings.json`), and it is on by default. Measured without the monitor: a block in a 240-pixel picture keeps its 80 pixels in both eyes where the stretched map gave it another width in each; rendering a 1920 × 1080 picture takes the same time with and without (14 ms on two cores of a machine without a GPU). The method is odysseyvk's "cantos finos", done here on the processor one row at a time.
+
 ## 1.0.7 (2026-11-22)
 
 An eleventh audit release: seven pull requests (#196 to #202) from a round that put 1.0.4, 1.0.5 and 1.0.6 on the rigs. Those three were made in one day on the monitor's own Linux PC, from measurements of one film on one screen, and their notes say what they had not seen: another refresh rate, another desktop, a game, a video of 60 pictures a second. This round ran those: a producer of frames at any rate through the program's own capture and render loop, the Wine-side program under real Wine 11.22 and 11.6 with a stand-in for Leia's weaver, TensorRT on an RTX 5090 (in WSL), the set-up script of the depth runtime in root trees of nine distributions, and the published files of the three releases. Linux only, but for the version: nothing Windows runs has changed. **None of it has been seen on the monitor**; `docs/TESTING.md`, "New in 1.0.7", has the checks.

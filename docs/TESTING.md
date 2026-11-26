@@ -146,6 +146,10 @@ The changes made in 0.9.1 to 1.0.7 (audit rounds 11 to 25, the Windows setup pro
 
 Some of the Windows checks below end with a note *Seen in a window*. In audit round 22 the Windows controls were run in their own window on Windows 11 without the monitor: a build with no conversion engine, on a desktop that is never shown, with input posted to the window as messages, a display scale of 150 or 200 % given to the window by the message Windows sends for one, and pictures taken by the program itself. What a note names was seen there; what it names as not seen is still to do, and so is every item without a note.
 
+Unreleased (nothing of it has been seen on the monitor):
+
+- Linux, G90XF, a live screen and a still image with AI depth through the Odyssey 3D output: with **Fine edges** on and off, look at the edge of a near object against a far background (a person in front of a wall, a window over the desktop) and move the head. Expected with it on: no strip of background that moves with the object, and no doubled edge; nothing changed in flat areas and on floors. Note what thin things (hair, railings, text) and edges without a difference in colour do.
+
 New in 1.0.7 (audit round 25: 1.0.4 to 1.0.6 on the rigs; nothing of it was seen on the monitor before the release):
 
 - Linux, the G90XF at 120 Hz, `any2odyssey-setup` once (the program that shows the picture is built by it), then the film of 24 pictures a second on the live screen with `env A2O_WEAVER_STATS='Z:\tmp\weaver-stats.txt' A2O_LIVE_TIMES=/tmp/live-times.txt any2odyssey` as under "New in 1.0.6": `shown for turns:` as with 1.0.6 (nearly all under `5`), and the file's first line is `latency 25000 microseconds`. Nothing should differ: this case takes the same path as before.
