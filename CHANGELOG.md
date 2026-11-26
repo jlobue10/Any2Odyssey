@@ -2,6 +2,14 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+Global shortcuts for the Linux viewer, with the keys of the Odyssey 3D Hub as [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT) uses them. **Not run on the monitor's own desktop yet**: `docs/TESTING.md` has the check.
+
+### Added
+
+- **Linux: global shortcuts.** **Global shortcuts** on the viewer's page (off until chosen; `GlobalShortcuts` in `viewer-settings.json`) asks the desktop's `GlobalShortcuts` portal for five shortcuts that work while another window has the keyboard: start or stop the output, less and more depth, less and more pop-out (five hundredths a press). The keys asked for are the Odyssey 3D Hub's, as in odysseyvk: Ctrl+Shift+1, 3 and 4, 5 and 6. The desktop decides: it may ask you to confirm them, and they are changed in its own shortcut settings (KDE Plasma 6: System Settings → Shortcuts). A desktop whose portal has none, or a declined dialog, clears the box and says why on the status line.
+
 ## 1.0.7 (2026-11-22)
 
 An eleventh audit release: seven pull requests (#196 to #202) from a round that put 1.0.4, 1.0.5 and 1.0.6 on the rigs. Those three were made in one day on the monitor's own Linux PC, from measurements of one film on one screen, and their notes say what they had not seen: another refresh rate, another desktop, a game, a video of 60 pictures a second. This round ran those: a producer of frames at any rate through the program's own capture and render loop, the Wine-side program under real Wine 11.22 and 11.6 with a stand-in for Leia's weaver, TensorRT on an RTX 5090 (in WSL), the set-up script of the depth runtime in root trees of nine distributions, and the published files of the three releases. Linux only, but for the version: nothing Windows runs has changed. **None of it has been seen on the monitor**; `docs/TESTING.md`, "New in 1.0.7", has the checks.
