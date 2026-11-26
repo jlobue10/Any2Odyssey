@@ -96,6 +96,23 @@ The input format "Live screen → 3D" feeds the same output continuously (`crate
 
 The screen can be the Odyssey's own on KDE Plasma 6: while a live screen is shown, `any2odyssey-weaver` loads a small KWin script (`tools/kwin-overlay.js`) that asks KWin to leave the host's window out of screen casts and to keep it above the other windows, so the capture sees the desktop underneath and not the 3D picture of it. The helper reports `capture: excluded` and the viewer then says the Odyssey itself can be chosen. Other desktops have no such switch that this project knows of; there the screen has to be another one, the helper reports `capture: not excluded`, and the viewer's page says for as long as the screen shows that the Odyssey's own must not be the one shown. On the Odyssey's own screen the real pointer is drawn by the desktop on top of the 3D picture, as a flat pointer, so the viewer's "Draw the pointer into the picture" should be off.
 
+## The scaler's 3D mode
+
+Experimental and off unless asked for. Besides the lens board and the webcam, the monitor's USB hub carries a mass-storage style device whose SCSI vendor name is `GCREADER` (Linux gives it a `/dev/sgN`; `lsscsi -g` shows it). A vendor command to it switches a "3D mode" of the monitor's scaler. [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux), which drives the monitor without Leia's runtime, sends it before every picture and says that without it its panel does not enter 3D. Leia's service under Wine does not send it and does not know the device, and the Odyssey 3D output described above has been seen working all the same. What the mode changes for that output is therefore not known; `any2odyssey-scaler` exists so that it can be tried with and without.
+
+- `any2odyssey-scaler on|off` (`contrib/wine-lens/src/scaler.c`, built by `setup.sh` into `wine-lens/build/` where there is a C compiler) finds the device by its vendor name and sends the one command odysseyvk sends: a 16-byte CDB `E9 61 00 00 00 00 00 00 02 00…` with 512 bytes of data, of which byte 0 is 1 for on and 0 for off and byte 4 is `D2`. It prints `on` or `off`, or `error: <reason>`. `--dry` after `on` or `off` prints the device and the command and sends nothing.
+- The installer does the two steps below when asked: `./install.sh --scaler` from the archive, or `any2odyssey-setup --scaler` with the Arch package. `--no-scaler` switches it off again and leaves the rule, which `--uninstall` asks about. Without either option the installer asks, and Enter and `--yes` both mean no. By hand:
+- The device has to be open to the person at the seat. `71-any2odyssey-scaler.rules` does that:
+
+  ```sh
+  sudo cp contrib/wine-lens/71-any2odyssey-scaler.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+  ```
+
+  and then unplug and replug the monitor's USB cable, or switch the monitor off and on. odysseyvk reports that `udevadm trigger` on this device re-initialises the monitor's hub and takes the lens board and the webcam off the bus until then; that has not been tried here.
+- To have the Odyssey 3D output use it: `touch ~/.local/share/any2odyssey/wine-lens/scaler.on` (or start Any2Odyssey with `ANY2ODYSSEY_SCALER=1`). `any2odyssey-weaver` then switches the mode on after Leia's service is up and before the picture, and off when the picture ends, and only a mode it switched on. What the scaler answered is in `scaler.log` beside `scaler.on`; the picture is shown whatever it answered. Remove `scaler.on` to go back.
+
+Not checked: any of it on the monitor. The command's bytes are compared with odysseyvk's in a test, and the script's use of the program is run against stand-ins (`contrib/wine-lens/tests/test-scaler.py`).
+
 ## The other lens helper: Leia's runtime for Linux
 
 `contrib/lens-helper/` is one C file and a CMake file, built by whoever has Leia's SDK for Linux. With `leiasr-runtime` installed (or `SRSDK_ROOT` pointing at an unpacked SDK):

@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Samsung Odyssey 3D (G90XF): the scaler's vendor device (SCSI vendor "GCREADER", a /dev/sgN). Only for
 # any2odyssey-scaler, which is experimental and off unless asked for (docs/LENS-SWITCH.md, "The scaler's 3D
-# mode"): it lets the person at the seat send that device its 3D-mode command. Not installed by the set-up.
+# mode"): it lets the person at the seat send that device its 3D-mode command. Installed only by the
+# installer's step 6 (install.sh --scaler), or by hand.
 #
 # After copying this file: "sudo udevadm control --reload", then unplug and replug the monitor's USB cable
 # (or switch the monitor off and on). odysseyvk-linux reports that "udevadm trigger" on this device

@@ -16,7 +16,9 @@
 #   5. prepares the Odyssey 3D's lens, eye tracker and weaver under Wine from your own Windows installation
 #      of the Odyssey 3D Hub, if it finds one mounted or is given one. This part expects a dual-boot PC:
 #      Windows with the Odyssey 3D Hub on a drive of this machine, which has shown 3D on this monitor at
-#      least once. Mount its system partition (read-only is enough) before running this script.
+#      least once. Mount its system partition (read-only is enough) before running this script;
+#   6. only when asked for (it is experimental, and --yes does not agree to it): has the Odyssey 3D output
+#      switch the monitor's scaler to its 3D mode, with the udev rule that lets you send it the command.
 #
 # Options:
 #   --yes               answer yes to every question
@@ -24,6 +26,8 @@
 #   --no-udev           do not install the udev rules
 #   --no-model          do not download the depth model
 #   --no-odyssey        do not prepare the Wine side
+#   --scaler            do step 6 without asking: the Odyssey 3D output switches the scaler's 3D mode
+#   --no-scaler         switch that off again (the udev rule stays until --uninstall)
 #   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files");
 #                       needed when it is on a USB drive, a memory card or a network share, or when several
 #                       drives have one
@@ -39,13 +43,15 @@ umask go-w
 
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PREFIX=$HOME/.local PREFIX_GIVEN=
-YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 PACKAGED= DRY= UNINSTALL= WINROOT=
+YES= DEPS=1 UDEV=1 MODEL=1 ODYSSEY=1 SCALER= PACKAGED= DRY= UNINSTALL= WINROOT=
 # For packaging/linux/tests only: a folder that stands in for / where this script looks for the lens board,
 # for mounted drives (with the mount table and the /sys entries that describe them) and for the udev rules.
 # It comes from the environment, so nothing it names reaches a command run as root: while it is set no step
 # uses sudo, and udevadm, which acts on the real system whatever stands in for /, is named and not run.
 TEST_ROOT=${A2O_INSTALL_TEST_ROOT:-}
 RULES_NAME=70-any2odyssey-lens.rules
+# The rule for the scaler's vendor device, which only step 6 installs.
+SCALER_RULES_NAME=71-any2odyssey-scaler.rules
 # The rules folder follows the stand-in. It was the real /etc/udev/rules.d in a test run too, with the udev
 # step switched off there: no test could see what that step or its removal does, and the one that looked
 # whether a rules file under the stand-in was left alone passed whatever this script did.
@@ -70,6 +76,8 @@ while [ $# -gt 0 ]; do
         --no-udev) UDEV= ;;
         --no-model) MODEL= ;;
         --no-odyssey) ODYSSEY= ;;
+        --scaler) SCALER=yes ;;
+        --no-scaler) SCALER=no ;;
         --packaged) PACKAGED=1 ;;
         --dry-run) DRY=1 ;;
         --uninstall) UNINSTALL=1 ;;
@@ -344,6 +352,15 @@ if [ -n "$UNINSTALL" ]; then
             # (a refusal by sudo must not end the removal half-way: the Wine side and the last lines follow)
             { run $SUDO rm -f "$RULES_DIR/$RULES_NAME" && udev control --reload; } ||
                 warn "the udev rules could not be removed or reloaded (see the message above)"
+        fi
+    fi
+    # The scaler's rule, where step 6 installed it. (scaler.on goes with the Wine side below.)
+    if [ -f "$RULES_DIR/$SCALER_RULES_NAME" ]; then
+        if no_sudo; then
+            say "   the scaler's udev rule stays (this system has no sudo); as root: rm -f $RULES_DIR/$SCALER_RULES_NAME && udevadm control --reload"
+        elif ask "Remove the scaler's udev rule ($RULES_DIR/$SCALER_RULES_NAME${SUDO:+, needs sudo})?"; then
+            { run $SUDO rm -f "$RULES_DIR/$SCALER_RULES_NAME" && udev control --reload; } ||
+                warn "the scaler's udev rule could not be removed or reloaded (see the message above)"
         fi
     fi
     # The Wine side is in the data folder, which a distribution's package of the program uses as well. The
@@ -1036,6 +1053,58 @@ older_wine_side() {
 }
 if [ -z "$DRY" ] && older_wine_side; then
     warn "the Odyssey 3D's Wine side in $DATA/wine-lens was made by another version of Any2Odyssey and still runs that version's scripts and stand-in libraries; what this version changed in them does not apply until it is made again. With the Windows drive mounted and the monitor awake, run this script again, or: $(quoted "$WINE_LENS/setup.sh") /path/to/that/drive"
+fi
+
+# ---------------------------------------------------------------------------------------------------------
+# Experimental, and the one step that has this program send the monitor a command of its own (to the scaler,
+# not to the lens board): see docs/LENS-SWITCH.md, "The scaler's 3D mode". It is done with --scaler, or when
+# the question is answered with yes; Enter means no, and so does --yes.
+step "6. The scaler's 3D mode (experimental)"
+SIDE=$DATA/wine-lens
+SCALER_RULES=$WINE_LENS/$SCALER_RULES_NAME
+[ -f "$SCALER_RULES" ] || SCALER_RULES=$HERE/wine-lens/$SCALER_RULES_NAME
+scaler_rule_installed() { [ -f "$RULES_DIR/$SCALER_RULES_NAME" ] && cmp -s "$SCALER_RULES" "$RULES_DIR/$SCALER_RULES_NAME"; }
+if [ "$SCALER" = no ]; then
+    if [ -e "$SIDE/scaler.on" ]; then
+        run rm -f "$SIDE/scaler.on"
+        say "   switched off: the Odyssey 3D output no longer sends the scaler its command"
+        [ ! -f "$RULES_DIR/$SCALER_RULES_NAME" ] || say "   the udev rule stays ($RULES_DIR/$SCALER_RULES_NAME); --uninstall asks about removing it"
+    else
+        say "   it was not switched on"
+    fi
+elif [ "$SCALER" != yes ] && [ -e "$SIDE/scaler.on" ] && scaler_rule_installed; then
+    say "   already switched on (--no-scaler switches it off)"
+elif [ "$SCALER" != yes ] && ! ask "Have the Odyssey 3D output switch the monitor's scaler to its 3D mode (experimental and not tried on the monitor; a command of this program's own to the monitor, see docs/LENS-SWITCH.md)?" no; then
+    : # no, or it has said why it did not ask
+elif [ ! -f "$SIDE/any2odyssey-weaver" ] && [ -z "$DRY" ]; then
+    warn "the Odyssey 3D's Wine side is not prepared (step 5), and it is what switches the scaler; run this script again with --scaler once it is"
+else
+    if [ -z "$UDEV" ]; then
+        say "   the udev rule is not installed (--no-udev)"
+    elif [ ! -f "$SCALER_RULES" ]; then
+        warn "$SCALER_RULES_NAME was not found; the rule is not installed"
+    elif scaler_rule_installed; then
+        say "   the udev rule is already installed"
+    elif [ ! -d "$RULES_DIR" ] && ! have udevadm; then
+        say "   the udev rule is not installed: this system has no udev (no $RULES_DIR and no udevadm; a container?)"
+    elif no_sudo; then
+        say "   this system has no sudo. As root, run:   install -m644 $(quoted "$SCALER_RULES") $RULES_DIR/$SCALER_RULES_NAME && udevadm control --reload"
+    elif ! run $SUDO install -m644 "$SCALER_RULES" "$RULES_DIR/$SCALER_RULES_NAME"; then
+        warn "the scaler's udev rule was not installed (see the message above); the scaler cannot be sent its command until it is. As root: install -m644 $(quoted "$SCALER_RULES") $RULES_DIR/$SCALER_RULES_NAME && udevadm control --reload"
+    else
+        udev control --reload || warn "the scaler's udev rule is installed but could not be reloaded (see the message above); it is read at the next start of the system"
+        # No "udevadm trigger" here: on this device it is reported to re-initialise the monitor's hub and
+        # take the lens board and the webcam off the bus (odysseyvk-linux's README).
+        say "   The rule takes effect once the monitor's USB cable has been unplugged and plugged in again, or the monitor switched off and on."
+    fi
+    [ -x "$SIDE/build/any2odyssey-scaler" ] || [ -n "$DRY" ] ||
+        warn "any2odyssey-scaler is not in $SIDE/build yet: run the Odyssey 3D set-up once more ($WINE_LENS/setup.sh, with a C compiler installed), which builds it"
+    if [ -n "$DRY" ]; then
+        say "   would make: $SIDE/scaler.on"
+    else
+        : >"$SIDE/scaler.on"
+    fi
+    say "   switched on: the Odyssey 3D output sends the scaler its command before a picture and after it. What the scaler answered is in $SIDE/scaler.log; --no-scaler switches it off."
 fi
 
 say ""

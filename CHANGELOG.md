@@ -2,6 +2,14 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
+## Unreleased
+
+One thing taken from [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT), a native Linux player for the same monitor that talks to its hardware itself. **It has not been run on the monitor**: `docs/TESTING.md` has the check.
+
+### Added
+
+- **Linux, the Odyssey 3D output: the scaler's 3D mode, for those who want to try it.** The monitor's USB hub carries a device (SCSI vendor `GCREADER`) that takes a command switching a "3D mode" of the scaler; odysseyvk sends it and reports that its own picture needs it. The Odyssey 3D output here has been seen working without it, so it is **off unless asked for**: with the file `scaler.on` in `~/.local/share/any2odyssey/wine-lens/` (or `ANY2ODYSSEY_SCALER=1`), `any2odyssey-weaver` switches the mode on before the picture and off after, through the new `any2odyssey-scaler` (`contrib/wine-lens/src/scaler.c`), and writes what it answered to `scaler.log` there. The installer does all of it when asked: `./install.sh --scaler` (or `any2odyssey-setup --scaler`) installs `71-any2odyssey-scaler.rules` and makes `scaler.on`, `--no-scaler` switches it off again, and without either it asks, with no for Enter and for `--yes`. See `docs/LENS-SWITCH.md`, "The scaler's 3D mode".
+
 ## 1.0.7 (2026-11-22)
 
 An eleventh audit release: seven pull requests (#196 to #202) from a round that put 1.0.4, 1.0.5 and 1.0.6 on the rigs. Those three were made in one day on the monitor's own Linux PC, from measurements of one film on one screen, and their notes say what they had not seen: another refresh rate, another desktop, a game, a video of 60 pictures a second. This round ran those: a producer of frames at any rate through the program's own capture and render loop, the Wine-side program under real Wine 11.22 and 11.6 with a stand-in for Leia's weaver, TensorRT on an RTX 5090 (in WSL), the set-up script of the depth runtime in root trees of nine distributions, and the published files of the three releases. Linux only, but for the version: nothing Windows runs has changed. **None of it has been seen on the monitor**; `docs/TESTING.md`, "New in 1.0.7", has the checks.
