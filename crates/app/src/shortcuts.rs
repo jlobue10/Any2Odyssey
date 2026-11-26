@@ -15,11 +15,24 @@
 //!
 //! Nothing here knows the viewer: presses come out as [`Action`]s for it
 //! to take at its next frame.
+//!
+//! The desktop keeps a session of shortcuts, and their keys, until the
+//! session is closed or the program leaves the bus. So the session is
+//! closed whenever the shortcuts end here: the box cleared, the desktop's
+//! dialog declined, a refusal. And there is one session at a time.
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Mutex, PoisonError};
+use std::task::Poll;
 
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
-use ashpd::desktop::CreateSessionOptions;
+use ashpd::desktop::{CreateSessionOptions, Session};
+use ashpd::zbus::export::futures_core::Stream;
+use tokio::sync::oneshot::{self, error::TryRecvError};
+use tokio::task::JoinHandle;
 
 /// What a shortcut asks of the viewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,34 +135,67 @@ fn failure_line(error: &ashpd::Error) -> String {
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => {
             "Global shortcuts: declined in the desktop's dialog.".to_owned()
         }
+        // The desktop does not know which program asks: see
+        // `name_this_program`.
+        ashpd::Error::Portal(ashpd::PortalError::NotAllowed(why)) => format!(
+            "Global shortcuts: the desktop gives them only to a program it knows by name, and it does not know this one ({why}). It knows a program by its desktop file: any2odyssey.desktop, which install.sh and the package install."
+        ),
         other => format!("Global shortcuts: the desktop refused them ({other})."),
     }
 }
 
-/// The shortcuts while they are wanted. Dropping it ends them.
+/// What the status line says when the desktop itself ended the shortcuts.
+const ENDED_BY_DESKTOP: &str =
+    "Global shortcuts: the desktop ended them. Tick the box to ask again.";
+
+/// The shortcuts while they are wanted. Dropping it ends them: the desktop
+/// is told, and has its keys back.
 pub struct Shortcuts {
     events: Receiver<Event>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    /// Nothing is ever sent: that this end is dropped with the rest is what
+    /// tells the task to close the desktop's session. (A task that is only
+    /// aborted leaves the session open, and the desktop keeps the keys for
+    /// as long as this program runs.)
+    _wanted: Option<oneshot::Sender<()>>,
 }
+
+/// The task of the shortcuts before these, which may still be closing its
+/// session.
+static BEFORE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 impl Shortcuts {
     /// Ask the desktop for the shortcuts. `wake` is called (on another
     /// thread) whenever there is an [`Event`] to take.
     pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Shortcuts {
         let (tx, events) = mpsc::channel();
-        let task = match crate::capture::portal_runtime() {
-            Ok(runtime) => Some(runtime.spawn(async move {
-                if let Err(error) = serve(&tx, &wake).await {
-                    let _ = tx.send(Event::Failed(failure_line(&error)));
+        let (wanted, unwanted) = oneshot::channel();
+        match crate::capture::portal_runtime() {
+            Ok(runtime) => {
+                let mut before = BEFORE.lock().unwrap_or_else(PoisonError::into_inner);
+                let earlier = before.take();
+                *before = Some(runtime.spawn(async move {
+                    // One session at a time: the desktop tells every session
+                    // of a press, and with two a press would be taken twice.
+                    if let Some(earlier) = earlier {
+                        let _ = earlier.await;
+                    }
+                    let said = match serve(&tx, &wake, unwanted).await {
+                        Ok(End::Unwanted) => return,
+                        Ok(End::ByDesktop) => ENDED_BY_DESKTOP.to_owned(),
+                        Err(error) => failure_line(&error),
+                    };
+                    let _ = tx.send(Event::Failed(said));
                     wake();
-                }
-            })),
+                }));
+            }
             Err(why) => {
                 let _ = tx.send(Event::Failed(format!("Global shortcuts: {why}.")));
-                None
             }
-        };
-        Shortcuts { events, task }
+        }
+        Shortcuts {
+            events,
+            _wanted: Some(wanted),
+        }
     }
 
     /// The next event, if there is one.
@@ -162,37 +208,135 @@ impl Shortcuts {
     #[cfg(test)]
     pub fn for_test() -> (Shortcuts, Sender<Event>) {
         let (tx, events) = mpsc::channel();
-        (Shortcuts { events, task: None }, tx)
+        (
+            Shortcuts {
+                events,
+                _wanted: None,
+            },
+            tx,
+        )
     }
 }
 
-impl Drop for Shortcuts {
-    fn drop(&mut self) {
-        // The session goes with the task that holds it.
-        if let Some(task) = self.task.take() {
-            task.abort();
+/// How the shortcuts ended, where it was not a refusal.
+#[derive(Debug, PartialEq, Eq)]
+enum End {
+    /// The viewer no longer wants them.
+    Unwanted,
+    /// The desktop closed the session, stopped telling of presses, or its
+    /// portal left the bus.
+    ByDesktop,
+}
+
+/// What `future` gives, or nothing once the other end of `unwanted` is gone.
+/// After nothing, `unwanted` is not asked again.
+async fn unless<T>(
+    unwanted: &mut oneshot::Receiver<()>,
+    future: impl Future<Output = T>,
+) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|context| {
+        if Pin::new(&mut *unwanted).poll(context).is_ready() {
+            return Poll::Ready(None);
         }
-    }
+        future.as_mut().poll(context).map(Some)
+    })
+    .await
 }
 
-/// Bind the shortcuts and hand over every press, for as long as the desktop
-/// keeps the session.
-async fn serve(tx: &Sender<Event>, wake: &(impl Fn() + Send + Sync)) -> Result<(), ashpd::Error> {
-    let portal = GlobalShortcuts::new().await?;
+/// The name the desktop knows this program by: its desktop file's
+/// (`any2odyssey.desktop`), which is also the windows' application name.
+const APP_ID: &str = "any2odyssey";
+
+/// The portal's name on the bus.
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+
+/// Tell the portal which program is on `connection`.
+///
+/// The desktop gives global shortcuts only to a program it can name: it
+/// keeps them, and shows them in its settings, under that name. A program
+/// started from the desktop's menu is named by the desktop itself. One
+/// started from a terminal, a script or another program is not, and its
+/// request is refused ("An app id is required") unless it says who it is
+/// through the portal's registry of programs outside a sandbox. The registry
+/// answers only the first call made on a connection, and only for a name
+/// that has a desktop file. A failure here is not the end: an older portal
+/// has no registry, and the desktop may know the name anyway.
+async fn name_this_program(connection: &ashpd::zbus::Connection) -> ashpd::zbus::Result<()> {
+    let registry = ashpd::zbus::Proxy::new(
+        connection,
+        PORTAL,
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.host.portal.Registry",
+    )
+    .await?;
+    let options: HashMap<&str, ashpd::zvariant::Value<'_>> = HashMap::new();
+    registry
+        .call_method("Register", &(APP_ID, options))
+        .await
+        .map(drop)
+}
+
+/// Have a session of shortcuts with the desktop for as long as they are
+/// wanted and the desktop keeps it, and close it whatever ends it.
+async fn serve(
+    tx: &Sender<Event>,
+    wake: &(impl Fn() + Send + Sync),
+    mut unwanted: oneshot::Receiver<()>,
+) -> Result<End, ashpd::Error> {
+    // A connection of their own, on which this program first says who it
+    // is (see `name_this_program`): only the first call on a connection can.
+    let connection = ashpd::zbus::Connection::session().await?;
+    let _ = name_this_program(&connection).await;
+    let portal = GlobalShortcuts::with_connection(connection.clone()).await?;
+    // (Not while the session is being made: one that the desktop has made
+    // and this program has not heard of could not be closed.)
+    if !matches!(unwanted.try_recv(), Err(TryRecvError::Empty)) {
+        return Ok(End::Unwanted);
+    }
     let session = portal
         .create_session(CreateSessionOptions::default())
         .await?;
+    let end = hold(&connection, &portal, &session, tx, wake, &mut unwanted).await;
+    let _ = session.close().await;
+    end
+}
+
+/// Bind the shortcuts in `session` and hand over every press.
+async fn hold(
+    connection: &ashpd::zbus::Connection,
+    portal: &GlobalShortcuts,
+    session: &Session<GlobalShortcuts>,
+    tx: &Sender<Event>,
+    wake: &(impl Fn() + Send + Sync),
+    unwanted: &mut oneshot::Receiver<()>,
+) -> Result<End, ashpd::Error> {
     let wanted: Vec<NewShortcut> = WANTED
         .iter()
         .map(|w| NewShortcut::new(w.id, w.does).preferred_trigger(w.keys))
         .collect();
     // Listening before binding: no press between the two is lost.
     let pressed = portal.receive_activated().await?;
-    let bound = portal
-        .bind_shortcuts(&session, &wanted, None, BindShortcutsOptions::default())
-        .await?
-        .response()?;
-    let bound: Vec<(String, String)> = bound
+    let closed = session.receive_closed().await?;
+    // A portal that leaves the bus (restarted by an update of its package,
+    // or fallen over) says nothing to its sessions, and the one that comes
+    // after it knows none of them.
+    let bus = ashpd::zbus::fdo::DBusProxy::new(connection).await?;
+    let left = bus
+        .receive_name_owner_changed_with_args(&[(0, PORTAL)])
+        .await?;
+    // The desktop may ask the user here, and the box may be cleared while
+    // it does: closing the session takes its dialog away.
+    let bind = async {
+        portal
+            .bind_shortcuts(session, &wanted, None, BindShortcutsOptions::default())
+            .await?
+            .response()
+    };
+    let Some(bound) = unless(unwanted, bind).await else {
+        return Ok(End::Unwanted);
+    };
+    let bound: Vec<(String, String)> = bound?
         .shortcuts()
         .iter()
         .map(|s| (s.id().to_owned(), s.trigger_description().to_owned()))
@@ -200,21 +344,45 @@ async fn serve(tx: &Sender<Event>, wake: &(impl Fn() + Send + Sync)) -> Result<(
     let _ = tx.send(Event::Bound(bound_line(&bound)));
     wake();
 
-    use ashpd::zbus::export::futures_core::Stream;
+    enum Next<P> {
+        Unwanted,
+        Ended,
+        Press(P),
+    }
     let mut pressed = std::pin::pin!(pressed);
-    while let Some(press) =
-        std::future::poll_fn(|context| pressed.as_mut().poll_next(context)).await
-    {
-        // (This program has one session of shortcuts, so a press is its.)
-        if let Some(action) = action_of(press.shortcut_id()) {
-            if tx.send(Event::Pressed(action)).is_err() {
-                break;
+    let mut closed = std::pin::pin!(closed);
+    let mut left = std::pin::pin!(left);
+    loop {
+        let next = std::future::poll_fn(|context| {
+            if Pin::new(&mut *unwanted).poll(context).is_ready() {
+                return Poll::Ready(Next::Unwanted);
             }
-            wake();
+            if closed.as_mut().poll_next(context).is_ready()
+                || left.as_mut().poll_next(context).is_ready()
+            {
+                return Poll::Ready(Next::Ended);
+            }
+            pressed
+                .as_mut()
+                .poll_next(context)
+                .map(|press| press.map_or(Next::Ended, Next::Press))
+        })
+        .await;
+        match next {
+            Next::Unwanted => return Ok(End::Unwanted),
+            Next::Ended => return Ok(End::ByDesktop),
+            Next::Press(press) => {
+                // (The session before this one was closed before this one
+                // was asked for, so a press is this one's.)
+                if let Some(action) = action_of(press.shortcut_id()) {
+                    if tx.send(Event::Pressed(action)).is_err() {
+                        return Ok(End::Unwanted);
+                    }
+                    wake();
+                }
+            }
         }
     }
-    let _ = session.close().await;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -273,10 +441,57 @@ mod tests {
     }
 
     #[test]
+    fn what_is_waited_for_is_given_up_once_the_shortcuts_are_not_wanted() {
+        let runtime = crate::capture::portal_runtime().unwrap();
+        // Still wanted: the answer comes through.
+        let (wanted, mut unwanted) = oneshot::channel::<()>();
+        assert_eq!(
+            runtime.block_on(unless(&mut unwanted, async { 7 })),
+            Some(7)
+        );
+        // No longer wanted while waiting for an answer that never comes (the
+        // desktop's dialog left open): the wait ends.
+        let waiting =
+            runtime.spawn(async move { unless(&mut unwanted, std::future::pending::<()>()).await });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!waiting.is_finished());
+        drop(wanted);
+        assert_eq!(runtime.block_on(waiting).unwrap(), None);
+        // Not wanted from the start: nothing is waited for at all.
+        let (wanted, mut unwanted) = oneshot::channel::<()>();
+        drop(wanted);
+        assert_eq!(
+            runtime.block_on(unless(&mut unwanted, std::future::pending::<()>())),
+            None
+        );
+    }
+
+    #[test]
+    fn dropping_the_shortcuts_is_what_tells_their_task() {
+        let (wanted, mut unwanted) = oneshot::channel::<()>();
+        let (_tx, events) = mpsc::channel();
+        let shortcuts = Shortcuts {
+            events,
+            _wanted: Some(wanted),
+        };
+        assert!(matches!(unwanted.try_recv(), Err(TryRecvError::Empty)));
+        drop(shortcuts);
+        assert!(matches!(unwanted.try_recv(), Err(TryRecvError::Closed)));
+    }
+
+    #[test]
     fn a_desktop_without_the_portal_or_a_declined_dialog_is_said_plainly() {
         let declined = ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled);
         assert!(failure_line(&declined).contains("declined"));
         let other = ashpd::Error::Response(ashpd::desktop::ResponseError::Other);
         assert!(failure_line(&other).starts_with("Global shortcuts: the desktop refused them"));
+        // What KDE Plasma 6.8 answers a program it cannot name.
+        let unnamed = ashpd::Error::Portal(ashpd::PortalError::NotAllowed(
+            "An app id is required".to_owned(),
+        ));
+        let line = failure_line(&unnamed);
+        assert!(line.contains("An app id is required") && line.contains("any2odyssey.desktop"));
+        // The name given to the desktop is the desktop file's.
+        assert_eq!(APP_ID, "any2odyssey");
     }
 }

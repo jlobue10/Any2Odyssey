@@ -923,6 +923,10 @@ impl ViewerState {
             self.shortcuts = Some(Shortcuts::start(move || wake.0.request_repaint()));
         }
         while let Some(event) = self.shortcuts.as_ref().and_then(Shortcuts::take) {
+            // One more frame after this one: the page shows where a slider
+            // is now and what the status line says, and whatever in this
+            // frame came before the press sees it.
+            ctx.request_repaint();
             match event {
                 Event::Pressed(action) => self.shortcut(action),
                 Event::Bound(line) => self.shortcuts_said = Some(line),

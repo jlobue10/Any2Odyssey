@@ -906,6 +906,14 @@ impl eframe::App for App {
             let update = c.update.available().map(|r| r.version.to_string());
             tray.sync(c.wanted(), c.prefs.keep_overlay_on_top, update.as_deref());
         }
+        // Global shortcuts are taken here and not from the viewer's page:
+        // they are for when the page is not in front. And before the output
+        // is seen to, so that what a press asks for is done in this frame.
+        // (Taken after it, a press that starts the output only set its mark
+        // in this frame; it was acted on because egui runs a second frame
+        // for every frame asked for, which nothing here should rest on.)
+        #[cfg(target_os = "linux")]
+        self.viewer.poll_shortcuts(ctx);
         // The output window is a window of its own: it stays up while the
         // controls are minimized.
         self.viewer.show_output(ctx);
@@ -913,10 +921,6 @@ impl eframe::App for App {
         // last change: its page is not drawn while the controls are hidden,
         // minimized or on another page.
         self.viewer.keep_choices(ctx, Instant::now());
-        // Global shortcuts are taken here for the same reason: they are for
-        // when the page is not in front.
-        #[cfg(target_os = "linux")]
-        self.viewer.poll_shortcuts(ctx);
         // Process show/quit requests and synchronize the tray before skipping
         // hidden content. Supervision continues on its independent poller.
         if self.hidden || minimized {
