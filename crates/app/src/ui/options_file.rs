@@ -36,6 +36,7 @@ struct Saved {
     depth_steadiness: Option<i32>,
     lines: Option<i32>,
     depth_detail: Option<u32>,
+    fine_edges: Option<bool>,
     pointer: Option<bool>,
 }
 
@@ -99,6 +100,7 @@ impl Saved {
             depth_steadiness: number("DepthSteadiness"),
             lines: number("Lines"),
             depth_detail: number("DepthDetail").and_then(|v| u32::try_from(v).ok()),
+            fine_edges: yes_or_no("FineEdges"),
             pointer: yes_or_no("Pointer"),
         }
     }
@@ -115,6 +117,7 @@ impl Saved {
             depth_steadiness: Some(options.steady_pos),
             lines: Some(options.lines),
             depth_detail: Some(options.detail),
+            fine_edges: Some(options.edges),
             pointer: Some(options.pointer),
         }
     }
@@ -148,6 +151,7 @@ impl Saved {
                 .depth_detail
                 .filter(|detail| DEPTH_DETAIL.iter().any(|(known, _)| known == detail))
                 .unwrap_or(default.detail),
+            edges: self.fine_edges.unwrap_or(default.edges),
             pointer: self.pointer.unwrap_or(default.pointer),
         }
     }
@@ -251,6 +255,7 @@ mod tests {
             steady_pos: 80,
             lines: 2160,
             detail: 1022,
+            edges: false,
             pointer: false,
         }
     }
@@ -270,6 +275,24 @@ mod tests {
         // Back at the defaults: the file says so, it is not left as it was.
         file.store(Options::default());
         assert_eq!(read(&path), Options::default());
+    }
+
+    #[test]
+    fn a_file_from_before_fine_edges_has_them_on_and_the_choice_is_kept_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        std::fs::write(&path, r#"{"Input":"Ai","Depth":120}"#).unwrap();
+        assert!(read(&path).edges);
+        std::fs::write(&path, r#"{"Input":"Ai","FineEdges":false}"#).unwrap();
+        assert!(!read(&path).edges);
+        let off = Options {
+            edges: false,
+            ..Options::default()
+        };
+        OptionsFile::load(path.clone()).0.store(Options::default());
+        assert!(read(&path).edges);
+        OptionsFile::load(path.clone()).0.store(off);
+        assert_eq!(read(&path), off);
     }
 
     #[cfg(target_os = "linux")]
@@ -389,6 +412,7 @@ mod tests {
             r#""DepthDetail":770.0"#,
             r#""HalfWidth":"no""#,
             r#""Pointer":0"#,
+            r#""FineEdges":"off""#,
             // Not the numbers they are when their upper half is cut off
             // (1440 and 770).
             r#""Lines":4294968736"#,
