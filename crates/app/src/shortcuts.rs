@@ -16,7 +16,7 @@
 //! Nothing here knows the viewer: presses come out as [`Action`]s for it
 //! to take at its next frame.
 
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use ashpd::desktop::global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut};
 use ashpd::desktop::CreateSessionOptions;
@@ -154,10 +154,8 @@ impl Shortcuts {
 
     /// The next event, if there is one.
     pub fn take(&self) -> Option<Event> {
-        match self.events.try_recv() {
-            Ok(event) => Some(event),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        // (an ended source has nothing more to say)
+        self.events.try_recv().ok()
     }
 
     /// Shortcuts that deliver what a test sends.
