@@ -246,6 +246,12 @@ class WeaverScalerTests(unittest.TestCase):
         self.scaler()
         self.assertEqual(self.shown(), (["on"], ["picture"]))
         self.assertFalse((self.root / "scaler.log").exists())
+        # A note of a mode switched on, left by a run whose leaving never happened (the PC lost power): not
+        # this run's to act on: its leaving sent "off" with nothing asked for.
+        (self.root / "scaler.sent").touch()
+        self.assertEqual(self.shown(), (["on"], ["picture"]))
+        self.assertFalse((self.root / "scaler.sent").exists())
+        self.assertFalse((self.root / "scaler.log").exists())
 
     def test_asked_for_by_file_or_by_variable_it_is_on_for_the_picture_and_off_after(self):
         self.scaler()

@@ -36,6 +36,10 @@ flock -n 7 || true
 # Any2Odyssey does not wait long for this script, which may be ended at any point below, and what has
 # been started by then must still be undone.
 SCALER=
+# A note of a mode switched on that no leaving took away (the PC lost power, the leaving was ended): this
+# run did not switch it on, and what a run did not ask for it does not send. No other leaving can be on its
+# way now; it would hold the first lock.
+rm -f "$T/scaler.sent"
 if [ -e "$T/scaler.on" ] || [ "${ANY2ODYSSEY_SCALER:-}" = 1 ]; then
     [ -x "$T/build/any2odyssey-scaler" ] && SCALER=1 ||
         echo "error: no any2odyssey-scaler (run setup.sh again; it needs a C compiler)" >"$T/scaler.log"
