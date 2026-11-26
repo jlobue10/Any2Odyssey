@@ -5,7 +5,7 @@
  * "The scaler's 3D mode").
  *
  * Besides the lens board and the webcam, the monitor's USB hub carries a mass-storage style device whose
- * SCSI vendor name is "GCREADER" (Linux gives it a /dev/sgN). A vendor command to it switches a "3D mode" of
+ * SCSI vendor name is "GCREADER" (Linux gives it a /dev/sgN where its sg driver is loaded). A vendor command to it switches a "3D mode" of
  * the monitor's scaler. The Odyssey 3D output of Any2Odyssey has been seen working without this command
  * (Leia's service under Wine does not send it and does not know the device), so what the mode changes on the
  * panel is not known here; this program exists so that it can be tried with and without.
@@ -170,6 +170,14 @@ int main(int argc, char **argv)
     }
     on = !strcmp(argv[1], "on");
 
+    /* No folder of sg devices at all: the kernel's sg driver is not loaded (Arch does not load it by itself),
+     * and whether the monitor is connected cannot be told from here. Said apart from "not found", which
+     * would send the reader to the cable. */
+    if (access(sysfs, F_OK) && errno == ENOENT)
+        return fail("the kernel's SCSI generic driver (sg) is not loaded, so the scaler has no /dev/sgN",
+                    "as root: modprobe sg (71-any2odyssey-scaler.rules loads it when the monitor is plugged "
+                    "in; after an update of the kernel it can be loaded only once the system has been "
+                    "restarted)");
     if (!find_scaler(sysfs, name, other, other_id, sizeof name)) {
         if (!other[0])
             return fail("the monitor's scaler was not found (no SCSI device of the vendor " VENDOR

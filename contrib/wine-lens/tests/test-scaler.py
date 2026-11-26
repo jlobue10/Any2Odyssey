@@ -85,9 +85,19 @@ class ScalerTests(unittest.TestCase):
             done = self.run_scaler(*arguments)
             self.assertEqual(done.returncode, 1)
             self.assertTrue(done.stdout.startswith("error: the monitor's scaler was not found"), done.stdout)
-        # No folder of SCSI devices at all (a kernel without the sg driver).
+
+    def test_without_the_sg_driver_it_names_the_driver_and_not_the_cable(self):
+        # No folder of sg devices at all: the kernel's sg driver is not loaded (seen on CachyOS, with the
+        # monitor connected and its device there as a disk).
         shutil.rmtree(self.root / "sys")
-        self.assertEqual(self.run_scaler("on").returncode, 1)
+        for arguments in (("on",), ("off",), ("on", "--dry")):
+            done = self.run_scaler(*arguments)
+            self.assertEqual(done.returncode, 1)
+            self.assertTrue(done.stdout.startswith("error: the kernel's SCSI generic driver (sg) is not loaded"),
+                            done.stdout)
+            self.assertIn("modprobe sg", done.stdout)
+            self.assertNotIn("cable", done.stdout)
+            self.assertEqual(len(done.stdout.splitlines()), 1, done.stdout)
 
     def test_a_device_of_the_name_that_is_another_usb_device_gets_nothing_and_is_named(self):
         # Another maker's card reader that calls itself the same: what E9 means to it is not known.
@@ -160,10 +170,12 @@ class RuleTests(unittest.TestCase):
         source = (HERE / "src/scaler.c").read_text()
         self.assertEqual(re.findall(r'#define USB_ID "([0-9a-f]{4}:[0-9a-f]{4})"', source), [SCALER_USB])
         vendor, product = SCALER_USB.split(":")
+        # (the line that notes the id for the permission, and the one that loads the sg driver)
         usb = [line for line in self.rules if "idVendor" in line]
-        self.assertEqual(len(usb), 1, self.rules)
-        self.assertIn(f'ATTRS{{idVendor}}=="{vendor}"', usb[0])
-        self.assertIn(f'ATTRS{{idProduct}}=="{product}"', usb[0])
+        self.assertEqual(len(usb), 2, self.rules)
+        for line in usb:
+            self.assertIn(f'ATTRS{{idVendor}}=="{vendor}"', line)
+            self.assertIn(f'ATTRS{{idProduct}}=="{product}"', line)
 
     def test_no_line_asks_two_devices_above_for_what_only_one_of_them_has(self):
         # udev wants every ATTRS and SUBSYSTEMS of a line to be true of the same device above: the USB id
@@ -171,19 +183,34 @@ class RuleTests(unittest.TestCase):
         for line in self.rules:
             self.assertFalse("ATTRS{vendor}" in line and "ATTRS{idVendor}" in line, line)
             self.assertEqual(len(re.findall(r"SUBSYSTEMS==", line)), 1, line)
-            self.assertTrue(line.startswith('SUBSYSTEM=="scsi_generic", '), line)
+            self.assertTrue(line.startswith(('SUBSYSTEM=="scsi_generic", ', 'ACTION=="add", SUBSYSTEM=="scsi", ')), line)
 
     def test_the_tag_is_given_only_to_a_device_with_the_id_and_the_name(self):
         noted = [line for line in self.rules if line.endswith(', ENV{.A2O_SCALER_USB}="1"')]
         tagged = [line for line in self.rules if "uaccess" in line]
-        self.assertEqual((len(noted), len(tagged), len(self.rules)), (1, 1, 2), self.rules)
+        self.assertEqual((len(noted), len(tagged), len(self.rules)), (1, 1, 3), self.rules)
         self.assertLess(self.rules.index(noted[0]), self.rules.index(tagged[0]))
         self.assertIn('ENV{.A2O_SCALER_USB}=="1"', tagged[0])
         self.assertIn('ATTRS{vendor}=="GCREADER*"', tagged[0])
         self.assertTrue(tagged[0].endswith(', TAG+="uaccess"'), tagged[0])
-        # Nothing but the tag: no mode for everybody, no group, no program run.
+        # Nothing but the tag: no mode for everybody, no group, no program run (the one RUN is udev's own
+        # loading of a kernel driver, in the test below).
         for line in self.rules:
-            self.assertIsNone(re.search(r"MODE|GROUP|OWNER|RUN|PROGRAM|IMPORT", line), line)
+            self.assertIsNone(re.search(r"MODE|GROUP|OWNER|PROGRAM|IMPORT", line), line)
+            self.assertEqual("RUN" in line, line not in noted + tagged, line)
+
+    def test_the_sg_driver_is_loaded_for_the_scaler_and_for_nothing_else(self):
+        # Without the driver there is no /dev/sgN for the other two lines to open (Arch does not load it by
+        # itself). It is loaded by udev itself, when the SCSI device with the name on the USB device with the
+        # id appears: the name is that device's own (ATTR), the id the one device above's (ATTRS).
+        loads = [line for line in self.rules if "RUN" in line]
+        self.assertEqual(len(loads), 1, self.rules)
+        vendor, product = SCALER_USB.split(":")
+        self.assertEqual(loads[0], 'ACTION=="add", SUBSYSTEM=="scsi", ENV{DEVTYPE}=="scsi_device", '
+                         'ATTR{vendor}=="GCREADER*", SUBSYSTEMS=="usb", '
+                         f'ATTRS{{idVendor}}=="{vendor}", ATTRS{{idProduct}}=="{product}", '
+                         'RUN{builtin}+="kmod load sg"')
+        self.assertNotIn("uaccess", loads[0])
 
     def test_udev_reads_the_rule_without_a_complaint(self):
         # (udevadm verify came with systemd 254; it reads the file and touches no device)
