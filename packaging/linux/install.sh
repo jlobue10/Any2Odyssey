@@ -17,8 +17,9 @@
 #      of the Odyssey 3D Hub, if it finds one mounted or is given one. This part expects a dual-boot PC:
 #      Windows with the Odyssey 3D Hub on a drive of this machine, which has shown 3D on this monitor at
 #      least once. Mount its system partition (read-only is enough) before running this script;
-#   6. only when asked for (it is experimental, and --yes does not agree to it): has the Odyssey 3D output
-#      switch the monitor's scaler to its 3D mode, with the udev rule that lets you send it the command.
+#   6. only with --scaler (it is experimental; no question is asked about it, and --yes does not agree to
+#      it): has the Odyssey 3D output switch the monitor's scaler to its 3D mode, with the udev rule that
+#      lets you send it the command.
 #
 # Options:
 #   --yes               answer yes to every question
@@ -26,14 +27,14 @@
 #   --no-udev           do not install the udev rules
 #   --no-model          do not download the depth model
 #   --no-odyssey        do not prepare the Wine side
-#   --scaler            do step 6 without asking: the Odyssey 3D output switches the scaler's 3D mode
+#   --scaler            do step 6: the Odyssey 3D output switches the scaler's 3D mode (docs/LENS-SWITCH.md)
 #   --no-scaler         switch that off again (the udev rule stays until --uninstall)
 #   --windows-root DIR  the mounted Windows drive that has the Odyssey 3D Hub (the folder with "Program Files");
 #                       needed when it is on a USB drive, a memory card or a network share, or when several
 #                       drives have one
 #   --prefix DIR        install under DIR instead of ~/.local (the installed copy of this script, which
 #                       --uninstall is run from, knows where it was installed without it)
-#   --packaged          the program is installed already (a distribution package): do steps 2 to 5 only
+#   --packaged          the program is installed already (a distribution package): do steps 2 to 6 only
 #   --dry-run           say what would be done and do none of it
 #   --uninstall         remove the installed files (and, when confirmed, the udev rules and the Wine side)
 set -eu
@@ -361,6 +362,11 @@ if [ -n "$UNINSTALL" ]; then
         elif ask "Remove the scaler's udev rule ($RULES_DIR/$SCALER_RULES_NAME${SUDO:+, needs sudo})?"; then
             { run $SUDO rm -f "$RULES_DIR/$SCALER_RULES_NAME" && udev control --reload; } ||
                 warn "the scaler's udev rule could not be removed or reloaded (see the message above)"
+            # Without the rule the command cannot be sent. A Wine side that stays (below: beside a package's
+            # program, or kept by choice) would go on trying at every picture and note a refusal each time.
+            if [ -e "$DATA/wine-lens/scaler.on" ] && { [ -n "$DRY" ] || [ ! -f "$RULES_DIR/$SCALER_RULES_NAME" ]; }; then
+                run rm -f "$DATA/wine-lens/scaler.on"
+            fi
         fi
     fi
     # The Wine side is in the data folder, which a distribution's package of the program uses as well. The
@@ -1057,10 +1063,11 @@ fi
 
 # ---------------------------------------------------------------------------------------------------------
 # Experimental, and the one step that has this program send the monitor a command of its own (to the scaler,
-# not to the lens board): see docs/LENS-SWITCH.md, "The scaler's 3D mode". It is done with --scaler, or when
-# the question is answered with yes; Enter means no, and so does --yes.
-step "6. The scaler's 3D mode (experimental)"
+# not to the lens board): see docs/LENS-SWITCH.md, "The scaler's 3D mode". It is done with --scaler and with
+# nothing else: no question is asked about it, and --yes does not agree to it. A run without the option
+# says nothing of the step, unless an earlier run switched it on.
 SIDE=$DATA/wine-lens
+if [ -n "$SCALER" ] || [ -e "$SIDE/scaler.on" ]; then step "6. The scaler's 3D mode (experimental)"; fi
 SCALER_RULES=$WINE_LENS/$SCALER_RULES_NAME
 [ -f "$SCALER_RULES" ] || SCALER_RULES=$HERE/wine-lens/$SCALER_RULES_NAME
 scaler_rule_installed() { [ -f "$RULES_DIR/$SCALER_RULES_NAME" ] && cmp -s "$SCALER_RULES" "$RULES_DIR/$SCALER_RULES_NAME"; }
@@ -1072,10 +1079,14 @@ if [ "$SCALER" = no ]; then
     else
         say "   it was not switched on"
     fi
-elif [ "$SCALER" != yes ] && [ -e "$SIDE/scaler.on" ] && scaler_rule_installed; then
-    say "   already switched on (--no-scaler switches it off)"
-elif [ "$SCALER" != yes ] && ! ask "Have the Odyssey 3D output switch the monitor's scaler to its 3D mode (experimental and not tried on the monitor; a command of this program's own to the monitor, see docs/LENS-SWITCH.md)?" no; then
-    : # no, or it has said why it did not ask
+elif [ "$SCALER" != yes ]; then
+    if [ -e "$SIDE/scaler.on" ]; then
+        say "   already switched on (--no-scaler switches it off)"
+        # (the rule of another version, or one taken away by hand: said, and not put right unasked)
+        if [ -n "$UDEV" ] && [ -f "$SCALER_RULES" ] && ! scaler_rule_installed; then
+            warn "the scaler's udev rule in $RULES_DIR is missing or is not this version's, and the scaler may not take its command until it is; --scaler installs it"
+        fi
+    fi
 elif [ ! -f "$SIDE/any2odyssey-weaver" ] && [ -z "$DRY" ]; then
     warn "the Odyssey 3D's Wine side is not prepared (step 5), and it is what switches the scaler; run this script again with --scaler once it is"
 else
