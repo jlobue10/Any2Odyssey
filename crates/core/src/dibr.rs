@@ -4,7 +4,9 @@
 //! half its disparity, nearer pixels winning where two land on the same
 //! place, and the gaps a foreground object leaves behind filled from the
 //! background beside it. The result is a full-width side-by-side pair that
-//! [`crate::stereo`] turns into anaglyph or leaves as it is.
+//! [`crate::stereo`] turns into anaglyph or leaves as it is. A depth map
+//! smaller than the image has the edges of its objects put where the image
+//! has them first (`edges`), unless that is switched off.
 //!
 //! No model runs here: the depth map comes from whoever estimated it.
 
@@ -140,8 +142,9 @@ impl DepthMap {
     }
 }
 
-/// The two controls of the conversion, with the ranges the Windows edition
-/// uses for Samsung's engine.
+/// The controls of the conversion: depth strength and pop-out with the
+/// ranges the Windows edition uses for Samsung's engine, and how the edges
+/// of objects are treated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Params {
     /// Depth strength, 0.0..=2.0: how far apart near and far are pushed.
@@ -150,6 +153,12 @@ pub struct Params {
     /// the nearest point is on the screen and everything else behind it; at
     /// 1 the farthest point is on the screen and everything comes forward.
     pub popout: f64,
+    /// Fine edges: where a depth map smaller than the picture slopes from
+    /// an object to the background, the slope is replaced by a step where
+    /// the picture's colour changes, so that neither eye's view carries a
+    /// strip of background along with the object. Off, the map is used as
+    /// it is stretched.
+    pub edges: bool,
 }
 
 impl Default for Params {
@@ -157,6 +166,7 @@ impl Default for Params {
         Params {
             strength: 0.9,
             popout: 0.0,
+            edges: true,
         }
     }
 }
@@ -266,19 +276,24 @@ fn synthesize_on(
     };
     let (scale, screen) = params.disparity_terms(width);
     let source = image.as_raw();
+    let cell = width as f32 / depth.width as f32;
     let render = |first_row: usize, band: &mut [u8]| {
         let mut resized_row = Vec::with_capacity(if native_depth { 0 } else { w });
+        let mut edges = crate::edges::Work::default();
         let mut nearness = vec![f32::NEG_INFINITY; w];
         for (index, line) in band.chunks_exact_mut(row_bytes).enumerate() {
             let y = first_row + index;
+            let pixels = source[y * w * 4..(y + 1) * w * 4].as_chunks::<4>().0;
             let row = if native_depth {
                 &depth.values[y * w..(y + 1) * w]
             } else {
                 resized_row.clear();
                 depth.append_resized_row(height, y as u32, &columns, &mut resized_row);
+                if params.edges {
+                    crate::edges::refine_row(pixels, &mut resized_row, scale, cell, &mut edges);
+                }
                 &resized_row
             };
-            let pixels = source[y * w * 4..(y + 1) * w * 4].as_chunks::<4>().0;
             let (left, right) = line.split_at_mut(w * 4);
             // Left eye: near points move right. Right eye: near points move left.
             for (view, direction) in [(left, 0.5f32), (right, -0.5f32)] {
@@ -449,7 +464,11 @@ mod tests {
                 let map = DepthMap::normalized(dw, dh, raw).unwrap();
                 let full = map.resized(width, height).unwrap();
                 for (strength, popout) in [(0.0, -1.0), (0.9, 0.0), (2.0, -1.0), (2.0, 1.0)] {
-                    let params = Params { strength, popout };
+                    let params = Params {
+                        strength,
+                        popout,
+                        edges: false,
+                    };
                     assert_eq!(
                         synthesize(&image, &map, params).unwrap(),
                         synthesize(&image, &full, params).unwrap(),
@@ -529,7 +548,11 @@ mod tests {
                     (2.0, 1.0),
                     (1.37, 0.41),
                 ] {
-                    let params = Params { strength, popout };
+                    let params = Params {
+                        strength,
+                        popout,
+                        edges: false,
+                    };
                     let expected = reference(&image, &map, params);
                     for threads in [1, 2, 3, 7, 64] {
                         assert!(
@@ -668,13 +691,110 @@ mod tests {
         let params = Params {
             strength: 1.6,
             popout: -0.35,
+            edges: false,
         };
         assert!(synthesize(&image, &map, params).unwrap() == reference(&image, &map, params));
     }
 
+    /// A near block in columns 80..160 of a 240-pixel picture, with the
+    /// depth a model gives of it: a sixth of the size, and the block two
+    /// of the picture's pixels too far left.
+    fn modelled_scene() -> (RgbaImage, DepthMap) {
+        let image = RgbaImage::from_fn(
+            240,
+            12,
+            |x, _| {
+                if (80..160).contains(&x) {
+                    FRONT
+                } else {
+                    BACK
+                }
+            },
+        );
+        let raw = (0..40 * 2)
+            .map(|i| {
+                let centre = (i % 40) * 6 + 3;
+                if (78..158).contains(&centre) {
+                    9.0
+                } else {
+                    3.0
+                }
+            })
+            .collect();
+        (image, DepthMap::normalized(40, 2, raw).unwrap())
+    }
+
+    #[test]
+    fn with_fine_edges_an_object_keeps_its_width_and_takes_no_background_along() {
+        let (image, map) = modelled_scene();
+        let front = |pair: &RgbaImage, eye: u32| {
+            (0..240)
+                .filter(|&x| *pair.get_pixel(eye * 240 + x, 5) == FRONT)
+                .count()
+        };
+        let params = Params {
+            strength: 2.0,
+            popout: 0.0,
+            edges: true,
+        };
+        // Half the disparity of the block against the background.
+        let shift = (params.disparity(1.0, 240) / 2.0).round() as u32;
+        assert!(shift >= 3);
+        let fine = synthesize(&image, &map, params).unwrap();
+        for eye in 0..2 {
+            // The block, whole and nothing else, moved as one piece.
+            assert_eq!(front(&fine, eye), 80, "eye {eye}");
+            let first = (0..240)
+                .position(|x| *fine.get_pixel(eye * 240 + x, 5) == FRONT)
+                .unwrap() as u32;
+            assert_eq!(first, if eye == 0 { 80 + shift } else { 80 - shift });
+        }
+        // With the map as it is stretched, the slope squeezes one side of
+        // the block and stretches the other in each eye.
+        let coarse = synthesize(
+            &image,
+            &map,
+            Params {
+                edges: false,
+                ..params
+            },
+        )
+        .unwrap();
+        assert!((0..2).any(|eye| front(&coarse, eye) != 80));
+    }
+
+    #[test]
+    fn fine_edges_make_the_same_picture_on_any_number_of_threads() {
+        let (image, map) = modelled_scene();
+        let params = Params::default();
+        assert!(params.edges);
+        let one = synthesize_on(&image, &map, params, 1).unwrap();
+        for threads in [2, 5, 12] {
+            assert!(synthesize_on(&image, &map, params, threads).unwrap() == one);
+        }
+        // A map of the picture's own size has its edges where it has them.
+        let full = map.resized(240, 12).unwrap();
+        assert!(
+            synthesize(&image, &full, params).unwrap()
+                == synthesize(
+                    &image,
+                    &full,
+                    Params {
+                        edges: false,
+                        ..params
+                    }
+                )
+                .unwrap()
+        );
+    }
+
     #[test]
     fn disparity_follows_strength_and_the_screen_plane_follows_popout() {
-        let p = |strength, popout| Params { strength, popout };
+        let p = |strength, popout| Params {
+            strength,
+            popout,
+            edges: true,
+        };
         // Width 1000, strength 1: 30 px between nearest and farthest.
         assert_eq!(p(1.0, 0.0).disparity(1.0, 1000), 15.0);
         assert_eq!(p(1.0, 0.0).disparity(0.0, 1000), -15.0);
@@ -698,6 +818,7 @@ mod tests {
         let params = Params {
             strength: 2.0,
             popout: 0.0,
+            edges: true,
         };
         assert_eq!(params.disparity(1.0, 100), 3.0);
         let pair = synthesize(&image, &depth, params).unwrap();
@@ -722,6 +843,7 @@ mod tests {
             Params {
                 strength: 2.0,
                 popout: 0.0,
+                edges: true,
             },
         )
         .unwrap();
@@ -749,6 +871,7 @@ mod tests {
             Params {
                 strength: 0.0,
                 popout: 0.7,
+                edges: true,
             },
         )
         .unwrap();
