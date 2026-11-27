@@ -658,6 +658,26 @@ impl<'a> DepthAt<'a> {
         })
     }
 
+    /// The nearness of every pixel of row `y` as it is rendered with:
+    /// [`DepthAt::row`], with the edges of a stretched map put where the
+    /// row's `pixels` have them if `params` ask for fine edges.
+    fn row_for(
+        &self,
+        y: usize,
+        pixels: &[u8],
+        params: Params,
+        work: &mut crate::edges::Work,
+        nearness: &mut [f32],
+    ) {
+        self.row(y, nearness);
+        if params.edges {
+            let width = self.columns.len();
+            let (scale, _) = params.disparity_terms(width as u32);
+            let cell = width as f32 / self.depth.width as f32;
+            crate::edges::refine_row(pixels.as_chunks::<4>().0, nearness, scale, cell, work);
+        }
+    }
+
     /// The nearness of every pixel of row `y`.
     fn row(&self, y: usize, nearness: &mut [f32]) {
         let (dw, dh) = (self.depth.width as usize, self.depth.height as usize);
@@ -741,10 +761,11 @@ pub fn render_pair(
     in_bands(out, w * 8, |first_row, band| {
         let mut nearness = vec![0.0f32; w];
         let mut placed = vec![f32::NEG_INFINITY; w];
+        let mut work = crate::edges::Work::default();
         for (row, line) in band.chunks_exact_mut(w * 8).enumerate() {
             let y = first_row + row;
-            depth.row(y, &mut nearness);
             let pixels = &source[y * w * 4..(y + 1) * w * 4];
+            depth.row_for(y, pixels, params, &mut work, &mut nearness);
             let (left, right) = line.split_at_mut(w * 4);
             shift_row(pixels, &nearness, &mut placed, params, width, left, right);
         }
@@ -825,6 +846,7 @@ pub fn render_placed(
     in_bands(&mut canvas[rows], row_bytes, |first_row, band| {
         let mut nearness = vec![0.0f32; if depth.is_some() { w } else { 0 }];
         let mut placed = vec![f32::NEG_INFINITY; nearness.len()];
+        let mut work = crate::edges::Work::default();
         for (row, line) in band.chunks_exact_mut(row_bytes).enumerate() {
             // The picture's rows run upwards, the view's downwards.
             let y = h - 1 - (first_row + row);
@@ -832,7 +854,7 @@ pub fn render_placed(
             let (left, right) = place.halves(line, w);
             match &depth {
                 Some(depth) => {
-                    depth.row(y, &mut nearness);
+                    depth.row_for(y, pixels, params, &mut work, &mut nearness);
                     shift_row(pixels, &nearness, &mut placed, params, width, left, right);
                 }
                 None => {
@@ -1096,10 +1118,12 @@ mod tests {
             Params {
                 strength: 2.0,
                 popout: 1.0,
+                edges: true,
             },
             Params {
                 strength: 1.3,
                 popout: -1.0,
+                edges: true,
             },
         ] {
             let still = dibr::synthesize(&image, &map, params).unwrap();
@@ -1119,6 +1143,92 @@ mod tests {
             ));
             assert_eq!(live, *still.as_raw(), "{params:?}");
         }
+    }
+
+    #[test]
+    fn with_a_smaller_map_and_fine_edges_both_renderers_still_make_one_picture() {
+        let (w, h) = (192u32, 24u32);
+        let image = RgbaImage::from_fn(w, h, |x, y| {
+            if (60..130).contains(&x) && (4..20).contains(&y) {
+                image::Rgba([210, 190, 40, 255])
+            } else {
+                image::Rgba([(x / 8) as u8, 30 + (y * 2) as u8, 90, 255])
+            }
+        });
+        let (dw, dh) = (32u32, 6u32);
+        let raw: Vec<f32> = (0..dw * dh)
+            .map(|i| {
+                let (x, y) = (i % dw, i / dw);
+                if (10..22).contains(&x) && (1..5).contains(&y) {
+                    7.0
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let map = DepthMap::normalized(dw, dh, raw).unwrap();
+        for edges in [true, false] {
+            let params = Params {
+                strength: 1.2,
+                popout: 0.2,
+                edges,
+            };
+            let still = dibr::synthesize(&image, &map, params).unwrap();
+            let depth = Depth {
+                values: map.values(),
+                width: dw,
+                height: dh,
+            };
+            let mut live = vec![0u8; (w * h * 8) as usize];
+            assert!(render_pair(
+                image.as_raw(),
+                w,
+                h,
+                Some(depth),
+                params,
+                &mut live
+            ));
+            assert!(live == *still.as_raw(), "edges {edges}");
+            // And rendered into its place, bottom row first.
+            let place = Placement {
+                view: (w, h),
+                x: 0,
+                y: 0,
+                swap: false,
+            };
+            let mut canvas = vec![0u8; place.bytes()];
+            assert!(render_placed(
+                image.as_raw(),
+                w,
+                h,
+                Some(depth),
+                params,
+                place,
+                &mut canvas
+            ));
+            let row = (w * 8) as usize;
+            for y in 0..h as usize {
+                let top = h as usize - 1 - y;
+                assert!(
+                    canvas[top * row..(top + 1) * row] == live[y * row..(y + 1) * row],
+                    "edges {edges}, row {y}"
+                );
+            }
+        }
+        // Fine edges change this picture: the test is not of two equal paths.
+        let pair = |edges| {
+            dibr::synthesize(
+                &image,
+                &map,
+                Params {
+                    strength: 1.2,
+                    popout: 0.2,
+                    edges,
+                },
+            )
+            .unwrap()
+        };
+        assert!(pair(true) != pair(false));
     }
 
     #[test]
@@ -1489,7 +1599,11 @@ mod tests {
                     (2.0, 1.0),
                     (1.37, 0.41),
                 ] {
-                    let params = Params { strength, popout };
+                    let params = Params {
+                        strength,
+                        popout,
+                        edges: true,
+                    };
                     // Stale bytes show a pixel that was not written.
                     let mut now = (vec![0xa5u8; w * 4], vec![0x5au8; w * 4], vec![0.0f32; w]);
                     let mut before = now.clone();
@@ -1649,6 +1763,7 @@ mod tests {
         let params = Params {
             strength: 1.6,
             popout: 0.4,
+            edges: true,
         };
         // (picture, view, corner): filling the view, letterboxed,
         // pillarboxed, off centre, and pictures too small to sharpen.

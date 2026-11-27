@@ -459,6 +459,8 @@ pub struct Controls {
     /// The long side of the picture the model sees (`depth::DETAIL`).
     pub detail: i32,
     pub swap: bool,
+    /// Fine edges (`Params::edges`).
+    pub edges: bool,
 }
 
 impl Default for Controls {
@@ -472,6 +474,7 @@ impl Default for Controls {
             lines: 1080,
             detail: crate::depth::LONG_SIDE as i32,
             swap: false,
+            edges: params.edges,
         }
     }
 }
@@ -537,6 +540,7 @@ struct Look {
     /// Which words are drawn into the picture (`Live::say`): another
     /// number for each, 0 for none.
     words: u64,
+    edges: bool,
 }
 
 /// What a turn of the render loop finds.
@@ -700,6 +704,7 @@ struct Shared {
     lines: AtomicI32,
     detail: AtomicI32,
     swap: AtomicBool,
+    edges: AtomicBool,
     /// Where the pictures go, once the output is up, and how many outputs
     /// there have been. The capture comes first: the desktop may have to
     /// ask which screen, and its dialog must not end up underneath the
@@ -733,6 +738,7 @@ impl Shared {
             lines: AtomicI32::new(1080),
             detail: AtomicI32::new(crate::depth::LONG_SIDE as i32),
             swap: AtomicBool::new(false),
+            edges: AtomicBool::new(Params::default().edges),
             sink: Mutex::new((0, None)),
             for_model: Mutex::new(ForModel::default()),
             model_wanted: Condvar::new(),
@@ -773,6 +779,7 @@ impl Shared {
                     let words = lock(&self.words);
                     words.1.as_ref().map_or(0, |_| words.0)
                 },
+                edges: self.edges.load(Ordering::Relaxed),
             },
             detail: self.detail.load(Ordering::Relaxed).max(0) as u32,
             depth,
@@ -852,6 +859,7 @@ impl Live {
         s.lines.store(controls.lines, Ordering::Relaxed);
         s.detail.store(controls.detail, Ordering::Relaxed);
         s.swap.store(controls.swap, Ordering::Relaxed);
+        s.edges.store(controls.edges, Ordering::Relaxed);
     }
 
     /// Draw `words` into the pictures from now on (what a global shortcut
@@ -1166,6 +1174,7 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         let params = Params {
             strength: DEPTH.value(look.depth_pos),
             popout: POPOUT.value(look.pop_pos),
+            edges: look.edges,
         };
         // Each view goes into its half of the picture, the bottom row
         // first as the weaver's file holds it.
@@ -2091,6 +2100,7 @@ mod tests {
             lines: 1080,
             swap: false,
             words: 0,
+            edges: true,
         }
     }
 
@@ -2287,6 +2297,10 @@ mod tests {
             // Words to draw into the picture, or other ones.
             Look {
                 words: 3,
+                ..a_look()
+            },
+            Look {
+                edges: false,
                 ..a_look()
             },
         ] {
@@ -3073,6 +3087,7 @@ mod tests {
         let params = Params {
             strength: DEPTH.value(look.depth_pos),
             popout: POPOUT.value(look.pop_pos),
+            edges: look.edges,
         };
         let mut canvas: Vec<u8> = [0, 0, 0, 255].repeat(place.bytes() / 4);
         if look.sharpness > 0 {

@@ -172,6 +172,9 @@ pub struct Options {
     /// AI depth: the long side of the picture the model sees
     /// (`depth::DETAIL`), for images and for a live screen.
     pub detail: u32,
+    /// AI depth: put the edges of the depth map where the picture has them
+    /// (`dibr::Params::edges`), for images and for a live screen.
+    pub edges: bool,
     /// Live screen only: draw the pointer into the picture. Wanted for a
     /// screen shown elsewhere; on the Odyssey's own screen the real pointer
     /// is there already.
@@ -207,6 +210,7 @@ impl Default for Options {
             steady_pos: 60,
             lines: 1080,
             detail: DEPTH_DETAIL[0].0,
+            edges: defaults.edges,
             pointer: true,
             shortcuts: false,
             feedback: true,
@@ -247,6 +251,7 @@ impl Options {
         dibr::Params {
             strength: DEPTH.value(self.depth_pos),
             popout: POPOUT.value(self.pop_pos),
+            edges: self.edges,
         }
     }
 
@@ -273,6 +278,8 @@ impl Options {
             } else {
                 0
             },
+            // Edges are only moved where there is depth to show them.
+            edges: ai && params.strength != 0.0 && params.edges,
         }
     }
 }
@@ -286,6 +293,7 @@ struct Conversion {
     half_width: bool,
     strength: u64,
     popout: u64,
+    edges: bool,
 }
 
 /// The source image and what the current options make of it. No window and
@@ -1428,6 +1436,7 @@ impl ViewerState {
             lines: self.options.lines,
             detail: self.options.detail as i32,
             swap: self.options.swap,
+            edges: self.options.edges,
         }
     }
 
@@ -2005,6 +2014,8 @@ impl ViewerState {
                             }).response.labelled_by(name);
                     })
                     .on_hover_text("How large the depth model sees the picture. Finer finds thin things and edges better and takes about twice as long per step; with an NVIDIA GPU all but Finest keep up with a live screen's pictures.");
+                    ui.checkbox(&mut state.options.edges, "Fine edges")
+                        .on_hover_text("Experimental. Puts the edge of each object in the depth map where the picture has it, so an object does not take a strip of background along. Each row of the picture finds the edge by itself, so an edge can come out ragged, and it can flicker a little more on a live screen. Off, the map is used as the model gives it.");
                     // Whether that GPU is used: a runtime that could not
                     // start its GPU part falls back to the processor, and
                     // nothing else on the page tells the two apart.
@@ -4141,6 +4152,23 @@ mod tests {
         assert!(!same(base, with(|o| o.half_width = false)));
         assert!(same(base, with(|o| o.depth_pos = 150)));
         assert!(same(base, with(|o| o.pop_pos = -40)));
+        assert!(!base.edges);
+        assert!(same(base, with(|o| o.edges = true)));
+        // With AI depth fine edges count, as long as there is depth to show.
+        let ai = |edges, depth_pos| {
+            let mut options = Options {
+                input: Input::Ai,
+                edges,
+                ..Options::default()
+            };
+            if let Some(depth_pos) = depth_pos {
+                options.depth_pos = depth_pos;
+            }
+            options
+        };
+        assert!(!same(ai(true, None), ai(false, None)));
+        let flat = Some(DEPTH.position(0.0));
+        assert!(same(ai(true, flat), ai(false, flat)));
         // Nor does anything of a live screen, or the model's detail (which
         // asks for another depth map instead, see `forget_depth`).
         for change in [
