@@ -2,9 +2,9 @@
 
 Any2Odyssey follows [Semantic Versioning](https://semver.org/). Versions continue from Any2Odd 0.7.3, whose own changelog ships with its source archive on [itch.io](https://zhandragon.itch.io/any2odd).
 
-## Unreleased
+## 1.1.0 (2026-11-27)
 
-Three things taken from [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT), a native Linux player for the same monitor that talks to its hardware itself: fine depth edges, global shortcuts with the keys of the Odyssey 3D Hub, and the switch of the scaler's 3D mode. All three are off until chosen. All three were used on the monitor's own PC on 2026-11-27 (CachyOS, KDE Plasma 6.8, the Odyssey 3D output with a live screen) by the person at the seat; what was seen there is said with each, and `docs/TESTING.md` has what was not.
+Three things taken from [odysseyvk-linux](https://github.com/the-cave-dweller/Odyssey3d-linux) (the-cave-dweller, MIT), a native Linux player for the same monitor that talks to its hardware itself: fine depth edges, global shortcuts with the keys of the Odyssey 3D Hub, and the switch of the scaler's 3D mode (#206, #207, #208). All three are off until chosen. All three were used on the monitor's own PC on 2026-11-27 (CachyOS, KDE Plasma 6.8, the Odyssey 3D output with a live screen) by the person at the seat; what was seen there is said with each, and `docs/TESTING.md` has what was not.
 
 After updating, run the Odyssey 3D set-up once more with no 3D picture showing and the Windows drive mounted (`any2odyssey-setup`, or `install.sh` from the archive): it builds the program that sends the scaler its command and installs the script that uses it. For the scaler's 3D mode, run it with `--scaler` once: that installs the udev rule (it needs root) and switches the mode on; then unplug and replug the monitor's USB cable. From then on the box on the viewer's page switches it.
 
