@@ -178,6 +178,29 @@ pub struct Options {
     pub pointer: bool,
 }
 
+/// The box for the scaler's 3D mode, and what it says when pointed at.
+#[cfg(target_os = "linux")]
+pub const SCALER_BOX: &str = "Scaler 3D mode (experimental)";
+#[cfg(target_os = "linux")]
+const SCALER_HINT: &str = "Has the Odyssey 3D output send the monitor's scaler the command for its 3D mode before the picture, and the one that ends it after. Counts from the next start of the output. Needs the scaler's udev rule (install.sh --scaler, or docs/LENS-SWITCH.md); what the scaler answered is in scaler.log in the wine-lens folder.";
+#[cfg(target_os = "linux")]
+const SCALER_MISSING: &str = "The program that sends the scaler its command is not there: run the Odyssey 3D set-up once more (any2odyssey-setup, or install.sh), with a C compiler installed.";
+
+/// The status line after the box for the scaler's 3D mode was changed.
+#[cfg(target_os = "linux")]
+fn scaler_line(on: bool, showing: bool) -> String {
+    let what = if on {
+        "Scaler 3D mode: on with the Odyssey 3D picture"
+    } else {
+        "Scaler 3D mode: off, the scaler is left alone"
+    };
+    if showing {
+        format!("{what}, from the next start of the output.")
+    } else {
+        format!("{what}.")
+    }
+}
+
 impl Default for Options {
     fn default() -> Options {
         let defaults = dibr::Params::default();
@@ -874,6 +897,44 @@ impl ViewerState {
     pub fn keep_choices(&mut self, ctx: &egui::Context, now: std::time::Instant) {
         if let Some(wait) = self.options_file.save_when_settled(self.options, now) {
             ctx.request_repaint_after(wait);
+        }
+    }
+
+    /// The box for the scaler's 3D mode (experimental), under the Odyssey 3D
+    /// output's line: the choice is a file beside the helper (`scaler`), so
+    /// it is read from there at every frame and the box shows what the
+    /// installer or a terminal did as well.
+    #[cfg(target_os = "linux")]
+    fn scaler_box(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let scaler = crate::scaler::Scaler::beside(self.weaver.helper());
+        let was = scaler.chosen();
+        let mut on = was;
+        // One that is chosen can always be cleared, whatever is missing.
+        ui.add_enabled(
+            scaler.installed() || was,
+            egui::Checkbox::new(&mut on, SCALER_BOX),
+        )
+        .on_hover_text(SCALER_HINT)
+        .on_disabled_hover_text(SCALER_MISSING);
+        if on != was {
+            self.status = match scaler.choose(on) {
+                Ok(()) => scaler_line(on, self.weaver.is_running()),
+                Err(e) => format!("The scaler's 3D mode could not be switched: {e}"),
+            };
+        }
+        if on {
+            if let Some(reason) = scaler.refused() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "At the last start the scaler did not take its command: {reason}"
+                        ))
+                        .color(color(p.muted))
+                        .size(12.0),
+                    )
+                    .wrap(),
+                );
+            }
         }
     }
 
@@ -1850,6 +1911,8 @@ impl ViewerState {
                         .wrap(),
                     )
                     .on_hover_text("Shown by Leia's own weaver in your copy of the SR runtime under Wine: factory lens calibration and eye tracking. The picture opens full screen on the Odyssey 3D by itself.");
+                    #[cfg(target_os = "linux")]
+                    state.scaler_box(ui, p);
                 }
                 if state.options.output == Output::Lens {
                     ui.add_space(4.0);
