@@ -48,6 +48,15 @@ pub enum Action {
 /// A shortcut as the desktop is told of it: the name it is kept under, what
 /// the desktop's own pages say it does, and the keys asked for (in the
 /// notation of the XDG shortcuts specification).
+///
+/// The keys are named by what they type, not by the key and Shift: KDE
+/// Plasma 6.8 bound "CTRL+SHIFT+4" as Ctrl+Shift+4, which no press ever is.
+/// With Shift held the key types a dollar sign, and the desktop looks for
+/// Ctrl+$ (seen on the monitor's own PC with key presses made through
+/// uinput: Ctrl+$ was taken, Ctrl+Shift+4 and Ctrl+Shift+$ were not). So
+/// they are asked for as the signs a US keyboard has on those keys. On
+/// another layout the signs are on other keys, or on none: there the
+/// desktop's shortcut settings are where they are chosen.
 struct Wanted {
     action: Action,
     id: &'static str,
@@ -60,31 +69,31 @@ const WANTED: [Wanted; 5] = [
         action: Action::Output,
         id: "output",
         does: "Start or stop the output",
-        keys: "CTRL+SHIFT+1",
+        keys: "CTRL+exclam",
     },
     Wanted {
         action: Action::DepthDown,
         id: "depth-down",
         does: "Less depth",
-        keys: "CTRL+SHIFT+3",
+        keys: "CTRL+numbersign",
     },
     Wanted {
         action: Action::DepthUp,
         id: "depth-up",
         does: "More depth",
-        keys: "CTRL+SHIFT+4",
+        keys: "CTRL+dollar",
     },
     Wanted {
         action: Action::PopoutDown,
         id: "popout-down",
         does: "Picture further behind the screen",
-        keys: "CTRL+SHIFT+5",
+        keys: "CTRL+percent",
     },
     Wanted {
         action: Action::PopoutUp,
         id: "popout-up",
         does: "Picture further in front of the screen",
-        keys: "CTRL+SHIFT+6",
+        keys: "CTRL+asciicircum",
     },
 ];
 
@@ -502,8 +511,14 @@ mod tests {
                 .iter()
                 .all(|w| w.id != wanted.id && w.action != wanted.action && w.keys != wanted.keys));
             // The notation of the shortcuts specification: modifiers in
-            // capitals, joined to the key by plus signs.
-            assert!(wanted.keys.starts_with("CTRL+SHIFT+"), "{}", wanted.keys);
+            // capitals, joined to the key by plus signs. No Shift: the key
+            // is named by the sign it types with Shift held.
+            let sign = wanted.keys.strip_prefix("CTRL+").expect(wanted.keys);
+            assert!(
+                !sign.is_empty() && sign.chars().all(|c| c.is_ascii_lowercase()),
+                "{}",
+                wanted.keys
+            );
         }
         assert_eq!(action_of("something-else"), None);
         assert_eq!(action_of(""), None);
