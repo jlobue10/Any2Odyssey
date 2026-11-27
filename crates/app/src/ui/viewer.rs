@@ -185,6 +185,10 @@ pub struct Options {
     pub feedback: bool,
 }
 
+/// How long the words that say what a shortcut did stay in the picture.
+#[cfg(target_os = "linux")]
+const WORDS_STAY: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// How far one press of a depth or pop-out shortcut moves its slider.
 #[cfg(target_os = "linux")]
 const SHORTCUT_STEP: i32 = 5;
@@ -724,6 +728,9 @@ struct Woven {
     generation: u64,
     flat: bool,
     stretch: f64,
+    /// Which words are drawn into it (`ViewerState::words_now`), 0 for
+    /// none.
+    words: u64,
 }
 
 pub struct ViewerState {
@@ -785,6 +792,16 @@ pub struct ViewerState {
     shortcuts: Option<crate::shortcuts::Shortcuts>,
     #[cfg(target_os = "linux")]
     shortcuts_said: Option<String>,
+    /// What a global shortcut did, drawn into the Odyssey 3D picture until
+    /// the moment given, and how many such words there have been.
+    #[cfg(target_os = "linux")]
+    picture_words: Option<(String, std::time::Instant)>,
+    /// Until when the page is drawn again several times a second after a
+    /// shortcut: see `poll_shortcuts`.
+    #[cfg(target_os = "linux")]
+    redrawn_until: Option<std::time::Instant>,
+    #[cfg(target_os = "linux")]
+    words_said: u64,
     /// Whether the desktop may be asked for them: not by tests and
     /// previews, which start nothing.
     #[cfg(target_os = "linux")]
@@ -828,6 +845,12 @@ impl Default for ViewerState {
             shortcuts: None,
             #[cfg(target_os = "linux")]
             shortcuts_said: None,
+            #[cfg(target_os = "linux")]
+            picture_words: None,
+            #[cfg(target_os = "linux")]
+            redrawn_until: None,
+            #[cfg(target_os = "linux")]
+            words_said: 0,
             #[cfg(target_os = "linux")]
             asks_desktop: false,
         }
@@ -915,6 +938,19 @@ impl ViewerState {
     #[cfg(target_os = "linux")]
     pub fn poll_shortcuts(&mut self, ctx: &egui::Context) {
         use crate::shortcuts::{Event, Shortcuts};
+        self.keep_words(ctx, std::time::Instant::now());
+        // A shortcut is pressed while another window is in front, and a
+        // desktop may not show what a window draws while it is covered: the
+        // one frame asked for at the press can be lost, and the sliders then
+        // stand where they were until the pointer comes by. So the page is
+        // drawn a few more times in the seconds after a press.
+        if let Some(until) = self.redrawn_until {
+            if std::time::Instant::now() < until {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            } else {
+                self.redrawn_until = None;
+            }
+        }
         if !self.options.shortcuts {
             self.shortcuts = None;
             return;
@@ -934,9 +970,10 @@ impl ViewerState {
             match event {
                 Event::Pressed(action) => {
                     let did = self.shortcut(action);
-                    // (tests and previews put nothing on the screen)
-                    if self.options.feedback && self.asks_desktop {
-                        crate::shortcuts::say(did);
+                    self.redrawn_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                    if self.options.feedback {
+                        self.tell(ctx, action, did, std::time::Instant::now());
                     }
                 }
                 Event::Bound(line) => self.shortcuts_said = Some(line),
@@ -951,6 +988,69 @@ impl ViewerState {
                 }
             }
         }
+    }
+
+    /// Say on a screen what a shortcut did. While the Odyssey 3D output
+    /// shows a picture the words go into that picture (`banner`): it covers
+    /// the Odyssey's screen, and the desktop's own display for such words
+    /// is on a screen of the desktop's choosing. Otherwise, and for the
+    /// output's own start and end (no picture yet, or none any more), the
+    /// desktop shows them (`shortcuts::say`).
+    #[cfg(target_os = "linux")]
+    fn tell(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::shortcuts::Action,
+        did: String,
+        now: std::time::Instant,
+    ) {
+        let in_picture = action != crate::shortcuts::Action::Output
+            && self.output_open
+            && self.options.output == Output::Odyssey
+            && self.weaver.is_running();
+        if !in_picture {
+            // (tests and previews ask the desktop for nothing)
+            if self.asks_desktop {
+                crate::shortcuts::say(did);
+            }
+            return;
+        }
+        self.words_said += 1;
+        if let Some(live) = &mut self.live {
+            live.say(Some(did.clone()));
+        }
+        self.picture_words = Some((did, now + WORDS_STAY));
+        // A still picture is made again with them (`show_odyssey`).
+        ctx.request_repaint();
+    }
+
+    /// Take the words out of the picture once they have been there long
+    /// enough. Called at every frame.
+    #[cfg(target_os = "linux")]
+    fn keep_words(&mut self, ctx: &egui::Context, now: std::time::Instant) {
+        let Some((_, until)) = &self.picture_words else {
+            return;
+        };
+        match until.checked_duration_since(now) {
+            Some(left) if !left.is_zero() => ctx.request_repaint_after(left),
+            _ => {
+                self.picture_words = None;
+                if let Some(live) = &mut self.live {
+                    live.say(None);
+                }
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Which words a still picture for the Odyssey 3D output has in it: a
+    /// number of their own, and the words; 0 and none without.
+    fn words_now(&self) -> (u64, Option<&str>) {
+        #[cfg(target_os = "linux")]
+        if let Some((words, _)) = &self.picture_words {
+            return (self.words_said, Some(words));
+        }
+        (0, None)
     }
 
     /// Do what a global shortcut asks, and give the few words that say what
@@ -1276,6 +1376,10 @@ impl ViewerState {
         self.lens_switch.set(false, || {});
         self.weaver.stop();
         self.woven = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.picture_words = None;
+        }
         self.stop_live();
     }
 
@@ -1482,6 +1586,7 @@ impl ViewerState {
             generation: self.document.generation,
             flat: self.options.input == Input::Flat,
             stretch: self.options.eye_stretch(),
+            words: self.words_now().0,
         };
         if self.woven != Some(wanted) {
             let picture = match self.document.result() {
@@ -1498,8 +1603,23 @@ impl ViewerState {
                     image::Rgba([0, 0, 0, 255]),
                 ),
             };
-            self.weaver
-                .show(picture.width(), picture.height(), picture.as_raw());
+            let (width, height) = picture.dimensions();
+            #[allow(unused_mut)]
+            let mut pixels = picture.into_raw();
+            #[cfg(target_os = "linux")]
+            if let Some(plate) = self
+                .words_now()
+                .1
+                .and_then(|words| crate::banner::Plate::of(words, height))
+            {
+                plate.draw(
+                    &mut pixels,
+                    (width / 2, height),
+                    (0, 0, width / 2, height),
+                    false,
+                );
+            }
+            self.weaver.show(width, height, &pixels);
             self.woven = Some(wanted);
             self.weaver_said = None;
         }
@@ -3489,6 +3609,66 @@ mod tests {
         assert_eq!(state.status, CONVERTED);
         // Started again by the user, it shows the new picture.
         assert!(state.woven.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_a_shortcut_did_is_in_the_odyssey_picture_for_a_moment() {
+        use crate::shortcuts::Action;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 0);
+        let sink = state.weaver.sink().unwrap();
+        let (pictures, _, _, plain) = sink.written();
+        let now = std::time::Instant::now();
+        state.tell(&ctx, Action::DepthUp, "Depth 55".into(), now);
+        state.show_output(&ctx);
+        let (with_words, width, _, worded) = sink.written();
+        assert_eq!(with_words, pictures + 1);
+        assert_ne!(worded, plain);
+        // The same in both views: at the depth of the screen.
+        let row = width as usize * 4;
+        for (line, before) in worded.chunks(row).zip(plain.chunks(row)) {
+            let (left, right) = line.split_at(row / 2);
+            let (left_before, right_before) = before.split_at(row / 2);
+            // (the views under the plate differ, and a letter may be the
+            // colour of what it covers in one of them)
+            for at in 0..row / 2 {
+                if left[at] != left_before[at] && right[at] != right_before[at] {
+                    assert!(left[at].abs_diff(right[at]) <= 65, "{at}");
+                }
+            }
+        }
+        // Still there before its time is over, and no picture made for it.
+        state.keep_words(&ctx, now + WORDS_STAY / 2);
+        state.show_output(&ctx);
+        assert_eq!(sink.written().0, with_words);
+        // Other words take their place and start the time anew.
+        state.tell(
+            &ctx,
+            Action::DepthUp,
+            "Depth 60".into(),
+            now + WORDS_STAY / 2,
+        );
+        state.show_output(&ctx);
+        assert_eq!(sink.written().0, with_words + 1);
+        state.keep_words(&ctx, now + WORDS_STAY);
+        assert!(state.picture_words.is_some());
+        // Then the picture is as it was.
+        state.keep_words(&ctx, now + WORDS_STAY / 2 + WORDS_STAY);
+        state.show_output(&ctx);
+        let (after, _, _, again) = sink.written();
+        assert_eq!(after, with_words + 2);
+        assert!(again == plain, "the words are gone");
+        // The output's own start and end are not said in its picture, and
+        // the end of the output is the end of the words.
+        state.tell(&ctx, Action::Output, "3D output off".into(), now);
+        assert!(state.picture_words.is_none());
+        state.tell(&ctx, Action::PopoutUp, "Pop-out 10".into(), now);
+        assert!(state.picture_words.is_some());
+        state.stop_output();
+        assert!(state.picture_words.is_none());
+        state.tell(&ctx, Action::PopoutUp, "Pop-out 15".into(), now);
+        assert!(state.picture_words.is_none(), "no picture to put them in");
     }
 
     #[cfg(unix)]

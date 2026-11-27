@@ -4,6 +4,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(target_os = "linux")]
+mod banner;
+#[cfg(target_os = "linux")]
 mod capture;
 mod core;
 #[cfg(not(windows))]
