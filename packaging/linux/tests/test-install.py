@@ -414,6 +414,116 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((camera / "power/control").read_text(), "on\n")
         self.assertIn("the Odyssey's webcam has been in USB power saving", result.stdout)
 
+    def scaler_fixture(self):
+        """The archive with the scaler's rule, a rules folder, and (returned) the Wine side's folder."""
+        (self.archive / "wine-lens" / "71-any2odyssey-scaler.rules").write_text("# the scaler's rule\n")
+        (self.system / "etc/udev/rules.d").mkdir(parents=True)
+        side = self.root / "data/wine-lens"
+        return side, self.system / "etc/udev/rules.d/71-any2odyssey-scaler.rules"
+
+    def test_the_scaler_step_is_done_only_when_asked_for_and_undone_when_asked(self):
+        side, rule = self.scaler_fixture()
+        flags = ["--prefix", str(self.root / "prefix"), "--no-deps", "--no-model", "--no-odyssey"]
+        (side / "build").mkdir(parents=True)
+        (side / "any2odyssey-weaver").touch()
+        (side / "build/any2odyssey-scaler").touch()
+        (side / "build/any2odyssey-scaler").chmod(0o755)
+        # Without the option, and with --yes, which agrees to the ordinary steps only: nothing of it is done,
+        # and nothing is said of it (no question either: the script has none to ask about this).
+        for extra in ([], ["--yes"]):
+            result = self.run_installer(*flags, *extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("== 6.", result.stdout)
+            self.assertNotIn("scaler", (result.stdout + result.stderr).lower())
+            self.assertFalse(rule.exists(), result.stdout)
+            self.assertFalse((side / "scaler.on").exists(), result.stdout)
+        script = (self.archive / "install.sh").read_text()
+        asked = [line for line in script.splitlines() if "scaler" in line.lower() and ' ask "' in line]
+        self.assertEqual(len(asked), 1, asked)  # (the one that asks about removing the rule)
+        self.assertIn("Remove the scaler's udev rule", asked[0])
+        # --dry-run says what it would do and does none of it.
+        result = self.run_installer(*flags, "--scaler", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"would make: {side}/scaler.on", result.stdout)
+        self.assertFalse(rule.exists() or (side / "scaler.on").exists(), result.stdout)
+        # Asked for: the rule, reloaded and not triggered, and the file the weaver looks for.
+        result = self.run_installer(*flags, "--scaler")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(rule.read_text(), "# the scaler's rule\n")
+        self.assertTrue((side / "scaler.on").is_file())
+        step = result.stdout.split("== 6.")[1]
+        self.assertIn("would run: udevadm control --reload", step)
+        self.assertNotIn("trigger", step)
+        self.assertIn("unplugged and plugged in again", step)
+        self.assertNotIn("is not in", step)  # (the program is built)
+        # A later run leaves it as it is, and says how to switch it off.
+        result = self.run_installer(*flags)
+        self.assertIn("== 6. The scaler's 3D mode (experimental)", result.stdout)
+        self.assertIn("already switched on (--no-scaler switches it off)", result.stdout)
+        self.assertNotIn("udev rule in", result.stdout)
+        # A rule that is not this version's, or gone: said, and left as it is until --scaler is given again.
+        for change in (lambda: rule.write_text("# the rule of another version\n"), rule.unlink):
+            change()
+            before = rule.read_text() if rule.exists() else None
+            result = self.run_installer(*flags, "--yes")
+            self.assertIn("already switched on", result.stdout)
+            self.assertIn("is missing or is not this version's", result.stdout)
+            self.assertEqual(rule.read_text() if rule.exists() else None, before)
+            self.assertNotIn("is not this version's", self.run_installer(*flags, "--no-udev").stdout)
+        result = self.run_installer(*flags, "--scaler")
+        self.assertEqual(rule.read_text(), "# the scaler's rule\n", result.stdout)
+        # Switched off: the weaver's file goes, the rule stays for --uninstall.
+        result = self.run_installer(*flags, "--no-scaler")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((side / "scaler.on").exists())
+        self.assertTrue(rule.is_file())
+        self.assertIn("it was not switched on", self.run_installer(*flags, "--no-scaler").stdout)
+        result = self.run_installer("--prefix", str(self.root / "prefix"), "--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(rule.exists(), result.stdout)
+
+    def test_removing_the_scalers_rule_switches_the_scaler_off_in_a_wine_side_that_stays(self):
+        side, rule = self.scaler_fixture()
+        prefix = str(self.root / "prefix")
+        side.mkdir(parents=True)
+        (side / "any2odyssey-weaver").touch()
+        result = self.run_installer("--prefix", prefix, "--no-deps", "--no-model", "--no-odyssey", "--scaler")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(rule.is_file() and (side / "scaler.on").is_file(), result.stdout)
+        # Installed from a distribution's package as well: its program uses the same Wine side, which stays.
+        (self.system / "usr/bin").mkdir(parents=True, exist_ok=True)
+        (self.system / "usr/bin/any2odyssey-setup").touch()
+        # --dry-run names both and removes neither.
+        result = self.run_installer("--prefix", prefix, "--uninstall", "--yes", "--dry-run")
+        self.assertIn(f"would run: rm -f {side}/scaler.on", result.stdout)
+        self.assertTrue(rule.is_file() and (side / "scaler.on").is_file(), result.stdout)
+        result = self.run_installer("--prefix", prefix, "--uninstall", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(rule.exists(), result.stdout)
+        self.assertTrue((side / "any2odyssey-weaver").exists(), result.stdout)
+        # Without the rule the command cannot be sent: the weaver is not left trying at every picture.
+        self.assertFalse((side / "scaler.on").exists(), result.stdout)
+
+    def test_the_scaler_step_says_what_is_missing_and_switches_nothing_on_without_a_wine_side(self):
+        side, rule = self.scaler_fixture()
+        flags = ["--prefix", str(self.root / "prefix"), "--no-deps", "--no-model", "--no-odyssey", "--scaler"]
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Wine side is not prepared (step 5)", result.stdout + result.stderr)
+        self.assertFalse(rule.exists() or side.exists(), result.stdout)
+        # A Wine side an earlier version made has no any2odyssey-scaler: switched on, and told to set up again.
+        side.mkdir(parents=True)
+        (side / "any2odyssey-weaver").touch()
+        result = self.run_installer(*flags)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"any2odyssey-scaler is not in {side}/build yet", result.stdout + result.stderr)
+        self.assertTrue((side / "scaler.on").is_file() and rule.is_file())
+        # --no-udev: the file for the weaver, and no rule.
+        rule.unlink()
+        result = self.run_installer(*flags, "--no-udev")
+        self.assertIn("the udev rule is not installed (--no-udev)", result.stdout)
+        self.assertFalse(rule.exists())
+
     def test_empty_windows_root_is_rejected(self):
         for root in ["", "/"]:
             with self.subTest(root=root):
@@ -1445,7 +1555,8 @@ class InstallerTests(unittest.TestCase):
         result = self.run_installer("--help")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(result.stdout.startswith("Install Any2Odyssey for Linux"), result.stdout)
-        for option in ["--yes", "--no-deps", "--no-udev", "--no-model", "--no-odyssey", "--windows-root DIR",
+        for option in ["--yes", "--no-deps", "--no-udev", "--no-model", "--no-odyssey", "--scaler ", "--no-scaler ",
+                       "--windows-root DIR",
                        "--prefix DIR", "--packaged", "--dry-run", "--uninstall "]:
             self.assertIn(f"\n  {option}", result.stdout)
         self.assertNotIn("set -eu", result.stdout)

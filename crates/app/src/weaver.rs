@@ -743,6 +743,12 @@ impl Weaver {
         self.session.is_some()
     }
 
+    /// The helper this output starts, if there is one.
+    #[cfg(target_os = "linux")]
+    pub fn helper(&self) -> Option<&Path> {
+        self.helper.as_deref()
+    }
+
     /// Forget the last failure: a new request to show something starts
     /// afresh instead of reporting what went wrong last time.
     pub fn forget_failure(&mut self) {

@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+# Samsung Odyssey 3D (G90XF): the scaler's vendor device, a USB mass-storage device (1603:452a) whose SCSI
+# vendor name is "GCREADER"; Linux gives it a /dev/sgN once its sg driver is loaded. Only for any2odyssey-scaler, which is experimental
+# and off unless asked for (docs/LENS-SWITCH.md, "The scaler's 3D mode"): it lets the person at the seat
+# send that device its 3D-mode command. Installed only by the installer's step 6 (install.sh --scaler), or
+# by hand.
+#
+# What it opens is more than that one command: every program of the person at the seat can then send this
+# device any SCSI command. What else the device takes is not known here.
+#
+# The USB id was read from one monitor, and any2odyssey-scaler asks for the same one. A monitor whose
+# device has another id gets nothing from either; any2odyssey-scaler names the id it found.
+#
+# After copying this file: "sudo udevadm control --reload", then unplug and replug the monitor's USB cable
+# (or switch the monitor off and on). odysseyvk-linux reports that "udevadm trigger" on this device
+# re-initialises the monitor's hub and takes the lens board and the webcam off the bus until then.
+#
+# Two lines for the permission, because udev wants everything a line asks of the devices above (ATTRS, SUBSYSTEMS) to be true
+# of one and the same of them: the USB id is the USB device's, the vendor name the SCSI device's. The first
+# line notes the id in a property that is kept nowhere (its name begins with a dot), the second asks for it.
+#
+# The last line: a /dev/sgN is made by the kernel's sg driver, which many systems (Arch among them) do not
+# load by themselves; without it the device is a disk and nothing more, and a vendor command sent through
+# the disk is refused to anybody but root. So the driver is loaded when this device, and no other, appears.
+# The line is about the SCSI device itself, whose vendor name is its own (ATTR) and whose USB id is the USB
+# device's above it (ATTRS). The driver stays loaded when the monitor is unplugged.
+SUBSYSTEM=="scsi_generic", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1603", ATTRS{idProduct}=="452a", ENV{.A2O_SCALER_USB}="1"
+SUBSYSTEM=="scsi_generic", ENV{.A2O_SCALER_USB}=="1", SUBSYSTEMS=="scsi", ATTRS{vendor}=="GCREADER*", TAG+="uaccess"
+ACTION=="add", SUBSYSTEM=="scsi", ENV{DEVTYPE}=="scsi_device", ATTR{vendor}=="GCREADER*", SUBSYSTEMS=="usb", ATTRS{idVendor}=="1603", ATTRS{idProduct}=="452a", RUN{builtin}+="kmod load sg"

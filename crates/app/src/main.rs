@@ -17,6 +17,8 @@ mod lens_switch;
 mod live;
 mod platform;
 #[cfg(target_os = "linux")]
+mod scaler;
+#[cfg(target_os = "linux")]
 mod shortcuts;
 #[cfg(windows)]
 mod tray;

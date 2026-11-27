@@ -11,6 +11,11 @@
 # "tracking: <reason>" when eye tracking could not be started, "capture: excluded" or "capture: not
 # excluded" as the desktop does or does not keep the picture out of screen captures (overlay only), or
 # "error: <reason>"; leaves (lens off, tracking stopped) when standard input closes.
+#
+# Experimental, and only when asked for (the file scaler.on beside this script, or ANY2ODYSSEY_SCALER=1): the
+# monitor's scaler is told to enter its 3D mode before the picture and to leave it after, by
+# build/any2odyssey-scaler. What it answered is in scaler.log beside this script; the picture is shown
+# whatever it answered.
 T=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 export WINEPREFIX=$T/prefix WINEDLLOVERRIDES="mscoree,mshtml="
 
@@ -30,6 +35,15 @@ flock -n 7 || true
 # Leaving is the work of a process of its own, started now and holding the lock until it has done it:
 # Any2Odyssey does not wait long for this script, which may be ended at any point below, and what has
 # been started by then must still be undone.
+SCALER=
+# A note of a mode switched on that no leaving took away (the PC lost power, the leaving was ended): this
+# run did not switch it on, and what a run did not ask for it does not send. No other leaving can be on its
+# way now; it would hold the first lock.
+rm -f "$T/scaler.sent"
+if [ -e "$T/scaler.on" ] || [ "${ANY2ODYSSEY_SCALER:-}" = 1 ]; then
+    [ -x "$T/build/any2odyssey-scaler" ] && SCALER=1 ||
+        echo "error: no any2odyssey-scaler (run setup.sh again; it needs a C compiler)" >"$T/scaler.log"
+fi
 ME=$$ T=$T setsid sh -c '
     # (a script that was ended but not yet collected by its parent still has its number: state Z)
     alive() { state=$(cat "/proc/$ME/stat" 2>/dev/null) && case $state in *") Z "*) false ;; esac; }
@@ -46,6 +60,11 @@ ME=$$ T=$T setsid sh -c '
     command -v busctl >/dev/null &&
         busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting unloadScript s any2odyssey-overlay >/dev/null 2>&1
     "$T/tools/tracking.sh" stop >/dev/null 2>&1 8>&-
+    # (only a mode this script switched on is switched off)
+    if [ -e "$T/scaler.sent" ]; then
+        rm -f "$T/scaler.sent"
+        echo "leaving: $("$T/build/any2odyssey-scaler" off 2>&1 8>&-)" >>"$T/scaler.log"
+    fi
 ' </dev/null >/dev/null 2>&1 7>&- &
 "$T/tools/ensure-stack.sh" </dev/null 8>&- 7>&- || exit 1
 # Where the Odyssey 3D is on Wine's desktop now (the monitors may have been rearranged since the service
@@ -63,6 +82,11 @@ TRACKING=$("$T/tools/tracking.sh" start </dev/null 2>/dev/null 8>&- 7>&-)
 # read any more, and "tracking: " with nothing after it left the reason out of what Any2Odyssey shows.
 [ -n "$TRACKING" ] || TRACKING="error: $T/tools/tracking.sh start gave no answer; run it to see why"
 [ "$TRACKING" = on ] || echo "tracking: ${TRACKING#error: }"
+
+if [ -n "$SCALER" ]; then
+    : >"$T/scaler.sent"
+    "$T/build/any2odyssey-scaler" on >"$T/scaler.log" 2>&1 </dev/null 8>&- 7>&- || rm -f "$T/scaler.sent"
+fi
 
 FRAME=$(readlink -f "$1")
 # A live screen may be the Odyssey's own: on KDE Plasma the picture's window is then kept out of the capture
