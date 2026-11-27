@@ -38,6 +38,8 @@ struct Saved {
     depth_detail: Option<u32>,
     fine_edges: Option<bool>,
     pointer: Option<bool>,
+    global_shortcuts: Option<bool>,
+    shortcut_feedback: Option<bool>,
 }
 
 const INPUTS: [(Input, &str); 4] = [
@@ -102,6 +104,8 @@ impl Saved {
             depth_detail: number("DepthDetail").and_then(|v| u32::try_from(v).ok()),
             fine_edges: yes_or_no("FineEdges"),
             pointer: yes_or_no("Pointer"),
+            global_shortcuts: yes_or_no("GlobalShortcuts"),
+            shortcut_feedback: yes_or_no("ShortcutFeedback"),
         }
     }
 
@@ -119,6 +123,8 @@ impl Saved {
             depth_detail: Some(options.detail),
             fine_edges: Some(options.edges),
             pointer: Some(options.pointer),
+            global_shortcuts: Some(options.shortcuts),
+            shortcut_feedback: Some(options.feedback),
         }
     }
 
@@ -153,6 +159,8 @@ impl Saved {
                 .unwrap_or(default.detail),
             edges: self.fine_edges.unwrap_or(default.edges),
             pointer: self.pointer.unwrap_or(default.pointer),
+            shortcuts: self.global_shortcuts.unwrap_or(default.shortcuts),
+            feedback: self.shortcut_feedback.unwrap_or(default.feedback),
         }
     }
 }
@@ -257,6 +265,8 @@ mod tests {
             detail: 1022,
             edges: false,
             pointer: false,
+            shortcuts: true,
+            feedback: false,
         }
     }
 
@@ -324,6 +334,44 @@ mod tests {
                 ..Options::default()
             }
         );
+    }
+
+    #[test]
+    fn what_a_shortcut_did_is_shown_until_that_is_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        assert!(read(&path).feedback, "no file");
+        std::fs::write(&path, r#"{"GlobalShortcuts":true}"#).unwrap();
+        assert!(read(&path).feedback, "a file of before the choice");
+        std::fs::write(&path, r#"{"ShortcutFeedback":false}"#).unwrap();
+        assert!(!read(&path).feedback);
+        std::fs::write(&path, r#"{"ShortcutFeedback":"no"}"#).unwrap();
+        assert!(read(&path).feedback, "not a yes or no");
+        let off = Options {
+            feedback: false,
+            ..Options::default()
+        };
+        OptionsFile::load(path.clone()).0.store(off);
+        assert_eq!(read(&path), off);
+    }
+
+    #[test]
+    fn global_shortcuts_are_off_until_chosen_and_the_choice_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("viewer-settings.json");
+        // A file from before there were any.
+        std::fs::write(&path, r#"{"Input":"Ai","Depth":120}"#).unwrap();
+        assert!(!read(&path).shortcuts);
+        std::fs::write(&path, r#"{"GlobalShortcuts":true}"#).unwrap();
+        assert!(read(&path).shortcuts);
+        OptionsFile::load(path.clone()).0.store(Options::default());
+        assert!(!read(&path).shortcuts);
+        let on = Options {
+            shortcuts: true,
+            ..Options::default()
+        };
+        OptionsFile::load(path.clone()).0.store(on);
+        assert_eq!(read(&path), on);
     }
 
     #[test]

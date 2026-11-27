@@ -537,6 +537,9 @@ struct Look {
     sharpness: i32,
     lines: i32,
     swap: bool,
+    /// Which words are drawn into the picture (`Live::say`): another
+    /// number for each, 0 for none.
+    words: u64,
     edges: bool,
 }
 
@@ -719,6 +722,9 @@ struct Shared {
     /// The screen's frames, for the depth thread to say that a map is
     /// there ([`Frames::look_again`]); none where nothing waits for them.
     frames: Mutex<Option<Frames>>,
+    /// The words to draw into the picture, if any, and how many there
+    /// have been.
+    words: Mutex<(u64, Option<String>)>,
 }
 
 impl Shared {
@@ -741,6 +747,7 @@ impl Shared {
             map_answered: Condvar::new(),
             stats: Mutex::new(Stats::default()),
             frames: Mutex::new(None),
+            words: Mutex::new((0, None)),
         }
     }
 
@@ -768,6 +775,10 @@ impl Shared {
                 sharpness: self.sharpness.load(Ordering::Relaxed).clamp(0, 100),
                 lines: self.lines.load(Ordering::Relaxed),
                 swap: self.swap.load(Ordering::Relaxed),
+                words: {
+                    let words = lock(&self.words);
+                    words.1.as_ref().map_or(0, |_| words.0)
+                },
                 edges: self.edges.load(Ordering::Relaxed),
             },
             detail: self.detail.load(Ordering::Relaxed).max(0) as u32,
@@ -849,6 +860,19 @@ impl Live {
         s.detail.store(controls.detail, Ordering::Relaxed);
         s.swap.store(controls.swap, Ordering::Relaxed);
         s.edges.store(controls.edges, Ordering::Relaxed);
+    }
+
+    /// Draw `words` into the pictures from now on (what a global shortcut
+    /// did: `banner`), or no words any more. A screen on which nothing
+    /// changes is drawn again for it.
+    pub fn say(&mut self, words: Option<String>) {
+        {
+            let mut said = lock(&self.shared.words);
+            *said = (said.0 + 1, words);
+        }
+        if let Some(frames) = lock(&self.shared.frames).as_ref() {
+            frames.look_again();
+        }
     }
 
     pub fn capture_state(&self) -> CaptureState {
@@ -955,6 +979,9 @@ fn render_loop(frames: &Frames, shared: &Shared) {
     let mut pace = Pace::default();
     // The frame whose picture waited for the frame's own map, and got it.
     let mut own_map = None;
+    // The words in the picture on their plate, and which words at how many
+    // lines the plate was made for.
+    let (mut plate, mut plate_of) = (None::<crate::banner::Plate>, (0u64, 0u32));
     while !shared.stop.load(Ordering::Relaxed) && !frames.ended() {
         // A little more than sixty pictures a second at most: a faster
         // screen (the Odyssey runs at 165) would double the work for depth
@@ -1181,6 +1208,15 @@ fn render_loop(frames: &Frames, shared: &Shared) {
         } else if pair.capacity() > 0 {
             pair = Vec::new();
         }
+        if plate_of != (look.words, h) {
+            plate_of = (look.words, h);
+            plate = lock(&shared.words)
+                .1
+                .as_deref()
+                .filter(|_| look.words != 0)
+                .and_then(|words| crate::banner::Plate::of(words, h));
+        }
+        let plate = plate.as_ref();
         let mut depth_shown = 0;
         let mut depth_of = 0;
         let mut render = |canvas: &mut [u8]| {
@@ -1203,6 +1239,11 @@ fn render_loop(frames: &Frames, shared: &Shared) {
             if look.sharpness > 0 {
                 let amount = look.sharpness as f32 / 100.0;
                 live::place_pair(&pair, w, h, amount, place, canvas);
+            }
+            // Over the picture, and inside it: what is beside it is black
+            // and is not drawn again with every picture.
+            if let Some(plate) = plate {
+                plate.draw(canvas, view, (x, y, w, h), true);
             }
         };
         // The picture is made where the output reads it. Only where that
@@ -2058,6 +2099,7 @@ mod tests {
             sharpness: 0,
             lines: 1080,
             swap: false,
+            words: 0,
             edges: true,
         }
     }
@@ -2250,6 +2292,11 @@ mod tests {
             },
             Look {
                 swap: true,
+                ..a_look()
+            },
+            // Words to draw into the picture, or other ones.
+            Look {
+                words: 3,
                 ..a_look()
             },
             Look {

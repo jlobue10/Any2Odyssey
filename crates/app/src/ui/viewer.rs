@@ -179,7 +179,22 @@ pub struct Options {
     /// screen shown elsewhere; on the Odyssey's own screen the real pointer
     /// is there already.
     pub pointer: bool,
+    /// Linux only: ask the desktop for global shortcuts (`shortcuts`), so
+    /// that the output and its depth answer to keys while another window
+    /// has the keyboard. Off until chosen: the desktop may ask about them.
+    pub shortcuts: bool,
+    /// With them: say on the screen what a shortcut did (`shortcuts::say`),
+    /// since the page is not in front when one is pressed.
+    pub feedback: bool,
 }
+
+/// How long the words that say what a shortcut did stay in the picture.
+#[cfg(target_os = "linux")]
+const WORDS_STAY: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How far one press of a depth or pop-out shortcut moves its slider.
+#[cfg(target_os = "linux")]
+const SHORTCUT_STEP: i32 = 5;
 
 impl Default for Options {
     fn default() -> Options {
@@ -197,6 +212,8 @@ impl Default for Options {
             detail: DEPTH_DETAIL[0].0,
             edges: defaults.edges,
             pointer: true,
+            shortcuts: false,
+            feedback: true,
         }
     }
 }
@@ -719,6 +736,9 @@ struct Woven {
     generation: u64,
     flat: bool,
     stretch: f64,
+    /// Which words are drawn into it (`ViewerState::words_now`), 0 for
+    /// none.
+    words: u64,
 }
 
 pub struct ViewerState {
@@ -774,6 +794,26 @@ pub struct ViewerState {
     /// Where the depth model runs, as the page says it under *Depth
     /// detail*; nothing until the model has been loaded.
     depth_line: Option<String>,
+    /// The desktop's global shortcuts while they are chosen, and what they
+    /// last said, for the log.
+    #[cfg(target_os = "linux")]
+    shortcuts: Option<crate::shortcuts::Shortcuts>,
+    #[cfg(target_os = "linux")]
+    shortcuts_said: Option<String>,
+    /// What a global shortcut did, drawn into the Odyssey 3D picture until
+    /// the moment given, and how many such words there have been.
+    #[cfg(target_os = "linux")]
+    picture_words: Option<(String, std::time::Instant)>,
+    /// Until when the page is drawn again several times a second after a
+    /// shortcut: see `poll_shortcuts`.
+    #[cfg(target_os = "linux")]
+    redrawn_until: Option<std::time::Instant>,
+    #[cfg(target_os = "linux")]
+    words_said: u64,
+    /// Whether the desktop may be asked for them: not by tests and
+    /// previews, which start nothing.
+    #[cfg(target_os = "linux")]
+    asks_desktop: bool,
 }
 
 impl Default for ViewerState {
@@ -809,6 +849,18 @@ impl Default for ViewerState {
             // In memory only: tests and previews write nothing.
             options_file: super::options_file::OptionsFile::default(),
             depth_line: None,
+            #[cfg(target_os = "linux")]
+            shortcuts: None,
+            #[cfg(target_os = "linux")]
+            shortcuts_said: None,
+            #[cfg(target_os = "linux")]
+            picture_words: None,
+            #[cfg(target_os = "linux")]
+            redrawn_until: None,
+            #[cfg(target_os = "linux")]
+            words_said: 0,
+            #[cfg(target_os = "linux")]
+            asks_desktop: false,
         }
     }
 }
@@ -851,6 +903,8 @@ impl ViewerState {
             lens: LensState::load(any2odyssey_core::paths::lens_file()),
             lens_switch: LensSwitch::new(),
             weaver: Weaver::new(),
+            #[cfg(target_os = "linux")]
+            asks_desktop: true,
             ..ViewerState::default()
         }
     }
@@ -883,6 +937,162 @@ impl ViewerState {
         if let Some(wait) = self.options_file.save_when_settled(self.options, now) {
             ctx.request_repaint_after(wait);
         }
+    }
+
+    /// Keep the desktop's global shortcuts as the choice says, and do what
+    /// was pressed since the last frame. Call at every frame, like
+    /// [`ViewerState::keep_choices`]: they are for when the page is not in
+    /// front.
+    #[cfg(target_os = "linux")]
+    pub fn poll_shortcuts(&mut self, ctx: &egui::Context) {
+        use crate::shortcuts::{Event, Shortcuts};
+        self.keep_words(ctx, std::time::Instant::now());
+        // A shortcut is pressed while another window is in front, and a
+        // desktop may not show what a window draws while it is covered: the
+        // one frame asked for at the press can be lost, and the sliders then
+        // stand where they were until the pointer comes by. So the page is
+        // drawn a few more times in the seconds after a press.
+        if let Some(until) = self.redrawn_until {
+            if std::time::Instant::now() < until {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            } else {
+                self.redrawn_until = None;
+            }
+        }
+        if !self.options.shortcuts {
+            self.shortcuts = None;
+            return;
+        }
+        if self.shortcuts.is_none() {
+            if !self.asks_desktop {
+                return;
+            }
+            let wake = Wake(ctx.clone());
+            self.shortcuts = Some(Shortcuts::start(move || wake.0.request_repaint()));
+        }
+        while let Some(event) = self.shortcuts.as_ref().and_then(Shortcuts::take) {
+            // One more frame after this one: the page shows where a slider
+            // is now and what the status line says, and whatever in this
+            // frame came before the press sees it.
+            ctx.request_repaint();
+            match event {
+                Event::Pressed(action) => {
+                    let did = self.shortcut(action);
+                    self.redrawn_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+                    if self.options.feedback {
+                        self.tell(ctx, action, did, std::time::Instant::now());
+                    }
+                }
+                Event::Bound(line) => self.shortcuts_said = Some(line),
+                Event::Failed(line) => {
+                    // Not asked for again at every frame: the box is
+                    // cleared, and ticking it asks once more.
+                    self.options.shortcuts = false;
+                    self.shortcuts = None;
+                    self.status.clone_from(&line);
+                    self.shortcuts_said = Some(line);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Say on a screen what a shortcut did. While the Odyssey 3D output
+    /// shows a picture the words go into that picture (`banner`): it covers
+    /// the Odyssey's screen, and the desktop's own display for such words
+    /// is on a screen of the desktop's choosing. Otherwise, and for the
+    /// output's own start and end (no picture yet, or none any more), the
+    /// desktop shows them (`shortcuts::say`).
+    #[cfg(target_os = "linux")]
+    fn tell(
+        &mut self,
+        ctx: &egui::Context,
+        action: crate::shortcuts::Action,
+        did: String,
+        now: std::time::Instant,
+    ) {
+        let in_picture = action != crate::shortcuts::Action::Output
+            && self.output_open
+            && self.options.output == Output::Odyssey
+            && self.weaver.is_running();
+        if !in_picture {
+            // (tests and previews ask the desktop for nothing)
+            if self.asks_desktop {
+                crate::shortcuts::say(did);
+            }
+            return;
+        }
+        self.words_said += 1;
+        if let Some(live) = &mut self.live {
+            live.say(Some(did.clone()));
+        }
+        self.picture_words = Some((did, now + WORDS_STAY));
+        // A still picture is made again with them (`show_odyssey`).
+        ctx.request_repaint();
+    }
+
+    /// Take the words out of the picture once they have been there long
+    /// enough. Called at every frame.
+    #[cfg(target_os = "linux")]
+    fn keep_words(&mut self, ctx: &egui::Context, now: std::time::Instant) {
+        let Some((_, until)) = &self.picture_words else {
+            return;
+        };
+        match until.checked_duration_since(now) {
+            Some(left) if !left.is_zero() => ctx.request_repaint_after(left),
+            _ => {
+                self.picture_words = None;
+                if let Some(live) = &mut self.live {
+                    live.say(None);
+                }
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Which words a still picture for the Odyssey 3D output has in it: a
+    /// number of their own, and the words; 0 and none without.
+    fn words_now(&self) -> (u64, Option<&str>) {
+        #[cfg(target_os = "linux")]
+        if let Some((words, _)) = &self.picture_words {
+            return (self.words_said, Some(words));
+        }
+        (0, None)
+    }
+
+    /// Do what a global shortcut asks, and give the few words that say what
+    /// came of it (for the screen: the page may not be in sight).
+    #[cfg(target_os = "linux")]
+    fn shortcut(&mut self, action: crate::shortcuts::Action) -> String {
+        use crate::shortcuts::Action;
+        let before = self.options;
+        let moved = |position: i32, by: i32, spec: any2odyssey_core::slider::SliderSpec| {
+            (position + by).clamp(spec.min, spec.max)
+        };
+        let o = &mut self.options;
+        match action {
+            Action::Output => {
+                let was = self.output_open;
+                self.toggle_output();
+                return match (was, self.output_open) {
+                    (false, true) => "3D output on".to_owned(),
+                    (true, false) => "3D output off".to_owned(),
+                    // It did not start: the status line says why.
+                    _ => self.status.clone(),
+                };
+            }
+            Action::DepthDown => o.depth_pos = moved(o.depth_pos, -SHORTCUT_STEP, DEPTH),
+            Action::DepthUp => o.depth_pos = moved(o.depth_pos, SHORTCUT_STEP, DEPTH),
+            Action::PopoutDown => o.pop_pos = moved(o.pop_pos, -SHORTCUT_STEP, POPOUT),
+            Action::PopoutUp => o.pop_pos = moved(o.pop_pos, SHORTCUT_STEP, POPOUT),
+        }
+        let did = match action {
+            Action::DepthDown | Action::DepthUp => format!("Depth {}", self.options.depth_pos),
+            _ => format!("Pop-out {}", self.options.pop_pos),
+        };
+        self.options_edited(before);
+        did
     }
 
     /// The calibration pattern is a picture of its own: it needs no image.
@@ -1174,6 +1384,10 @@ impl ViewerState {
         self.lens_switch.set(false, || {});
         self.weaver.stop();
         self.woven = None;
+        #[cfg(target_os = "linux")]
+        {
+            self.picture_words = None;
+        }
         self.stop_live();
     }
 
@@ -1381,6 +1595,7 @@ impl ViewerState {
             generation: self.document.generation,
             flat: self.options.input == Input::Flat,
             stretch: self.options.eye_stretch(),
+            words: self.words_now().0,
         };
         if self.woven != Some(wanted) {
             let picture = match self.document.result() {
@@ -1397,8 +1612,23 @@ impl ViewerState {
                     image::Rgba([0, 0, 0, 255]),
                 ),
             };
-            self.weaver
-                .show(picture.width(), picture.height(), picture.as_raw());
+            let (width, height) = picture.dimensions();
+            #[allow(unused_mut)]
+            let mut pixels = picture.into_raw();
+            #[cfg(target_os = "linux")]
+            if let Some(plate) = self
+                .words_now()
+                .1
+                .and_then(|words| crate::banner::Plate::of(words, height))
+            {
+                plate.draw(
+                    &mut pixels,
+                    (width / 2, height),
+                    (0, 0, width / 2, height),
+                    false,
+                );
+            }
+            self.weaver.show(width, height, &pixels);
             self.woven = Some(wanted);
             self.weaver_said = None;
         }
@@ -1644,6 +1874,10 @@ impl ViewerState {
                 self.depth_line = Some(line);
             }
         }
+        #[cfg(target_os = "linux")]
+        if let Some(line) = self.shortcuts_said.take() {
+            core.log(&line);
+        }
         banner(ui, wordmark, p);
         ui.add_space(4.0);
         section(ui, "STEREO VIEWER", p, |ui| {
@@ -1875,6 +2109,18 @@ impl ViewerState {
                         .wrap(),
                     );
                 }
+                #[cfg(target_os = "linux")]
+                ui.checkbox(&mut state.options.shortcuts, "Global shortcuts")
+                    .on_hover_text("Asks the desktop for shortcuts that work while another window has the keyboard: Ctrl+Shift+1 starts and stops the output, 3 and 4 change depth, 5 and 6 pop-out. The desktop may ask you to confirm them, and they are changed in its own shortcut settings. Needs a desktop whose portal has global shortcuts (KDE Plasma 6).");
+                #[cfg(target_os = "linux")]
+                ui.indent("shortcut-feedback", |ui| {
+                    ui.add_enabled(
+                        state.options.shortcuts,
+                        egui::Checkbox::new(&mut state.options.feedback, "Show what a shortcut did"),
+                    )
+                    .on_hover_text("A global shortcut is pressed while this page is behind another window: a few words on the screen say what it did (3D output on or off, the new depth or pop-out). On KDE Plasma they appear where the volume does when its keys are pressed; elsewhere as a notification that goes by itself.")
+                    .on_disabled_hover_text("For the global shortcuts: tick the box above first.");
+                });
                 ui.add_space(4.0);
                 if gold_button(ui, "Save preview PNG…", false, p).clicked() {
                     if state.document.result().is_none() {
@@ -2197,6 +2443,119 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn global_shortcuts_move_the_sliders_by_steps_within_their_ranges_and_toggle_the_output() {
+        use crate::shortcuts::{Action, Event, Shortcuts};
+        let ctx = egui::Context::default();
+        let (shortcuts, press) = Shortcuts::for_test();
+        let mut state = ViewerState {
+            shortcuts: Some(shortcuts),
+            ..ViewerState::default()
+        };
+        state.options.shortcuts = true;
+        state.options.input = Input::Ai;
+        let (depth, pop) = (state.options.depth_pos, state.options.pop_pos);
+        for action in [Action::DepthUp, Action::DepthUp, Action::PopoutDown] {
+            press.send(Event::Pressed(action)).unwrap();
+        }
+        state.poll_shortcuts(&ctx);
+        assert_eq!(state.options.depth_pos, depth + 2 * SHORTCUT_STEP);
+        assert_eq!(state.options.pop_pos, pop - SHORTCUT_STEP);
+        // Held down, a key ends at the end of its slider.
+        for _ in 0..100 {
+            press.send(Event::Pressed(Action::DepthDown)).unwrap();
+            press.send(Event::Pressed(Action::PopoutUp)).unwrap();
+        }
+        state.poll_shortcuts(&ctx);
+        assert_eq!(
+            (state.options.depth_pos, state.options.pop_pos),
+            (DEPTH.min, POPOUT.max)
+        );
+        // The output key is the Start output button: with no image it says
+        // so, and with the calibration pattern it opens and closes.
+        press.send(Event::Pressed(Action::Output)).unwrap();
+        state.poll_shortcuts(&ctx);
+        assert!(!state.output_open);
+        assert_eq!(state.status, NO_IMAGE);
+        state.options.input = Input::Pair;
+        state.options.output = Output::Lens;
+        state.lens.pattern = true;
+        for open in [true, false] {
+            press.send(Event::Pressed(Action::Output)).unwrap();
+            state.poll_shortcuts(&ctx);
+            assert_eq!(state.output_open, open);
+        }
+        // What the desktop bound goes to the log, not over the status.
+        press
+            .send(Event::Bound("Global shortcuts: bound.".into()))
+            .unwrap();
+        state.poll_shortcuts(&ctx);
+        assert_eq!(
+            state.shortcuts_said.as_deref(),
+            Some("Global shortcuts: bound.")
+        );
+        assert_eq!(state.status, OUTPUT_OFF);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shortcut_gives_the_words_for_the_screen_that_say_what_it_did() {
+        use crate::shortcuts::Action;
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        let (depth, pop) = (state.options.depth_pos, state.options.pop_pos);
+        assert_eq!(
+            state.shortcut(Action::DepthUp),
+            format!("Depth {}", depth + SHORTCUT_STEP)
+        );
+        assert_eq!(state.shortcut(Action::DepthDown), format!("Depth {depth}"));
+        assert_eq!(
+            state.shortcut(Action::PopoutDown),
+            format!("Pop-out {}", pop - SHORTCUT_STEP)
+        );
+        assert_eq!(state.shortcut(Action::PopoutUp), format!("Pop-out {pop}"));
+        // At the end of a slider the words say where it stands.
+        state.options.depth_pos = DEPTH.max;
+        assert_eq!(
+            state.shortcut(Action::DepthUp),
+            format!("Depth {}", DEPTH.max)
+        );
+        // An output that does not start: why, as the status line has it.
+        assert_eq!(state.shortcut(Action::Output), NO_IMAGE);
+        state.options.input = Input::Pair;
+        state.options.output = Output::Lens;
+        state.lens.pattern = true;
+        assert_eq!(state.shortcut(Action::Output), "3D output on");
+        assert_eq!(state.shortcut(Action::Output), "3D output off");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refused_shortcuts_clear_the_choice_and_nothing_is_asked_of_the_desktop_unbidden() {
+        use crate::shortcuts::{Event, Shortcuts};
+        let ctx = egui::Context::default();
+        // Tests and previews ask the desktop for nothing, whatever is chosen.
+        let mut state = ViewerState::default();
+        state.options.shortcuts = true;
+        state.poll_shortcuts(&ctx);
+        assert!(state.shortcuts.is_none() && state.options.shortcuts);
+        // A desktop that refuses is asked once, and the page says why.
+        let (shortcuts, events) = Shortcuts::for_test();
+        state.shortcuts = Some(shortcuts);
+        events
+            .send(Event::Failed("Global shortcuts: none.".into()))
+            .unwrap();
+        state.poll_shortcuts(&ctx);
+        assert!(state.shortcuts.is_none() && !state.options.shortcuts);
+        assert_eq!(state.status, "Global shortcuts: none.");
+        // Unticking ends them.
+        let (shortcuts, _events) = Shortcuts::for_test();
+        state.shortcuts = Some(shortcuts);
+        state.poll_shortcuts(&ctx);
+        assert!(state.shortcuts.is_none());
     }
 
     #[cfg(not(windows))]
@@ -3261,6 +3620,66 @@ mod tests {
         assert_eq!(state.status, CONVERTED);
         // Started again by the user, it shows the new picture.
         assert!(state.woven.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn what_a_shortcut_did_is_in_the_odyssey_picture_for_a_moment() {
+        use crate::shortcuts::Action;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, _frames, ctx) = odyssey_showing(dir.path(), 0);
+        let sink = state.weaver.sink().unwrap();
+        let (pictures, _, _, plain) = sink.written();
+        let now = std::time::Instant::now();
+        state.tell(&ctx, Action::DepthUp, "Depth 55".into(), now);
+        state.show_output(&ctx);
+        let (with_words, width, _, worded) = sink.written();
+        assert_eq!(with_words, pictures + 1);
+        assert_ne!(worded, plain);
+        // The same in both views: at the depth of the screen.
+        let row = width as usize * 4;
+        for (line, before) in worded.chunks(row).zip(plain.chunks(row)) {
+            let (left, right) = line.split_at(row / 2);
+            let (left_before, right_before) = before.split_at(row / 2);
+            // (the views under the plate differ, and a letter may be the
+            // colour of what it covers in one of them)
+            for at in 0..row / 2 {
+                if left[at] != left_before[at] && right[at] != right_before[at] {
+                    assert!(left[at].abs_diff(right[at]) <= 65, "{at}");
+                }
+            }
+        }
+        // Still there before its time is over, and no picture made for it.
+        state.keep_words(&ctx, now + WORDS_STAY / 2);
+        state.show_output(&ctx);
+        assert_eq!(sink.written().0, with_words);
+        // Other words take their place and start the time anew.
+        state.tell(
+            &ctx,
+            Action::DepthUp,
+            "Depth 60".into(),
+            now + WORDS_STAY / 2,
+        );
+        state.show_output(&ctx);
+        assert_eq!(sink.written().0, with_words + 1);
+        state.keep_words(&ctx, now + WORDS_STAY);
+        assert!(state.picture_words.is_some());
+        // Then the picture is as it was.
+        state.keep_words(&ctx, now + WORDS_STAY / 2 + WORDS_STAY);
+        state.show_output(&ctx);
+        let (after, _, _, again) = sink.written();
+        assert_eq!(after, with_words + 2);
+        assert!(again == plain, "the words are gone");
+        // The output's own start and end are not said in its picture, and
+        // the end of the output is the end of the words.
+        state.tell(&ctx, Action::Output, "3D output off".into(), now);
+        assert!(state.picture_words.is_none());
+        state.tell(&ctx, Action::PopoutUp, "Pop-out 10".into(), now);
+        assert!(state.picture_words.is_some());
+        state.stop_output();
+        assert!(state.picture_words.is_none());
+        state.tell(&ctx, Action::PopoutUp, "Pop-out 15".into(), now);
+        assert!(state.picture_words.is_none(), "no picture to put them in");
     }
 
     #[cfg(unix)]

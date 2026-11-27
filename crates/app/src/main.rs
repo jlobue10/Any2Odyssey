@@ -4,6 +4,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(target_os = "linux")]
+mod banner;
+#[cfg(target_os = "linux")]
 mod capture;
 mod core;
 #[cfg(not(windows))]
@@ -14,6 +16,8 @@ mod lens_switch;
 #[cfg(target_os = "linux")]
 mod live;
 mod platform;
+#[cfg(target_os = "linux")]
+mod shortcuts;
 #[cfg(windows)]
 mod tray;
 mod ui;
