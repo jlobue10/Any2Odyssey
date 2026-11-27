@@ -18,6 +18,10 @@ use any2odyssey_core::fsutil;
 const CHOSEN: &str = "scaler.on";
 /// What the program that sends the command said at the last start.
 const LOG: &str = "scaler.log";
+/// There while a mode that this picture's start switched on is on: the
+/// helper makes it before the command and takes it away when the command
+/// was refused or the mode was switched off again.
+const SENT: &str = "scaler.sent";
 /// The program that sends the command, built by the set-up where there is a
 /// C compiler.
 const PROGRAM: &str = "build/any2odyssey-scaler";
@@ -73,6 +77,20 @@ impl Scaler {
                 _ => Ok(()),
             }
         }
+    }
+
+    /// What there is to say about the scaler beside a picture that is
+    /// showing: that its 3D mode is on, or why it is not although it was
+    /// chosen. Nothing where it was not asked for.
+    pub fn with_the_picture(&self) -> Option<String> {
+        if self
+            .file(SENT)
+            .is_some_and(|sent| sent.symlink_metadata().is_ok())
+        {
+            return Some("Scaler 3D mode: on.".to_owned());
+        }
+        let reason = self.chosen().then(|| self.refused()).flatten()?;
+        Some(format!("Scaler 3D mode: not on ({reason})."))
     }
 
     /// Why the scaler did not take its command at the last start that sent
@@ -138,6 +156,36 @@ mod tests {
             assert!(scaler.choose(true).is_err());
             assert_eq!(scaler.refused(), None);
         }
+    }
+
+    #[test]
+    fn beside_a_picture_the_scaler_is_on_refused_or_not_spoken_of() {
+        let (dir, helper) = side();
+        let scaler = Scaler::beside(Some(&helper));
+        assert_eq!(scaler.with_the_picture(), None);
+        // Chosen after the picture started: nothing was sent for it.
+        scaler.choose(true).unwrap();
+        std::fs::write(dir.path().join("scaler.log"), "on\nleaving: off\n").unwrap();
+        assert_eq!(scaler.with_the_picture(), None);
+        std::fs::write(dir.path().join("scaler.sent"), "").unwrap();
+        assert_eq!(
+            scaler.with_the_picture().as_deref(),
+            Some("Scaler 3D mode: on.")
+        );
+        // Cleared while the picture shows: the mode stays on until it ends.
+        scaler.choose(false).unwrap();
+        assert_eq!(
+            scaler.with_the_picture().as_deref(),
+            Some("Scaler 3D mode: on.")
+        );
+        std::fs::remove_file(dir.path().join("scaler.sent")).unwrap();
+        std::fs::write(dir.path().join("scaler.log"), "error: no scaler\n").unwrap();
+        assert_eq!(scaler.with_the_picture(), None, "not chosen");
+        scaler.choose(true).unwrap();
+        assert_eq!(
+            scaler.with_the_picture().as_deref(),
+            Some("Scaler 3D mode: not on (no scaler).")
+        );
     }
 
     #[test]

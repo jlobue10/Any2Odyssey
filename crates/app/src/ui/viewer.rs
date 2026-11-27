@@ -900,6 +900,20 @@ impl ViewerState {
         }
     }
 
+    /// The Odyssey 3D output's line with what there is to say about the
+    /// scaler while a picture shows (`Scaler::with_the_picture`).
+    fn weaver_line(&self, status: &WeaverStatus) -> String {
+        let line = status.describe();
+        #[cfg(target_os = "linux")]
+        if let WeaverStatus::On { .. } = status {
+            let scaler = crate::scaler::Scaler::beside(self.weaver.helper());
+            if let Some(scaler) = scaler.with_the_picture() {
+                return format!("{line} {scaler}");
+            }
+        }
+        line
+    }
+
     /// The box for the scaler's 3D mode (experimental), under the Odyssey 3D
     /// output's line: the choice is a file beside the helper (`scaler`), so
     /// it is read from there at every frame and the box shows what the
@@ -1345,12 +1359,12 @@ impl ViewerState {
                     // a screen on which nothing changes.
                     None if paused => format!(
                         "Live: a {width} × {height} screen, {LIVE_PAUSED} {}",
-                        weaver.describe()
+                        self.weaver_line(weaver)
                     ),
                     None => format!(
                         "Live: a {width} × {height} screen, {}. {}{}",
                         stats.describe(),
-                        weaver.describe(),
+                        self.weaver_line(weaver),
                         if self.weaver.excluded_from_capture() == Some(false) {
                             " This desktop cannot keep the 3D picture out of a capture: do not show the Odyssey's own screen."
                         } else {
@@ -1456,7 +1470,7 @@ impl ViewerState {
         }
         if self.document.result().is_some() {
             let line = match status {
-                WeaverStatus::On { .. } => format!("{ODYSSEY_ON} {}", status.describe()),
+                WeaverStatus::On { .. } => format!("{ODYSSEY_ON} {}", self.weaver_line(&status)),
                 _ => status.describe(),
             };
             // Said when it changes, with each new picture, and in place of
@@ -1904,7 +1918,7 @@ impl ViewerState {
                 if state.options.output == Output::Odyssey {
                     ui.add(
                         egui::Label::new(
-                            RichText::new(state.weaver.status().describe())
+                            RichText::new(state.weaver_line(&state.weaver.status()))
                                 .color(color(p.muted))
                                 .size(12.0),
                         )
