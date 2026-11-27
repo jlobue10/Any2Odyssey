@@ -19,7 +19,8 @@
 #      least once. Mount its system partition (read-only is enough) before running this script;
 #   6. only with --scaler (it is experimental; no question is asked about it, and --yes does not agree to
 #      it): has the Odyssey 3D output switch the monitor's scaler to its 3D mode, with the udev rule that
-#      lets you send it the command.
+#      lets you send it the command. The box "Scaler 3D mode (experimental)" on the viewer's page is the
+#      same switch and can be changed there afterwards; the rule is installed only here (it needs root).
 #
 # Options:
 #   --yes               answer yes to every question
@@ -1115,7 +1116,7 @@ else
     else
         : >"$SIDE/scaler.on"
     fi
-    say "   switched on: the Odyssey 3D output sends the scaler its command before a picture and after it. What the scaler answered is in $SIDE/scaler.log; --no-scaler switches it off."
+    say "   switched on: the Odyssey 3D output sends the scaler its command before a picture and after it. What the scaler answered is in $SIDE/scaler.log; --no-scaler switches it off, and so does the box \"Scaler 3D mode (experimental)\" on the viewer's page, which shows the same switch."
 fi
 
 say ""

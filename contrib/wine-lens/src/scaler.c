@@ -212,7 +212,8 @@ int main(int argc, char **argv)
     if (fd < 0) {
         int why = errno;
         if (why == EACCES || why == EPERM)
-            return fail(path, "no permission (install 71-any2odyssey-scaler.rules, see docs/LENS-SWITCH.md)");
+            return fail(path, "no permission: the scaler's udev rule is missing (any2odyssey-setup --scaler or install.sh --scaler "
+                              "installs 71-any2odyssey-scaler.rules; then unplug and replug the monitor's USB cable)");
         return fail(path, strerror(why));
     }
     memset(&io, 0, sizeof io);

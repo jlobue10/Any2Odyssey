@@ -182,7 +182,7 @@ pub struct Options {
 #[cfg(target_os = "linux")]
 pub const SCALER_BOX: &str = "Scaler 3D mode (experimental)";
 #[cfg(target_os = "linux")]
-const SCALER_HINT: &str = "Has the Odyssey 3D output send the monitor's scaler the command for its 3D mode before the picture, and the one that ends it after. Counts from the next start of the output. Needs the scaler's udev rule (install.sh --scaler, or docs/LENS-SWITCH.md); what the scaler answered is in scaler.log in the wine-lens folder.";
+const SCALER_HINT: &str = "Has the Odyssey 3D output send the monitor's scaler the command for its 3D mode before the picture, and the one that ends it after. Counts from the next start of the output. Needs the scaler's udev rule, which this box does not install (it needs root): run any2odyssey-setup --scaler with the Arch package, or install.sh --scaler from the archive, once, then unplug and replug the monitor's USB cable. What the scaler answered is in scaler.log in the wine-lens folder.";
 #[cfg(target_os = "linux")]
 const SCALER_MISSING: &str = "The program that sends the scaler its command is not there: run the Odyssey 3D set-up once more (any2odyssey-setup, or install.sh), with a C compiler installed.";
 

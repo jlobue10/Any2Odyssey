@@ -97,7 +97,9 @@ What the installer sets up, if you would rather do it by hand
 - The scaler's 3D mode (experimental): the one step the installer does only when it is named, and asks no
   question about. `./install.sh --scaler` has the Odyssey 3D output send the monitor's scaler a command
   that switches its "3D mode" before a picture and after it, and installs the udev rule that lets you send
-  it; `./install.sh --no-scaler` switches that off again. The picture has been seen without it, and it is
+  it; `./install.sh --no-scaler` switches that off again. Once the rule is installed, the box "Scaler 3D
+  mode (experimental)" on the viewer's page (with the Odyssey 3D output chosen) is the same switch; the box
+  alone does not install the rule, which needs root. The picture has been seen without it, and it is
   the one command of this program's own to the monitor: docs/LENS-SWITCH.md, "The scaler's 3D mode", says
   what is sent, to which device, and what the rule opens.
 
