@@ -385,6 +385,111 @@ async fn hold(
     }
 }
 
+/// The icon beside a word on the screen: the program's own, by the name its
+/// desktop file gives it.
+const ICON: &str = APP_ID;
+
+/// How long a notification with the word stays where the desktop has no
+/// display of its own for such words, in milliseconds.
+const WORD_STAYS_MS: i32 = 1500;
+
+/// Say on the screen what a shortcut did: the page that would show it is
+/// behind another window, or not shown at all, when a global shortcut is
+/// what was pressed.
+///
+/// On KDE Plasma the word goes to the desktop's own display for such things
+/// (the one that shows the volume when its keys are pressed): it is over
+/// whatever is on the screen, goes by itself and leaves nothing behind. On
+/// another desktop it is a notification that goes after a moment, is not
+/// kept in the list, and takes the place of the one before it. A desktop
+/// with neither shows nothing, and nothing is said about that.
+///
+/// Returns at once: the desktop is told on the portal's threads, and of
+/// words that pile up while it answers only the newest is shown.
+pub fn say(word: String) {
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+    static WORDS: Mutex<Option<UnboundedSender<String>>> = Mutex::new(None);
+    let mut words = WORDS.lock().unwrap_or_else(PoisonError::into_inner);
+    let word = match words.as_ref() {
+        Some(tx) => match tx.send(word) {
+            Ok(()) => return,
+            // (the task that showed them has ended: one is started again)
+            Err(unsent) => unsent.0,
+        },
+        None => word,
+    };
+    let Ok(runtime) = crate::capture::portal_runtime() else {
+        return;
+    };
+    let (tx, mut rx) = unbounded_channel();
+    let _ = tx.send(word);
+    *words = Some(tx);
+    runtime.spawn(async move {
+        let Ok(connection) = ashpd::zbus::Connection::session().await else {
+            return;
+        };
+        let mut notification = 0;
+        while let Some(mut word) = rx.recv().await {
+            while let Ok(newer) = rx.try_recv() {
+                word = newer;
+            }
+            if on_plasma(&connection, &word).await.is_err() {
+                if let Ok(shown) = notify(&connection, &word, notification).await {
+                    notification = shown;
+                }
+            }
+        }
+    });
+}
+
+/// Show `word` on KDE Plasma's on-screen display.
+async fn on_plasma(connection: &ashpd::zbus::Connection, word: &str) -> ashpd::zbus::Result<()> {
+    connection
+        .call_method(
+            Some("org.kde.plasmashell"),
+            "/org/kde/osdService",
+            Some("org.kde.osdService"),
+            "showText",
+            &(ICON, word),
+        )
+        .await
+        .map(drop)
+}
+
+/// Show `word` as a notification in the place of the one numbered
+/// `before` (0: none), and give its number.
+async fn notify(
+    connection: &ashpd::zbus::Connection,
+    word: &str,
+    before: u32,
+) -> ashpd::zbus::Result<u32> {
+    let mut hints: HashMap<&str, ashpd::zvariant::Value<'_>> = HashMap::new();
+    // Not kept in the desktop's list of notifications.
+    hints.insert("transient", true.into());
+    hints.insert("desktop-entry", APP_ID.into());
+    let actions: [&str; 0] = [];
+    connection
+        .call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "Notify",
+            &(
+                "Any2Odyssey",
+                before,
+                ICON,
+                word,
+                "",
+                &actions[..],
+                hints,
+                WORD_STAYS_MS,
+            ),
+        )
+        .await?
+        .body()
+        .deserialize()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

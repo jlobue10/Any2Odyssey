@@ -180,6 +180,9 @@ pub struct Options {
     /// that the output and its depth answer to keys while another window
     /// has the keyboard. Off until chosen: the desktop may ask about them.
     pub shortcuts: bool,
+    /// With them: say on the screen what a shortcut did (`shortcuts::say`),
+    /// since the page is not in front when one is pressed.
+    pub feedback: bool,
 }
 
 /// How far one press of a depth or pop-out shortcut moves its slider.
@@ -202,6 +205,7 @@ impl Default for Options {
             detail: DEPTH_DETAIL[0].0,
             pointer: true,
             shortcuts: false,
+            feedback: true,
         }
     }
 }
@@ -928,7 +932,13 @@ impl ViewerState {
             // frame came before the press sees it.
             ctx.request_repaint();
             match event {
-                Event::Pressed(action) => self.shortcut(action),
+                Event::Pressed(action) => {
+                    let did = self.shortcut(action);
+                    // (tests and previews put nothing on the screen)
+                    if self.options.feedback && self.asks_desktop {
+                        crate::shortcuts::say(did);
+                    }
+                }
                 Event::Bound(line) => self.shortcuts_said = Some(line),
                 Event::Failed(line) => {
                     // Not asked for again at every frame: the box is
@@ -943,9 +953,10 @@ impl ViewerState {
         }
     }
 
-    /// Do what a global shortcut asks.
+    /// Do what a global shortcut asks, and give the few words that say what
+    /// came of it (for the screen: the page may not be in sight).
     #[cfg(target_os = "linux")]
-    fn shortcut(&mut self, action: crate::shortcuts::Action) {
+    fn shortcut(&mut self, action: crate::shortcuts::Action) -> String {
         use crate::shortcuts::Action;
         let before = self.options;
         let moved = |position: i32, by: i32, spec: any2odyssey_core::slider::SliderSpec| {
@@ -953,13 +964,27 @@ impl ViewerState {
         };
         let o = &mut self.options;
         match action {
-            Action::Output => return self.toggle_output(),
+            Action::Output => {
+                let was = self.output_open;
+                self.toggle_output();
+                return match (was, self.output_open) {
+                    (false, true) => "3D output on".to_owned(),
+                    (true, false) => "3D output off".to_owned(),
+                    // It did not start: the status line says why.
+                    _ => self.status.clone(),
+                };
+            }
             Action::DepthDown => o.depth_pos = moved(o.depth_pos, -SHORTCUT_STEP, DEPTH),
             Action::DepthUp => o.depth_pos = moved(o.depth_pos, SHORTCUT_STEP, DEPTH),
             Action::PopoutDown => o.pop_pos = moved(o.pop_pos, -SHORTCUT_STEP, POPOUT),
             Action::PopoutUp => o.pop_pos = moved(o.pop_pos, SHORTCUT_STEP, POPOUT),
         }
+        let did = match action {
+            Action::DepthDown | Action::DepthUp => format!("Depth {}", self.options.depth_pos),
+            _ => format!("Pop-out {}", self.options.pop_pos),
+        };
         self.options_edited(before);
+        did
     }
 
     /// The calibration pattern is a picture of its own: it needs no image.
@@ -1956,6 +1981,15 @@ impl ViewerState {
                 #[cfg(target_os = "linux")]
                 ui.checkbox(&mut state.options.shortcuts, "Global shortcuts")
                     .on_hover_text("Asks the desktop for shortcuts that work while another window has the keyboard: Ctrl+Shift+1 starts and stops the output, 3 and 4 change depth, 5 and 6 pop-out. The desktop may ask you to confirm them, and they are changed in its own shortcut settings. Needs a desktop whose portal has global shortcuts (KDE Plasma 6).");
+                #[cfg(target_os = "linux")]
+                ui.indent("shortcut-feedback", |ui| {
+                    ui.add_enabled(
+                        state.options.shortcuts,
+                        egui::Checkbox::new(&mut state.options.feedback, "Show what a shortcut did"),
+                    )
+                    .on_hover_text("A global shortcut is pressed while this page is behind another window: a few words on the screen say what it did (3D output on or off, the new depth or pop-out). On KDE Plasma they appear where the volume does when its keys are pressed; elsewhere as a notification that goes by itself.")
+                    .on_disabled_hover_text("For the global shortcuts: tick the box above first.");
+                });
                 ui.add_space(4.0);
                 if gold_button(ui, "Save preview PNG…", false, p).clicked() {
                     if state.document.result().is_none() {
@@ -2333,6 +2367,38 @@ mod tests {
             Some("Global shortcuts: bound.")
         );
         assert_eq!(state.status, OUTPUT_OFF);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shortcut_gives_the_words_for_the_screen_that_say_what_it_did() {
+        use crate::shortcuts::Action;
+        let mut state = ViewerState::default();
+        state.options.input = Input::Ai;
+        let (depth, pop) = (state.options.depth_pos, state.options.pop_pos);
+        assert_eq!(
+            state.shortcut(Action::DepthUp),
+            format!("Depth {}", depth + SHORTCUT_STEP)
+        );
+        assert_eq!(state.shortcut(Action::DepthDown), format!("Depth {depth}"));
+        assert_eq!(
+            state.shortcut(Action::PopoutDown),
+            format!("Pop-out {}", pop - SHORTCUT_STEP)
+        );
+        assert_eq!(state.shortcut(Action::PopoutUp), format!("Pop-out {pop}"));
+        // At the end of a slider the words say where it stands.
+        state.options.depth_pos = DEPTH.max;
+        assert_eq!(
+            state.shortcut(Action::DepthUp),
+            format!("Depth {}", DEPTH.max)
+        );
+        // An output that does not start: why, as the status line has it.
+        assert_eq!(state.shortcut(Action::Output), NO_IMAGE);
+        state.options.input = Input::Pair;
+        state.options.output = Output::Lens;
+        state.lens.pattern = true;
+        assert_eq!(state.shortcut(Action::Output), "3D output on");
+        assert_eq!(state.shortcut(Action::Output), "3D output off");
     }
 
     #[cfg(target_os = "linux")]
